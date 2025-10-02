@@ -88,6 +88,36 @@ python scripts/envelope_visuals.py envelopes \
 
 Both commands expose flags for FPS fallbacks, baseline/during/after windows, bar-chart spacing, and trial-order selection, so you can adapt the exports if acquisition parameters change.
 
+### Training envelopes and latency summaries
+
+`scripts/envelope_training.py` covers the training-trial notebooks. It reads the same CSV folders and float16 matrix, but it focuses exclusively on `training_*` files.
+
+Render per-fly Hilbert envelopes with global peaks annotated and the odor window shaded:
+
+```bash
+python scripts/envelope_training.py plots \
+  --root /home/ramanlab/Documents/cole/Data/flys/opto_hex/ \
+  --fps-default 40 --window-sec 0.25 --odor-on 30 --odor-off 60
+```
+
+Gather the resulting PNGs into a single folder (defaults to `all_training_envelope_plots/` under the root):
+
+```bash
+python scripts/envelope_training.py collect \
+  --root /home/ramanlab/Documents/cole/Data/flys/opto_hex/ \
+  --dest-folder all_training_envelope_plots
+```
+
+Compute latency-to-threshold summaries directly from the float16 matrix. The command emits per-fly bars, per-odor means (with SEM), and a grand-mean CSV + figure:
+
+```bash
+python scripts/envelope_training.py latency \
+  --matrix-npy /home/ramanlab/Documents/cole/Data/single_matrix_opto/envelope_matrix_float16.npy \
+  --codes-json /home/ramanlab/Documents/cole/Data/single_matrix_opto/code_maps.json \
+  --out-dir /home/ramanlab/Documents/cole/Results/Opto/Training_RESP_Time_DIST \
+  --before-sec 30 --during-sec 35 --threshold-mult 4 --latency-ceiling 9.5 --trials 4 5 6
+```
+
 ### Using an existing Conda environment
 
 If you already have a GPU-capable Conda environment (e.g., `yolo-env`), the commands above install the required packages directly into it—no extra virtualenv will be created by default.
