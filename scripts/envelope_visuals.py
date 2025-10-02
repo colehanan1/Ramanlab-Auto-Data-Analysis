@@ -548,13 +548,20 @@ class EnvelopePlotConfig:
     odor_off_s: float = 60.0
     after_show_sec: float = 30.0
     threshold_std_mult: float = 4.0
+    trial_type: str = "testing"
 
 
 def generate_envelope_plots(cfg: EnvelopePlotConfig) -> None:
     df, env_cols = _load_matrix(cfg.matrix_npy, cfg.codes_json)
-    df = df[df["trial_type"].str.lower() == "testing"].copy()
+    trial_type = cfg.trial_type.strip().lower()
+    if trial_type not in {"testing", "training"}:
+        raise ValueError(f"Unsupported trial type: {cfg.trial_type!r}")
+
+    df = df[df["trial_type"].str.lower() == trial_type].copy()
     if df.empty:
-        raise RuntimeError("No testing trials found in matrix; cannot build envelope plots.")
+        raise RuntimeError(
+            f"No {trial_type} trials found in matrix; cannot build envelope plots."
+        )
 
     df["fps"] = df["fps"].replace([np.inf, -np.inf], np.nan).fillna(cfg.fps_default)
     df["dataset_canon"] = df["dataset"].map(_canon_dataset)
@@ -569,7 +576,8 @@ def generate_envelope_plots(cfg: EnvelopePlotConfig) -> None:
     dataset_lookup = {idx: ds for idx, ds in zip(df.index, dataset_values, strict=False)}
     trial_lookup = {idx: tr for idx, tr in zip(df.index, trial_values, strict=False)}
 
-    cfg.out_dir.mkdir(parents=True, exist_ok=True)
+    trial_root = cfg.out_dir / trial_type
+    trial_root.mkdir(parents=True, exist_ok=True)
 
     x_max_limit = cfg.odor_off_s + cfg.latency_sec + cfg.after_show_sec
 
@@ -671,7 +679,7 @@ def generate_envelope_plots(cfg: EnvelopePlotConfig) -> None:
         )
 
         fig.suptitle(
-            f"{fly} RMS of Proboscis - Eye Distance Percentage",
+            f"{fly} {trial_type.title()} Trials — RMS of Proboscis vs Eye Distance",
             y=0.995,
             fontsize=14,
             weight="bold",
@@ -680,9 +688,12 @@ def generate_envelope_plots(cfg: EnvelopePlotConfig) -> None:
 
         odors_present = sorted({odor for odor, *_ in trial_curves})
         for odor_name in odors_present:
-            odor_dir = cfg.out_dir / _safe_dirname(odor_name)
+            odor_dir = trial_root / _safe_dirname(odor_name)
             odor_dir.mkdir(parents=True, exist_ok=True)
-            out_path = odor_dir / f"{fly}_envelope_trials_by_odor_{int(cfg.after_show_sec)}_shifted.png"
+            out_path = odor_dir / (
+                f"{fly}_{trial_type}_envelope_trials_by_odor_"
+                f"{int(cfg.after_show_sec)}_shifted.png"
+            )
             fig.savefig(out_path, dpi=300, bbox_inches="tight")
 
         plt.close(fig)
@@ -725,6 +736,12 @@ def _parse_envelopes_args(subparser: argparse.ArgumentParser) -> None:
     subparser.add_argument("--odor-off-s", type=float, default=60.0, help="Commanded odor OFF timestamp (seconds).")
     subparser.add_argument("--after-show-sec", type=float, default=30.0, help="Duration to display after odor off (seconds).")
     subparser.add_argument("--threshold-std-mult", type=float, default=4.0, help="Threshold multiplier applied to baseline std dev.")
+    subparser.add_argument(
+        "--trial-type",
+        choices=("testing", "training"),
+        default="testing",
+        help="Trial type to visualise.",
+    )
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -777,6 +794,7 @@ def main(argv: Sequence[str] | None = None) -> None:
             odor_off_s=args.odor_off_s,
             after_show_sec=args.after_show_sec,
             threshold_std_mult=args.threshold_std_mult,
+            trial_type=args.trial_type,
         )
         generate_envelope_plots(cfg)
         return

@@ -1,71 +1,85 @@
-
 from __future__ import annotations
-import argparse, sys
+
+import argparse
 from pathlib import Path
-from .config import load_settings
+from dataclasses import dataclass
+from typing import Callable, Iterable
+
+from .config import Settings, load_settings
 from .steps import (
-    yolo_infer, distance_stats, distance_normalize, plot_distance_time,
-    detect_dropped_frames, rms_copy_filter, update_ofm_state, histograms,
-    envelope_over_time, collect_envelope_plots, angle_compute_and_plots,
-    angle_heatmaps, move_videos, compose_videos_rms
+    compose_videos_rms,
+    detect_dropped_frames,
+    distance_normalize,
+    distance_stats,
+    move_videos,
+    rms_copy_filter,
+    update_ofm_state,
+    yolo_infer,
 )
 
-STEPS_IN_ORDER = [
-    yolo_infer.main,
-    distance_stats.main,
-    distance_normalize.main,
-    plot_distance_time.main,
-    detect_dropped_frames.main,
-    rms_copy_filter.main,
-    update_ofm_state.main,
-    histograms.main,
-    envelope_over_time.main,
-    collect_envelope_plots.main,
-    angle_compute_and_plots.main,
-    angle_heatmaps.main,
-    move_videos.main,
-    compose_videos_rms.main,
-]
 
-def run_all(config_path: Path):
+@dataclass(frozen=True)
+class Step:
+    """Executable unit within the pipeline."""
+
+    name: str
+    runner: Callable[[Settings], None]
+    description: str
+
+
+# The order emphasises dependencies: normalization relies on the distance
+# stats, OFM state annotations require the RMS copies, and the video overlay
+# comes last so that all metadata is already embedded in the CSVs.
+ORDERED_STEPS: tuple[Step, ...] = (
+    Step("yolo", yolo_infer.main, "Run Ultralytics YOLO inference and export merged CSVs"),
+    Step("distance_stats", distance_stats.main, "Derive global class-2 distance bounds per fly"),
+    Step("distance_normalize", distance_normalize.main, "Convert distances into percentage scores"),
+    Step("detect_dropped_frames", detect_dropped_frames.main, "Report missing frames and NaN segments"),
+    Step("rms_copy_filter", rms_copy_filter.main, "Copy curated columns into RMS_calculations"),
+    Step("update_ofm_state", update_ofm_state.main, "Annotate RMS tables with OFM state transitions"),
+    Step("move_videos", move_videos.main, "Stage annotated videos into the delivery directory"),
+    Step("compose_videos_rms", compose_videos_rms.main, "Render RMS overlays onto exported videos"),
+)
+
+STEP_REGISTRY = {step.name: step for step in ORDERED_STEPS}
+
+
+def run_steps(step_names: Iterable[str], config_path: str | Path) -> None:
     cfg = load_settings(config_path)
-    for step in STEPS_IN_ORDER:
-        step(cfg)
+    for name in step_names:
+        step = STEP_REGISTRY[name]
+        step.runner(cfg)
 
-def main():
-    p = argparse.ArgumentParser(description="Fly Behavior Pipeline")
-    p.add_argument("--config", type=Path, default=Path("config.yaml"))
-    p.add_argument("cmd", nargs="*", help="all or a list of steps")
-    args = p.parse_args()
 
-    if not args.cmd or args.cmd == ["all"]:
-        run_all(args.config)
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Fly Behavior Pipeline")
+    parser.add_argument("--config", default="config.yaml", help="Path to pipeline configuration")
+    parser.add_argument(
+        "steps",
+        nargs="*",
+        metavar="STEP",
+        help="Subset of steps to run. Use 'list' to display available steps.",
+    )
+    return parser.parse_args()
+
+
+def main() -> None:
+    args = parse_args()
+    if not args.steps or args.steps == ["all"]:
+        run_steps((step.name for step in ORDERED_STEPS), args.config)
         return
 
-    # selective execution
-    cfg = load_settings(args.config)
-    name2step = {
-        "yolo": yolo_infer.main,
-        "distance_stats": distance_stats.main,
-        "distance_normalize": distance_normalize.main,
-        "plot_distance_time": plot_distance_time.main,
-        "detect_dropped_frames": detect_dropped_frames.main,
-        "rms_copy_filter": rms_copy_filter.main,
-        "update_ofm_state": update_ofm_state.main,
-        "histograms": histograms.main,
-        "envelope": envelope_over_time.main,
-        "collect_envelope": collect_envelope_plots.main,
-        "angle": angle_compute_and_plots.main,
-        "heatmaps": angle_heatmaps.main,
-        "move_videos": move_videos.main,
-        "compose_videos_rms": compose_videos_rms.main,
-    }
-    for cmd in args.cmd:
-        f = name2step.get(cmd)
-        if f is None:
-            print(f"Unknown step: {cmd}", file=sys.stderr)
-            continue
-        f(cfg)
+    if args.steps == ["list"]:
+        for step in ORDERED_STEPS:
+            print(f"{step.name:>20}  - {step.description}")
+        return
+
+    unknown = [name for name in args.steps if name not in STEP_REGISTRY]
+    if unknown:
+        raise SystemExit(f"Unknown step(s): {', '.join(unknown)}")
+
+    run_steps(args.steps, args.config)
+
 
 if __name__ == "__main__":
     main()
