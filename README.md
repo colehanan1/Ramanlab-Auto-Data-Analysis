@@ -118,6 +118,76 @@ python scripts/envelope_training.py latency \
   --before-sec 30 --during-sec 35 --threshold-mult 4 --latency-ceiling 9.5 --trials 4 5 6
 ```
 
+### Combined distance × angle workflow
+
+The new `scripts/envelope_combined.py` script encapsulates the notebook cells that merge proboscis distance percentage with centred angle %, build a direction-value matrix, and compare it against the distance-only outputs.
+
+1. **Generate combined RMS/envelope CSVs and PNGs per fly**
+
+   ```bash
+   python scripts/envelope_combined.py combine \
+     --root /home/ramanlab/Documents/cole/Data/flys/opto_benz/ \
+     --fps-default 40 --window-sec 0.25 --odor-on 30 --odor-off 60
+   ```
+
+   The command scans each testing trial, interpolates the angle trace onto the distance timeline, multiplies by the discrete angle multiplier, and writes both the enriched CSV and envelope PNG under `angle_distance_rms_envelope/`.
+
+2. **Copy raw data to secure storage and prune the acquisition folders**
+
+   ```bash
+   python scripts/envelope_combined.py secure-sync \
+     --source /home/ramanlab/Documents/cole/Data/flys/opto_benz/ \
+     --source /home/ramanlab/Documents/cole/Data/flys/opto_EB/ \
+     --dest /securedstorage/DATAsec/cole/Data-secured/
+   ```
+
+   After copying, the helper keeps only month-prefixed fly folders, their CSVs, and `RMS_calculations/`, removing staging artefacts to reclaim space.
+
+3. **Aggregate `envelope_of_rms` columns into a wide CSV and float16 matrix**
+
+   ```bash
+   python scripts/envelope_combined.py wide \
+     --root /securedstorage/DATAsec/cole/Data-secured/opto_benz/ \
+     --root /securedstorage/DATAsec/cole/Data-secured/opto_EB/ \
+     --output-csv /home/ramanlab/Documents/cole/Data/single_matrix_opto_combined/all_direction_values_rows_wide.csv
+
+   python scripts/envelope_combined.py matrix \
+     --input-csv /home/ramanlab/Documents/cole/Data/single_matrix_opto_combined/all_direction_values_rows_wide.csv \
+     --output-dir /home/ramanlab/Documents/cole/Data/single_matrix_opto_combined/
+   ```
+
+4. **Reuse the existing visualisation commands for the combined matrix**
+
+   ```bash
+   python scripts/envelope_combined.py matrices \
+     --matrix-npy /home/ramanlab/Documents/cole/Data/single_matrix_opto_combined/envelope_matrix_float16.npy \
+     --codes-json /home/ramanlab/Documents/cole/Data/single_matrix_opto_combined/code_maps.json \
+     --out-dir /home/ramanlab/Documents/cole/Results/Opto/Matrixs_DISTxANGLE \
+     --latency-sec 2.75
+
+   python scripts/envelope_combined.py envelopes \
+     --matrix-npy /home/ramanlab/Documents/cole/Data/single_matrix_opto_combined/envelope_matrix_float16.npy \
+     --codes-json /home/ramanlab/Documents/cole/Data/single_matrix_opto_combined/code_maps.json \
+     --out-dir /home/ramanlab/Documents/cole/Results/Opto/Envlope_DISTxANGLE \
+     --latency-sec 2.75
+   ```
+
+   These subcommands simply reuse the distance-only plotting engine, so all tuning flags (`--trial-order`, baseline windows, etc.) work as before.
+
+5. **Overlay distance-only and distance×angle envelopes per fly/trial**
+
+   ```bash
+   python scripts/envelope_combined.py overlay \
+     --combined-matrix /home/ramanlab/Documents/cole/Data/single_matrix_opto_combined/envelope_matrix_float16.npy \
+     --combined-codes /home/ramanlab/Documents/cole/Data/single_matrix_opto_combined/code_maps.json \
+     --distance-matrix /home/ramanlab/Documents/cole/Data/single_matrix_opto/envelope_matrix_float16.npy \
+     --distance-codes /home/ramanlab/Documents/cole/Data/single_matrix_opto/code_maps.json \
+     --out-dir /home/ramanlab/Documents/cole/Results/Manual/Compare_Envlopes \
+     --latency-sec 2.75
+   ```
+
+   The overlay plot pools the global pre-odor mean per source and applies the same threshold multiplier to highlight where each signal crosses its dynamic baseline.
+
 ### Using an existing Conda environment
 
 If you already have a GPU-capable Conda environment (e.g., `yolo-env`), the commands above install the required packages directly into it—no extra virtualenv will be created by default.

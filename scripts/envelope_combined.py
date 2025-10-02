@@ -1,0 +1,1008 @@
+#!/usr/bin/env python3
+"""Combined distance/angle analytics derived from lab notebooks.
+
+This CLI exposes the distance-percentage × angle workflow that previously
+lived in ad-hoc notebooks.  It can
+
+* merge raw testing trials into combined RMS + Hilbert envelope CSVs/PNGs,
+* copy datasets into secured storage and prune the originals,
+* aggregate the direction-value envelopes into a float16 matrix, and
+* feed that matrix into the existing reaction-matrix / envelope exporters or
+  an overlay plot comparing distance-only versus combined signals.
+
+All commands emphasise single-pass scans and streaming writes so large folders
+run efficiently.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import math
+import os
+import re
+import shutil
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Iterable, Iterator, Mapping, MutableMapping, Sequence
+
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+from matplotlib import gridspec
+from matplotlib.colors import ListedColormap
+from matplotlib.patches import Patch
+from scipy.signal import hilbert
+
+from scripts import envelope_visuals
+from scripts.envelope_visuals import (
+    EnvelopePlotConfig,
+    MatrixPlotConfig,
+    generate_envelope_plots,
+    generate_reaction_matrices,
+)
+
+
+MONTHS = (
+    "january",
+    "february",
+    "march",
+    "april",
+    "may",
+    "june",
+    "july",
+    "august",
+    "september",
+    "october",
+    "november",
+    "december",
+)
+
+ANGLE_COLS = ["angle_centered_pct", "angle_centered_percentage", "angle_pct"]
+DIST_COLS = [
+    "distance_percentage_2_6",
+    "distance_percentage",
+    "distance_pct",
+    "measure",
+    "value",
+]
+TIME_COLS = ["time_s", "time_seconds", "t_s", "time"]
+TIMESTAMP_COLS = ["UTC_ISO", "Timestamp", "Number", "MonoNs"]
+FRAME_COLS = ["Frame", "FrameNumber", "Frame Number"]
+TESTING_REGEX = re.compile(r"testing_(\d+)", re.IGNORECASE)
+
+ODOR_CANON = {
+    "acv": "ACV",
+    "apple cider vinegar": "ACV",
+    "apple-cider-vinegar": "ACV",
+    "3-octonol": "3-octonol",
+    "3 octonol": "3-octonol",
+    "3-octanol": "3-octonol",
+    "3 octanol": "3-octonol",
+    "benz": "Benz",
+    "benzaldehyde": "Benz",
+    "benz-ald": "Benz",
+    "benzadhyde": "Benz",
+    "ethyl butyrate": "EB",
+    "optogenetics benzaldehyde": "opto_benz",
+    "optogenetics benzaldehyde 1": "opto_benz_1",
+    "optogenetics ethyl butyrate": "opto_EB",
+    "10s_odor_benz": "10s_Odor_Benz",
+}
+
+DISPLAY_LABEL = {
+    "ACV": "ACV",
+    "3-octonol": "3-Octonol",
+    "Benz": "Benzaldehyde",
+    "10s_Odor_Benz": "Benzaldehyde",
+    "EB": "Ethyl Butyrate",
+    "opto_benz": "Benzaldehyde",
+    "opto_benz_1": "Benzaldehyde",
+    "opto_EB": "Ethyl Butyrate",
+}
+
+HEXANOL = "Hexanol"
+
+
+# ---------------------------------------------------------------------------
+# Utility helpers
+# ---------------------------------------------------------------------------
+
+
+def _normalise_roots(roots: Sequence[str | os.PathLike[str]]) -> list[Path]:
+    resolved: list[Path] = []
+    for root in roots:
+        path = Path(root).expanduser().resolve()
+        if not path.is_dir():
+            raise FileNotFoundError(f"Not a directory: {path}")
+        resolved.append(path)
+    return resolved
+
+
+def _safe_dirname(value: str) -> str:
+    return re.sub(r"[^A-Za-z0-9._-]+", "_", str(value)).strip("_") or "export"
+
+
+def _canon_dataset(value: str) -> str:
+    if not isinstance(value, str):
+        return "UNKNOWN"
+    return ODOR_CANON.get(value.strip().lower(), value.strip())
+
+
+def _trial_num(label: str) -> int:
+    match = re.search(r"(\d+)", str(label))
+    return int(match.group(1)) if match else -1
+
+
+def _display_odor(dataset_canon: str, trial_label: str) -> str:
+    number = _trial_num(trial_label)
+    if number in (1, 3):
+        return HEXANOL
+    if number in (2, 4, 5):
+        return DISPLAY_LABEL.get(dataset_canon, dataset_canon)
+
+    mapping = {
+        "ACV": {6: "3-Octonol", 7: "Benzaldehyde", 8: "Citral", 9: "Linalool"},
+        "3-octonol": {6: "Benzaldehyde", 7: "Citral", 8: "Linalool"},
+        "Benz": {6: "Citral", 7: "Linalool"},
+        "EB": {6: "Apple Cider Vinegar", 7: "3-Octonol", 8: "Benzaldehyde", 9: "Citral", 10: "Linalool"},
+        "10s_Odor_Benz": {6: "Benzaldehyde", 7: "Benzaldehyde"},
+        "opto_EB": {6: "Apple Cider Vinegar", 7: "3-Octonol", 8: "Benzaldehyde", 9: "Citral", 10: "Linalool"},
+        "opto_benz": {6: "3-Octonol", 7: "Benzaldehyde", 8: "Citral", 9: "Linalool"},
+        "opto_benz_1": {6: "Apple Cider Vinegar", 7: "3-Octonol", 8: "Ethyl Butyrate", 9: "Citral", 10: "Linalool"},
+    }
+    return mapping.get(dataset_canon, {}).get(number, trial_label)
+
+
+def _is_trained(dataset_canon: str, odor_name: str) -> bool:
+    trained = DISPLAY_LABEL.get(dataset_canon, dataset_canon)
+    return odor_name.strip().lower() == trained.strip().lower()
+
+
+def _pick_column(df: pd.DataFrame, candidates: Sequence[str]) -> str | None:
+    for column in candidates:
+        if column in df.columns:
+            return column
+    return None
+
+
+def _time_axis(df: pd.DataFrame, fps_default: float) -> np.ndarray:
+    col = _pick_column(df, TIME_COLS)
+    if col:
+        return pd.to_numeric(df[col], errors="coerce").to_numpy()
+    if "frame" in df.columns:
+        frames = pd.to_numeric(df["frame"], errors="coerce").to_numpy()
+        return frames / max(fps_default, 1e-9)
+    return np.arange(len(df), dtype=float) / max(fps_default, 1e-9)
+
+
+def _rolling_rms(values: np.ndarray, window: int) -> np.ndarray:
+    series = pd.Series(pd.to_numeric(values, errors="coerce"), copy=False).fillna(0.0)
+    return (
+        series.pow(2)
+        .rolling(window=window, center=True, min_periods=1)
+        .mean()
+        .pow(0.5)
+        .to_numpy()
+    )
+
+
+def _hilbert_envelope(values: np.ndarray, window: int) -> np.ndarray:
+    env = np.abs(hilbert(np.nan_to_num(values, nan=0.0)))
+    return (
+        pd.Series(env)
+        .rolling(window=window, center=True, min_periods=1)
+        .mean()
+        .to_numpy()
+    )
+
+
+def _angle_multiplier(angle_pct: np.ndarray) -> np.ndarray:
+    pct = np.asarray(angle_pct, dtype=float)
+    pct = np.clip(pct, -100.0, 100.0)
+    conditions = [
+        pct < -40,
+        (pct >= -40) & (pct < -25),
+        (pct >= -25) & (pct < -10),
+        (pct >= -10) & (pct <= 10),
+        (pct > 10) & (pct <= 25),
+        (pct > 25) & (pct <= 40),
+        (pct > 40) & (pct <= 60),
+        (pct > 60) & (pct <= 100),
+    ]
+    multipliers = [0.25, 0.50, 0.75, 1.00, 1.25, 1.50, 1.75, 2.00]
+    return np.select(conditions, multipliers, default=np.nan)
+
+
+def _is_month_folder(path: Path) -> bool:
+    return path.is_dir() and path.name.lower().startswith(MONTHS)
+
+
+def _infer_category(path: Path) -> str:
+    parts = [segment.lower() for segment in path.parts]
+    if "testing" in parts or "testing" in path.name.lower():
+        return "testing"
+    if "training" in parts or "training" in path.name.lower():
+        return "training"
+    return "testing"
+
+
+def _locate_trials(
+    fly_dir: Path,
+    suffix_globs: Iterable[str] | str,
+    required_cols: Sequence[str],
+) -> list[tuple[str, Path, str]]:
+    patterns = [suffix_globs] if isinstance(suffix_globs, str) else list(suffix_globs)
+    month_dirs = [p for p in fly_dir.rglob("*") if _is_month_folder(p)]
+    found: set[Path] = set()
+    for month_dir in month_dirs:
+        for pattern in patterns:
+            found.update(Path(p) for p in month_dir.rglob(pattern))
+
+    results: list[tuple[str, Path, str]] = []
+    for csv_path in sorted(found):
+        try:
+            header = pd.read_csv(csv_path, nrows=5)
+        except Exception:
+            continue
+        if not _pick_column(header, required_cols):
+            continue
+        results.append((csv_path.stem, csv_path, _infer_category(csv_path)))
+    return results
+
+
+def _index_testing(entries: Sequence[tuple[str, Path, str]]) -> tuple[dict[str, Path], dict[str, Path]]:
+    indexed: dict[str, Path] = {}
+    fallback: dict[str, Path] = {}
+    for label, path, category in entries:
+        if category.lower() != "testing":
+            continue
+        match = TESTING_REGEX.search(label)
+        if match:
+            indexed[match.group(0).lower()] = path
+        else:
+            fallback[label.lower()] = path
+    return indexed, fallback
+
+
+def _find_trial_csvs(fly_dir: Path) -> Iterator[Path]:
+    search_root = fly_dir / "angle_distance_rms_envelope"
+    if not search_root.is_dir():
+        search_root = fly_dir
+    seen: set[Path] = set()
+    for pattern in ("**/*testing*.csv", "**/*training*.csv"):
+        for csv in search_root.glob(pattern):
+            if csv.is_file():
+                real = csv.resolve()
+                if real not in seen:
+                    seen.add(real)
+                    yield real
+
+
+def _pick_timestamp(df: pd.DataFrame) -> str | None:
+    return _pick_column(df, TIMESTAMP_COLS)
+
+
+def _pick_frame(df: pd.DataFrame) -> str | None:
+    return _pick_column(df, FRAME_COLS)
+
+
+def _seconds_from_timestamp(df: pd.DataFrame, column: str) -> pd.Series:
+    series = df[column]
+    if column in ("UTC_ISO", "Timestamp"):
+        dt = pd.to_datetime(series, errors="coerce", utc=(column == "UTC_ISO"))
+        secs = dt.astype("int64") / 1e9
+    elif column == "Number":
+        secs = pd.to_numeric(series, errors="coerce").astype(float)
+    elif column == "MonoNs":
+        secs = pd.to_numeric(series, errors="coerce").astype(float) / 1e9
+    else:
+        raise ValueError(f"Unsupported timestamp column: {column}")
+    origin = np.nanmin(secs.values)
+    return (secs - origin).astype(float)
+
+
+def _estimate_fps(seconds: pd.Series) -> float | None:
+    mask = seconds.notna()
+    if mask.sum() < 2:
+        return None
+    duration = seconds[mask].iloc[-1] - seconds[mask].iloc[0]
+    if duration <= 0:
+        return None
+    return mask.sum() / duration
+
+
+def _extract_env(row: pd.Series, env_cols: Sequence[str]) -> np.ndarray:
+    env = row[list(env_cols)].to_numpy(dtype=float)
+    env = env[np.isfinite(env) & (env > 0)]
+    return env
+
+
+# ---------------------------------------------------------------------------
+# Combined distance × angle processing
+# ---------------------------------------------------------------------------
+
+
+@dataclass(slots=True)
+class CombineConfig:
+    root: Path
+    fps_default: float = 40.0
+    window_sec: float = 0.25
+    odor_on_s: float = 30.0
+    odor_off_s: float = 60.0
+    angle_suffixes: tuple[str, ...] = ("*merged.csv", "*class_2_6.csv")
+    distance_suffixes: tuple[str, ...] = ("*merged.csv", "*class_2_6.csv")
+
+    @property
+    def window_frames(self) -> int:
+        return max(int(round(self.window_sec * self.fps_default)), 1)
+
+
+def combine_distance_angle(cfg: CombineConfig) -> None:
+    for fly_dir in sorted(p for p in cfg.root.iterdir() if p.is_dir()):
+        fly_name = fly_dir.name
+        angle_entries = _locate_trials(fly_dir, cfg.angle_suffixes, ANGLE_COLS)
+        distance_entries = _locate_trials(fly_dir, cfg.distance_suffixes, DIST_COLS)
+
+        if not distance_entries:
+            print(f"[{fly_name}] No testing distance trials found — skipping.")
+            continue
+
+        angle_idx, angle_fallback = _index_testing(angle_entries)
+        dist_idx, _ = _index_testing(distance_entries)
+
+        out_csv_dir = fly_dir / "angle_distance_rms_envelope"
+        out_fig_dir = out_csv_dir / "plots"
+        out_csv_dir.mkdir(parents=True, exist_ok=True)
+        out_fig_dir.mkdir(parents=True, exist_ok=True)
+
+        completed = skipped = 0
+        for test_id, dist_path in sorted(dist_idx.items()):
+            angle_path = angle_idx.get(test_id) or angle_fallback.get(dist_path.stem.lower())
+            if angle_path is None:
+                print(f"[WARN] {fly_name} {test_id}: no matching angle file — skipped.")
+                skipped += 1
+                continue
+
+            try:
+                dist_df = pd.read_csv(dist_path)
+                dist_col = _pick_column(dist_df, DIST_COLS)
+                if not dist_col:
+                    raise ValueError("missing distance column")
+                dist_pct = (
+                    pd.to_numeric(dist_df[dist_col], errors="coerce")
+                    .fillna(0.0)
+                    .clip(lower=0.0, upper=100.0)
+                    .to_numpy()
+                )
+                time_dist = _time_axis(dist_df, cfg.fps_default)
+
+                angle_df = pd.read_csv(angle_path)
+                angle_col = _pick_column(angle_df, ANGLE_COLS)
+                if not angle_col:
+                    raise ValueError("missing angle column")
+                time_ang = _time_axis(angle_df, cfg.fps_default)
+                angle_vals = pd.to_numeric(angle_df[angle_col], errors="coerce").to_numpy()
+
+                order = np.argsort(time_ang)
+                time_ang = time_ang[order]
+                angle_vals = angle_vals[order]
+                mask = np.isfinite(time_ang) & np.isfinite(angle_vals)
+                if not np.any(mask):
+                    raise ValueError("angle series has no finite values")
+                time_ang = time_ang[mask]
+                angle_vals = angle_vals[mask]
+
+                interp_angle = np.interp(
+                    time_dist, time_ang, angle_vals, left=angle_vals[0], right=angle_vals[-1]
+                )
+                multiplier = _angle_multiplier(interp_angle)
+                combined = dist_pct * multiplier
+                combined_rms = _rolling_rms(combined, cfg.window_frames)
+                envelope = _hilbert_envelope(combined_rms, cfg.window_frames)
+
+                out_df = pd.DataFrame(
+                    {
+                        "time_s": time_dist,
+                        "angle_centered_pct_interp": interp_angle,
+                        "distance_percentage": dist_pct,
+                        "multiplier": multiplier,
+                        "combined_base": combined,
+                        "rolling_rms": combined_rms,
+                        "envelope_of_rms": envelope,
+                    }
+                )
+                out_csv = out_csv_dir / f"{test_id}_angle_distance_rms_envelope.csv"
+                out_df.to_csv(out_csv, index=False)
+
+                plt.figure(figsize=(12, 4))
+                plt.plot(time_dist, envelope, linewidth=1.5)
+                plt.axvline(cfg.odor_on_s, color="red", linewidth=2)
+                plt.axvline(cfg.odor_off_s, color="red", linewidth=2)
+                plt.title(
+                    f"{fly_name} — {test_id}: Envelope(RMS(distance × angle-mult))"
+                )
+                plt.xlabel("Time (s)")
+                plt.ylabel("Envelope of RMS (arb.)")
+                plt.margins(x=0)
+                plt.grid(True, alpha=0.3)
+                out_png = out_fig_dir / f"{fly_name}_{test_id}_env_rms_angle_distance.png"
+                plt.savefig(out_png, dpi=300, bbox_inches="tight")
+                plt.close()
+
+                print(
+                    f"[OK] {fly_name} {test_id} → CSV: {out_csv.name} | FIG: {out_png.name}"
+                )
+                completed += 1
+            except Exception as exc:
+                print(f"[WARN] {fly_name} {test_id} → {exc}")
+                skipped += 1
+
+        print(f"[{fly_name}] completed: {completed}, skipped: {skipped}")
+
+
+# ---------------------------------------------------------------------------
+# Secure copy + cleanup
+# ---------------------------------------------------------------------------
+
+
+def secure_copy_and_cleanup(sources: Sequence[str], destination: str) -> None:
+    dest_root = Path(destination).expanduser().resolve()
+    dest_root.mkdir(parents=True, exist_ok=True)
+
+    for source in _normalise_roots(sources):
+        dest_path = dest_root / source.name
+        print(f"\nCopying from {source} → {dest_path}")
+        dest_path.mkdir(parents=True, exist_ok=True)
+        for item in source.rglob("*"):
+            relative = item.relative_to(source)
+            target = dest_path / relative
+            if item.is_dir():
+                target.mkdir(parents=True, exist_ok=True)
+                continue
+            if target.exists():
+                print(f"Skipping (already exists): {target}")
+                continue
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(item, target)
+            print(f"Copied: {target}")
+
+    print("\nCopy phase completed successfully.")
+
+    for source in _normalise_roots(sources):
+        print(f"\nCleaning up {source}...")
+        for fly_folder in source.iterdir():
+            if not fly_folder.is_dir():
+                continue
+            lower = fly_folder.name.lower()
+            if not any(lower.startswith(month) for month in MONTHS):
+                shutil.rmtree(fly_folder)
+                print(f"Deleted non-month folder: {fly_folder}")
+                continue
+            for item in list(fly_folder.iterdir()):
+                if item.name == "RMS_calculations":
+                    print(f"Preserving folder: {item}")
+                    continue
+                if item.is_file() and item.suffix.lower() == ".csv":
+                    print(f"Preserving CSV file: {item}")
+                    continue
+                if item.is_file():
+                    item.unlink()
+                    print(f"Deleted file: {item}")
+                elif item.is_dir():
+                    shutil.rmtree(item)
+                    print(f"Deleted folder: {item}")
+
+    print("\nCleanup completed successfully.")
+
+
+# ---------------------------------------------------------------------------
+# Wide CSV + float16 matrix
+# ---------------------------------------------------------------------------
+
+
+def build_wide_csv(roots: Sequence[str], output_csv: str, *, measure_cols: Sequence[str]) -> None:
+    out_path = Path(output_csv).expanduser().resolve()
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    items: list[dict[str, object]] = []
+    max_len = 0
+    for root in _normalise_roots(roots):
+        dataset = root.name
+        for fly_dir in sorted(p for p in root.iterdir() if p.is_dir()):
+            fly = fly_dir.name
+            for csv_path in _find_trial_csvs(fly_dir):
+                try:
+                    header = pd.read_csv(csv_path, nrows=0)
+                except Exception as exc:
+                    print(f"[WARN] Skip {csv_path.name}: header read error: {exc}")
+                    continue
+                measure = _pick_column(header, measure_cols)
+                if measure is None:
+                    print(f"[SKIP] {csv_path.name}: none of {measure_cols} present.")
+                    continue
+                try:
+                    n_rows = pd.read_csv(csv_path, usecols=[measure]).shape[0]
+                except Exception as exc:
+                    print(f"[WARN] Skip {csv_path.name}: count error: {exc}")
+                    continue
+                items.append(
+                    {
+                        "dataset": dataset,
+                        "fly": fly,
+                        "csv_path": csv_path,
+                        "measure_col": measure,
+                    }
+                )
+                max_len = max(max_len, n_rows)
+
+    if not items:
+        raise RuntimeError("No eligible testing/training CSVs found in provided roots.")
+
+    metadata = ["dataset", "fly", "trial_type", "trial_label", "fps"]
+    value_cols = [f"dir_val_{idx}" for idx in range(max_len)]
+    header_df = pd.DataFrame(columns=metadata + value_cols)
+    header_df.to_csv(out_path, index=False)
+
+    for item in items:
+        csv_path = Path(item["csv_path"])
+        try:
+            header = pd.read_csv(csv_path, nrows=0)
+        except Exception:
+            header = pd.DataFrame()
+
+        frame_col = _pick_frame(header) if not header.empty else None
+        ts_col = _pick_timestamp(header) if not header.empty else None
+        fps = math.nan
+        if frame_col and ts_col:
+            try:
+                ts_df = pd.read_csv(csv_path, usecols=[frame_col, ts_col])
+                seconds = _seconds_from_timestamp(ts_df, ts_col)
+                fps_est = _estimate_fps(seconds)
+                if fps_est and np.isfinite(fps_est) and fps_est > 0:
+                    fps = float(fps_est)
+            except Exception as exc:
+                print(f"[WARN] FPS inference failed for {csv_path.name}: {exc}")
+        if not np.isfinite(fps):
+            fps = 40.0
+
+        try:
+            measure = str(item["measure_col"])
+            df = pd.read_csv(csv_path, usecols=[measure])
+            values = pd.to_numeric(df[measure], errors="coerce").astype(float).to_numpy()
+        except Exception as exc:
+            print(f"[WARN] Read failed {csv_path}: {exc}")
+            continue
+
+        trial_type = _infer_category(csv_path)
+        label = csv_path.stem
+        match = re.search(r"(testing|training)_(\d+)", csv_path.stem, re.IGNORECASE)
+        if match:
+            label = f"{match.group(1).lower()}_{match.group(2)}"
+
+        row = [item["dataset"], item["fly"], trial_type, label, float(fps)] + list(values)
+        if len(values) < max_len:
+            row.extend([np.nan] * (max_len - len(values)))
+        elif len(values) > max_len:
+            row = row[: len(metadata) + max_len]
+
+        pd.DataFrame([row], columns=metadata + value_cols).to_csv(
+            out_path, index=False, mode="a", header=False
+        )
+
+    print(f"[OK] Wrote combined direction-value table: {out_path}")
+
+
+def wide_to_matrix(input_csv: str, output_dir: str) -> None:
+    csv_path = Path(input_csv).expanduser().resolve()
+    out_dir = Path(output_dir).expanduser().resolve()
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    df = pd.read_csv(csv_path)
+    meta_cols = [
+        column
+        for column in ("dataset", "fly", "trial_type", "trial_label", "fps")
+        if column in df.columns
+    ]
+    if not meta_cols:
+        raise RuntimeError(
+            "No metadata columns found. Expected at least dataset/fly/trial_type/trial_label."
+        )
+
+    env_cols = [column for column in df.columns if column not in meta_cols]
+    if not env_cols:
+        raise RuntimeError("No envelope columns found.")
+
+    code_maps: dict[str, dict[str, int]] = {}
+    df_num = df.copy()
+    for column in meta_cols:
+        uniques = pd.Series(df[column].astype(str).fillna("UNKNOWN")).unique().tolist()
+        mapping = {"UNKNOWN": 0}
+        code = 1
+        for value in uniques:
+            if value not in mapping:
+                mapping[value] = code
+                code += 1
+        code_maps[column] = mapping
+        df_num[column] = df_num[column].astype(str).map(mapping).fillna(0).astype(np.int32)
+
+    df_num[env_cols] = df_num[env_cols].apply(pd.to_numeric, errors="coerce").fillna(0.0)
+    ordered_cols = meta_cols + env_cols
+    matrix = df_num[ordered_cols].to_numpy(dtype=np.float16)
+
+    matrix_path = out_dir / "envelope_matrix_float16.npy"
+    codes_path = out_dir / "code_maps.json"
+    key_path = out_dir / "code_key.txt"
+
+    np.save(matrix_path, matrix)
+    with open(codes_path, "w", encoding="utf-8") as fh:
+        json.dump({"column_order": ordered_cols, "code_maps": code_maps}, fh, indent=2)
+
+    with open(key_path, "w", encoding="utf-8") as fh:
+        fh.write("# Envelope matrix schema (float16), row-wise\n")
+        fh.write("# Columns (in order):\n")
+        for idx, column in enumerate(ordered_cols):
+            fh.write(f"{idx:>5}: {column}\n")
+        fh.write("\n# Metadata code maps (string → integer code)\n")
+        for column in meta_cols:
+            fh.write(f"\n[{column}]\n")
+            inverse = sorted(
+                ((code, value) for value, code in code_maps[column].items()),
+                key=lambda pair: pair[0],
+            )
+            for code, value in inverse:
+                fh.write(f"{code:>5} : {value}\n")
+        fh.write("\nNotes:\n")
+        fh.write("- Matrix dtype is float16 (16-bit). Metadata codes are stored as float16 numbers in the matrix.\n")
+        fh.write("- Envelope NaNs (shorter videos) were replaced with 0.0.\n")
+        fh.write("- Code '0' means UNKNOWN for the metadata fields.\n")
+
+    print(f"[OK] Saved 16-bit matrix: {matrix_path} (shape={matrix.shape}, dtype={matrix.dtype})")
+    print(f"[OK] Saved key: {key_path}")
+    print(f"[OK] Saved JSON maps: {codes_path}")
+
+
+# ---------------------------------------------------------------------------
+# Overlay plots (combined vs distance-only)
+# ---------------------------------------------------------------------------
+
+
+def overlay_sources(
+    sources: Mapping[str, Mapping[str, str]],
+    *,
+    latency_sec: float,
+    after_show_sec: float,
+    output_dir: str,
+    threshold_mult: float = 4.0,
+    odor_on_s: float = 30.0,
+    odor_off_s: float = 60.0,
+) -> None:
+    frames = []
+    env_cols_by_source: dict[str, list[str]] = {}
+    for tag, paths in sources.items():
+        df, env_cols = envelope_visuals._load_matrix(
+            Path(paths["MATRIX_NPY"]).expanduser().resolve(),
+            Path(paths["CODES_JSON"]).expanduser().resolve(),
+        )
+        df["_source"] = tag
+        df["dataset_canon"] = df["dataset"].apply(_canon_dataset)
+        df = df[df["trial_type"].str.lower() == "testing"].copy()
+        df["fps"] = df["fps"].replace([np.inf, -np.inf], np.nan).fillna(40.0)
+        frames.append(df)
+        env_cols_by_source[tag] = env_cols
+
+    if not frames:
+        raise RuntimeError("No sources available for overlay plotting.")
+
+    combined = pd.concat(frames, ignore_index=True)
+    out_dir = Path(output_dir).expanduser().resolve()
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    x_max = odor_off_s + latency_sec + after_show_sec
+
+    plt.rcParams.update(
+        {
+            "figure.dpi": 300,
+            "savefig.dpi": 300,
+            "axes.spines.top": False,
+            "axes.spines.right": False,
+            "axes.linewidth": 0.8,
+            "xtick.direction": "out",
+            "ytick.direction": "out",
+            "font.size": 10,
+        }
+    )
+
+    palette = ["tab:blue", "tab:orange", "tab:green", "tab:red"]
+    style_map = {
+        tag: dict(color=palette[idx % len(palette)], label=tag)
+        for idx, tag in enumerate(sources.keys())
+    }
+
+    for fly, df_fly in combined.groupby("fly"):
+        mu_per_source: MutableMapping[str, list[float]] = {}
+        for _, row in df_fly.iterrows():
+            env = _extract_env(row, env_cols_by_source[row["_source"]])
+            fps = float(row.get("fps", 40.0))
+            baseline_end = min(int(round(odor_on_s * fps)), env.size)
+            if baseline_end:
+                baseline = env[:baseline_end]
+                baseline = baseline[np.isfinite(baseline)]
+                if baseline.size:
+                    mu_per_source.setdefault(row["_source"], []).extend(baseline)
+
+        mu_lookup = {
+            source: float(np.mean(values)) if values else math.nan
+            for source, values in mu_per_source.items()
+        }
+
+        trials: dict[str, list[tuple[str, np.ndarray, np.ndarray, float, str, bool]]] = {}
+        y_max = 0.0
+        for _, row in df_fly.iterrows():
+            env = _extract_env(row, env_cols_by_source[row["_source"]])
+            if env.size == 0:
+                continue
+            fps = float(row.get("fps", 40.0))
+            t_full = np.arange(env.size, dtype=float) / max(fps, 1e-9)
+            mask = t_full <= x_max + 1e-9
+            t = t_full[mask]
+            env_visible = env[mask]
+            if t.size == 0:
+                continue
+
+            baseline_end = min(int(round(odor_on_s * fps)), env.size)
+            baseline = env[:baseline_end]
+            sigma = float(np.nanstd(baseline)) if baseline.size else math.nan
+            mu = mu_lookup.get(row["_source"], math.nan)
+            if not math.isfinite(mu) and baseline.size:
+                mu = float(np.nanmean(baseline))
+            theta = mu + threshold_mult * sigma if math.isfinite(mu) and math.isfinite(sigma) else math.nan
+
+            dataset_canon = row["dataset_canon"]
+            odor_name = _display_odor(dataset_canon, row["trial_label"])
+            is_trained = _is_trained(dataset_canon, odor_name)
+            trials.setdefault(row["trial_label"], []).append(
+                (row["_source"], t, env_visible, theta, odor_name, is_trained)
+            )
+
+            local_max = np.nanmax(env_visible) if np.isfinite(env_visible).any() else 0.0
+            if np.isfinite(theta):
+                local_max = max(local_max, theta)
+            y_max = max(y_max, float(local_max))
+
+        if not trials:
+            continue
+
+        trial_labels = sorted(trials.keys(), key=_trial_num)
+        fig, axes = plt.subplots(
+            len(trial_labels),
+            1,
+            figsize=(10, max(3.0, len(trial_labels) * 1.6 + 1.5)),
+            sharex=True,
+        )
+        if len(trial_labels) == 1:
+            axes = [axes]
+
+        for ax, trial_label in zip(axes, trial_labels):
+            entries = trials[trial_label]
+            odor_name = entries[0][4]
+            is_trained = entries[0][5]
+            ax.axvline(odor_on_s, linestyle="--", linewidth=1.0, color="black")
+            ax.axvline(odor_off_s, linestyle="--", linewidth=1.0, color="black")
+            on_lat_end = min(odor_on_s + latency_sec, x_max)
+            off_lat_end = min(odor_off_s + latency_sec, x_max)
+            if latency_sec > 0:
+                ax.axvspan(odor_on_s, on_lat_end, alpha=0.25, color="red")
+            if off_lat_end > on_lat_end:
+                ax.axvspan(on_lat_end, off_lat_end, alpha=0.15, color="gray")
+            if latency_sec > 0:
+                ax.axvspan(odor_off_s, off_lat_end, alpha=0.25, color="red")
+
+            for source, t, env_visible, theta, *_ in entries:
+                style = style_map[source]
+                line = ax.plot(t, env_visible, linewidth=1.3, color=style["color"], label=style["label"])
+                style["label"] = None  # only show once in legend
+                if np.isfinite(theta):
+                    ax.axhline(theta, linestyle=":", linewidth=1.0, color=line[0].get_color(), alpha=0.9)
+
+            ax.set_ylim(0, y_max * 1.02 if y_max > 0 else 1.0)
+            ax.set_xlim(0, x_max)
+            ax.margins(x=0, y=0.02)
+            ax.set_ylabel("DIST or DIST×ANGLE", fontsize=10)
+            title = f"{odor_name} — {trial_label}"
+            if is_trained:
+                ax.set_title(title, loc="left", fontsize=11, weight="bold", pad=2, color="tab:blue")
+            else:
+                ax.set_title(title, loc="left", fontsize=11, weight="bold", pad=2)
+
+        axes[-1].set_xlabel("Time (s)", fontsize=11)
+
+        legend_handles = [
+            plt.Line2D([0], [0], linestyle="--", linewidth=1.0, color="black", label="Valve on/off (command)"),
+            plt.Rectangle((0, 0), 1, 1, alpha=0.25, color="red", label=f"Odor transit (~{latency_sec:.2f}s)"),
+            plt.Rectangle((0, 0), 1, 1, alpha=0.15, color="gray", label="Effective odor-on at fly"),
+            plt.Line2D([0], [0], linestyle=":", linewidth=1.0, color="black", label=r"$\theta=\mu_{global}+k\sigma_{trial}$"),
+        ]
+        for tag, style in style_map.items():
+            legend_handles.insert(0, plt.Line2D([0], [0], linewidth=1.3, color=style["color"], label=tag))
+
+        fig = plt.gcf()
+        fig.legend(
+            handles=legend_handles,
+            loc="upper right",
+            bbox_to_anchor=(0.98, 0.97),
+            frameon=True,
+            fontsize=9,
+            title=f"Threshold: k = {threshold_mult}",
+            title_fontsize=9,
+        )
+        fig.suptitle(
+            f"{fly} — Envelope overlay by testing trial (global μ per source, σ per trial)",
+            y=0.995,
+            fontsize=14,
+            weight="bold",
+        )
+        fig.tight_layout(rect=[0, 0, 1, 0.97])
+
+        odors_present = sorted({entries[0][4] for entries in trials.values()})
+        for odor_name in odors_present:
+            odor_dir = out_dir / _safe_dirname(odor_name)
+            odor_dir.mkdir(parents=True, exist_ok=True)
+            out_png = odor_dir / f"{fly}_overlay_envelope_by_trial_{int(after_show_sec)}s_shifted.png"
+            fig.savefig(out_png, dpi=300, bbox_inches="tight")
+            print(f"[OK] Saved {out_png}")
+
+        plt.close(fig)
+
+
+# ---------------------------------------------------------------------------
+# CLI plumbing
+# ---------------------------------------------------------------------------
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description=__doc__)
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    combine_parser = subparsers.add_parser("combine", help="Merge distance/angle testing trials.")
+    combine_parser.add_argument("--root", type=Path, required=True, help="Fly dataset root directory.")
+    combine_parser.add_argument("--fps-default", type=float, default=40.0)
+    combine_parser.add_argument("--window-sec", type=float, default=0.25)
+    combine_parser.add_argument("--odor-on", type=float, default=30.0)
+    combine_parser.add_argument("--odor-off", type=float, default=60.0)
+
+    copy_parser = subparsers.add_parser("secure-sync", help="Copy datasets then clean source directories.")
+    copy_parser.add_argument("--source", action="append", required=True, help="Source directory (repeatable).")
+    copy_parser.add_argument("--dest", required=True, help="Destination root directory.")
+
+    wide_parser = subparsers.add_parser("wide", help="Build wide CSV of direction values.")
+    wide_parser.add_argument("--root", action="append", required=True, help="Root directory (repeatable).")
+    wide_parser.add_argument("--output-csv", required=True, help="Destination CSV path.")
+
+    matrix_parser = subparsers.add_parser("matrix", help="Convert wide CSV → float16 matrix + metadata.")
+    matrix_parser.add_argument("--input-csv", required=True)
+    matrix_parser.add_argument("--output-dir", required=True)
+
+    matrices_parser = subparsers.add_parser("matrices", help="Generate reaction matrices for combined data.")
+    envelope_visuals._parse_matrices_args(matrices_parser)  # reuse existing options
+
+    envelopes_parser = subparsers.add_parser("envelopes", help="Generate per-fly envelopes for combined data.")
+    envelope_visuals._parse_envelopes_args(envelopes_parser)
+
+    overlay_parser = subparsers.add_parser("overlay", help="Overlay combined matrix vs distance-only matrix.")
+    overlay_parser.add_argument(
+        "--combined-matrix",
+        required=True,
+        help="Path to combined matrix float16 .npy file.",
+    )
+    overlay_parser.add_argument(
+        "--combined-codes",
+        required=True,
+        help="Path to combined matrix code_maps.json.",
+    )
+    overlay_parser.add_argument(
+        "--distance-matrix",
+        required=True,
+        help="Path to distance-only matrix float16 .npy file.",
+    )
+    overlay_parser.add_argument(
+        "--distance-codes",
+        required=True,
+        help="Path to distance-only matrix code_maps.json.",
+    )
+    overlay_parser.add_argument("--out-dir", required=True, help="Output directory for overlay figures.")
+    overlay_parser.add_argument("--latency-sec", type=float, default=0.0)
+    overlay_parser.add_argument("--after-show-sec", type=float, default=30.0)
+    overlay_parser.add_argument("--threshold-std-mult", type=float, default=4.0)
+
+    return parser
+
+
+def main(argv: Sequence[str] | None = None) -> None:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+
+    if args.command == "combine":
+        cfg = CombineConfig(
+            root=args.root.expanduser().resolve(),
+            fps_default=args.fps_default,
+            window_sec=args.window_sec,
+            odor_on_s=args.odor_on,
+            odor_off_s=args.odor_off,
+        )
+        combine_distance_angle(cfg)
+        return
+
+    if args.command == "secure-sync":
+        secure_copy_and_cleanup(args.source, args.dest)
+        return
+
+    if args.command == "wide":
+        build_wide_csv(args.root, args.output_csv, measure_cols=["envelope_of_rms"])
+        return
+
+    if args.command == "matrix":
+        wide_to_matrix(args.input_csv, args.output_dir)
+        return
+
+    if args.command == "matrices":
+        trial_order = args.trial_order or ("observed", "trained-first")
+        cfg = MatrixPlotConfig(
+            matrix_npy=args.matrix_npy,
+            codes_json=args.codes_json,
+            out_dir=args.out_dir,
+            latency_sec=args.latency_sec,
+            fps_default=args.fps_default,
+            before_sec=args.before_sec,
+            during_sec=args.during_sec,
+            after_window_sec=args.after_window_sec,
+            threshold_std_mult=args.threshold_std_mult,
+            min_samples_over=args.min_samples_over,
+            row_gap=args.row_gap,
+            height_per_gap_in=args.height_per_gap_in,
+            bottom_shift_in=args.bottom_shift_in,
+            trial_orders=trial_order,
+            include_hexanol=not args.exclude_hexanol,
+        )
+        generate_reaction_matrices(cfg)
+        return
+
+    if args.command == "envelopes":
+        cfg = EnvelopePlotConfig(
+            matrix_npy=args.matrix_npy,
+            codes_json=args.codes_json,
+            out_dir=args.out_dir,
+            latency_sec=args.latency_sec,
+            fps_default=args.fps_default,
+            odor_on_s=args.odor_on_s,
+            odor_off_s=args.odor_off_s,
+            after_show_sec=args.after_show_sec,
+            threshold_std_mult=args.threshold_std_mult,
+        )
+        generate_envelope_plots(cfg)
+        return
+
+    if args.command == "overlay":
+        overlay_sources(
+            {
+                "RMS × Angle": {
+                    "MATRIX_NPY": args.combined_matrix,
+                    "CODES_JSON": args.combined_codes,
+                },
+                "RMS": {
+                    "MATRIX_NPY": args.distance_matrix,
+                    "CODES_JSON": args.distance_codes,
+                },
+            },
+            latency_sec=args.latency_sec,
+            after_show_sec=args.after_show_sec,
+            output_dir=args.out_dir,
+            threshold_mult=args.threshold_std_mult,
+        )
+        return
+
+    parser.error(f"Unknown command: {args.command!r}")
+
+
+if __name__ == "__main__":  # pragma: no cover
+    main()
