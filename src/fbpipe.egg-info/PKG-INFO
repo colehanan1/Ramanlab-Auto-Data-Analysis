@@ -1,3 +1,10 @@
+Metadata-Version: 2.4
+Name: fbpipe
+Version: 0.1.0
+Summary: Fly behavior pipeline: YOLO → analysis → videos
+Requires-Python: >=3.9
+Description-Content-Type: text/markdown
+
 
 # Fly Behavior Pipeline (YOLO → Distances/Angles → RMS/Envelope → Videos)
 
