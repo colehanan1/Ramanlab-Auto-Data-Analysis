@@ -1,6 +1,6 @@
 
 from __future__ import annotations
-import os, time, logging, cv2, numpy as np, pandas as pd
+import time, logging, cv2, numpy as np, pandas as pd
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 from ultralytics import YOLO
@@ -27,11 +27,11 @@ def _flow_nudge(prev_gray, gray, box_xyxy, flow_skip_edge: int, flow_params: dic
     return nudged
 
 def _process_frame(frame, frame_number, current_timestamp, trackers: Dict[int, SingleClassTracker],
-                   prev_gray, anchor, settings: Settings, model: YOLO):
+                   prev_gray, anchor, settings: Settings, predict_fn):
     CONF_THRES = settings.conf_thres
     FLOW_PARAMS = dict(pyr_scale=0.5, levels=3, winsize=15, iterations=3, poly_n=5, poly_sigma=1.2, flags=0)
 
-    r = model.predict(source=frame, conf=CONF_THRES, verbose=False)[0]
+    r = predict_fn(frame, CONF_THRES)[0]
 
     dets_by_class: Dict[int, Tuple[np.ndarray, np.ndarray]] = {
         1:(np.zeros((0,4),np.float32), np.zeros((0,),np.float32)),
@@ -121,6 +121,11 @@ def _process_frame(frame, frame_number, current_timestamp, trackers: Dict[int, S
         "angle_deg_c2_26_vs_anchor": angle_deg
     }
     return frame, row, gray
+
+def _is_cuda_failure(exc: Exception) -> bool:
+    msg = str(exc).lower()
+    return any(tok in msg for tok in ("cuda", "cudnn", "cublas", "expandable_segments", "device-side assert", "hip"))
+
 
 def main(cfg: Settings):
     allocator_was_set = False
@@ -215,7 +220,7 @@ def main(cfg: Settings):
                 if (w, h) != (1080, 1080):
                     frame = cv2.resize(frame, (1080,1080), interpolation=cv2.INTER_LINEAR)
                 ts = timestamps.get(frame_idx, frame_idx / fps)
-                frame, row, prev_gray = _process_frame(frame, frame_idx, ts, trackers, prev_gray, (AX,AY), cfg, model)
+                frame, row, prev_gray = _process_frame(frame, frame_idx, ts, trackers, prev_gray, (AX,AY), cfg, predict_fn)
                 writer.write(frame)
                 rows.append(row)
                 frame_idx += 1

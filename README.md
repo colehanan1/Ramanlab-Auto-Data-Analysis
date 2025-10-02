@@ -20,11 +20,17 @@ End-to-end, reproducible pipeline that:
 # 0) Prepare venv + deps (or use your own Conda env; see below)
 make setup
 
-# 1) Configure paths
+# 1) Install/refresh dependencies inside the active environment
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+# (optional but recommended if you are developing):
+python -m pip install -e .
+
+# 2) Configure paths
 cp .env.example .env
 # edit MODEL_PATH and MAIN_DIRECTORY, or edit config.yaml directly
 
-# 2) Run everything
+# 3) Run everything (env must stay active)
 make run   # or: python -m fbpipe.pipeline --config config.yaml all
 ```
 
@@ -104,7 +110,7 @@ python -m fbpipe.steps.distance_stats --config config.yaml
 
 ## GPU requirements
 
-The pipeline expects a CUDA-capable GPU. Set `allow_cpu: true` (or `ALLOW_CPU=true` in `.env`) **only** for smoke tests—performance will be poor.
+The pipeline expects a CUDA-capable GPU. If CUDA initialisation fails or the driver is unstable, the YOLO step will automatically fall back to CPU inference (with a warning) so long as `allow_cpu` is enabled. CPU mode is significantly slower and should be reserved for debugging or smoke tests.
 
 ## Notes
 

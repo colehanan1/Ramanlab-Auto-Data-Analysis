@@ -3,7 +3,7 @@
 
 help:
 	@echo "Targets:"
-	@echo "  setup     - create .venv and install requirements"
+	@echo "  setup     - install requirements into the active environment"
 	@echo "  run       - run the full pipeline with config.yaml"
 	@echo "  all       - same as run"
 	@echo "  clean     - remove build artifacts"
@@ -16,5 +16,8 @@ run:
 
 all: run
 
+yolo:
+	python -m fbpipe.steps.yolo_infer --config config.yaml
+
 clean:
-	rm -rf .venv **/__pycache__ **/*.pyc
+	rm -rf **/__pycache__ **/*.pyc
