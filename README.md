@@ -62,6 +62,32 @@ python scripts/envelope_exports.py convert \
 
 All arguments are optional; the defaults mirror the notebook cells (measurement column priorities, FPS fallbacks, rolling window length, and output paths). Supply additional roots or override the output destinations when your data lives elsewhere.
 
+### Envelope visualisation commands
+
+After converting the wide CSV into a float16 matrix, the new `scripts/envelope_visuals.py` helper renders the reaction matrices and per-fly envelope traces without touching notebooks.
+
+Generate both the "testing order" and "trained-first" matrix variants (each odor ends up in its own subfolder) and drop per-odor CSV summaries for the trained-first ordering:
+
+```bash
+python scripts/envelope_visuals.py matrices \
+  --matrix-npy /home/ramanlab/Documents/cole/Data/single_matrix_opto/envelope_matrix_float16.npy \
+  --codes-json /home/ramanlab/Documents/cole/Data/single_matrix_opto/code_maps.json \
+  --out-dir /home/ramanlab/Documents/cole/Results/Opto/Matrixs_DIST \
+  --latency-sec 2.75
+```
+
+Render per-fly envelope traces, highlighting the trained odor and shading the latency-adjusted delivery window. Each fly's figure is replicated into every odor folder that appears in its trials:
+
+```bash
+python scripts/envelope_visuals.py envelopes \
+  --matrix-npy /home/ramanlab/Documents/cole/Data/single_matrix_opto/envelope_matrix_float16.npy \
+  --codes-json /home/ramanlab/Documents/cole/Data/single_matrix_opto/code_maps.json \
+  --out-dir /home/ramanlab/Documents/cole/Results/Opto/Envlope_DIST \
+  --latency-sec 2.75
+```
+
+Both commands expose flags for FPS fallbacks, baseline/during/after windows, bar-chart spacing, and trial-order selection, so you can adapt the exports if acquisition parameters change.
+
 ### Using an existing Conda environment
 
 If you already have a GPU-capable Conda environment (e.g., `yolo-env`), the commands above install the required packages directly into it—no extra virtualenv will be created by default.
