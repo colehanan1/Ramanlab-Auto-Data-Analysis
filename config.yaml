@@ -1,0 +1,35 @@
+
+# Project configuration
+model_path: "/home/ramanlab/Documents/cole/model/YOLOProjectProboscisLegs/runs/obb/train5/weights/best.pt"
+main_directory: "/home/ramanlab/Documents/cole/Data/flys/opto_hex/"
+
+# Compute
+allow_cpu: false
+cuda_allow_tf32: true
+
+# Detection / tracking
+yolo:
+  conf_thres: 0.40
+  iou_match_thres: 0.25
+  max_age: 15
+  ema_alpha: 0.20
+  use_optical_flow: true
+  flow_skip_edge: 10
+
+# Geometry
+anchor_x: 1079.0
+anchor_y: 540.0
+
+# Distance stats
+distance_limits:
+  class2_min: 70.0
+  class2_max: 250.0
+
+# Envelope / RMS
+fps_default: 40.0
+window_sec: 0.25
+odor_on_s: 30.0
+odor_off_s: 60.0
+
+# Videos
+delete_source_after_render: true

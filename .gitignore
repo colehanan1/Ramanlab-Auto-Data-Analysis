@@ -1,0 +1,38 @@
+
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual envs
+.venv/
+.env
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Data & outputs
+**/output_runs/
+**/logs/
+**/RMS_calculations/
+**/angle_plots/
+**/videos_with_rms/
+**/three_line_videos/
+**/all_envelope_plots/
+**/*_time.png
+**/*.mp4
+**/*.avi
+**/*.mov
+**/*.mkv
+
+# Caches
+*.log
+*.tmp
+*.npy
+*.npz
+*.csv~
+*.png~
+*.ipynb_checkpoints/

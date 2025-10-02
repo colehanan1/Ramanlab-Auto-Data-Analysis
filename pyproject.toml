@@ -1,0 +1,17 @@
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "fbpipe"
+version = "0.1.0"
+description = "Fly behavior pipeline: YOLO → analysis → videos"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = []
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["fbpipe*"]
+exclude = ["tests*"]
