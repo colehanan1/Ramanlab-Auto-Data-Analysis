@@ -9,11 +9,10 @@ help:
 	@echo "  clean     - remove build artifacts"
 
 setup:
-	python -m pip install --upgrade pip
-	python -m pip install -r requirements.txt
+	pip install --upgrade pip && pip install -r requirements.txt
 
-run:
-	python -m fbpipe.pipeline --config config.yaml all
+run: 
+	conda activate yolo-env python && -m fbpipe.pipeline --config config.yaml all
 
 all: run
 

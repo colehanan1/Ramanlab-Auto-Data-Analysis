@@ -1,0 +1,14 @@
+name: yolo-env
+channels:
+  - defaults
+dependencies:
+  - ipykernel
+  - jupyterlab
+  - pip
+  - ipywidgets
+  - libgcc-ng
+  - gcc
+  - cudatoolkit=11.8
+  - cudnn
+  - ffmpeg
+prefix: /home/ramanlab/anaconda3/envs/yolo-env
