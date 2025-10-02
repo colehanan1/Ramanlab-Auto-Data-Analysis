@@ -1,14 +1,9 @@
-
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Activate venv
-if [ ! -d ".venv" ]; then
-  python3 -m venv .venv
+if [[ -z "${CONDA_DEFAULT_ENV:-}" && -z "${VIRTUAL_ENV:-}" ]]; then
+  echo "[fbpipe] No Python environment detected. Activate your Conda environment (e.g., yolo-env)." >&2
+  exit 1
 fi
-source .venv/bin/activate
-pip -q install --upgrade pip
-pip -q install -r requirements.txt
 
-# Run full pipeline
 python -m fbpipe.pipeline --config config.yaml all

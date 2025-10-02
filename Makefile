@@ -3,18 +3,22 @@
 
 help:
 	@echo "Targets:"
-	@echo "  setup     - create .venv and install requirements"
+	@echo "  setup     - install requirements into the active environment"
 	@echo "  run       - run the full pipeline with config.yaml"
 	@echo "  all       - same as run"
 	@echo "  clean     - remove build artifacts"
 
 setup:
-	python3 -m venv .venv && . .venv/bin/activate && pip install --upgrade pip && pip install -r requirements.txt
+	python -m pip install --upgrade pip
+	python -m pip install -r requirements.txt
 
-run: 
-	. .venv/bin/activate && python -m fbpipe.pipeline --config config.yaml all
+run:
+	python -m fbpipe.pipeline --config config.yaml all
 
 all: run
 
+yolo:
+	python -m fbpipe.steps.yolo_infer --config config.yaml
+
 clean:
-	rm -rf .venv **/__pycache__ **/*.pyc
+	rm -rf **/__pycache__ **/*.pyc
