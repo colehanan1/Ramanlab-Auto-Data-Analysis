@@ -9,10 +9,10 @@ help:
 	@echo "  clean     - remove build artifacts"
 
 setup:
-	python3 -m venv .venv && . .venv/bin/activate && pip install --upgrade pip && pip install -r requirements.txt
+	pip install --upgrade pip && pip install -r requirements.txt
 
 run: 
-	. .venv/bin/activate && python -m fbpipe.pipeline --config config.yaml all
+	python -m fbpipe.pipeline --config config.yaml all
 
 all: run
 
