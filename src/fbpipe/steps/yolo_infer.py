@@ -4,7 +4,6 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 from ultralytics import YOLO
 import torch
-import os
 import gc  # Add this import
 
 from ..config import Settings
@@ -132,11 +131,6 @@ def main(cfg: Settings):
     cuda_available = torch.cuda.is_available()
     use_cuda = cuda_available and not cfg.allow_cpu
 
-    allocator_was_set = False
-    if use_cuda and "PYTORCH_CUDA_ALLOC_CONF" not in os.environ:
-        os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments=True"
-        allocator_was_set = True
-
     torch.backends.cudnn.benchmark = use_cuda
     if cuda_available:
         torch.backends.cuda.matmul.allow_tf32 = cfg.cuda_allow_tf32
@@ -152,12 +146,9 @@ def main(cfg: Settings):
     device_in_use: Optional[str] = None
 
     def _set_device(target: str):
-        nonlocal device_in_use, allocator_was_set
+        nonlocal device_in_use
         if device_in_use == target:
             return
-        if target == "cpu" and allocator_was_set:
-            os.environ.pop("PYTORCH_CUDA_ALLOC_CONF", None)
-            allocator_was_set = False
         if target == "cpu":
             gc.collect()
             if torch.cuda.is_available():
@@ -170,22 +161,7 @@ def main(cfg: Settings):
         _set_device(target_device)
     except RuntimeError as exc:
         if target_device == "cuda":
-            if "expandable_segments" in str(exc) and allocator_was_set:
-                log.warning("CUDA allocator does not support expandable_segments; retrying without it.")
-                os.environ.pop("PYTORCH_CUDA_ALLOC_CONF", None)
-                allocator_was_set = False
-                gc.collect()
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
-                try:
-                    _set_device("cuda")
-                except RuntimeError as retry_exc:
-                    if cfg.allow_cpu and _is_cuda_failure(retry_exc):
-                        log.warning("CUDA initialisation failed after retry (%s); falling back to CPU.", retry_exc)
-                        _set_device("cpu")
-                    else:
-                        raise
-            elif cfg.allow_cpu and _is_cuda_failure(exc):
+            if cfg.allow_cpu and _is_cuda_failure(exc):
                 log.warning("CUDA initialisation failed (%s); falling back to CPU.", exc)
                 _set_device("cpu")
             else:
