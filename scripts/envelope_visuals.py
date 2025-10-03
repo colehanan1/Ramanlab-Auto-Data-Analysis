@@ -75,7 +75,7 @@ DISPLAY_LABEL = {
     "opto_benz": "Benzaldehyde",
     "opto_EB": "Ethyl Butyrate",
     "opto_benz_1": "Benzaldehyde",
-    "opto_hex": "Hexanol",
+    "opto_hex": "Optogenetics Hexanol",
 }
 
 ODOR_ORDER = [
@@ -91,7 +91,7 @@ ODOR_ORDER = [
 ]
 
 TRAINED_FIRST_ORDER = (2, 4, 5, 1, 3, 6, 7, 8, 9)
-HEXANOL_LABEL = "Hexanol"
+HEXANOL_LABEL = "Optogenetics Hexanol"
 
 
 # ---------------------------------------------------------------------------
@@ -158,6 +158,13 @@ def _trial_num(label: str) -> int:
 
 def _display_odor(dataset_canon: str, trial_label: str) -> str:
     number = _trial_num(trial_label)
+    label_lower = str(trial_label).lower()
+    if (
+        dataset_canon == "opto_hex"
+        and "testing" in label_lower
+        and number in (1, 3)
+    ):
+        return "Apple Cider Vinegar"
     if number in (1, 3):
         return HEXANOL_LABEL
     if number in (2, 4, 5):
@@ -185,6 +192,13 @@ def _display_odor(dataset_canon: str, trial_label: str) -> str:
         "opto_benz": {6: "3-Octonol", 7: "Benzaldehyde", 8: "Citral", 9: "Linalool"},
         "opto_benz_1": {
             6: "Apple Cider Vinegar",
+            7: "3-Octonol",
+            8: "Ethyl Butyrate",
+            9: "Citral",
+            10: "Linalool",
+        },
+        "opto_hex": {
+            6: "Benzaldehyde",
             7: "3-Octonol",
             8: "Ethyl Butyrate",
             9: "Citral",
@@ -781,7 +795,11 @@ def _parse_matrices_args(subparser: argparse.ArgumentParser) -> None:
         choices=("observed", "trained-first"),
         help="Trial ordering strategy. Repeat to request multiple variants.",
     )
-    subparser.add_argument("--exclude-hexanol", action="store_true", help="Exclude Hexanol from 'other' reaction counts.")
+    subparser.add_argument(
+        "--exclude-hexanol",
+        action="store_true",
+        help="Exclude Optogenetics Hexanol from 'other' reaction counts.",
+    )
     subparser.add_argument("--overwrite", action="store_true", help="Rebuild plots even if the target files exist.")
 
 

@@ -113,10 +113,10 @@ DISPLAY_LABEL = {
     "opto_benz": "Benzaldehyde",
     "opto_benz_1": "Benzaldehyde",
     "opto_EB": "Ethyl Butyrate",
-    "opto_hex": "Hexanol",
+    "opto_hex": "Optogenetics Hexanol",
 }
 
-HEXANOL = "Hexanol"
+HEXANOL = "Optogenetics Hexanol"
 
 
 # ---------------------------------------------------------------------------
@@ -151,6 +151,13 @@ def _trial_num(label: str) -> int:
 
 def _display_odor(dataset_canon: str, trial_label: str) -> str:
     number = _trial_num(trial_label)
+    label_lower = str(trial_label).lower()
+    if (
+        dataset_canon == "opto_hex"
+        and "testing" in label_lower
+        and number in (1, 3)
+    ):
+        return "Apple Cider Vinegar"
     if number in (1, 3):
         return HEXANOL
     if number in (2, 4, 5):
@@ -165,6 +172,13 @@ def _display_odor(dataset_canon: str, trial_label: str) -> str:
         "opto_EB": {6: "Apple Cider Vinegar", 7: "3-Octonol", 8: "Benzaldehyde", 9: "Citral", 10: "Linalool"},
         "opto_benz": {6: "3-Octonol", 7: "Benzaldehyde", 8: "Citral", 9: "Linalool"},
         "opto_benz_1": {6: "Apple Cider Vinegar", 7: "3-Octonol", 8: "Ethyl Butyrate", 9: "Citral", 10: "Linalool"},
+        "opto_hex": {
+            6: "Benzaldehyde",
+            7: "3-Octonol",
+            8: "Ethyl Butyrate",
+            9: "Citral",
+            10: "Linalool",
+        },
     }
     return mapping.get(dataset_canon, {}).get(number, trial_label)
 
