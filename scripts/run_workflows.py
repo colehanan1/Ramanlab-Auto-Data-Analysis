@@ -180,7 +180,13 @@ def _run_combined(cfg: Mapping[str, Any] | None) -> None:
 def _run_pipeline(config_path: Path) -> None:
     cmd = [sys.executable, "-m", "fbpipe.pipeline", "--config", str(config_path), "all"]
     print(f"[analysis] pipeline → {' '.join(cmd)}")
-    subprocess.run(cmd, check=True)
+    try:
+        subprocess.run(cmd, check=True)
+    except subprocess.CalledProcessError as e:
+        print(f"[ERROR] Pipeline failed with exit code {e.returncode}")
+        if e.stderr:
+            print(e.stderr.decode() if hasattr(e.stderr, "decode") else e.stderr)
+        raise
 
 
 def main(argv: Sequence[str] | None = None) -> None:
