@@ -11,8 +11,8 @@ help:
 setup:
 	pip install --upgrade pip && pip install -r requirements.txt
 
-run: 
-	conda activate yolo-env python && -m fbpipe.pipeline --config config.yaml all
+run:
+        python scripts/run_workflows.py --config config.yaml
 
 all: run
 
