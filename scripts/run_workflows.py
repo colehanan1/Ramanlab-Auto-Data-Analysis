@@ -11,6 +11,9 @@ from typing import Any, Mapping, Sequence
 
 import yaml
 
+# Add project root to sys.path for imports to work
+sys.path.insert(0, str(Path(__file__).parent.parent.resolve()))
+
 from scripts.envelope_visuals import (
     EnvelopePlotConfig,
     MatrixPlotConfig,

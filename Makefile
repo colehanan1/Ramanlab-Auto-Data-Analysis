@@ -1,4 +1,3 @@
-
 .PHONY: help setup run all yolo infer distances plots angles videos clean
 
 help:
