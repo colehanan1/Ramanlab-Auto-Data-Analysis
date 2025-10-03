@@ -1,10 +1,11 @@
-
 from __future__ import annotations
 import time, logging, cv2, numpy as np, pandas as pd
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 from ultralytics import YOLO
 import torch
+import os
+import gc  # Add this import
 
 from ..config import Settings
 from ..utils.timestamps import pick_timestamp_column, pick_frame_column, to_seconds_series
@@ -146,6 +147,7 @@ def main(cfg: Settings):
         if "expandable_segments" in str(exc) and allocator_was_set:
             log.warning("CUDA allocator does not support expandable_segments; retrying without it.")
             os.environ.pop("PYTORCH_CUDA_ALLOC_CONF", None)
+            gc.collect()  # Force garbage collection before retry
             model.to(device)
         else:
             raise

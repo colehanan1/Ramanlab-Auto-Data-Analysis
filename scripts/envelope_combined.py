@@ -40,6 +40,8 @@ from scripts.envelope_visuals import (
     MatrixPlotConfig,
     generate_envelope_plots,
     generate_reaction_matrices,
+    resolve_dataset_output_dir,
+    should_write,
 )
 
 
@@ -88,6 +90,10 @@ ODOR_CANON = {
     "optogenetics benzaldehyde 1": "opto_benz_1",
     "optogenetics ethyl butyrate": "opto_EB",
     "10s_odor_benz": "10s_Odor_Benz",
+    "optogenetics hexanol": "opto_hex",
+    "optogenetics hex": "opto_hex",
+    "hexanol": "opto_hex",
+    "opto_hex": "opto_hex",
 }
 
 DISPLAY_LABEL = {
@@ -99,6 +105,7 @@ DISPLAY_LABEL = {
     "opto_benz": "Benzaldehyde",
     "opto_benz_1": "Benzaldehyde",
     "opto_EB": "Ethyl Butyrate",
+    "opto_hex": "Hexanol",
 }
 
 HEXANOL = "Hexanol"
@@ -676,6 +683,7 @@ def overlay_sources(
     threshold_mult: float = 4.0,
     odor_on_s: float = 30.0,
     odor_off_s: float = 60.0,
+    overwrite: bool = False,
 ) -> None:
     frames = []
     env_cols_by_source: dict[str, list[str]] = {}
@@ -696,7 +704,6 @@ def overlay_sources(
 
     combined = pd.concat(frames, ignore_index=True)
     out_dir = Path(output_dir).expanduser().resolve()
-    out_dir.mkdir(parents=True, exist_ok=True)
 
     x_max = odor_off_s + latency_sec + after_show_sec
 
@@ -773,6 +780,12 @@ def overlay_sources(
         if not trials:
             continue
 
+        datasets_present = df_fly["dataset_canon"].dropna().unique().tolist()
+        target_dir = resolve_dataset_output_dir(out_dir, datasets_present or ("UNKNOWN",))
+        out_png = target_dir / f"{fly}_overlay_envelope_by_trial_{int(after_show_sec)}s_shifted.png"
+        if out_png.exists() and not overwrite:
+            continue
+
         trial_labels = sorted(trials.keys(), key=_trial_num)
         fig, axes = plt.subplots(
             len(trial_labels),
@@ -844,13 +857,8 @@ def overlay_sources(
         )
         fig.tight_layout(rect=[0, 0, 1, 0.97])
 
-        odors_present = sorted({entries[0][4] for entries in trials.values()})
-        for odor_name in odors_present:
-            odor_dir = out_dir / _safe_dirname(odor_name)
-            odor_dir.mkdir(parents=True, exist_ok=True)
-            out_png = odor_dir / f"{fly}_overlay_envelope_by_trial_{int(after_show_sec)}s_shifted.png"
+        if should_write(out_png, overwrite):
             fig.savefig(out_png, dpi=300, bbox_inches="tight")
-            print(f"[OK] Saved {out_png}")
 
         plt.close(fig)
 
@@ -914,6 +922,7 @@ def build_parser() -> argparse.ArgumentParser:
     overlay_parser.add_argument("--latency-sec", type=float, default=0.0)
     overlay_parser.add_argument("--after-show-sec", type=float, default=30.0)
     overlay_parser.add_argument("--threshold-std-mult", type=float, default=4.0)
+    overlay_parser.add_argument("--overwrite", action="store_true", help="Rebuild plots even if the target files exist.")
 
     return parser
 
@@ -963,6 +972,7 @@ def main(argv: Sequence[str] | None = None) -> None:
             bottom_shift_in=args.bottom_shift_in,
             trial_orders=trial_order,
             include_hexanol=not args.exclude_hexanol,
+            overwrite=args.overwrite,
         )
         generate_reaction_matrices(cfg)
         return
@@ -978,6 +988,7 @@ def main(argv: Sequence[str] | None = None) -> None:
             odor_off_s=args.odor_off_s,
             after_show_sec=args.after_show_sec,
             threshold_std_mult=args.threshold_std_mult,
+            overwrite=args.overwrite,
         )
         generate_envelope_plots(cfg)
         return
@@ -998,6 +1009,7 @@ def main(argv: Sequence[str] | None = None) -> None:
             after_show_sec=args.after_show_sec,
             output_dir=args.out_dir,
             threshold_mult=args.threshold_std_mult,
+            overwrite=args.overwrite,
         )
         return
 

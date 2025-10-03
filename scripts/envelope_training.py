@@ -34,6 +34,10 @@ ODOR_CANON: Mapping[str, str] = {
     "optogenetics benzaldehyde 1": "opto_benz_1",
     "optogenetics ethyl butyrate": "opto_EB",
     "10s_odor_benz": "10s_Odor_Benz",
+    "optogenetics hexanol": "opto_hex",
+    "optogenetics hex": "opto_hex",
+    "hexanol": "opto_hex",
+    "opto_hex": "opto_hex",
 }
 
 DISPLAY_LABEL = {
@@ -45,6 +49,7 @@ DISPLAY_LABEL = {
     "opto_benz": "Benzaldehyde",
     "opto_benz_1": "Benzaldehyde",
     "opto_EB": "Ethyl Butyrate",
+    "opto_hex": "Hexanol",
 }
 
 HEXANOL_LABEL = "Hexanol"
@@ -63,6 +68,36 @@ def _canon_dataset(value: str) -> str:
 
 def _safe_dirname(value: str) -> str:
     return re.sub(r"[^A-Za-z0-9._-]+", "_", str(value)).strip("_") or "export"
+
+
+def _dataset_label(dataset: str) -> str:
+    canon = _canon_dataset(dataset)
+    return DISPLAY_LABEL.get(canon, canon)
+
+
+def _target_dir(base: Path, datasets: Sequence[str] | str) -> Path:
+    if isinstance(datasets, str):
+        values = {_canon_dataset(datasets)} if datasets else set()
+    else:
+        values = {_canon_dataset(val) for val in datasets if isinstance(val, str) and val}
+
+    values = {val for val in values if val}
+    if not values:
+        label = "UNKNOWN"
+    elif len(values) == 1:
+        key = next(iter(values))
+        label = DISPLAY_LABEL.get(key, key)
+    else:
+        pretty = [DISPLAY_LABEL.get(key, key) for key in sorted(values)]
+        label = f"Mixed ({'+'.join(pretty)})"
+    return base / _safe_dirname(label)
+
+
+def _should_write(path: Path, overwrite: bool) -> bool:
+    if path.exists() and not overwrite:
+        return False
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return True
 
 
 def _trial_num(label: str) -> int:
@@ -156,14 +191,18 @@ def _plot_latency_per_fly(
     *,
     latency_ceiling: float,
     trials_of_interest: Sequence[int],
+    overwrite: bool,
 ) -> None:
     for fly in sorted(lat_df["fly"].unique()):
         subset = lat_df[lat_df["fly"] == fly]
         if subset.empty:
             continue
 
-        odor_dir = out_dir / _safe_dirname(subset["dataset_canon"].iloc[0])
-        odor_dir.mkdir(parents=True, exist_ok=True)
+        datasets = subset["dataset_canon"].dropna().unique().tolist()
+        target_dir = _target_dir(out_dir, datasets or ("UNKNOWN",))
+        out_png = target_dir / f"{fly}_training_{'_'.join(map(str, trials_of_interest))}_latency.png"
+        if out_png.exists() and not overwrite:
+            continue
 
         latencies = []
         labels = []
@@ -173,7 +212,6 @@ def _plot_latency_per_fly(
             latencies.append(row["latency"].iloc[0] if not row.empty else None)
 
         any_response = any(lat is not None and lat <= latency_ceiling for lat in latencies)
-        out_png = odor_dir / f"{fly}_training_{'_'.join(map(str, trials_of_interest))}_latency.png"
 
         if not any_response:
             fig, ax = plt.subplots(figsize=(6.5, 3.2))
@@ -187,7 +225,8 @@ def _plot_latency_per_fly(
             trans = mtransforms.blended_transform_factory(ax.transAxes, ax.transData)
             ax.text(0.995, latency_ceiling + 0.12, f"NR if > {latency_ceiling:.1f} s", transform=trans, ha="right", va="bottom", fontsize=10, color="#444444", clip_on=False)
             fig.tight_layout()
-            fig.savefig(out_png, dpi=300)
+            if _should_write(out_png, overwrite):
+                fig.savefig(out_png, dpi=300)
             plt.close(fig)
             continue
 
@@ -222,7 +261,8 @@ def _plot_latency_per_fly(
         ax.set_title(f"{fly} — Time to PER", pad=10, fontsize=14, weight="bold")
 
         fig.tight_layout()
-        fig.savefig(out_png, dpi=300)
+        if _should_write(out_png, overwrite):
+            fig.savefig(out_png, dpi=300)
         plt.close(fig)
 
 
@@ -232,24 +272,30 @@ def _plot_latency_by_odor(
     *,
     latency_ceiling: float,
     trials_of_interest: Sequence[int],
+    overwrite: bool,
 ) -> None:
     for odor in sorted(lat_df["dataset_canon"].unique()):
-        odor_dir = out_dir / _safe_dirname(odor)
-        odor_dir.mkdir(parents=True, exist_ok=True)
+        target_dir = _target_dir(out_dir, odor)
+        filename = f"{odor}_training_{'_'.join(map(str, trials_of_interest))}_mean_latency.png"
+        out_png = target_dir / filename
+        if out_png.exists() and not overwrite:
+            continue
 
         subset = lat_df[lat_df["dataset_canon"] == odor]
         labels = [f"Training {n}" for n in trials_of_interest]
+        odor_label = _dataset_label(odor)
 
         if subset.empty:
             fig, ax = plt.subplots(figsize=(6.8, 3.2))
-            ax.set_title(f"{odor} — Mean Time to PER", pad=10, fontsize=14, weight="bold")
+            ax.set_title(f"{odor_label} — Mean Time to PER", pad=10, fontsize=14, weight="bold")
             ax.set_xticks(np.arange(len(labels)))
             ax.set_xticklabels(labels)
             ax.set_ylim(0, latency_ceiling + 2.0)
             ax.text(0.5, 0.55, "NR", transform=ax.transAxes, ha="center", va="center", fontsize=18, color="#666666", weight="bold")
             ax.set_ylabel("Time After Odor Sent (s)")
             fig.tight_layout()
-            fig.savefig(odor_dir / f"{odor}_training_{'_'.join(map(str, trials_of_interest))}_mean_latency.png", dpi=300)
+            if _should_write(out_png, overwrite):
+                fig.savefig(out_png, dpi=300)
             plt.close(fig)
             continue
 
@@ -299,14 +345,20 @@ def _plot_latency_by_odor(
         ax.axhline(latency_ceiling, linestyle="--", linewidth=1.0, color="#6f6f6f")
         trans = mtransforms.blended_transform_factory(ax.transAxes, ax.transData)
         ax.text(0.995, latency_ceiling + 0.08, f"NR if > {latency_ceiling:.1f} s", transform=trans, ha="right", va="bottom", fontsize=9, color="#6f6f6f")
-        ax.set_title(f"{odor} — Mean Time to PER", pad=10, fontsize=14, weight="bold")
+        ax.set_title(f"{odor_label} — Mean Time to PER", pad=10, fontsize=14, weight="bold")
 
         fig.tight_layout()
-        fig.savefig(odor_dir / f"{odor}_training_{'_'.join(map(str, trials_of_interest))}_mean_latency.png", dpi=300)
+        if _should_write(out_png, overwrite):
+            fig.savefig(out_png, dpi=300)
         plt.close(fig)
 
 
-def _plot_latency_grand_means(lat_df: pd.DataFrame, out_dir: Path, latency_ceiling: float) -> None:
+def _plot_latency_grand_means(
+    lat_df: pd.DataFrame,
+    out_dir: Path,
+    latency_ceiling: float,
+    overwrite: bool,
+) -> None:
     odors = sorted(lat_df["dataset_canon"].dropna().unique())
     rows = []
     means = []
@@ -332,7 +384,13 @@ def _plot_latency_grand_means(lat_df: pd.DataFrame, out_dir: Path, latency_ceili
             sems.append(sem)
         rows.append({"odor": odor, "n_resp": n_resp, "mean_s": means[-1], "sem_s": sems[-1]})
 
-    pd.DataFrame(rows).to_csv(out_dir / "grand_mean_by_odor_latency.csv", index=False)
+    csv_path = out_dir / "grand_mean_by_odor_latency.csv"
+    if _should_write(csv_path, overwrite):
+        pd.DataFrame(rows).to_csv(csv_path, index=False)
+
+    out_png = out_dir / "grand_mean_by_odor_latency.png"
+    if out_png.exists() and not overwrite:
+        return
 
     if sum(counts) == 0:
         fig, ax = plt.subplots(figsize=(7.2, 3.2))
@@ -344,7 +402,8 @@ def _plot_latency_grand_means(lat_df: pd.DataFrame, out_dir: Path, latency_ceili
         ax.set_ylabel("Time After Odor Sent (s)")
         ax.axhline(latency_ceiling, linestyle="--", linewidth=1.0, color="#6f6f6f")
         fig.tight_layout()
-        fig.savefig(out_dir / "grand_mean_by_odor_latency.png", dpi=300)
+        if _should_write(out_png, overwrite):
+            fig.savefig(out_png, dpi=300)
         plt.close(fig)
         return
 
@@ -376,7 +435,8 @@ def _plot_latency_grand_means(lat_df: pd.DataFrame, out_dir: Path, latency_ceili
     ax.set_title("Grand Mean Time to Reaction by Trained Odor", pad=10, fontsize=14, weight="bold")
 
     fig.tight_layout()
-    fig.savefig(out_dir / "grand_mean_by_odor_latency.png", dpi=300)
+    if _should_write(out_png, overwrite):
+        fig.savefig(out_png, dpi=300)
     plt.close(fig)
 
 
@@ -391,6 +451,7 @@ def latency_reports(
     latency_ceiling: float,
     trials_of_interest: Sequence[int],
     fps_default: float,
+    overwrite: bool,
 ) -> None:
     df, env_cols = _load_envelope_matrix(matrix_path, codes_json)
     df = df[df["trial_type"].str.lower() == "training"].copy()
@@ -424,11 +485,22 @@ def latency_reports(
         raise RuntimeError("No training trials matched the requested trial numbers.")
 
     lat_df = pd.DataFrame(records)
-    out_dir.mkdir(parents=True, exist_ok=True)
 
-    _plot_latency_per_fly(lat_df, out_dir, latency_ceiling=latency_ceiling, trials_of_interest=trials_of_interest)
-    _plot_latency_by_odor(lat_df, out_dir, latency_ceiling=latency_ceiling, trials_of_interest=trials_of_interest)
-    _plot_latency_grand_means(lat_df, out_dir, latency_ceiling)
+    _plot_latency_per_fly(
+        lat_df,
+        out_dir,
+        latency_ceiling=latency_ceiling,
+        trials_of_interest=trials_of_interest,
+        overwrite=overwrite,
+    )
+    _plot_latency_by_odor(
+        lat_df,
+        out_dir,
+        latency_ceiling=latency_ceiling,
+        trials_of_interest=trials_of_interest,
+        overwrite=overwrite,
+    )
+    _plot_latency_grand_means(lat_df, out_dir, latency_ceiling, overwrite)
 
 
 # ---------------------------------------------------------------------------
@@ -450,6 +522,7 @@ def build_parser() -> argparse.ArgumentParser:
     env_parser.add_argument("--odor-off-s", type=float, default=60.0, help="Commanded odor OFF timestamp (seconds).")
     env_parser.add_argument("--after-show-sec", type=float, default=30.0, help="Duration to display after odor OFF (seconds).")
     env_parser.add_argument("--threshold-std-mult", type=float, default=4.0, help="Threshold multiplier for baseline std dev.")
+    env_parser.add_argument("--overwrite", action="store_true", help="Rebuild plots even if the target files exist.")
 
     lat_parser = sub.add_parser("latency", help="Compute latency-to-threshold metrics from the matrix outputs.")
     lat_parser.add_argument("--matrix-npy", type=Path, required=True, help="Float16 matrix produced by the convert step.")
@@ -461,6 +534,7 @@ def build_parser() -> argparse.ArgumentParser:
     lat_parser.add_argument("--latency-ceiling", type=float, default=9.5, help="Cap for marking NR trials in seconds.")
     lat_parser.add_argument("--trials", nargs="+", type=int, default=[4, 5, 6], help="Training trial numbers to analyse.")
     lat_parser.add_argument("--fps-default", type=float, default=40.0, help="Fallback FPS when metadata missing.")
+    lat_parser.add_argument("--overwrite", action="store_true", help="Rebuild plots even if the target files exist.")
 
     return parser
 
@@ -481,6 +555,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             after_show_sec=args.after_show_sec,
             threshold_std_mult=args.threshold_std_mult,
             trial_type="training",
+            overwrite=args.overwrite,
         )
         generate_envelope_plots(cfg)
         return
@@ -496,6 +571,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             latency_ceiling=args.latency_ceiling,
             trials_of_interest=tuple(args.trials),
             fps_default=args.fps_default,
+            overwrite=args.overwrite,
         )
         return
 
