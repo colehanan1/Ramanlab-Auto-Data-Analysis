@@ -59,6 +59,11 @@ ODOR_CANON: Mapping[str, str] = {
     "optogenetics benzaldehyde": "opto_benz",
     "optogenetics benzaldehyde 1": "opto_benz_1",
     "optogenetics ethyl butyrate": "opto_EB",
+    "optogenetics hexanol": "opto_hex",
+    "optogenetics hex": "opto_hex",
+    "hexanol": "opto_hex",
+    "opto_hex": "opto_hex",
+    "10s_odor_benz": "10s_Odor_Benz",
 }
 
 DISPLAY_LABEL = {
@@ -70,6 +75,7 @@ DISPLAY_LABEL = {
     "opto_benz": "Benzaldehyde",
     "opto_EB": "Ethyl Butyrate",
     "opto_benz_1": "Benzaldehyde",
+    "opto_hex": "Hexanol",
 }
 
 ODOR_ORDER = [
@@ -81,6 +87,7 @@ ODOR_ORDER = [
     "opto_benz",
     "opto_EB",
     "opto_benz_1",
+    "opto_hex",
 ]
 
 TRAINED_FIRST_ORDER = (2, 4, 5, 1, 3, 6, 7, 8, 9)
@@ -100,6 +107,48 @@ def _canon_dataset(value: str) -> str:
 
 def _safe_dirname(value: str) -> str:
     return re.sub(r"[^A-Za-z0-9._-]+", "_", str(value)).strip("_") or "export"
+
+
+def canonical_dataset(value: str) -> str:
+    """Return the canonical ODOR identifier for *value*."""
+
+    return _canon_dataset(value)
+
+
+def resolve_dataset_label(values: Sequence[str] | str) -> str:
+    """Return a human-readable label for one or more dataset identifiers."""
+
+    if isinstance(values, str):
+        candidates = {_canon_dataset(values)} if values else set()
+    else:
+        candidates = {_canon_dataset(val) for val in values if isinstance(val, str) and val}
+
+    candidates = {val for val in candidates if val}
+    if not candidates:
+        return "UNKNOWN"
+
+    if len(candidates) == 1:
+        key = next(iter(candidates))
+        return DISPLAY_LABEL.get(key, key)
+
+    pretty = [DISPLAY_LABEL.get(key, key) for key in sorted(candidates)]
+    return f"Mixed ({'+'.join(pretty)})"
+
+
+def resolve_dataset_output_dir(base: Path, values: Sequence[str] | str) -> Path:
+    """Return the output directory for the provided dataset identifiers."""
+
+    label = resolve_dataset_label(values)
+    return base / _safe_dirname(label)
+
+
+def should_write(path: Path, overwrite: bool) -> bool:
+    """Return ``True`` if *path* should be written, honouring overwrite policy."""
+
+    if path.exists() and not overwrite:
+        return False
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return True
 
 
 def _trial_num(label: str) -> int:
@@ -227,6 +276,7 @@ class MatrixPlotConfig:
     bottom_shift_in: float = 0.5
     trial_orders: Sequence[str] = field(default_factory=lambda: ("observed", "trained-first"))
     include_hexanol: bool = True
+    overwrite: bool = False
 
 
 def _score_trial(env: np.ndarray, fps: float, cfg: MatrixPlotConfig) -> tuple[int, int]:
@@ -394,8 +444,6 @@ def generate_reaction_matrices(cfg: MatrixPlotConfig) -> None:
     ordered_present = [odor for odor in ODOR_ORDER if odor in present]
     extras = sorted(odor for odor in present if odor not in ODOR_ORDER)
 
-    cfg.out_dir.mkdir(parents=True, exist_ok=True)
-
     for order in cfg.trial_orders:
         order_suffix = _order_suffix(order)
         for odor in ordered_present + extras:
@@ -499,8 +547,7 @@ def generate_reaction_matrices(cfg: MatrixPlotConfig) -> None:
                 new_y0 = max(0.05, pos.y0 - shift_frac)
                 axis.set_position([pos.x0, new_y0, pos.width, pos.height])
 
-            odor_dir = cfg.out_dir / _safe_dirname(odor)
-            odor_dir.mkdir(parents=True, exist_ok=True)
+            odor_dir = resolve_dataset_output_dir(cfg.out_dir, odor)
 
             png_name = (
                 f"reaction_matrix_{odor.replace(' ', '_')}_{int(cfg.after_window_sec)}"
@@ -508,14 +555,18 @@ def generate_reaction_matrices(cfg: MatrixPlotConfig) -> None:
             )
             if order_suffix != "observed":
                 png_name += f"_{order_suffix}"
-            fig.savefig(odor_dir / f"{png_name}.png", dpi=300, bbox_inches="tight")
+            png_path = odor_dir / f"{png_name}.png"
+            if should_write(png_path, cfg.overwrite):
+                fig.savefig(png_path, dpi=300, bbox_inches="tight")
 
             row_key_name = f"row_key_{odor.replace(' ', '_')}_{int(cfg.after_window_sec)}"
             if order_suffix != "observed":
                 row_key_name += f"_{order_suffix}"
-            with (odor_dir / f"{row_key_name}.txt").open("w", encoding="utf-8") as fh:
-                for idx, fly in enumerate(flies):
-                    fh.write(f"Row {idx}: {fly}\n")
+            row_key_path = odor_dir / f"{row_key_name}.txt"
+            if should_write(row_key_path, cfg.overwrite):
+                with row_key_path.open("w", encoding="utf-8") as fh:
+                    for idx, fly in enumerate(flies):
+                        fh.write(f"Row {idx}: {fly}\n")
 
             if order == "trained-first":
                 export = subset.copy()
@@ -524,11 +575,9 @@ def generate_reaction_matrices(cfg: MatrixPlotConfig) -> None:
                 export["trial_ord"] = export["trial"].map(order_map).fillna(10**9).astype(int)
                 export = export.sort_values(["fly", "trial_ord", "trial_num", "trial"])
                 export_cols = ["dataset", "fly", "trial_num", "odor_sent", "during_hit", "after_hit"]
-                export.to_csv(
-                    odor_dir / f"binary_reactions_{odor.replace(' ', '_')}_{order_suffix}.csv",
-                    columns=export_cols,
-                    index=False,
-                )
+                export_path = odor_dir / f"binary_reactions_{odor.replace(' ', '_')}_{order_suffix}.csv"
+                if should_write(export_path, cfg.overwrite):
+                    export.to_csv(export_path, columns=export_cols, index=False)
 
             plt.close(fig)
 
@@ -549,6 +598,7 @@ class EnvelopePlotConfig:
     after_show_sec: float = 30.0
     threshold_std_mult: float = 4.0
     trial_type: str = "testing"
+    overwrite: bool = False
 
 
 def generate_envelope_plots(cfg: EnvelopePlotConfig) -> None:
@@ -576,9 +626,6 @@ def generate_envelope_plots(cfg: EnvelopePlotConfig) -> None:
     dataset_lookup = {idx: ds for idx, ds in zip(df.index, dataset_values, strict=False)}
     trial_lookup = {idx: tr for idx, tr in zip(df.index, trial_values, strict=False)}
 
-    trial_root = cfg.out_dir / trial_type
-    trial_root.mkdir(parents=True, exist_ok=True)
-
     x_max_limit = cfg.odor_off_s + cfg.latency_sec + cfg.after_show_sec
 
     for fly, fly_df in df.groupby("fly"):
@@ -586,6 +633,15 @@ def generate_envelope_plots(cfg: EnvelopePlotConfig) -> None:
         indices = fly_df.index.to_numpy()
         trial_curves: list[tuple[str, np.ndarray, np.ndarray, float, bool]] = []
         y_max = 0.0
+
+        dataset_candidates = [dataset_lookup[idx] for idx in indices if dataset_lookup[idx]]
+        folder_dir = resolve_dataset_output_dir(cfg.out_dir, dataset_candidates or ("UNKNOWN",))
+        out_path = folder_dir / (
+            f"{fly}_{trial_type}_envelope_trials_by_odor_"
+            f"{int(cfg.after_show_sec)}_shifted.png"
+        )
+        if out_path.exists() and not cfg.overwrite:
+            continue
 
         for idx in indices:
             env = _extract_env_row(env_lookup[idx])
@@ -686,14 +742,7 @@ def generate_envelope_plots(cfg: EnvelopePlotConfig) -> None:
         )
         fig.tight_layout(rect=[0, 0, 1, 0.97])
 
-        odors_present = sorted({odor for odor, *_ in trial_curves})
-        for odor_name in odors_present:
-            odor_dir = trial_root / _safe_dirname(odor_name)
-            odor_dir.mkdir(parents=True, exist_ok=True)
-            out_path = odor_dir / (
-                f"{fly}_{trial_type}_envelope_trials_by_odor_"
-                f"{int(cfg.after_show_sec)}_shifted.png"
-            )
+        if should_write(out_path, cfg.overwrite):
             fig.savefig(out_path, dpi=300, bbox_inches="tight")
 
         plt.close(fig)
@@ -724,6 +773,7 @@ def _parse_matrices_args(subparser: argparse.ArgumentParser) -> None:
         help="Trial ordering strategy. Repeat to request multiple variants.",
     )
     subparser.add_argument("--exclude-hexanol", action="store_true", help="Exclude Hexanol from 'other' reaction counts.")
+    subparser.add_argument("--overwrite", action="store_true", help="Rebuild plots even if the target files exist.")
 
 
 def _parse_envelopes_args(subparser: argparse.ArgumentParser) -> None:
@@ -742,6 +792,7 @@ def _parse_envelopes_args(subparser: argparse.ArgumentParser) -> None:
         default="testing",
         help="Trial type to visualise.",
     )
+    subparser.add_argument("--overwrite", action="store_true", help="Rebuild plots even if the target files exist.")
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -779,6 +830,7 @@ def main(argv: Sequence[str] | None = None) -> None:
             bottom_shift_in=args.bottom_shift_in,
             trial_orders=trial_orders,
             include_hexanol=not args.exclude_hexanol,
+            overwrite=args.overwrite,
         )
         generate_reaction_matrices(cfg)
         return
@@ -795,6 +847,7 @@ def main(argv: Sequence[str] | None = None) -> None:
             after_show_sec=args.after_show_sec,
             threshold_std_mult=args.threshold_std_mult,
             trial_type=args.trial_type,
+            overwrite=args.overwrite,
         )
         generate_envelope_plots(cfg)
         return
