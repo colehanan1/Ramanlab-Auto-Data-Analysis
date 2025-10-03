@@ -1,3 +1,10 @@
+Metadata-Version: 2.4
+Name: fbpipe
+Version: 0.1.0
+Summary: Fly behavior pipeline: YOLO → analysis → videos
+Requires-Python: >=3.9
+Description-Content-Type: text/markdown
+
 
 # Fly Behavior Pipeline (YOLO → Distances/Angles → RMS/Envelope → Videos)
 
@@ -5,9 +12,10 @@ End-to-end, reproducible pipeline that:
 1) Runs YOLO (OBB or axis-aligned) on videos with a Kalman tracker + optional optical flow.
 2) Writes per-frame CSVs (coordinates, distances, angles).
 3) Computes global min/max for distances; normalizes to percent.
-4) Flags dropped frames, stages RMS-ready CSVs, and annotates OFM state.
-5) Organizes trial videos and renders line-panel videos with RMS overlays.
-6) Produces consistent, versioned outputs under each *fly* folder and hands matrix-ready data to the analysis scripts.
+4) Generates plots (time-series, histograms, envelopes).
+5) Computes angles and centered-angle-% heatmaps.
+6) Organizes trial videos and renders line-panel videos with RMS overlay.
+7) Produces consistent, versioned outputs under each *fly* folder.
 
 > **Minimum**: Linux + CUDA GPU. Set `model_path` and `main_directory` in `config.yaml` or `.env`.
 
@@ -19,17 +27,11 @@ End-to-end, reproducible pipeline that:
 # 0) Prepare venv + deps (or use your own Conda env; see below)
 make setup
 
-# 1) Install/refresh dependencies inside the active environment
-python -m pip install --upgrade pip
-python -m pip install -r requirements.txt
-# (optional but recommended if you are developing):
-python -m pip install -e .
-
-# 2) Configure paths
+# 1) Configure paths
 cp .env.example .env
 # edit MODEL_PATH and MAIN_DIRECTORY, or edit config.yaml directly
 
-# 3) Run everything (env must stay active)
+# 2) Run everything
 make run   # or: python -m fbpipe.pipeline --config config.yaml all
 ```
 
@@ -87,9 +89,15 @@ fbpipe/
     yolo_infer.py
     distance_stats.py
     distance_normalize.py
+    plot_distance_time.py
     detect_dropped_frames.py
     rms_copy_filter.py
     update_ofm_state.py
+    histograms.py
+    envelope_over_time.py
+    collect_envelope_plots.py
+    angle_compute_and_plots.py
+    angle_heatmaps.py
     move_videos.py
     compose_videos_rms.py
 ```
@@ -103,11 +111,12 @@ python -m fbpipe.steps.distance_stats --config config.yaml
 
 ## GPU requirements
 
-The pipeline expects a CUDA-capable GPU. If CUDA initialisation fails or the driver is unstable, the YOLO step will automatically fall back to CPU inference (with a warning) so long as `allow_cpu` is enabled. CPU mode is significantly slower and should be reserved for debugging or smoke tests.
+The pipeline expects a CUDA-capable GPU. Set `allow_cpu: true` (or `ALLOW_CPU=true` in `.env`) **only** for smoke tests—performance will be poor.
 
 ## Notes
 
 - The pipeline is resilient to missing files/columns; steps skip gracefully when inputs are absent.
+- Angle centering uses the first frame where `distance_percentage == 0`, or otherwise the minimal absolute value across a fly.
 - RMS/Envelope calculations ignore values outside `[0, 100]` and NaNs.
 - Video overlay deletes source trial videos after composing by default; toggle in `config.yaml`.
 - See `docs/pipeline_overview.md` for a deeper look at how the steps are orchestrated.

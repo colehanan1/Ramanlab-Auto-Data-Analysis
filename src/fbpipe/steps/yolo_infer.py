@@ -128,6 +128,10 @@ def _is_cuda_failure(exc: Exception) -> bool:
 
 
 def main(cfg: Settings):
+    allocator_was_set = False
+    if torch.cuda.is_available() and "PYTORCH_CUDA_ALLOC_CONF" not in os.environ:
+        os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments=True"
+        allocator_was_set = True
     torch.backends.cudnn.benchmark = True
     torch.backends.cuda.matmul.allow_tf32 = cfg.cuda_allow_tf32
     torch.backends.cudnn.allow_tf32 = cfg.cuda_allow_tf32
@@ -136,43 +140,14 @@ def main(cfg: Settings):
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     model = YOLO(cfg.model_path)
-    state = {"device": device}
-
-    def _move_model(target: str):
-        model.to(target)
-        state["device"] = target
-
     try:
-        _move_model(device)
-        if state["device"] == "cuda":
-            try:
-                torch.cuda.current_device()
-                torch.zeros(1, device="cuda")
-            except Exception as exc:
-                raise RuntimeError("CUDA warm-up tensor failed") from exc
-    except Exception as exc:
-        if device == "cuda":
-            log.warning("CUDA initialisation failed: %s", exc, exc_info=True)
-            if not cfg.allow_cpu:
-                raise RuntimeError("CUDA initialisation failed and allow_cpu is false.") from exc
-            log.warning("Falling back to CPU inference because CUDA cannot be initialised.")
-            _move_model("cpu")
+        model.to(device)
+    except RuntimeError as exc:
+        if "expandable_segments" in str(exc) and allocator_was_set:
+            log.warning("CUDA allocator does not support expandable_segments; retrying without it.")
+            os.environ.pop("PYTORCH_CUDA_ALLOC_CONF", None)
+            model.to(device)
         else:
-            raise
-
-    def predict_fn(frame, conf):
-        try:
-            return model.predict(source=frame, conf=conf, verbose=False, device=state["device"])
-        except RuntimeError as exc:
-            if state["device"] == "cuda" and _is_cuda_failure(exc):
-                log.warning("CUDA inference failed mid-run: %s", exc, exc_info=True)
-                if not cfg.allow_cpu:
-                    raise RuntimeError("CUDA inference failed and allow_cpu is false.") from exc
-                log.warning("Switching YOLO inference to CPU to keep the pipeline running.")
-                _move_model("cpu")
-                if torch.cuda.is_available() and torch.cuda.is_initialized():
-                    torch.cuda.empty_cache()
-                return model.predict(source=frame, conf=conf, verbose=False, device=state["device"])
             raise
 
     AX, AY = cfg.anchor_x, cfg.anchor_y
