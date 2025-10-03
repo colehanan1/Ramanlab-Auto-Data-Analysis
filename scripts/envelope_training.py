@@ -160,7 +160,13 @@ def _extract_env(row: pd.Series, env_cols: Sequence[str]) -> np.ndarray:
     return env[mask]
 
 
-def _latency_to_cross(env: np.ndarray, fps: float, before_sec: float, during_sec: float, thresh_mult: float) -> Optional[float]:
+def _latency_to_cross(
+    env: np.ndarray,
+    fps: float,
+    before_sec: float,
+    during_sec: float,
+    threshold_mult: float,
+) -> Optional[float]:
     if env.size == 0 or not np.isfinite(fps) or fps <= 0:
         return None
 
@@ -173,7 +179,7 @@ def _latency_to_cross(env: np.ndarray, fps: float, before_sec: float, during_sec
 
     mu = float(np.nanmean(before))
     sd = float(np.nanstd(before))
-    theta = mu + thresh_mult * sd
+    theta = mu + threshold_mult * sd
     idx = np.where(during > theta)[0]
     if idx.size == 0:
         return None
@@ -447,7 +453,7 @@ def latency_reports(
     *,
     before_sec: float,
     during_sec: float,
-    thresh_mult: float,
+    threshold_mult: float,
     latency_ceiling: float,
     trials_of_interest: Sequence[int],
     fps_default: float,
@@ -468,7 +474,7 @@ def latency_reports(
             continue
         env = _extract_env(row, env_cols)
         fps = float(row.get("fps", fps_default))
-        latency = _latency_to_cross(env, fps, before_sec, during_sec, thresh_mult)
+        latency = _latency_to_cross(env, fps, before_sec, during_sec, threshold_mult)
         lat_for_mean = latency if (latency is not None and latency <= latency_ceiling) else math.nan
         records.append(
             {
@@ -567,7 +573,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             args.out_dir.expanduser().resolve(),
             before_sec=args.before_sec,
             during_sec=args.during_sec,
-            thresh_mult=args.threshold_mult,
+            threshold_mult=args.threshold_mult,
             latency_ceiling=args.latency_ceiling,
             trials_of_interest=tuple(args.trials),
             fps_default=args.fps_default,
