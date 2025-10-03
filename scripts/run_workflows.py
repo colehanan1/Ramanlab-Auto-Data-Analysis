@@ -113,6 +113,10 @@ def _run_combined(cfg: Mapping[str, Any] | None) -> None:
     if combine_cfg:
         opts = dict(combine_cfg)
         opts["root"] = _ensure_path(opts.get("root"), "root")
+        if "odor_on" in opts and "odor_on_s" not in opts:
+            opts["odor_on_s"] = float(opts.pop("odor_on"))
+        if "odor_off" in opts and "odor_off_s" not in opts:
+            opts["odor_off_s"] = float(opts.pop("odor_off"))
         config = CombineConfig(**opts)  # type: ignore[arg-type]
         print(f"[analysis] combined.combine → {config.root}")
         combine_distance_angle(config)
