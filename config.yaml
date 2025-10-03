@@ -156,3 +156,11 @@ analysis:
       odor_off_s: 60.0
       odor_latency_s: 2.15
       overwrite: false
+    secure_cleanup:
+      destination: "/securedstorage/DATAsec/cole/Data-secured/"
+      sources:
+        - "/home/ramanlab/Documents/cole/Data/flys/10s_Odor_Benz/"
+        - "/home/ramanlab/Documents/cole/Data/flys/opto_benz/"
+        - "/home/ramanlab/Documents/cole/Data/flys/opto_EB/"
+        - "/home/ramanlab/Documents/cole/Data/flys/opto_benz_1/"
+        - "/home/ramanlab/Documents/cole/Data/flys/opto_hex/"

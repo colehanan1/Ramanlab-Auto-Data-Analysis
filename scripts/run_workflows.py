@@ -27,6 +27,7 @@ from scripts.envelope_combined import (
     combine_distance_angle,
     mirror_directory,
     overlay_sources,
+    secure_copy_and_cleanup,
     wide_to_matrix,
 )
 
@@ -212,6 +213,16 @@ def _run_combined(cfg: Mapping[str, Any] | None) -> None:
             odor_latency_s=odor_latency,
             overwrite=overwrite,
         )
+
+    secure_cfg = cfg.get("secure_cleanup")
+    if secure_cfg:
+        sources = secure_cfg.get("sources") or []
+        if not sources:
+            raise ValueError("combined.secure_cleanup.sources must list at least one directory.")
+        dest = _ensure_path(secure_cfg.get("destination"), "secure_cleanup.destination")
+        resolved_sources = [str(_ensure_path(src, "secure_cleanup.sources")) for src in sources]
+        print(f"[analysis] combined.secure_cleanup → {dest}")
+        secure_copy_and_cleanup(resolved_sources, str(dest))
 
 
 def _run_pipeline(config_path: Path) -> None:
