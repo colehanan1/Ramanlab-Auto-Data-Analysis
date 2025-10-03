@@ -129,27 +129,82 @@ def _is_cuda_failure(exc: Exception) -> bool:
 
 
 def main(cfg: Settings):
+    cuda_available = torch.cuda.is_available()
+    use_cuda = cuda_available and not cfg.allow_cpu
+
     allocator_was_set = False
-    if torch.cuda.is_available() and "PYTORCH_CUDA_ALLOC_CONF" not in os.environ:
+    if use_cuda and "PYTORCH_CUDA_ALLOC_CONF" not in os.environ:
         os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments=True"
         allocator_was_set = True
-    torch.backends.cudnn.benchmark = True
-    torch.backends.cuda.matmul.allow_tf32 = cfg.cuda_allow_tf32
-    torch.backends.cudnn.allow_tf32 = cfg.cuda_allow_tf32
-    if not torch.cuda.is_available() and not cfg.allow_cpu:
+
+    torch.backends.cudnn.benchmark = use_cuda
+    if cuda_available:
+        torch.backends.cuda.matmul.allow_tf32 = cfg.cuda_allow_tf32
+        torch.backends.cudnn.allow_tf32 = cfg.cuda_allow_tf32
+
+    if not cuda_available and not cfg.allow_cpu:
         raise RuntimeError("CUDA is not available. Set allow_cpu: true only for smoke tests.")
 
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    if cfg.allow_cpu and cuda_available and not use_cuda:
+        log.warning("allow_cpu is enabled; forcing YOLO inference to run on CPU.")
+
     model = YOLO(cfg.model_path)
-    try:
-        model.to(device)
-    except RuntimeError as exc:
-        if "expandable_segments" in str(exc) and allocator_was_set:
-            log.warning("CUDA allocator does not support expandable_segments; retrying without it.")
+    device_in_use: Optional[str] = None
+
+    def _set_device(target: str):
+        nonlocal device_in_use, allocator_was_set
+        if device_in_use == target:
+            return
+        if target == "cpu" and allocator_was_set:
             os.environ.pop("PYTORCH_CUDA_ALLOC_CONF", None)
-            gc.collect()  # Force garbage collection before retry
-            model.to(device)
+            allocator_was_set = False
+        if target == "cpu":
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        model.to(target)
+        device_in_use = target
+
+    target_device = "cuda" if use_cuda else "cpu"
+    try:
+        _set_device(target_device)
+    except RuntimeError as exc:
+        if target_device == "cuda":
+            if "expandable_segments" in str(exc) and allocator_was_set:
+                log.warning("CUDA allocator does not support expandable_segments; retrying without it.")
+                os.environ.pop("PYTORCH_CUDA_ALLOC_CONF", None)
+                allocator_was_set = False
+                gc.collect()
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                try:
+                    _set_device("cuda")
+                except RuntimeError as retry_exc:
+                    if cfg.allow_cpu and _is_cuda_failure(retry_exc):
+                        log.warning("CUDA initialisation failed after retry (%s); falling back to CPU.", retry_exc)
+                        _set_device("cpu")
+                    else:
+                        raise
+            elif cfg.allow_cpu and _is_cuda_failure(exc):
+                log.warning("CUDA initialisation failed (%s); falling back to CPU.", exc)
+                _set_device("cpu")
+            else:
+                raise
         else:
+            raise
+
+    if device_in_use is None:
+        raise RuntimeError("Failed to initialise YOLO device")
+
+    def predict_fn(image, conf_thres):
+        nonlocal device_in_use
+        try:
+            return model.predict(image, conf=conf_thres, verbose=False, device=device_in_use)
+        except RuntimeError as exc:
+            if device_in_use == "cuda" and cfg.allow_cpu and _is_cuda_failure(exc):
+                log.warning("CUDA inference failed (%s); switching to CPU for the rest of the run.", exc)
+                _set_device("cpu")
+                return model.predict(image, conf=conf_thres, verbose=False, device=device_in_use)
             raise
 
     AX, AY = cfg.anchor_x, cfg.anchor_y
