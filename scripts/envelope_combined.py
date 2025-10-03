@@ -73,6 +73,9 @@ TIMESTAMP_COLS = ["UTC_ISO", "Timestamp", "Number", "MonoNs"]
 FRAME_COLS = ["Frame", "FrameNumber", "Frame Number"]
 TESTING_REGEX = re.compile(r"testing_(\d+)", re.IGNORECASE)
 
+ANCHOR_X = 1080.0
+ANCHOR_Y = 540.0
+
 ODOR_CANON = {
     "acv": "ACV",
     "apple cider vinegar": "ACV",
@@ -258,6 +261,208 @@ def _locate_trials(
     return results
 
 
+def _normalise_key(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "", value.lower())
+
+
+def _resolve_column_alias(df: pd.DataFrame, *aliases: str) -> str | None:
+    lookup = {_normalise_key(col): col for col in df.columns}
+    for alias in aliases:
+        column = lookup.get(_normalise_key(alias))
+        if column:
+            return column
+    return None
+
+
+def _compute_angle_deg(df: pd.DataFrame) -> pd.Series:
+    x2_col = _resolve_column_alias(df, "x_class2", "x_class_2", "class2_x")
+    y2_col = _resolve_column_alias(df, "y_class2", "y_class_2", "class2_y")
+    x6_col = _resolve_column_alias(df, "x_class6", "x_class_6", "class6_x")
+    y6_col = _resolve_column_alias(df, "y_class6", "y_class_6", "class6_y")
+    if not all((x2_col, y2_col, x6_col, y6_col)):
+        raise ValueError("Missing class2/class6 coordinate columns for angle computation.")
+
+    p2x = pd.to_numeric(df[x2_col], errors="coerce").astype(float)
+    p2y = pd.to_numeric(df[y2_col], errors="coerce").astype(float)
+    p3x = pd.to_numeric(df[x6_col], errors="coerce").astype(float)
+    p3y = pd.to_numeric(df[y6_col], errors="coerce").astype(float)
+
+    ux = ANCHOR_X - p2x
+    uy = ANCHOR_Y - p2y
+    vx = p3x - p2x
+    vy = p3y - p2y
+
+    dot = ux * vx + uy * vy
+    cross = ux * vy - uy * vx
+    n1 = np.hypot(ux, uy)
+    n2 = np.hypot(vx, vy)
+    valid = (n1 > 0) & (n2 > 0) & np.isfinite(dot) & np.isfinite(cross)
+
+    angles = np.full(len(df), np.nan, dtype=float)
+    if valid.any():
+        with np.errstate(invalid="ignore"):
+            ang = np.arctan2(np.abs(cross[valid]), dot[valid])
+        angles[valid.to_numpy()] = np.degrees(ang)
+
+    return pd.Series(angles, index=df.index, name="angle_ARB_deg")
+
+
+def _trial_csv_candidates(fly_dir: Path, suffix_globs: Iterable[str] | str) -> list[Path]:
+    patterns = [suffix_globs] if isinstance(suffix_globs, str) else list(suffix_globs)
+    candidates: list[Path] = []
+    seen: set[Path] = set()
+    for pattern in patterns:
+        for path in fly_dir.rglob(pattern):
+            if not path.is_file():
+                continue
+            if "training" not in path.name.lower() and "testing" not in path.name.lower():
+                continue
+            real = path.resolve()
+            if real in seen:
+                continue
+            seen.add(real)
+            candidates.append(path)
+    return sorted(candidates)
+
+
+def _find_reference_angle(csv_paths: Sequence[Path]) -> float:
+    best: tuple[int, float, float] | None = None
+    for path in csv_paths:
+        try:
+            df = pd.read_csv(path)
+            angles = _compute_angle_deg(df).to_numpy(dtype=float)
+        except Exception:
+            continue
+
+        dist_col = _pick_column(df, DIST_COLS)
+        if not dist_col:
+            continue
+        dist = pd.to_numeric(df[dist_col], errors="coerce").to_numpy(dtype=float)
+        if dist.size == 0:
+            continue
+
+        exact = np.flatnonzero(np.isfinite(dist) & (dist == 0))
+        candidate: tuple[int, float, float] | None = None
+        if exact.size > 0:
+            idx = int(exact[0])
+            angle_val = angles[idx] if np.isfinite(angles[idx]) else np.nan
+            if np.isfinite(angle_val):
+                candidate = (0, 0.0, float(angle_val))
+        else:
+            with np.errstate(invalid="ignore"):
+                absdist = np.abs(dist)
+            if not np.isfinite(absdist).any():
+                continue
+            idx = int(np.nanargmin(absdist))
+            angle_val = angles[idx] if np.isfinite(angles[idx]) else np.nan
+            if np.isfinite(angle_val):
+                candidate = (1, float(absdist[idx]), float(angle_val))
+
+        if candidate is None:
+            continue
+        if best is None or candidate < best:
+            best = candidate
+
+    return float("nan") if best is None else best[2]
+
+
+def _fly_max_centered(csv_paths: Sequence[Path], reference_angle: float) -> float:
+    if not np.isfinite(reference_angle):
+        return float("nan")
+
+    max_abs = 0.0
+    for path in csv_paths:
+        try:
+            df = pd.read_csv(path)
+            angles = _compute_angle_deg(df).to_numpy(dtype=float)
+        except Exception:
+            continue
+
+        centered = angles - reference_angle
+        with np.errstate(invalid="ignore"):
+            local = np.nanmax(np.abs(centered))
+        if np.isfinite(local):
+            max_abs = max(max_abs, float(local))
+
+    return float("nan") if max_abs <= 0 else max_abs
+
+
+def _series_matches(existing: pd.Series | None, values: np.ndarray) -> bool:
+    if existing is None:
+        return False
+    arr_existing = pd.to_numeric(existing, errors="coerce").to_numpy(dtype=float)
+    arr_values = np.asarray(values, dtype=float)
+    if arr_existing.shape != arr_values.shape:
+        return False
+    return np.allclose(arr_existing, arr_values, equal_nan=True)
+
+
+def _ensure_angle_percentages(fly_dir: Path, suffix_globs: Iterable[str] | str) -> None:
+    csv_paths = _trial_csv_candidates(fly_dir, suffix_globs)
+    if not csv_paths:
+        return
+
+    reference = _find_reference_angle(csv_paths)
+    fly_max = _fly_max_centered(csv_paths, reference)
+
+    if not np.isfinite(reference):
+        reference = 0.0
+    valid_scale = np.isfinite(fly_max) and fly_max > 0
+    if not valid_scale:
+        print(
+            f"[WARN] {fly_dir.name}: unable to derive centered angle scale; "
+            "percentages will default to 0."
+        )
+
+    updates = 0
+    for path in csv_paths:
+        try:
+            df = pd.read_csv(path)
+            angles = _compute_angle_deg(df)
+        except Exception:
+            continue
+
+        angle_vals = angles.to_numpy(dtype=float)
+        centered_deg = angle_vals - reference
+        existing_pct_series = df.get("angle_centered_pct")
+        if not valid_scale:
+            centered_pct = (
+                pd.to_numeric(existing_pct_series, errors="coerce").to_numpy(dtype=float)
+                if existing_pct_series is not None
+                else np.zeros_like(centered_deg)
+            )
+            if not np.isfinite(centered_pct).any():
+                centered_pct = np.zeros_like(centered_deg)
+        else:
+            with np.errstate(invalid="ignore"):
+                centered_pct = (centered_deg / fly_max) * 100.0
+
+        centered_deg = np.nan_to_num(centered_deg, nan=0.0)
+        centered_pct = np.nan_to_num(centered_pct, nan=0.0)
+
+        needs_write = False
+        if not _series_matches(df.get("angle_ARB_deg"), angle_vals):
+            df["angle_ARB_deg"] = angle_vals
+            needs_write = True
+        if not _series_matches(df.get("angle_centered_deg"), centered_deg):
+            df["angle_centered_deg"] = centered_deg
+            needs_write = True
+        if not _series_matches(df.get("angle_centered_pct"), centered_pct):
+            df["angle_centered_pct"] = centered_pct
+            needs_write = True
+
+        if needs_write:
+            try:
+                df.to_csv(path, index=False)
+                updates += 1
+                print(f"[angle] {fly_dir.name}: augmented {path.name} with centered angle columns.")
+            except Exception as exc:
+                print(f"[WARN] Failed to persist centered angle columns for {path}: {exc}")
+
+    if updates:
+        print(f"[{fly_dir.name}] centered angle normalisation applied to {updates} file(s).")
+
+
 def _index_testing(entries: Sequence[tuple[str, Path, str]]) -> tuple[dict[str, Path], dict[str, Path]]:
     indexed: dict[str, Path] = {}
     fallback: dict[str, Path] = {}
@@ -348,6 +553,7 @@ class CombineConfig:
 def combine_distance_angle(cfg: CombineConfig) -> None:
     for fly_dir in sorted(p for p in cfg.root.iterdir() if p.is_dir()):
         fly_name = fly_dir.name
+        _ensure_angle_percentages(fly_dir, cfg.angle_suffixes)
         angle_entries = _locate_trials(fly_dir, cfg.angle_suffixes, ANGLE_COLS)
         distance_entries = _locate_trials(fly_dir, cfg.distance_suffixes, DIST_COLS)
 
