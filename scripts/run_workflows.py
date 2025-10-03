@@ -25,6 +25,7 @@ from scripts.envelope_combined import (
     CombineConfig,
     build_wide_csv,
     combine_distance_angle,
+    mirror_directory,
     overlay_sources,
     wide_to_matrix,
 )
@@ -123,13 +124,32 @@ def _run_combined(cfg: Mapping[str, Any] | None) -> None:
 
     wide_cfg = cfg.get("wide")
     if wide_cfg:
+        mirror_cfg = wide_cfg.get("mirror")
+        if mirror_cfg:
+            entries = mirror_cfg if isinstance(mirror_cfg, Sequence) else [mirror_cfg]
+            for entry in entries:
+                src = _ensure_path(entry.get("source"), "mirror.source")
+                dest = _ensure_path(entry.get("destination"), "mirror.destination")
+                print(f"[analysis] combined.mirror → {dest}")
+                copied, bytes_copied = mirror_directory(str(src), str(dest))
+                size_mb = bytes_copied / (1024 * 1024) if bytes_copied else 0.0
+                print(
+                    f"[analysis] combined.mirror copied {copied} file(s) "
+                    f"({size_mb:.1f} MiB)."
+                )
         roots = [str(_ensure_path(root, "roots")) for root in wide_cfg.get("roots", [])]
         if not roots:
             raise ValueError("combined.wide.roots must list at least one directory.")
         output_csv = _ensure_path(wide_cfg.get("output_csv"), "output_csv")
         measure_cols = wide_cfg.get("measure_cols") or ["envelope_of_rms"]
+        fps_fallback = float(wide_cfg.get("fps_fallback", 40.0))
         print(f"[analysis] combined.wide → {output_csv}")
-        build_wide_csv(roots, str(output_csv), measure_cols=measure_cols)
+        build_wide_csv(
+            roots,
+            str(output_csv),
+            measure_cols=measure_cols,
+            fps_fallback=fps_fallback,
+        )
 
     matrix_cfg = cfg.get("matrix")
     if matrix_cfg:

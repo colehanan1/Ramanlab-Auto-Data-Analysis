@@ -71,6 +71,7 @@ DIST_COLS = [
 TIME_COLS = ["time_s", "time_seconds", "t_s", "time"]
 TIMESTAMP_COLS = ["UTC_ISO", "Timestamp", "Number", "MonoNs"]
 FRAME_COLS = ["Frame", "FrameNumber", "Frame Number"]
+TRIAL_REGEX = re.compile(r"(testing|training)_(\d+)", re.IGNORECASE)
 TESTING_REGEX = re.compile(r"testing_(\d+)", re.IGNORECASE)
 
 ANCHOR_X = 1080.0
@@ -235,6 +236,19 @@ def _infer_category(path: Path) -> str:
     if "training" in parts or "training" in path.name.lower():
         return "training"
     return "testing"
+
+
+def _trial_label(path: Path) -> str:
+    match = TRIAL_REGEX.search(path.stem)
+    if not match:
+        chain = f"{path.stem}/" + "/".join(parent.name for parent in path.parents)
+        match = TRIAL_REGEX.search(chain)
+    if match:
+        return f"{match.group(1).lower()}_{match.group(2)}"
+    trailing = re.search(r"(\d+)$", path.stem)
+    if trailing:
+        return f"{_infer_category(path)}_{trailing.group(1)}"
+    return path.stem
 
 
 def _locate_trials(
@@ -478,17 +492,24 @@ def _index_testing(entries: Sequence[tuple[str, Path, str]]) -> tuple[dict[str, 
 
 
 def _find_trial_csvs(fly_dir: Path) -> Iterator[Path]:
-    search_root = fly_dir / "angle_distance_rms_envelope"
-    if not search_root.is_dir():
-        search_root = fly_dir
+    candidate_roots = [
+        fly_dir / "angle_distance_rms_envelope",
+        fly_dir / "envelope_of_rms",
+        fly_dir,
+    ]
     seen: set[Path] = set()
-    for pattern in ("**/*testing*.csv", "**/*training*.csv"):
-        for csv in search_root.glob(pattern):
-            if csv.is_file():
+    for base in candidate_roots:
+        if not base.is_dir():
+            continue
+        for pattern in ("**/*testing*.csv", "**/*training*.csv"):
+            for csv in base.glob(pattern):
+                if not csv.is_file():
+                    continue
                 real = csv.resolve()
-                if real not in seen:
-                    seen.add(real)
-                    yield real
+                if real in seen:
+                    continue
+                seen.add(real)
+                yield real
 
 
 def _pick_timestamp(df: pd.DataFrame) -> str | None:
@@ -709,12 +730,59 @@ def secure_copy_and_cleanup(sources: Sequence[str], destination: str) -> None:
     print("\nCleanup completed successfully.")
 
 
+def mirror_directory(source: str | os.PathLike[str], destination: str | os.PathLike[str]) -> tuple[int, int]:
+    """Mirror *source* into *destination*, copying new or changed files.
+
+    Returns a tuple of (files_copied, bytes_copied).
+    """
+
+    src = Path(source).expanduser().resolve()
+    dest = Path(destination).expanduser().resolve()
+    if not src.is_dir():
+        raise FileNotFoundError(f"Mirror source is not a directory: {src}")
+
+    files_copied = 0
+    bytes_copied = 0
+    for path in src.rglob("*"):
+        relative = path.relative_to(src)
+        target = dest / relative
+        if path.is_dir():
+            target.mkdir(parents=True, exist_ok=True)
+            continue
+
+        target.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            needs_copy = True
+            if target.exists():
+                src_stat = path.stat()
+                dest_stat = target.stat()
+                needs_copy = not (
+                    dest_stat.st_size == src_stat.st_size
+                    and int(dest_stat.st_mtime) >= int(src_stat.st_mtime)
+                )
+            if not needs_copy:
+                continue
+            shutil.copy2(path, target)
+            files_copied += 1
+            bytes_copied += path.stat().st_size
+        except Exception as exc:  # pragma: no cover - best effort sync
+            print(f"[WARN] Failed to mirror {path} → {target}: {exc}")
+
+    return files_copied, bytes_copied
+
+
 # ---------------------------------------------------------------------------
 # Wide CSV + float16 matrix
 # ---------------------------------------------------------------------------
 
 
-def build_wide_csv(roots: Sequence[str], output_csv: str, *, measure_cols: Sequence[str]) -> None:
+def build_wide_csv(
+    roots: Sequence[str],
+    output_csv: str,
+    *,
+    measure_cols: Sequence[str],
+    fps_fallback: float = 40.0,
+) -> None:
     out_path = Path(output_csv).expanduser().resolve()
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -777,7 +845,7 @@ def build_wide_csv(roots: Sequence[str], output_csv: str, *, measure_cols: Seque
             except Exception as exc:
                 print(f"[WARN] FPS inference failed for {csv_path.name}: {exc}")
         if not np.isfinite(fps):
-            fps = 40.0
+            fps = float(fps_fallback)
 
         try:
             measure = str(item["measure_col"])
@@ -788,10 +856,7 @@ def build_wide_csv(roots: Sequence[str], output_csv: str, *, measure_cols: Seque
             continue
 
         trial_type = _infer_category(csv_path)
-        label = csv_path.stem
-        match = re.search(r"(testing|training)_(\d+)", csv_path.stem, re.IGNORECASE)
-        if match:
-            label = f"{match.group(1).lower()}_{match.group(2)}"
+        label = _trial_label(csv_path)
 
         row = [item["dataset"], item["fly"], trial_type, label, float(fps)] + list(values)
         if len(values) < max_len:
@@ -1092,6 +1157,19 @@ def build_parser() -> argparse.ArgumentParser:
     wide_parser = subparsers.add_parser("wide", help="Build wide CSV of direction values.")
     wide_parser.add_argument("--root", action="append", required=True, help="Root directory (repeatable).")
     wide_parser.add_argument("--output-csv", required=True, help="Destination CSV path.")
+    wide_parser.add_argument(
+        "--measure-col",
+        dest="measure_cols",
+        action="append",
+        default=None,
+        help="Measurement column to extract (repeatable).",
+    )
+    wide_parser.add_argument(
+        "--fps-fallback",
+        type=float,
+        default=40.0,
+        help="Fallback FPS when timestamps/frames cannot infer it.",
+    )
 
     matrix_parser = subparsers.add_parser("matrix", help="Convert wide CSV → float16 matrix + metadata.")
     matrix_parser.add_argument("--input-csv", required=True)
@@ -1153,7 +1231,13 @@ def main(argv: Sequence[str] | None = None) -> None:
         return
 
     if args.command == "wide":
-        build_wide_csv(args.root, args.output_csv, measure_cols=["envelope_of_rms"])
+        measure_cols = args.measure_cols or ["envelope_of_rms"]
+        build_wide_csv(
+            args.root,
+            args.output_csv,
+            measure_cols=measure_cols,
+            fps_fallback=args.fps_fallback,
+        )
         return
 
     if args.command == "matrix":

@@ -97,10 +97,17 @@ analysis:
       odor_on: 30.0
       odor_off: 60.0
     wide:
+      mirror:
+        - source: "/home/ramanlab/Documents/cole/Data/flys/opto_hex/"
+          destination: "/securedstorage/DATAsec/cole/Data-secured/opto_hex/"
       roots:
-        - "/home/ramanlab/Documents/cole/Data/flys/opto_hex/"
+        - "/securedstorage/DATAsec/cole/Data-secured/opto_EB/"
+        - "/securedstorage/DATAsec/cole/Data-secured/opto_benz/"
+        - "/securedstorage/DATAsec/cole/Data-secured/opto_benz_1/"
+        - "/securedstorage/DATAsec/cole/Data-secured/opto_hex/"
       output_csv: "/home/ramanlab/Documents/cole/Results/Opto/Combined/all_envelope_rows_wide.csv"
       measure_cols: ["envelope_of_rms"]
+      fps_fallback: 40.0
     matrix:
       input_csv: "/home/ramanlab/Documents/cole/Results/Opto/Combined/all_envelope_rows_wide.csv"
       out_dir: "/home/ramanlab/Documents/cole/Results/Opto/Combined/matrix"
