@@ -197,11 +197,11 @@ def main(cfg: Settings):
             parts = base.split("_")
             folder_name = "_".join(parts[1:7]) if len(parts)>=7 else base
             out_dir = fly / folder_name
+            if out_dir.exists():
+                print(f"[YOLO] Skipping {video_path.name}: detected processed folder {out_dir.name}")
+                continue
             out_dir.mkdir(exist_ok=True)
             out_mp4 = out_dir / f"{folder_name}_distance_annotated.mp4"
-            if out_mp4.exists():
-                print(f"[YOLO] Skipping (exists): {out_mp4}")
-                continue
 
             cap = cv2.VideoCapture(str(video_path))
             if not cap.isOpened():

@@ -118,6 +118,8 @@ def _run_combined(cfg: Mapping[str, Any] | None) -> None:
             opts["odor_on_s"] = float(opts.pop("odor_on"))
         if "odor_off" in opts and "odor_off_s" not in opts:
             opts["odor_off_s"] = float(opts.pop("odor_off"))
+        if "odor_latency" in opts and "odor_latency_s" not in opts:
+            opts["odor_latency_s"] = float(opts.pop("odor_latency"))
         config = CombineConfig(**opts)  # type: ignore[arg-type]
         print(f"[analysis] combined.combine → {config.root}")
         combine_distance_angle(config)
@@ -143,12 +145,17 @@ def _run_combined(cfg: Mapping[str, Any] | None) -> None:
         output_csv = _ensure_path(wide_cfg.get("output_csv"), "output_csv")
         measure_cols = wide_cfg.get("measure_cols") or ["envelope_of_rms"]
         fps_fallback = float(wide_cfg.get("fps_fallback", 40.0))
+        exclude_cfg = [
+            str(_ensure_path(path, "exclude_roots"))
+            for path in wide_cfg.get("exclude_roots", [])
+        ]
         print(f"[analysis] combined.wide → {output_csv}")
         build_wide_csv(
             roots,
             str(output_csv),
             measure_cols=measure_cols,
             fps_fallback=fps_fallback,
+            exclude_roots=exclude_cfg,
         )
 
     matrix_cfg = cfg.get("matrix")
@@ -180,6 +187,9 @@ def _run_combined(cfg: Mapping[str, Any] | None) -> None:
         latency_sec = float(overlay_cfg.get("latency_sec", 0.0))
         after_show = float(overlay_cfg.get("after_show_sec", 30.0))
         thresh = float(overlay_cfg.get("threshold_std_mult", 4.0))
+        odor_on = float(overlay_cfg.get("odor_on_s", 30.0))
+        odor_off = float(overlay_cfg.get("odor_off_s", 60.0))
+        odor_latency = float(overlay_cfg.get("odor_latency_s", overlay_cfg.get("odor_latency", 0.0)))
         overwrite = bool(overlay_cfg.get("overwrite", False))
         print(f"[analysis] combined.overlay → {out_dir}")
         overlay_sources(
@@ -197,6 +207,9 @@ def _run_combined(cfg: Mapping[str, Any] | None) -> None:
             after_show_sec=after_show,
             output_dir=str(out_dir),
             threshold_mult=thresh,
+            odor_on_s=odor_on,
+            odor_off_s=odor_off,
+            odor_latency_s=odor_latency,
             overwrite=overwrite,
         )
 

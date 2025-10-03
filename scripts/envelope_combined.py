@@ -492,24 +492,20 @@ def _index_testing(entries: Sequence[tuple[str, Path, str]]) -> tuple[dict[str, 
 
 
 def _find_trial_csvs(fly_dir: Path) -> Iterator[Path]:
-    candidate_roots = [
-        fly_dir / "angle_distance_rms_envelope",
-        fly_dir / "envelope_of_rms",
-        fly_dir,
-    ]
+    base = fly_dir / "angle_distance_rms_envelope"
+    if not base.is_dir():
+        return
+
     seen: set[Path] = set()
-    for base in candidate_roots:
-        if not base.is_dir():
-            continue
-        for pattern in ("**/*testing*.csv", "**/*training*.csv"):
-            for csv in base.glob(pattern):
-                if not csv.is_file():
-                    continue
-                real = csv.resolve()
-                if real in seen:
-                    continue
-                seen.add(real)
-                yield real
+    for pattern in ("**/*testing*.csv", "**/*training*.csv"):
+        for csv in base.glob(pattern):
+            if not csv.is_file():
+                continue
+            real = csv.resolve()
+            if real in seen:
+                continue
+            seen.add(real)
+            yield real
 
 
 def _pick_timestamp(df: pd.DataFrame) -> str | None:
@@ -563,6 +559,7 @@ class CombineConfig:
     window_sec: float = 0.25
     odor_on_s: float = 30.0
     odor_off_s: float = 60.0
+    odor_latency_s: float = 0.0
     angle_suffixes: tuple[str, ...] = ("*merged.csv", "*class_2_6.csv")
     distance_suffixes: tuple[str, ...] = ("*merged.csv", "*class_2_6.csv")
 
@@ -572,6 +569,12 @@ class CombineConfig:
 
 
 def combine_distance_angle(cfg: CombineConfig) -> None:
+    odor_latency = max(cfg.odor_latency_s, 0.0)
+    odor_on_cmd = cfg.odor_on_s
+    odor_off_cmd = cfg.odor_off_s
+    odor_on_effective = odor_on_cmd + odor_latency
+    odor_off_effective = odor_off_cmd + odor_latency
+
     for fly_dir in sorted(p for p in cfg.root.iterdir() if p.is_dir()):
         fly_name = fly_dir.name
         _ensure_angle_percentages(fly_dir, cfg.angle_suffixes)
@@ -651,8 +654,21 @@ def combine_distance_angle(cfg: CombineConfig) -> None:
 
                 plt.figure(figsize=(12, 4))
                 plt.plot(time_dist, envelope, linewidth=1.5)
-                plt.axvline(cfg.odor_on_s, color="red", linewidth=2)
-                plt.axvline(cfg.odor_off_s, color="red", linewidth=2)
+                plt.axvline(odor_on_effective, color="red", linewidth=2)
+                plt.axvline(odor_off_effective, color="red", linewidth=2)
+                if odor_latency > 0:
+                    plt.axvspan(
+                        odor_on_cmd,
+                        min(odor_on_effective, time_dist[-1]),
+                        alpha=0.25,
+                        color="red",
+                    )
+                    plt.axvspan(
+                        odor_off_cmd,
+                        min(odor_off_effective, time_dist[-1]),
+                        alpha=0.25,
+                        color="red",
+                    )
                 plt.title(
                     f"{fly_name} — {test_id}: Envelope(RMS(distance × angle-mult))"
                 )
@@ -782,13 +798,20 @@ def build_wide_csv(
     *,
     measure_cols: Sequence[str],
     fps_fallback: float = 40.0,
+    exclude_roots: Sequence[str] | None = None,
 ) -> None:
     out_path = Path(output_csv).expanduser().resolve()
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
     items: list[dict[str, object]] = []
     max_len = 0
+    exclude = {
+        Path(root).expanduser().resolve() for root in (exclude_roots or ())
+    }
     for root in _normalise_roots(roots):
+        if root in exclude:
+            print(f"[SKIP] Excluding dataset root: {root}")
+            continue
         dataset = root.name
         for fly_dir in sorted(p for p in root.iterdir() if p.is_dir()):
             fly = fly_dir.name
@@ -954,6 +977,7 @@ def overlay_sources(
     threshold_mult: float = 4.0,
     odor_on_s: float = 30.0,
     odor_off_s: float = 60.0,
+    odor_latency_s: float = 0.0,
     overwrite: bool = False,
 ) -> None:
     frames = []
@@ -976,7 +1000,13 @@ def overlay_sources(
     combined = pd.concat(frames, ignore_index=True)
     out_dir = Path(output_dir).expanduser().resolve()
 
-    x_max = odor_off_s + latency_sec + after_show_sec
+    odor_latency = max(odor_latency_s, 0.0)
+    odor_on_cmd = odor_on_s
+    odor_off_cmd = odor_off_s
+    odor_on_effective = odor_on_cmd + odor_latency
+    odor_off_effective = odor_off_cmd + odor_latency
+    linger = max(latency_sec, 0.0)
+    x_max = odor_off_effective + linger + after_show_sec
 
     plt.rcParams.update(
         {
@@ -1002,7 +1032,7 @@ def overlay_sources(
         for _, row in df_fly.iterrows():
             env = _extract_env(row, env_cols_by_source[row["_source"]])
             fps = float(row.get("fps", 40.0))
-            baseline_end = min(int(round(odor_on_s * fps)), env.size)
+            baseline_end = min(int(round(odor_on_effective * fps)), env.size)
             if baseline_end:
                 baseline = env[:baseline_end]
                 baseline = baseline[np.isfinite(baseline)]
@@ -1028,7 +1058,7 @@ def overlay_sources(
             if t.size == 0:
                 continue
 
-            baseline_end = min(int(round(odor_on_s * fps)), env.size)
+            baseline_end = min(int(round(odor_on_effective * fps)), env.size)
             baseline = env[:baseline_end]
             sigma = float(np.nanstd(baseline)) if baseline.size else math.nan
             mu = mu_lookup.get(row["_source"], math.nan)
@@ -1071,16 +1101,21 @@ def overlay_sources(
             entries = trials[trial_label]
             odor_name = entries[0][4]
             is_trained = entries[0][5]
-            ax.axvline(odor_on_s, linestyle="--", linewidth=1.0, color="black")
-            ax.axvline(odor_off_s, linestyle="--", linewidth=1.0, color="black")
-            on_lat_end = min(odor_on_s + latency_sec, x_max)
-            off_lat_end = min(odor_off_s + latency_sec, x_max)
-            if latency_sec > 0:
-                ax.axvspan(odor_on_s, on_lat_end, alpha=0.25, color="red")
-            if off_lat_end > on_lat_end:
-                ax.axvspan(on_lat_end, off_lat_end, alpha=0.15, color="gray")
-            if latency_sec > 0:
-                ax.axvspan(odor_off_s, off_lat_end, alpha=0.25, color="red")
+            ax.axvline(odor_on_effective, linestyle="--", linewidth=1.0, color="black")
+            ax.axvline(odor_off_effective, linestyle="--", linewidth=1.0, color="black")
+
+            transit_on_end = min(odor_on_effective, x_max)
+            transit_off_end = min(odor_off_effective, x_max)
+            if odor_latency > 0:
+                ax.axvspan(odor_on_cmd, transit_on_end, alpha=0.25, color="red")
+                ax.axvspan(odor_off_cmd, transit_off_end, alpha=0.25, color="red")
+
+            steady_off_end = min(odor_off_effective, x_max)
+            linger_off_end = min(odor_off_effective + linger, x_max)
+            if steady_off_end > transit_on_end:
+                ax.axvspan(transit_on_end, steady_off_end, alpha=0.15, color="gray")
+            if linger > 0 and linger_off_end > steady_off_end:
+                ax.axvspan(steady_off_end, linger_off_end, alpha=0.1, color="gray")
 
             for source, t, env_visible, theta, *_ in entries:
                 style = style_map[source]
@@ -1102,9 +1137,9 @@ def overlay_sources(
         axes[-1].set_xlabel("Time (s)", fontsize=11)
 
         legend_handles = [
-            plt.Line2D([0], [0], linestyle="--", linewidth=1.0, color="black", label="Valve on/off (command)"),
-            plt.Rectangle((0, 0), 1, 1, alpha=0.25, color="red", label=f"Odor transit (~{latency_sec:.2f}s)"),
-            plt.Rectangle((0, 0), 1, 1, alpha=0.15, color="gray", label="Effective odor-on at fly"),
+            plt.Line2D([0], [0], linestyle="--", linewidth=1.0, color="black", label="Odor at fly"),
+            plt.Rectangle((0, 0), 1, 1, alpha=0.25, color="red", label=f"Valve→fly transit (~{odor_latency:.2f}s)"),
+            plt.Rectangle((0, 0), 1, 1, alpha=0.15, color="gray", label="Odor present"),
             plt.Line2D([0], [0], linestyle=":", linewidth=1.0, color="black", label=r"$\theta=\mu_{global}+k\sigma_{trial}$"),
         ]
         for tag, style in style_map.items():
@@ -1149,6 +1184,12 @@ def build_parser() -> argparse.ArgumentParser:
     combine_parser.add_argument("--window-sec", type=float, default=0.25)
     combine_parser.add_argument("--odor-on", type=float, default=30.0)
     combine_parser.add_argument("--odor-off", type=float, default=60.0)
+    combine_parser.add_argument(
+        "--odor-latency",
+        type=float,
+        default=0.0,
+        help="Transit delay between valve command and odor at the fly (seconds).",
+    )
 
     copy_parser = subparsers.add_parser("secure-sync", help="Copy datasets then clean source directories.")
     copy_parser.add_argument("--source", action="append", required=True, help="Source directory (repeatable).")
@@ -1169,6 +1210,12 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=40.0,
         help="Fallback FPS when timestamps/frames cannot infer it.",
+    )
+    wide_parser.add_argument(
+        "--exclude-root",
+        action="append",
+        default=None,
+        help="Root directory to exclude from aggregation (repeatable).",
     )
 
     matrix_parser = subparsers.add_parser("matrix", help="Convert wide CSV → float16 matrix + metadata.")
@@ -1206,6 +1253,12 @@ def build_parser() -> argparse.ArgumentParser:
     overlay_parser.add_argument("--latency-sec", type=float, default=0.0)
     overlay_parser.add_argument("--after-show-sec", type=float, default=30.0)
     overlay_parser.add_argument("--threshold-std-mult", type=float, default=4.0)
+    overlay_parser.add_argument(
+        "--odor-latency-s",
+        type=float,
+        default=0.0,
+        help="Transit delay between valve command and odor at the fly (seconds).",
+    )
     overlay_parser.add_argument("--overwrite", action="store_true", help="Rebuild plots even if the target files exist.")
 
     return parser
@@ -1222,6 +1275,7 @@ def main(argv: Sequence[str] | None = None) -> None:
             window_sec=args.window_sec,
             odor_on_s=args.odor_on,
             odor_off_s=args.odor_off,
+            odor_latency_s=args.odor_latency,
         )
         combine_distance_angle(cfg)
         return
@@ -1237,6 +1291,7 @@ def main(argv: Sequence[str] | None = None) -> None:
             args.output_csv,
             measure_cols=measure_cols,
             fps_fallback=args.fps_fallback,
+            exclude_roots=args.exclude_root,
         )
         return
 
@@ -1276,6 +1331,7 @@ def main(argv: Sequence[str] | None = None) -> None:
             fps_default=args.fps_default,
             odor_on_s=args.odor_on_s,
             odor_off_s=args.odor_off_s,
+            odor_latency_s=args.odor_latency_s,
             after_show_sec=args.after_show_sec,
             threshold_std_mult=args.threshold_std_mult,
             overwrite=args.overwrite,
@@ -1299,6 +1355,7 @@ def main(argv: Sequence[str] | None = None) -> None:
             after_show_sec=args.after_show_sec,
             output_dir=args.out_dir,
             threshold_mult=args.threshold_std_mult,
+            odor_latency_s=args.odor_latency_s,
             overwrite=args.overwrite,
         )
         return

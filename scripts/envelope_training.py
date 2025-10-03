@@ -552,6 +552,12 @@ def build_parser() -> argparse.ArgumentParser:
     env_parser.add_argument("--fps-default", type=float, default=40.0, help="Fallback FPS when decoding rows.")
     env_parser.add_argument("--odor-on-s", type=float, default=30.0, help="Commanded odor ON timestamp (seconds).")
     env_parser.add_argument("--odor-off-s", type=float, default=60.0, help="Commanded odor OFF timestamp (seconds).")
+    env_parser.add_argument(
+        "--odor-latency-s",
+        type=float,
+        default=0.0,
+        help="Transit delay between valve command and odor at the fly (seconds).",
+    )
     env_parser.add_argument("--after-show-sec", type=float, default=30.0, help="Duration to display after odor OFF (seconds).")
     env_parser.add_argument("--threshold-std-mult", type=float, default=4.0, help="Threshold multiplier for baseline std dev.")
     env_parser.add_argument("--overwrite", action="store_true", help="Rebuild plots even if the target files exist.")
@@ -590,6 +596,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             fps_default=args.fps_default,
             odor_on_s=args.odor_on_s,
             odor_off_s=args.odor_off_s,
+            odor_latency_s=args.odor_latency_s,
             after_show_sec=args.after_show_sec,
             threshold_std_mult=args.threshold_std_mult,
             trial_type="training",

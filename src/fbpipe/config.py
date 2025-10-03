@@ -18,6 +18,7 @@ class Settings:
     window_sec: float = 0.25
     odor_on_s: float = 30.0
     odor_off_s: float = 60.0
+    odor_latency_s: float = 0.0
     delete_source_after_render: bool = True
 
     # detector/tracker
@@ -65,6 +66,7 @@ def load_settings(config_path: str | Path) -> Settings:
         window_sec=float(os.getenv("WINDOW_SEC", _get(data, "window_sec", 0.25))),
         odor_on_s=float(os.getenv("ODOR_ON_S", _get(data, "odor_on_s", 30.0))),
         odor_off_s=float(os.getenv("ODOR_OFF_S", _get(data, "odor_off_s", 60.0))),
+        odor_latency_s=float(os.getenv("ODOR_LATENCY_S", _get(data, "odor_latency_s", 0.0))),
         delete_source_after_render=(os.getenv("DELETE_SOURCE_AFTER_RENDER", str(_get(data, "delete_source_after_render", True))).lower()=="true"),
 
         conf_thres=float(os.getenv("CONF_THRES", yolo.get("conf_thres", 0.40))),

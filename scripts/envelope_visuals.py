@@ -595,6 +595,7 @@ class EnvelopePlotConfig:
     fps_default: float = 40.0
     odor_on_s: float = 30.0
     odor_off_s: float = 60.0
+    odor_latency_s: float = 0.0
     after_show_sec: float = 30.0
     threshold_std_mult: float = 4.0
     trial_type: str = "testing"
@@ -626,7 +627,13 @@ def generate_envelope_plots(cfg: EnvelopePlotConfig) -> None:
     dataset_lookup = {idx: ds for idx, ds in zip(df.index, dataset_values, strict=False)}
     trial_lookup = {idx: tr for idx, tr in zip(df.index, trial_values, strict=False)}
 
-    x_max_limit = cfg.odor_off_s + cfg.latency_sec + cfg.after_show_sec
+    odor_latency = max(cfg.odor_latency_s, 0.0)
+    odor_on_cmd = cfg.odor_on_s
+    odor_off_cmd = cfg.odor_off_s
+    odor_on_effective = odor_on_cmd + odor_latency
+    odor_off_effective = odor_off_cmd + odor_latency
+    linger = max(cfg.latency_sec, 0.0)
+    x_max_limit = odor_off_effective + linger + cfg.after_show_sec
 
     for fly, fly_df in df.groupby("fly"):
         fly_df = fly_df.sort_values("trial_label", key=lambda s: s.map(_trial_num))
@@ -656,7 +663,7 @@ def generate_envelope_plots(cfg: EnvelopePlotConfig) -> None:
             if env.size == 0:
                 continue
 
-            theta = _compute_theta(env, fps, cfg.odor_on_s, cfg.threshold_std_mult)
+            theta = _compute_theta(env, fps, odor_on_effective, cfg.threshold_std_mult)
             dataset_canon = dataset_lookup[idx]
             odor_name = _display_odor(dataset_canon, trial_lookup[idx])
             is_trained = _is_trained_odor(dataset_canon, odor_name)
@@ -692,16 +699,18 @@ def generate_envelope_plots(cfg: EnvelopePlotConfig) -> None:
 
         for ax, (odor_name, t, env, theta, is_trained) in zip(axes, trial_curves):
             ax.plot(t, env, linewidth=1.2, color="black")
-            ax.axvline(cfg.odor_on_s, linestyle="--", linewidth=1.0, color="black")
-            ax.axvline(cfg.odor_off_s, linestyle="--", linewidth=1.0, color="black")
+            ax.axvline(odor_on_effective, linestyle="--", linewidth=1.0, color="black")
+            ax.axvline(odor_off_effective, linestyle="--", linewidth=1.0, color="black")
 
-            on_lat_end = min(cfg.odor_on_s + cfg.latency_sec, x_max_limit)
-            off_lat_end = min(cfg.odor_off_s + cfg.latency_sec, x_max_limit)
-            if cfg.latency_sec > 0:
-                ax.axvspan(cfg.odor_on_s, on_lat_end, alpha=0.25, color="red")
-                ax.axvspan(cfg.odor_off_s, off_lat_end, alpha=0.25, color="red")
-            if off_lat_end > on_lat_end:
-                ax.axvspan(on_lat_end, off_lat_end, alpha=0.15, color="gray")
+            transit_on_end = min(odor_on_effective, x_max_limit)
+            transit_off_end = min(odor_off_effective, x_max_limit)
+            if odor_latency > 0:
+                ax.axvspan(odor_on_cmd, transit_on_end, alpha=0.25, color="red")
+                ax.axvspan(odor_off_cmd, transit_off_end, alpha=0.25, color="red")
+
+            effective_off_end = min(odor_off_effective + linger, x_max_limit)
+            if effective_off_end > transit_on_end:
+                ax.axvspan(transit_on_end, effective_off_end, alpha=0.15, color="gray")
 
             if math.isfinite(theta):
                 ax.axhline(theta, linestyle="-", linewidth=1.0, color="tab:red", alpha=0.9)
@@ -719,9 +728,9 @@ def generate_envelope_plots(cfg: EnvelopePlotConfig) -> None:
         axes[-1].set_xlabel("Time (s)", fontsize=11)
 
         legend_handles = [
-            plt.Line2D([0], [0], linestyle="--", linewidth=1.0, color="black", label="Valve on/off (command)"),
-            plt.Rectangle((0, 0), 1, 1, alpha=0.25, color="red", label=f"Odor transit (~{cfg.latency_sec:.2f}s)"),
-            plt.Rectangle((0, 0), 1, 1, alpha=0.15, color="gray", label="Effective odor-on at fly"),
+            plt.Line2D([0], [0], linestyle="--", linewidth=1.0, color="black", label="Odor at fly"),
+            plt.Rectangle((0, 0), 1, 1, alpha=0.25, color="red", label=f"Valve→fly transit (~{odor_latency:.2f}s)"),
+            plt.Rectangle((0, 0), 1, 1, alpha=0.15, color="gray", label="Odor present / linger"),
             plt.Line2D([0], [0], linestyle="-", linewidth=1.0, color="tab:red", label=r"$\theta = \mu_{before} + k\sigma_{before}$"),
         ]
         fig.legend(
@@ -784,6 +793,12 @@ def _parse_envelopes_args(subparser: argparse.ArgumentParser) -> None:
     subparser.add_argument("--fps-default", type=float, default=40.0, help="Fallback FPS when decoding rows.")
     subparser.add_argument("--odor-on-s", type=float, default=30.0, help="Commanded odor ON timestamp (seconds).")
     subparser.add_argument("--odor-off-s", type=float, default=60.0, help="Commanded odor OFF timestamp (seconds).")
+    subparser.add_argument(
+        "--odor-latency-s",
+        type=float,
+        default=0.0,
+        help="Transit delay between valve command and odor at the fly (seconds).",
+    )
     subparser.add_argument("--after-show-sec", type=float, default=30.0, help="Duration to display after odor off (seconds).")
     subparser.add_argument("--threshold-std-mult", type=float, default=4.0, help="Threshold multiplier applied to baseline std dev.")
     subparser.add_argument(
@@ -844,6 +859,7 @@ def main(argv: Sequence[str] | None = None) -> None:
             fps_default=args.fps_default,
             odor_on_s=args.odor_on_s,
             odor_off_s=args.odor_off_s,
+            odor_latency_s=args.odor_latency_s,
             after_show_sec=args.after_show_sec,
             threshold_std_mult=args.threshold_std_mult,
             trial_type=args.trial_type,

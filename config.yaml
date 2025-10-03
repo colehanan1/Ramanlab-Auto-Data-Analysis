@@ -30,6 +30,7 @@ fps_default: 40.0
 window_sec: 0.25
 odor_on_s: 30.0
 odor_off_s: 60.0
+odor_latency_s: 2.15
 
 # Videos
 delete_source_after_render: true
@@ -61,6 +62,7 @@ analysis:
       fps_default: 40.0
       odor_on_s: 30.0
       odor_off_s: 60.0
+      odor_latency_s: 2.15
       after_show_sec: 30.0
       threshold_std_mult: 4.0
       trial_type: testing
@@ -74,6 +76,7 @@ analysis:
       fps_default: 40.0
       odor_on_s: 30.0
       odor_off_s: 60.0
+      odor_latency_s: 2.15
       after_show_sec: 30.0
       threshold_std_mult: 4.0
       trial_type: training
@@ -96,6 +99,7 @@ analysis:
       window_sec: 0.25
       odor_on: 30.0
       odor_off: 60.0
+      odor_latency_s: 2.15
     wide:
       mirror:
         - source: "/home/ramanlab/Documents/cole/Data/flys/opto_hex/"
@@ -105,6 +109,8 @@ analysis:
         - "/securedstorage/DATAsec/cole/Data-secured/opto_benz/"
         - "/securedstorage/DATAsec/cole/Data-secured/opto_benz_1/"
         - "/securedstorage/DATAsec/cole/Data-secured/opto_hex/"
+      exclude_roots:
+        - "/securedstorage/DATAsec/cole/Data-secured/opto_benz/"
       output_csv: "/home/ramanlab/Documents/cole/Results/Opto/Combined/all_envelope_rows_wide.csv"
       measure_cols: ["envelope_of_rms"]
       fps_fallback: 40.0
@@ -136,6 +142,7 @@ analysis:
       fps_default: 40.0
       odor_on_s: 30.0
       odor_off_s: 60.0
+      odor_latency_s: 2.15
       after_show_sec: 30.0
       threshold_std_mult: 4.0
       overwrite: false
@@ -148,4 +155,7 @@ analysis:
       latency_sec: 0.0
       after_show_sec: 30.0
       threshold_std_mult: 4.0
+      odor_on_s: 30.0
+      odor_off_s: 60.0
+      odor_latency_s: 2.15
       overwrite: false
