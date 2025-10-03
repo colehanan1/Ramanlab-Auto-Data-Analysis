@@ -77,6 +77,10 @@ TESTING_REGEX = re.compile(r"testing_(\d+)", re.IGNORECASE)
 ANCHOR_X = 1080.0
 ANCHOR_Y = 540.0
 
+MANDATORY_WIDE_EXCLUDES = {
+    Path("/securedstorage/DATAsec/cole/Data-secured/opto_benz/").expanduser().resolve()
+}
+
 ODOR_CANON = {
     "acv": "ACV",
     "apple cider vinegar": "ACV",
@@ -808,6 +812,7 @@ def build_wide_csv(
     exclude = {
         Path(root).expanduser().resolve() for root in (exclude_roots or ())
     }
+    exclude |= MANDATORY_WIDE_EXCLUDES
     for root in _normalise_roots(roots):
         if root in exclude:
             print(f"[SKIP] Excluding dataset root: {root}")

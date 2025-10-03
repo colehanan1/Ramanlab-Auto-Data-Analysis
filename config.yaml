@@ -106,11 +106,8 @@ analysis:
           destination: "/securedstorage/DATAsec/cole/Data-secured/opto_hex/"
       roots:
         - "/securedstorage/DATAsec/cole/Data-secured/opto_EB/"
-        - "/securedstorage/DATAsec/cole/Data-secured/opto_benz/"
         - "/securedstorage/DATAsec/cole/Data-secured/opto_benz_1/"
         - "/securedstorage/DATAsec/cole/Data-secured/opto_hex/"
-      exclude_roots:
-        - "/securedstorage/DATAsec/cole/Data-secured/opto_benz/"
       output_csv: "/home/ramanlab/Documents/cole/Results/Opto/Combined/all_envelope_rows_wide.csv"
       measure_cols: ["envelope_of_rms"]
       fps_fallback: 40.0
