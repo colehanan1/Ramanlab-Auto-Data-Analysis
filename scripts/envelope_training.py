@@ -49,10 +49,10 @@ DISPLAY_LABEL = {
     "opto_benz": "Benzaldehyde",
     "opto_benz_1": "Benzaldehyde",
     "opto_EB": "Ethyl Butyrate",
-    "opto_hex": "Hexanol",
+    "opto_hex": "Optogenetics Hexanol",
 }
 
-HEXANOL_LABEL = "Hexanol"
+HEXANOL_LABEL = "Optogenetics Hexanol"
 
 
 # ---------------------------------------------------------------------------
@@ -107,6 +107,13 @@ def _trial_num(label: str) -> int:
 
 def _display_odor(dataset_canon: str, trial_label: str) -> str:
     number = _trial_num(trial_label)
+    label_lower = str(trial_label).lower()
+    if (
+        dataset_canon == "opto_hex"
+        and "testing" in label_lower
+        and number in (1, 3)
+    ):
+        return "Apple Cider Vinegar"
     if number in (1, 3):
         return HEXANOL_LABEL
     if number in (2, 4, 5):
@@ -121,6 +128,13 @@ def _display_odor(dataset_canon: str, trial_label: str) -> str:
         "opto_EB": {6: "Apple Cider Vinegar", 7: "3-Octonol", 8: "Benzaldehyde", 9: "Citral", 10: "Linalool"},
         "opto_benz": {6: "3-Octonol", 7: "Benzaldehyde", 8: "Citral", 9: "Linalool"},
         "opto_benz_1": {6: "Apple Cider Vinegar", 7: "3-Octonol", 8: "Ethyl Butyrate", 9: "Citral", 10: "Linalool"},
+        "opto_hex": {
+            6: "Benzaldehyde",
+            7: "3-Octonol",
+            8: "Ethyl Butyrate",
+            9: "Citral",
+            10: "Linalool",
+        },
     }
     return mapping.get(dataset_canon, {}).get(number, trial_label)
 
@@ -160,7 +174,13 @@ def _extract_env(row: pd.Series, env_cols: Sequence[str]) -> np.ndarray:
     return env[mask]
 
 
-def _latency_to_cross(env: np.ndarray, fps: float, before_sec: float, during_sec: float, thresh_mult: float) -> Optional[float]:
+def _latency_to_cross(
+    env: np.ndarray,
+    fps: float,
+    before_sec: float,
+    during_sec: float,
+    threshold_mult: float,
+) -> Optional[float]:
     if env.size == 0 or not np.isfinite(fps) or fps <= 0:
         return None
 
@@ -173,7 +193,7 @@ def _latency_to_cross(env: np.ndarray, fps: float, before_sec: float, during_sec
 
     mu = float(np.nanmean(before))
     sd = float(np.nanstd(before))
-    theta = mu + thresh_mult * sd
+    theta = mu + threshold_mult * sd
     idx = np.where(during > theta)[0]
     if idx.size == 0:
         return None
@@ -447,12 +467,38 @@ def latency_reports(
     *,
     before_sec: float,
     during_sec: float,
-    thresh_mult: float,
+    threshold_mult: float | None = None,
+    threshold_std_mult: float | None = None,
     latency_ceiling: float,
     trials_of_interest: Sequence[int],
     fps_default: float,
     overwrite: bool,
 ) -> None:
+    """Generate latency plots and summaries for the requested trials.
+
+    Historically this function only accepted ``threshold_std_mult`` while recent
+    workflow updates switched to ``threshold_mult``.  Accept both names (with
+    the former taking precedence when both supplied) so that existing configs
+    and cached CLI invocations continue to function without raising
+    ``TypeError`` when mixing versions of the scripts.
+    """
+    if threshold_mult is None and threshold_std_mult is None:
+        # Maintain the previous implicit default of 4.0 when neither keyword is
+        # provided.  This mirrors the CLI default and the behaviour prior to the
+        # signature change.
+        threshold_mult = 4.0
+
+    # Allow either keyword while favouring the legacy ``threshold_std_mult`` if
+    # both are present.  This keeps behaviour consistent for older configs that
+    # may still pass the legacy name indirectly (e.g. via cached YAML renders).
+    if threshold_std_mult is not None:
+        threshold_mult = threshold_std_mult
+
+    if threshold_mult is None:
+        raise ValueError("Latency threshold multiplier must be provided.")
+
+    threshold_mult = float(threshold_mult)
+
     df, env_cols = _load_envelope_matrix(matrix_path, codes_json)
     df = df[df["trial_type"].str.lower() == "training"].copy()
     if df.empty:
@@ -468,7 +514,7 @@ def latency_reports(
             continue
         env = _extract_env(row, env_cols)
         fps = float(row.get("fps", fps_default))
-        latency = _latency_to_cross(env, fps, before_sec, during_sec, thresh_mult)
+        latency = _latency_to_cross(env, fps, before_sec, during_sec, threshold_mult)
         lat_for_mean = latency if (latency is not None and latency <= latency_ceiling) else math.nan
         records.append(
             {
@@ -520,6 +566,12 @@ def build_parser() -> argparse.ArgumentParser:
     env_parser.add_argument("--fps-default", type=float, default=40.0, help="Fallback FPS when decoding rows.")
     env_parser.add_argument("--odor-on-s", type=float, default=30.0, help="Commanded odor ON timestamp (seconds).")
     env_parser.add_argument("--odor-off-s", type=float, default=60.0, help="Commanded odor OFF timestamp (seconds).")
+    env_parser.add_argument(
+        "--odor-latency-s",
+        type=float,
+        default=0.0,
+        help="Transit delay between valve command and odor at the fly (seconds).",
+    )
     env_parser.add_argument("--after-show-sec", type=float, default=30.0, help="Duration to display after odor OFF (seconds).")
     env_parser.add_argument("--threshold-std-mult", type=float, default=4.0, help="Threshold multiplier for baseline std dev.")
     env_parser.add_argument("--overwrite", action="store_true", help="Rebuild plots even if the target files exist.")
@@ -531,6 +583,12 @@ def build_parser() -> argparse.ArgumentParser:
     lat_parser.add_argument("--before-sec", type=float, default=30.0, help="Baseline window length in seconds.")
     lat_parser.add_argument("--during-sec", type=float, default=35.0, help="During window length in seconds.")
     lat_parser.add_argument("--threshold-mult", type=float, default=4.0, help="Threshold multiplier (mu + k*std).")
+    lat_parser.add_argument(
+        "--threshold-std-mult",
+        type=float,
+        default=None,
+        help="Deprecated alias for --threshold-mult maintained for backward compatibility.",
+    )
     lat_parser.add_argument("--latency-ceiling", type=float, default=9.5, help="Cap for marking NR trials in seconds.")
     lat_parser.add_argument("--trials", nargs="+", type=int, default=[4, 5, 6], help="Training trial numbers to analyse.")
     lat_parser.add_argument("--fps-default", type=float, default=40.0, help="Fallback FPS when metadata missing.")
@@ -552,6 +610,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             fps_default=args.fps_default,
             odor_on_s=args.odor_on_s,
             odor_off_s=args.odor_off_s,
+            odor_latency_s=args.odor_latency_s,
             after_show_sec=args.after_show_sec,
             threshold_std_mult=args.threshold_std_mult,
             trial_type="training",
@@ -567,7 +626,8 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             args.out_dir.expanduser().resolve(),
             before_sec=args.before_sec,
             during_sec=args.during_sec,
-            thresh_mult=args.threshold_mult,
+            threshold_mult=args.threshold_mult,
+            threshold_std_mult=args.threshold_std_mult,
             latency_ceiling=args.latency_ceiling,
             trials_of_interest=tuple(args.trials),
             fps_default=args.fps_default,

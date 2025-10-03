@@ -71,7 +71,15 @@ DIST_COLS = [
 TIME_COLS = ["time_s", "time_seconds", "t_s", "time"]
 TIMESTAMP_COLS = ["UTC_ISO", "Timestamp", "Number", "MonoNs"]
 FRAME_COLS = ["Frame", "FrameNumber", "Frame Number"]
+TRIAL_REGEX = re.compile(r"(testing|training)_(\d+)", re.IGNORECASE)
 TESTING_REGEX = re.compile(r"testing_(\d+)", re.IGNORECASE)
+
+ANCHOR_X = 1080.0
+ANCHOR_Y = 540.0
+
+MANDATORY_WIDE_EXCLUDES = {
+    Path("/securedstorage/DATAsec/cole/Data-secured/opto_benz/").expanduser().resolve()
+}
 
 ODOR_CANON = {
     "acv": "ACV",
@@ -105,10 +113,10 @@ DISPLAY_LABEL = {
     "opto_benz": "Benzaldehyde",
     "opto_benz_1": "Benzaldehyde",
     "opto_EB": "Ethyl Butyrate",
-    "opto_hex": "Hexanol",
+    "opto_hex": "Optogenetics Hexanol",
 }
 
-HEXANOL = "Hexanol"
+HEXANOL = "Optogenetics Hexanol"
 
 
 # ---------------------------------------------------------------------------
@@ -143,6 +151,13 @@ def _trial_num(label: str) -> int:
 
 def _display_odor(dataset_canon: str, trial_label: str) -> str:
     number = _trial_num(trial_label)
+    label_lower = str(trial_label).lower()
+    if (
+        dataset_canon == "opto_hex"
+        and "testing" in label_lower
+        and number in (1, 3)
+    ):
+        return "Apple Cider Vinegar"
     if number in (1, 3):
         return HEXANOL
     if number in (2, 4, 5):
@@ -157,6 +172,13 @@ def _display_odor(dataset_canon: str, trial_label: str) -> str:
         "opto_EB": {6: "Apple Cider Vinegar", 7: "3-Octonol", 8: "Benzaldehyde", 9: "Citral", 10: "Linalool"},
         "opto_benz": {6: "3-Octonol", 7: "Benzaldehyde", 8: "Citral", 9: "Linalool"},
         "opto_benz_1": {6: "Apple Cider Vinegar", 7: "3-Octonol", 8: "Ethyl Butyrate", 9: "Citral", 10: "Linalool"},
+        "opto_hex": {
+            6: "Benzaldehyde",
+            7: "3-Octonol",
+            8: "Ethyl Butyrate",
+            9: "Citral",
+            10: "Linalool",
+        },
     }
     return mapping.get(dataset_canon, {}).get(number, trial_label)
 
@@ -234,6 +256,19 @@ def _infer_category(path: Path) -> str:
     return "testing"
 
 
+def _trial_label(path: Path) -> str:
+    match = TRIAL_REGEX.search(path.stem)
+    if not match:
+        chain = f"{path.stem}/" + "/".join(parent.name for parent in path.parents)
+        match = TRIAL_REGEX.search(chain)
+    if match:
+        return f"{match.group(1).lower()}_{match.group(2)}"
+    trailing = re.search(r"(\d+)$", path.stem)
+    if trailing:
+        return f"{_infer_category(path)}_{trailing.group(1)}"
+    return path.stem
+
+
 def _locate_trials(
     fly_dir: Path,
     suffix_globs: Iterable[str] | str,
@@ -258,6 +293,208 @@ def _locate_trials(
     return results
 
 
+def _normalise_key(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "", value.lower())
+
+
+def _resolve_column_alias(df: pd.DataFrame, *aliases: str) -> str | None:
+    lookup = {_normalise_key(col): col for col in df.columns}
+    for alias in aliases:
+        column = lookup.get(_normalise_key(alias))
+        if column:
+            return column
+    return None
+
+
+def _compute_angle_deg(df: pd.DataFrame) -> pd.Series:
+    x2_col = _resolve_column_alias(df, "x_class2", "x_class_2", "class2_x")
+    y2_col = _resolve_column_alias(df, "y_class2", "y_class_2", "class2_y")
+    x6_col = _resolve_column_alias(df, "x_class6", "x_class_6", "class6_x")
+    y6_col = _resolve_column_alias(df, "y_class6", "y_class_6", "class6_y")
+    if not all((x2_col, y2_col, x6_col, y6_col)):
+        raise ValueError("Missing class2/class6 coordinate columns for angle computation.")
+
+    p2x = pd.to_numeric(df[x2_col], errors="coerce").astype(float)
+    p2y = pd.to_numeric(df[y2_col], errors="coerce").astype(float)
+    p3x = pd.to_numeric(df[x6_col], errors="coerce").astype(float)
+    p3y = pd.to_numeric(df[y6_col], errors="coerce").astype(float)
+
+    ux = ANCHOR_X - p2x
+    uy = ANCHOR_Y - p2y
+    vx = p3x - p2x
+    vy = p3y - p2y
+
+    dot = ux * vx + uy * vy
+    cross = ux * vy - uy * vx
+    n1 = np.hypot(ux, uy)
+    n2 = np.hypot(vx, vy)
+    valid = (n1 > 0) & (n2 > 0) & np.isfinite(dot) & np.isfinite(cross)
+
+    angles = np.full(len(df), np.nan, dtype=float)
+    if valid.any():
+        with np.errstate(invalid="ignore"):
+            ang = np.arctan2(np.abs(cross[valid]), dot[valid])
+        angles[valid.to_numpy()] = np.degrees(ang)
+
+    return pd.Series(angles, index=df.index, name="angle_ARB_deg")
+
+
+def _trial_csv_candidates(fly_dir: Path, suffix_globs: Iterable[str] | str) -> list[Path]:
+    patterns = [suffix_globs] if isinstance(suffix_globs, str) else list(suffix_globs)
+    candidates: list[Path] = []
+    seen: set[Path] = set()
+    for pattern in patterns:
+        for path in fly_dir.rglob(pattern):
+            if not path.is_file():
+                continue
+            if "training" not in path.name.lower() and "testing" not in path.name.lower():
+                continue
+            real = path.resolve()
+            if real in seen:
+                continue
+            seen.add(real)
+            candidates.append(path)
+    return sorted(candidates)
+
+
+def _find_reference_angle(csv_paths: Sequence[Path]) -> float:
+    best: tuple[int, float, float] | None = None
+    for path in csv_paths:
+        try:
+            df = pd.read_csv(path)
+            angles = _compute_angle_deg(df).to_numpy(dtype=float)
+        except Exception:
+            continue
+
+        dist_col = _pick_column(df, DIST_COLS)
+        if not dist_col:
+            continue
+        dist = pd.to_numeric(df[dist_col], errors="coerce").to_numpy(dtype=float)
+        if dist.size == 0:
+            continue
+
+        exact = np.flatnonzero(np.isfinite(dist) & (dist == 0))
+        candidate: tuple[int, float, float] | None = None
+        if exact.size > 0:
+            idx = int(exact[0])
+            angle_val = angles[idx] if np.isfinite(angles[idx]) else np.nan
+            if np.isfinite(angle_val):
+                candidate = (0, 0.0, float(angle_val))
+        else:
+            with np.errstate(invalid="ignore"):
+                absdist = np.abs(dist)
+            if not np.isfinite(absdist).any():
+                continue
+            idx = int(np.nanargmin(absdist))
+            angle_val = angles[idx] if np.isfinite(angles[idx]) else np.nan
+            if np.isfinite(angle_val):
+                candidate = (1, float(absdist[idx]), float(angle_val))
+
+        if candidate is None:
+            continue
+        if best is None or candidate < best:
+            best = candidate
+
+    return float("nan") if best is None else best[2]
+
+
+def _fly_max_centered(csv_paths: Sequence[Path], reference_angle: float) -> float:
+    if not np.isfinite(reference_angle):
+        return float("nan")
+
+    max_abs = 0.0
+    for path in csv_paths:
+        try:
+            df = pd.read_csv(path)
+            angles = _compute_angle_deg(df).to_numpy(dtype=float)
+        except Exception:
+            continue
+
+        centered = angles - reference_angle
+        with np.errstate(invalid="ignore"):
+            local = np.nanmax(np.abs(centered))
+        if np.isfinite(local):
+            max_abs = max(max_abs, float(local))
+
+    return float("nan") if max_abs <= 0 else max_abs
+
+
+def _series_matches(existing: pd.Series | None, values: np.ndarray) -> bool:
+    if existing is None:
+        return False
+    arr_existing = pd.to_numeric(existing, errors="coerce").to_numpy(dtype=float)
+    arr_values = np.asarray(values, dtype=float)
+    if arr_existing.shape != arr_values.shape:
+        return False
+    return np.allclose(arr_existing, arr_values, equal_nan=True)
+
+
+def _ensure_angle_percentages(fly_dir: Path, suffix_globs: Iterable[str] | str) -> None:
+    csv_paths = _trial_csv_candidates(fly_dir, suffix_globs)
+    if not csv_paths:
+        return
+
+    reference = _find_reference_angle(csv_paths)
+    fly_max = _fly_max_centered(csv_paths, reference)
+
+    if not np.isfinite(reference):
+        reference = 0.0
+    valid_scale = np.isfinite(fly_max) and fly_max > 0
+    if not valid_scale:
+        print(
+            f"[WARN] {fly_dir.name}: unable to derive centered angle scale; "
+            "percentages will default to 0."
+        )
+
+    updates = 0
+    for path in csv_paths:
+        try:
+            df = pd.read_csv(path)
+            angles = _compute_angle_deg(df)
+        except Exception:
+            continue
+
+        angle_vals = angles.to_numpy(dtype=float)
+        centered_deg = angle_vals - reference
+        existing_pct_series = df.get("angle_centered_pct")
+        if not valid_scale:
+            centered_pct = (
+                pd.to_numeric(existing_pct_series, errors="coerce").to_numpy(dtype=float)
+                if existing_pct_series is not None
+                else np.zeros_like(centered_deg)
+            )
+            if not np.isfinite(centered_pct).any():
+                centered_pct = np.zeros_like(centered_deg)
+        else:
+            with np.errstate(invalid="ignore"):
+                centered_pct = (centered_deg / fly_max) * 100.0
+
+        centered_deg = np.nan_to_num(centered_deg, nan=0.0)
+        centered_pct = np.nan_to_num(centered_pct, nan=0.0)
+
+        needs_write = False
+        if not _series_matches(df.get("angle_ARB_deg"), angle_vals):
+            df["angle_ARB_deg"] = angle_vals
+            needs_write = True
+        if not _series_matches(df.get("angle_centered_deg"), centered_deg):
+            df["angle_centered_deg"] = centered_deg
+            needs_write = True
+        if not _series_matches(df.get("angle_centered_pct"), centered_pct):
+            df["angle_centered_pct"] = centered_pct
+            needs_write = True
+
+        if needs_write:
+            try:
+                df.to_csv(path, index=False)
+                updates += 1
+                print(f"[angle] {fly_dir.name}: augmented {path.name} with centered angle columns.")
+            except Exception as exc:
+                print(f"[WARN] Failed to persist centered angle columns for {path}: {exc}")
+
+    if updates:
+        print(f"[{fly_dir.name}] centered angle normalisation applied to {updates} file(s).")
+
+
 def _index_testing(entries: Sequence[tuple[str, Path, str]]) -> tuple[dict[str, Path], dict[str, Path]]:
     indexed: dict[str, Path] = {}
     fallback: dict[str, Path] = {}
@@ -273,17 +510,20 @@ def _index_testing(entries: Sequence[tuple[str, Path, str]]) -> tuple[dict[str, 
 
 
 def _find_trial_csvs(fly_dir: Path) -> Iterator[Path]:
-    search_root = fly_dir / "angle_distance_rms_envelope"
-    if not search_root.is_dir():
-        search_root = fly_dir
+    base = fly_dir / "angle_distance_rms_envelope"
+    if not base.is_dir():
+        return
+
     seen: set[Path] = set()
     for pattern in ("**/*testing*.csv", "**/*training*.csv"):
-        for csv in search_root.glob(pattern):
-            if csv.is_file():
-                real = csv.resolve()
-                if real not in seen:
-                    seen.add(real)
-                    yield real
+        for csv in base.glob(pattern):
+            if not csv.is_file():
+                continue
+            real = csv.resolve()
+            if real in seen:
+                continue
+            seen.add(real)
+            yield real
 
 
 def _pick_timestamp(df: pd.DataFrame) -> str | None:
@@ -337,6 +577,7 @@ class CombineConfig:
     window_sec: float = 0.25
     odor_on_s: float = 30.0
     odor_off_s: float = 60.0
+    odor_latency_s: float = 0.0
     angle_suffixes: tuple[str, ...] = ("*merged.csv", "*class_2_6.csv")
     distance_suffixes: tuple[str, ...] = ("*merged.csv", "*class_2_6.csv")
 
@@ -346,8 +587,15 @@ class CombineConfig:
 
 
 def combine_distance_angle(cfg: CombineConfig) -> None:
+    odor_latency = max(cfg.odor_latency_s, 0.0)
+    odor_on_cmd = cfg.odor_on_s
+    odor_off_cmd = cfg.odor_off_s
+    odor_on_effective = odor_on_cmd + odor_latency
+    odor_off_effective = odor_off_cmd + odor_latency
+
     for fly_dir in sorted(p for p in cfg.root.iterdir() if p.is_dir()):
         fly_name = fly_dir.name
+        _ensure_angle_percentages(fly_dir, cfg.angle_suffixes)
         angle_entries = _locate_trials(fly_dir, cfg.angle_suffixes, ANGLE_COLS)
         distance_entries = _locate_trials(fly_dir, cfg.distance_suffixes, DIST_COLS)
 
@@ -424,8 +672,21 @@ def combine_distance_angle(cfg: CombineConfig) -> None:
 
                 plt.figure(figsize=(12, 4))
                 plt.plot(time_dist, envelope, linewidth=1.5)
-                plt.axvline(cfg.odor_on_s, color="red", linewidth=2)
-                plt.axvline(cfg.odor_off_s, color="red", linewidth=2)
+                plt.axvline(odor_on_effective, color="red", linewidth=2)
+                plt.axvline(odor_off_effective, color="red", linewidth=2)
+                if odor_latency > 0:
+                    plt.axvspan(
+                        odor_on_cmd,
+                        min(odor_on_effective, time_dist[-1]),
+                        alpha=0.25,
+                        color="red",
+                    )
+                    plt.axvspan(
+                        odor_off_cmd,
+                        min(odor_off_effective, time_dist[-1]),
+                        alpha=0.25,
+                        color="red",
+                    )
                 plt.title(
                     f"{fly_name} — {test_id}: Envelope(RMS(distance × angle-mult))"
                 )
@@ -503,18 +764,73 @@ def secure_copy_and_cleanup(sources: Sequence[str], destination: str) -> None:
     print("\nCleanup completed successfully.")
 
 
+def mirror_directory(source: str | os.PathLike[str], destination: str | os.PathLike[str]) -> tuple[int, int]:
+    """Mirror *source* into *destination*, copying new or changed files.
+
+    Returns a tuple of (files_copied, bytes_copied).
+    """
+
+    src = Path(source).expanduser().resolve()
+    dest = Path(destination).expanduser().resolve()
+    if not src.is_dir():
+        raise FileNotFoundError(f"Mirror source is not a directory: {src}")
+
+    files_copied = 0
+    bytes_copied = 0
+    for path in src.rglob("*"):
+        relative = path.relative_to(src)
+        target = dest / relative
+        if path.is_dir():
+            target.mkdir(parents=True, exist_ok=True)
+            continue
+
+        target.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            needs_copy = True
+            if target.exists():
+                src_stat = path.stat()
+                dest_stat = target.stat()
+                needs_copy = not (
+                    dest_stat.st_size == src_stat.st_size
+                    and int(dest_stat.st_mtime) >= int(src_stat.st_mtime)
+                )
+            if not needs_copy:
+                continue
+            shutil.copy2(path, target)
+            files_copied += 1
+            bytes_copied += path.stat().st_size
+        except Exception as exc:  # pragma: no cover - best effort sync
+            print(f"[WARN] Failed to mirror {path} → {target}: {exc}")
+
+    return files_copied, bytes_copied
+
+
 # ---------------------------------------------------------------------------
 # Wide CSV + float16 matrix
 # ---------------------------------------------------------------------------
 
 
-def build_wide_csv(roots: Sequence[str], output_csv: str, *, measure_cols: Sequence[str]) -> None:
+def build_wide_csv(
+    roots: Sequence[str],
+    output_csv: str,
+    *,
+    measure_cols: Sequence[str],
+    fps_fallback: float = 40.0,
+    exclude_roots: Sequence[str] | None = None,
+) -> None:
     out_path = Path(output_csv).expanduser().resolve()
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
     items: list[dict[str, object]] = []
     max_len = 0
+    exclude = {
+        Path(root).expanduser().resolve() for root in (exclude_roots or ())
+    }
+    exclude |= MANDATORY_WIDE_EXCLUDES
     for root in _normalise_roots(roots):
+        if root in exclude:
+            print(f"[SKIP] Excluding dataset root: {root}")
+            continue
         dataset = root.name
         for fly_dir in sorted(p for p in root.iterdir() if p.is_dir()):
             fly = fly_dir.name
@@ -571,7 +887,7 @@ def build_wide_csv(roots: Sequence[str], output_csv: str, *, measure_cols: Seque
             except Exception as exc:
                 print(f"[WARN] FPS inference failed for {csv_path.name}: {exc}")
         if not np.isfinite(fps):
-            fps = 40.0
+            fps = float(fps_fallback)
 
         try:
             measure = str(item["measure_col"])
@@ -582,10 +898,7 @@ def build_wide_csv(roots: Sequence[str], output_csv: str, *, measure_cols: Seque
             continue
 
         trial_type = _infer_category(csv_path)
-        label = csv_path.stem
-        match = re.search(r"(testing|training)_(\d+)", csv_path.stem, re.IGNORECASE)
-        if match:
-            label = f"{match.group(1).lower()}_{match.group(2)}"
+        label = _trial_label(csv_path)
 
         row = [item["dataset"], item["fly"], trial_type, label, float(fps)] + list(values)
         if len(values) < max_len:
@@ -683,6 +996,7 @@ def overlay_sources(
     threshold_mult: float = 4.0,
     odor_on_s: float = 30.0,
     odor_off_s: float = 60.0,
+    odor_latency_s: float = 0.0,
     overwrite: bool = False,
 ) -> None:
     frames = []
@@ -705,7 +1019,13 @@ def overlay_sources(
     combined = pd.concat(frames, ignore_index=True)
     out_dir = Path(output_dir).expanduser().resolve()
 
-    x_max = odor_off_s + latency_sec + after_show_sec
+    odor_latency = max(odor_latency_s, 0.0)
+    odor_on_cmd = odor_on_s
+    odor_off_cmd = odor_off_s
+    odor_on_effective = odor_on_cmd + odor_latency
+    odor_off_effective = odor_off_cmd + odor_latency
+    linger = max(latency_sec, 0.0)
+    x_max = odor_off_effective + linger + after_show_sec
 
     plt.rcParams.update(
         {
@@ -731,7 +1051,7 @@ def overlay_sources(
         for _, row in df_fly.iterrows():
             env = _extract_env(row, env_cols_by_source[row["_source"]])
             fps = float(row.get("fps", 40.0))
-            baseline_end = min(int(round(odor_on_s * fps)), env.size)
+            baseline_end = min(int(round(odor_on_effective * fps)), env.size)
             if baseline_end:
                 baseline = env[:baseline_end]
                 baseline = baseline[np.isfinite(baseline)]
@@ -757,7 +1077,7 @@ def overlay_sources(
             if t.size == 0:
                 continue
 
-            baseline_end = min(int(round(odor_on_s * fps)), env.size)
+            baseline_end = min(int(round(odor_on_effective * fps)), env.size)
             baseline = env[:baseline_end]
             sigma = float(np.nanstd(baseline)) if baseline.size else math.nan
             mu = mu_lookup.get(row["_source"], math.nan)
@@ -800,16 +1120,21 @@ def overlay_sources(
             entries = trials[trial_label]
             odor_name = entries[0][4]
             is_trained = entries[0][5]
-            ax.axvline(odor_on_s, linestyle="--", linewidth=1.0, color="black")
-            ax.axvline(odor_off_s, linestyle="--", linewidth=1.0, color="black")
-            on_lat_end = min(odor_on_s + latency_sec, x_max)
-            off_lat_end = min(odor_off_s + latency_sec, x_max)
-            if latency_sec > 0:
-                ax.axvspan(odor_on_s, on_lat_end, alpha=0.25, color="red")
-            if off_lat_end > on_lat_end:
-                ax.axvspan(on_lat_end, off_lat_end, alpha=0.15, color="gray")
-            if latency_sec > 0:
-                ax.axvspan(odor_off_s, off_lat_end, alpha=0.25, color="red")
+            ax.axvline(odor_on_effective, linestyle="--", linewidth=1.0, color="black")
+            ax.axvline(odor_off_effective, linestyle="--", linewidth=1.0, color="black")
+
+            transit_on_end = min(odor_on_effective, x_max)
+            transit_off_end = min(odor_off_effective, x_max)
+            if odor_latency > 0:
+                ax.axvspan(odor_on_cmd, transit_on_end, alpha=0.25, color="red")
+                ax.axvspan(odor_off_cmd, transit_off_end, alpha=0.25, color="red")
+
+            steady_off_end = min(odor_off_effective, x_max)
+            linger_off_end = min(odor_off_effective + linger, x_max)
+            if steady_off_end > transit_on_end:
+                ax.axvspan(transit_on_end, steady_off_end, alpha=0.15, color="gray")
+            if linger > 0 and linger_off_end > steady_off_end:
+                ax.axvspan(steady_off_end, linger_off_end, alpha=0.1, color="gray")
 
             for source, t, env_visible, theta, *_ in entries:
                 style = style_map[source]
@@ -831,9 +1156,9 @@ def overlay_sources(
         axes[-1].set_xlabel("Time (s)", fontsize=11)
 
         legend_handles = [
-            plt.Line2D([0], [0], linestyle="--", linewidth=1.0, color="black", label="Valve on/off (command)"),
-            plt.Rectangle((0, 0), 1, 1, alpha=0.25, color="red", label=f"Odor transit (~{latency_sec:.2f}s)"),
-            plt.Rectangle((0, 0), 1, 1, alpha=0.15, color="gray", label="Effective odor-on at fly"),
+            plt.Line2D([0], [0], linestyle="--", linewidth=1.0, color="black", label="Odor at fly"),
+            plt.Rectangle((0, 0), 1, 1, alpha=0.25, color="red", label=f"Valve→fly transit (~{odor_latency:.2f}s)"),
+            plt.Rectangle((0, 0), 1, 1, alpha=0.15, color="gray", label="Odor present"),
             plt.Line2D([0], [0], linestyle=":", linewidth=1.0, color="black", label=r"$\theta=\mu_{global}+k\sigma_{trial}$"),
         ]
         for tag, style in style_map.items():
@@ -878,6 +1203,12 @@ def build_parser() -> argparse.ArgumentParser:
     combine_parser.add_argument("--window-sec", type=float, default=0.25)
     combine_parser.add_argument("--odor-on", type=float, default=30.0)
     combine_parser.add_argument("--odor-off", type=float, default=60.0)
+    combine_parser.add_argument(
+        "--odor-latency",
+        type=float,
+        default=0.0,
+        help="Transit delay between valve command and odor at the fly (seconds).",
+    )
 
     copy_parser = subparsers.add_parser("secure-sync", help="Copy datasets then clean source directories.")
     copy_parser.add_argument("--source", action="append", required=True, help="Source directory (repeatable).")
@@ -886,6 +1217,25 @@ def build_parser() -> argparse.ArgumentParser:
     wide_parser = subparsers.add_parser("wide", help="Build wide CSV of direction values.")
     wide_parser.add_argument("--root", action="append", required=True, help="Root directory (repeatable).")
     wide_parser.add_argument("--output-csv", required=True, help="Destination CSV path.")
+    wide_parser.add_argument(
+        "--measure-col",
+        dest="measure_cols",
+        action="append",
+        default=None,
+        help="Measurement column to extract (repeatable).",
+    )
+    wide_parser.add_argument(
+        "--fps-fallback",
+        type=float,
+        default=40.0,
+        help="Fallback FPS when timestamps/frames cannot infer it.",
+    )
+    wide_parser.add_argument(
+        "--exclude-root",
+        action="append",
+        default=None,
+        help="Root directory to exclude from aggregation (repeatable).",
+    )
 
     matrix_parser = subparsers.add_parser("matrix", help="Convert wide CSV → float16 matrix + metadata.")
     matrix_parser.add_argument("--input-csv", required=True)
@@ -922,6 +1272,12 @@ def build_parser() -> argparse.ArgumentParser:
     overlay_parser.add_argument("--latency-sec", type=float, default=0.0)
     overlay_parser.add_argument("--after-show-sec", type=float, default=30.0)
     overlay_parser.add_argument("--threshold-std-mult", type=float, default=4.0)
+    overlay_parser.add_argument(
+        "--odor-latency-s",
+        type=float,
+        default=0.0,
+        help="Transit delay between valve command and odor at the fly (seconds).",
+    )
     overlay_parser.add_argument("--overwrite", action="store_true", help="Rebuild plots even if the target files exist.")
 
     return parser
@@ -938,6 +1294,7 @@ def main(argv: Sequence[str] | None = None) -> None:
             window_sec=args.window_sec,
             odor_on_s=args.odor_on,
             odor_off_s=args.odor_off,
+            odor_latency_s=args.odor_latency,
         )
         combine_distance_angle(cfg)
         return
@@ -947,7 +1304,14 @@ def main(argv: Sequence[str] | None = None) -> None:
         return
 
     if args.command == "wide":
-        build_wide_csv(args.root, args.output_csv, measure_cols=["envelope_of_rms"])
+        measure_cols = args.measure_cols or ["envelope_of_rms"]
+        build_wide_csv(
+            args.root,
+            args.output_csv,
+            measure_cols=measure_cols,
+            fps_fallback=args.fps_fallback,
+            exclude_roots=args.exclude_root,
+        )
         return
 
     if args.command == "matrix":
@@ -986,6 +1350,7 @@ def main(argv: Sequence[str] | None = None) -> None:
             fps_default=args.fps_default,
             odor_on_s=args.odor_on_s,
             odor_off_s=args.odor_off_s,
+            odor_latency_s=args.odor_latency_s,
             after_show_sec=args.after_show_sec,
             threshold_std_mult=args.threshold_std_mult,
             overwrite=args.overwrite,
@@ -1009,6 +1374,7 @@ def main(argv: Sequence[str] | None = None) -> None:
             after_show_sec=args.after_show_sec,
             output_dir=args.out_dir,
             threshold_mult=args.threshold_std_mult,
+            odor_latency_s=args.odor_latency_s,
             overwrite=args.overwrite,
         )
         return

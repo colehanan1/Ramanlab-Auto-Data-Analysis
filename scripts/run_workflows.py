@@ -25,7 +25,9 @@ from scripts.envelope_combined import (
     CombineConfig,
     build_wide_csv,
     combine_distance_angle,
+    mirror_directory,
     overlay_sources,
+    secure_copy_and_cleanup,
     wide_to_matrix,
 )
 
@@ -113,19 +115,49 @@ def _run_combined(cfg: Mapping[str, Any] | None) -> None:
     if combine_cfg:
         opts = dict(combine_cfg)
         opts["root"] = _ensure_path(opts.get("root"), "root")
+        if "odor_on" in opts and "odor_on_s" not in opts:
+            opts["odor_on_s"] = float(opts.pop("odor_on"))
+        if "odor_off" in opts and "odor_off_s" not in opts:
+            opts["odor_off_s"] = float(opts.pop("odor_off"))
+        if "odor_latency" in opts and "odor_latency_s" not in opts:
+            opts["odor_latency_s"] = float(opts.pop("odor_latency"))
         config = CombineConfig(**opts)  # type: ignore[arg-type]
         print(f"[analysis] combined.combine → {config.root}")
         combine_distance_angle(config)
 
     wide_cfg = cfg.get("wide")
     if wide_cfg:
+        mirror_cfg = wide_cfg.get("mirror")
+        if mirror_cfg:
+            entries = mirror_cfg if isinstance(mirror_cfg, Sequence) else [mirror_cfg]
+            for entry in entries:
+                src = _ensure_path(entry.get("source"), "mirror.source")
+                dest = _ensure_path(entry.get("destination"), "mirror.destination")
+                print(f"[analysis] combined.mirror → {dest}")
+                copied, bytes_copied = mirror_directory(str(src), str(dest))
+                size_mb = bytes_copied / (1024 * 1024) if bytes_copied else 0.0
+                print(
+                    f"[analysis] combined.mirror copied {copied} file(s) "
+                    f"({size_mb:.1f} MiB)."
+                )
         roots = [str(_ensure_path(root, "roots")) for root in wide_cfg.get("roots", [])]
         if not roots:
             raise ValueError("combined.wide.roots must list at least one directory.")
         output_csv = _ensure_path(wide_cfg.get("output_csv"), "output_csv")
         measure_cols = wide_cfg.get("measure_cols") or ["envelope_of_rms"]
+        fps_fallback = float(wide_cfg.get("fps_fallback", 40.0))
+        exclude_cfg = [
+            str(_ensure_path(path, "exclude_roots"))
+            for path in wide_cfg.get("exclude_roots", [])
+        ]
         print(f"[analysis] combined.wide → {output_csv}")
-        build_wide_csv(roots, str(output_csv), measure_cols=measure_cols)
+        build_wide_csv(
+            roots,
+            str(output_csv),
+            measure_cols=measure_cols,
+            fps_fallback=fps_fallback,
+            exclude_roots=exclude_cfg,
+        )
 
     matrix_cfg = cfg.get("matrix")
     if matrix_cfg:
@@ -156,6 +188,9 @@ def _run_combined(cfg: Mapping[str, Any] | None) -> None:
         latency_sec = float(overlay_cfg.get("latency_sec", 0.0))
         after_show = float(overlay_cfg.get("after_show_sec", 30.0))
         thresh = float(overlay_cfg.get("threshold_std_mult", 4.0))
+        odor_on = float(overlay_cfg.get("odor_on_s", 30.0))
+        odor_off = float(overlay_cfg.get("odor_off_s", 60.0))
+        odor_latency = float(overlay_cfg.get("odor_latency_s", overlay_cfg.get("odor_latency", 0.0)))
         overwrite = bool(overlay_cfg.get("overwrite", False))
         print(f"[analysis] combined.overlay → {out_dir}")
         overlay_sources(
@@ -173,8 +208,21 @@ def _run_combined(cfg: Mapping[str, Any] | None) -> None:
             after_show_sec=after_show,
             output_dir=str(out_dir),
             threshold_mult=thresh,
+            odor_on_s=odor_on,
+            odor_off_s=odor_off,
+            odor_latency_s=odor_latency,
             overwrite=overwrite,
         )
+
+    secure_cfg = cfg.get("secure_cleanup")
+    if secure_cfg:
+        sources = secure_cfg.get("sources") or []
+        if not sources:
+            raise ValueError("combined.secure_cleanup.sources must list at least one directory.")
+        dest = _ensure_path(secure_cfg.get("destination"), "secure_cleanup.destination")
+        resolved_sources = [str(_ensure_path(src, "secure_cleanup.sources")) for src in sources]
+        print(f"[analysis] combined.secure_cleanup → {dest}")
+        secure_copy_and_cleanup(resolved_sources, str(dest))
 
 
 def _run_pipeline(config_path: Path) -> None:

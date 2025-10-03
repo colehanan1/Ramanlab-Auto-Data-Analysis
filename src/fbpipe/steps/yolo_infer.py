@@ -4,7 +4,6 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 from ultralytics import YOLO
 import torch
-import os
 import gc  # Add this import
 
 from ..config import Settings
@@ -129,27 +128,59 @@ def _is_cuda_failure(exc: Exception) -> bool:
 
 
 def main(cfg: Settings):
-    allocator_was_set = False
-    if torch.cuda.is_available() and "PYTORCH_CUDA_ALLOC_CONF" not in os.environ:
-        os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments=True"
-        allocator_was_set = True
-    torch.backends.cudnn.benchmark = True
-    torch.backends.cuda.matmul.allow_tf32 = cfg.cuda_allow_tf32
-    torch.backends.cudnn.allow_tf32 = cfg.cuda_allow_tf32
-    if not torch.cuda.is_available() and not cfg.allow_cpu:
+    cuda_available = torch.cuda.is_available()
+    use_cuda = cuda_available and not cfg.allow_cpu
+
+    torch.backends.cudnn.benchmark = use_cuda
+    if cuda_available:
+        torch.backends.cuda.matmul.allow_tf32 = cfg.cuda_allow_tf32
+        torch.backends.cudnn.allow_tf32 = cfg.cuda_allow_tf32
+
+    if not cuda_available and not cfg.allow_cpu:
         raise RuntimeError("CUDA is not available. Set allow_cpu: true only for smoke tests.")
 
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    if cfg.allow_cpu and cuda_available and not use_cuda:
+        log.warning("allow_cpu is enabled; forcing YOLO inference to run on CPU.")
+
     model = YOLO(cfg.model_path)
+    device_in_use: Optional[str] = None
+
+    def _set_device(target: str):
+        nonlocal device_in_use
+        if device_in_use == target:
+            return
+        if target == "cpu":
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        model.to(target)
+        device_in_use = target
+
+    target_device = "cuda" if use_cuda else "cpu"
     try:
-        model.to(device)
+        _set_device(target_device)
     except RuntimeError as exc:
-        if "expandable_segments" in str(exc) and allocator_was_set:
-            log.warning("CUDA allocator does not support expandable_segments; retrying without it.")
-            os.environ.pop("PYTORCH_CUDA_ALLOC_CONF", None)
-            gc.collect()  # Force garbage collection before retry
-            model.to(device)
+        if target_device == "cuda":
+            if cfg.allow_cpu and _is_cuda_failure(exc):
+                log.warning("CUDA initialisation failed (%s); falling back to CPU.", exc)
+                _set_device("cpu")
+            else:
+                raise
         else:
+            raise
+
+    if device_in_use is None:
+        raise RuntimeError("Failed to initialise YOLO device")
+
+    def predict_fn(image, conf_thres):
+        nonlocal device_in_use
+        try:
+            return model.predict(image, conf=conf_thres, verbose=False, device=device_in_use)
+        except RuntimeError as exc:
+            if device_in_use == "cuda" and cfg.allow_cpu and _is_cuda_failure(exc):
+                log.warning("CUDA inference failed (%s); switching to CPU for the rest of the run.", exc)
+                _set_device("cpu")
+                return model.predict(image, conf=conf_thres, verbose=False, device=device_in_use)
             raise
 
     AX, AY = cfg.anchor_x, cfg.anchor_y
@@ -166,11 +197,11 @@ def main(cfg: Settings):
             parts = base.split("_")
             folder_name = "_".join(parts[1:7]) if len(parts)>=7 else base
             out_dir = fly / folder_name
+            if out_dir.exists():
+                print(f"[YOLO] Skipping {video_path.name}: detected processed folder {out_dir.name}")
+                continue
             out_dir.mkdir(exist_ok=True)
             out_mp4 = out_dir / f"{folder_name}_distance_annotated.mp4"
-            if out_mp4.exists():
-                print(f"[YOLO] Skipping (exists): {out_mp4}")
-                continue
 
             cap = cv2.VideoCapture(str(video_path))
             if not cap.isOpened():

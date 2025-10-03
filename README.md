@@ -103,7 +103,7 @@ python -m fbpipe.steps.distance_stats --config config.yaml
 
 ## GPU requirements
 
-The pipeline expects a CUDA-capable GPU. If CUDA initialisation fails or the driver is unstable, the YOLO step will automatically fall back to CPU inference (with a warning) so long as `allow_cpu` is enabled. CPU mode is significantly slower and should be reserved for debugging or smoke tests.
+The pipeline expects a CUDA-capable GPU for production workloads. Setting `allow_cpu: true` (or `ALLOW_CPU=true` via environment) now **forces** the YOLO step to run entirely on CPU, which is useful for smoke tests or when the local CUDA stack is unstable. If CUDA initialisation or inference fails while GPU mode is requested and `allow_cpu` is enabled, the step logs a warning and permanently switches to CPU for the rest of the run. CPU mode is significantly slower and should only be used for debugging.
 
 ## Notes
 
@@ -111,3 +111,35 @@ The pipeline expects a CUDA-capable GPU. If CUDA initialisation fails or the dri
 - RMS/Envelope calculations ignore values outside `[0, 100]` and NaNs.
 - Video overlay deletes source trial videos after composing by default; toggle in `config.yaml`.
 - See `docs/pipeline_overview.md` for a deeper look at how the steps are orchestrated.
+
+## Nightly automation
+
+To run the full pipeline every night at midnight, use the bundled cron helpers:
+
+1. Ensure the Conda environment you use for the project (default: `yolo-env`) is available in non-interactive shells.
+2. From the repository root, install/update the cron job:
+
+   ```bash
+   ./scripts/install_midnight_cron.sh
+   ```
+
+   The installer writes a `0 0 * * *` entry that launches `make run` via
+   `scripts/nightly_make_run.sh`, appending logs to `logs/nightly_make_run.log`.
+
+3. Adjust behaviour via environment variables when invoking the installer:
+
+   ```bash
+   YOLO_ENV_NAME=my-env ./scripts/install_midnight_cron.sh
+   ```
+
+   This overrides the Conda environment activated before `make run` executes.
+
+4. Inspect or prune the cron entry with standard tooling:
+
+   ```bash
+   crontab -l        # list entries (should include the "Ramanlab Auto Data Analysis" marker)
+   crontab -e        # edit manually if needed
+   ```
+
+To remove the scheduled run entirely, delete the two lines marked with the
+`Ramanlab Auto Data Analysis nightly make run` comment from your crontab.

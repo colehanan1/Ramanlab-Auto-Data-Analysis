@@ -111,7 +111,7 @@ python -m fbpipe.steps.distance_stats --config config.yaml
 
 ## GPU requirements
 
-The pipeline expects a CUDA-capable GPU. Set `allow_cpu: true` (or `ALLOW_CPU=true` in `.env`) **only** for smoke tests—performance will be poor.
+The pipeline expects a CUDA-capable GPU. Set `allow_cpu: true` (or `ALLOW_CPU=true` in `.env`) to force CPU execution for smoke tests or to bypass unstable CUDA drivers. Performance will be poor.
 
 ## Notes
 
