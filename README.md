@@ -116,7 +116,9 @@ The pipeline expects a CUDA-capable GPU for production workloads. Setting `allow
 
 To run the full pipeline every night at midnight, use the bundled cron helpers:
 
-1. Ensure the Conda environment you use for the project (default: `yolo-env`) is available in non-interactive shells.
+1. Ensure the Conda environment you use for the project (default: `yolo-env`) is available in non-interactive shells. If `conda`
+   is not on cron's `PATH`, export `CONDA_BASE=/path/to/miniconda3` (or similar) before installing the job so the nightly
+   wrapper can source the correct `conda.sh`.
 2. From the repository root, install/update the cron job:
 
    ```bash
