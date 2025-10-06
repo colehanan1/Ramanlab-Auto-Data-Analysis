@@ -1051,7 +1051,7 @@ def overlay_sources(
         for _, row in df_fly.iterrows():
             env = _extract_env(row, env_cols_by_source[row["_source"]])
             fps = float(row.get("fps", 40.0))
-            baseline_end = min(int(round(odor_on_effective * fps)), env.size)
+            baseline_end = min(int(round(odor_on_cmd * fps)), env.size)
             if baseline_end:
                 baseline = env[:baseline_end]
                 baseline = baseline[np.isfinite(baseline)]
@@ -1077,7 +1077,7 @@ def overlay_sources(
             if t.size == 0:
                 continue
 
-            baseline_end = min(int(round(odor_on_effective * fps)), env.size)
+            baseline_end = min(int(round(odor_on_cmd * fps)), env.size)
             baseline = env[:baseline_end]
             sigma = float(np.nanstd(baseline)) if baseline.size else math.nan
             mu = mu_lookup.get(row["_source"], math.nan)
