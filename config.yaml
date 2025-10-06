@@ -108,15 +108,15 @@ analysis:
         - "/securedstorage/DATAsec/cole/Data-secured/opto_EB/"
         - "/securedstorage/DATAsec/cole/Data-secured/opto_benz_1/"
         - "/securedstorage/DATAsec/cole/Data-secured/opto_hex/"
-      output_csv: "/home/ramanlab/Documents/cole/Results/Opto/Combined/all_envelope_rows_wide.csv"
+      output_csv: "/home/ramanlab/Documents/cole/Data/Opto/Combined/all_envelope_rows_wide.csv"
       measure_cols: ["envelope_of_rms"]
       fps_fallback: 40.0
     matrix:
-      input_csv: "/home/ramanlab/Documents/cole/Results/Opto/Combined/all_envelope_rows_wide.csv"
-      out_dir: "/home/ramanlab/Documents/cole/Results/Opto/Combined/matrix"
+      input_csv: "/home/ramanlab/Documents/cole/Data/Opto/Combined/all_envelope_rows_wide.csv"
+      out_dir: "/home/ramanlab/Documents/cole/Data/Opto/Combined/matrix"
     matrices:
-      matrix_npy: "/home/ramanlab/Documents/cole/Results/Opto/Combined/matrix/envelope_matrix_float16.npy"
-      codes_json: "/home/ramanlab/Documents/cole/Results/Opto/Combined/matrix/code_maps.json"
+      matrix_npy: "/home/ramanlab/Documents/cole/Data/Opto/Combined/matrix/envelope_matrix_float16.npy"
+      codes_json: "/home/ramanlab/Documents/cole/Data/Opto/Combined/matrix/code_maps.json"
       out_dir: "/home/ramanlab/Documents/cole/Results/Opto/Combined/Reaction_Matrices"
       latency_sec: 0.0
       fps_default: 40.0
@@ -132,8 +132,8 @@ analysis:
       include_hexanol: true
       overwrite: false
     envelopes:
-      matrix_npy: "/home/ramanlab/Documents/cole/Results/Opto/Combined/matrix/envelope_matrix_float16.npy"
-      codes_json: "/home/ramanlab/Documents/cole/Results/Opto/Combined/matrix/code_maps.json"
+      matrix_npy: "/home/ramanlab/Documents/cole/Data/Opto/Combined/matrix/envelope_matrix_float16.npy"
+      codes_json: "/home/ramanlab/Documents/cole/Data/Opto/Combined/matrix/code_maps.json"
       out_dir: "/home/ramanlab/Documents/cole/Results/Opto/Combined/Envelopes"
       latency_sec: 0.0
       fps_default: 40.0
@@ -144,8 +144,8 @@ analysis:
       threshold_std_mult: 4.0
       overwrite: false
     overlay:
-      combined_matrix: "/home/ramanlab/Documents/cole/Results/Opto/Combined/matrix/envelope_matrix_float16.npy"
-      combined_codes: "/home/ramanlab/Documents/cole/Results/Opto/Combined/matrix/code_maps.json"
+      combined_matrix: "/home/ramanlab/Documents/cole/Data/Opto/Combined/matrix/envelope_matrix_float16.npy"
+      combined_codes: "/home/ramanlab/Documents/cole/Data/Opto/Combined/matrix/code_maps.json"
       distance_matrix: "/home/ramanlab/Documents/cole/Data/single_matrix_opto/envelope_matrix_float16.npy"
       distance_codes: "/home/ramanlab/Documents/cole/Data/single_matrix_opto/code_maps.json"
       out_dir: "/home/ramanlab/Documents/cole/Results/Opto/Combined/Overlay"
@@ -159,8 +159,6 @@ analysis:
     secure_cleanup:
       destination: "/securedstorage/DATAsec/cole/Data-secured/"
       sources:
-        - "/home/ramanlab/Documents/cole/Data/flys/10s_Odor_Benz/"
-        - "/home/ramanlab/Documents/cole/Data/flys/opto_benz/"
         - "/home/ramanlab/Documents/cole/Data/flys/opto_EB/"
         - "/home/ramanlab/Documents/cole/Data/flys/opto_benz_1/"
         - "/home/ramanlab/Documents/cole/Data/flys/opto_hex/"
