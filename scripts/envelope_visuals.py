@@ -222,12 +222,18 @@ def _extract_env_row(env_row: np.ndarray) -> np.ndarray:
     return env[mask]
 
 
-def _compute_theta(env: np.ndarray, fps: float, odor_on_s: float, std_mult: float) -> float:
+def _compute_theta(
+    env: np.ndarray, fps: float, baseline_until_s: float, std_mult: float
+) -> float:
+    """Compute the response threshold using only the pre-command baseline."""
+
     if env.size == 0 or fps <= 0:
         return math.nan
-    before_end = min(int(round(odor_on_s * fps)), env.size)
+
+    before_end = min(int(round(baseline_until_s * fps)), env.size)
     if before_end <= 0:
         return math.nan
+
     window = env[:before_end]
     return float(np.nanmean(window) + std_mult * np.nanstd(window))
 
@@ -677,7 +683,7 @@ def generate_envelope_plots(cfg: EnvelopePlotConfig) -> None:
             if env.size == 0:
                 continue
 
-            theta = _compute_theta(env, fps, odor_on_effective, cfg.threshold_std_mult)
+            theta = _compute_theta(env, fps, odor_on_cmd, cfg.threshold_std_mult)
             dataset_canon = dataset_lookup[idx]
             odor_name = _display_odor(dataset_canon, trial_lookup[idx])
             is_trained = _is_trained_odor(dataset_canon, odor_name)
