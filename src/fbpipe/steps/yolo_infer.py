@@ -103,6 +103,48 @@ def _prepare_single_class_input(
     return boxes[[best_idx]], scores[[best_idx]], selected_corners
 
 
+def _scan_initial_fly_count(
+    cap,
+    max_frames: int,
+    target_size: Tuple[int, int],
+    settings: Settings,
+    predict_fn,
+):
+    """Infer the number of flies present using the first ``max_frames`` frames."""
+
+    eye_mgr = EyeAnchorManager(max_eyes=settings.max_flies, zero_iou_eps=settings.zero_iou_epsilon)
+    frames_checked = 0
+    target_w, target_h = target_size
+
+    while frames_checked < max_frames:
+        ok, frame = cap.read()
+        if not ok:
+            break
+
+        h, w = frame.shape[:2]
+        if (w, h) != (target_w, target_h):
+            frame = cv2.resize(frame, (target_w, target_h), interpolation=cv2.INTER_LINEAR)
+
+        result = predict_fn(frame, settings.conf_thres)[0]
+        dets = _collect_detections(result)
+        cls2_boxes = dets.get(EYE_CLASS, {}).get("boxes", np.zeros((0, 4), np.float32))
+        cls2_scores = dets.get(EYE_CLASS, {}).get("scores", np.zeros((0,), np.float32))
+        cls2_boxes, cls2_scores = enforce_zero_iou_and_topk(
+            cls2_boxes,
+            cls2_scores,
+            settings.max_flies,
+            eps=settings.zero_iou_epsilon,
+        )
+
+        eye_mgr.try_update_from_dets(cls2_boxes, cls2_scores)
+        frames_checked += 1
+
+        if eye_mgr.confirmed:
+            break
+
+    return len(eye_mgr.anchor_ids)
+
+
 def _process_frame(
     frame,
     frame_number,
@@ -115,6 +157,7 @@ def _process_frame(
     eye_mgr: EyeAnchorManager,
     cls8_tracker: MultiObjectTracker,
     pairer: StablePairing,
+    active_max_flies: int,
 ):
     conf_thres = settings.conf_thres
     flow_params = dict(pyr_scale=0.5, levels=3, winsize=15, iterations=3, poly_n=5, poly_sigma=1.2, flags=0)
@@ -150,7 +193,7 @@ def _process_frame(
     cls2_boxes, cls2_scores = enforce_zero_iou_and_topk(
         cls2_boxes,
         cls2_scores,
-        settings.max_flies,
+        active_max_flies,
         eps=settings.zero_iou_epsilon,
     )
     eye_mgr.try_update_from_dets(cls2_boxes, cls2_scores)
@@ -259,9 +302,15 @@ def _process_frame(
     return frame, row, gray
 
 
-def _export_per_fly_csvs(df: pd.DataFrame, out_dir: Path, folder_name: str, cfg: Settings) -> List[Path]:
+def _export_per_fly_csvs(
+    df: pd.DataFrame,
+    out_dir: Path,
+    folder_name: str,
+    cfg: Settings,
+    active_max_flies: int,
+) -> List[Path]:
     per_fly_paths: List[Path] = []
-    for idx in range(cfg.max_flies):
+    for idx in range(active_max_flies):
         eye_x_col = f"eye_{idx}_x"
         if eye_x_col not in df.columns or df[eye_x_col].notna().sum() == 0:
             continue
@@ -386,6 +435,31 @@ def main(cfg: Settings):
                 print(f"[YOLO] Cannot open {video_path}")
                 continue
 
+            original_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)) or 1080
+            original_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) or 1080
+            target_w, target_h = (1080, 1080) if (original_w, original_h) != (1080, 1080) else (original_w, original_h)
+
+            scan_frames = 5
+            detected_flies = _scan_initial_fly_count(cap, scan_frames, (target_w, target_h), cfg, predict_fn)
+            if not cap.set(cv2.CAP_PROP_POS_FRAMES, 0):
+                cap.release()
+                cap = cv2.VideoCapture(str(video_path))
+                if not cap.isOpened():
+                    print(f"[YOLO] Cannot reopen {video_path} after warm-up scan")
+                    continue
+
+            if detected_flies == 0:
+                print(
+                    f"[YOLO] {video_path.name}: no eyes detected in first {scan_frames} frames; "
+                    f"using configured max ({cfg.max_flies})."
+                )
+                active_max_flies = cfg.max_flies
+            else:
+                active_max_flies = min(detected_flies, cfg.max_flies)
+                print(
+                    f"[YOLO] {video_path.name}: detected {active_max_flies} fly/fly slots from first {scan_frames} frames."
+                )
+
             total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) or 0
             max_frame = total_frames-1 if total_frames>0 else 10**9
             timestamps = {}
@@ -421,14 +495,14 @@ def main(cfg: Settings):
                 )
                 for cls in SINGLE_TRACK_CLASSES
             }
-            eye_mgr = EyeAnchorManager(max_eyes=cfg.max_flies, zero_iou_eps=cfg.zero_iou_epsilon)
+            eye_mgr = EyeAnchorManager(max_eyes=active_max_flies, zero_iou_eps=cfg.zero_iou_epsilon)
             cls8_tracker = MultiObjectTracker(
                 iou_thres=cfg.iou_match_thres,
                 max_age=cfg.max_age,
                 ema_alpha=cfg.ema_alpha,
                 max_tracks=cfg.max_proboscis_tracks,
             )
-            pairer = StablePairing(max_pairs=cfg.max_flies)
+            pairer = StablePairing(max_pairs=active_max_flies)
 
             target_w, target_h = (1080, 1080) if (w, h) != (1080, 1080) else (w, h)
             pairer.rebind_max_dist_px = cfg.pair_rebind_ratio * math.hypot(target_w, target_h)
@@ -455,6 +529,7 @@ def main(cfg: Settings):
                     eye_mgr,
                     cls8_tracker,
                     pairer,
+                    active_max_flies,
                 )
                 writer.write(frame)
                 rows.append(row)
@@ -464,7 +539,7 @@ def main(cfg: Settings):
             merged_csv_path = out_dir / f"{folder_name}_distances_merged.csv"
             df_rows.to_csv(merged_csv_path, index=False)
 
-            per_fly_paths = _export_per_fly_csvs(df_rows, out_dir, folder_name, cfg)
+            per_fly_paths = _export_per_fly_csvs(df_rows, out_dir, folder_name, cfg, active_max_flies)
 
             extra_msg = ""
             if per_fly_paths:
