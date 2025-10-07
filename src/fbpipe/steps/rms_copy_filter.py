@@ -4,6 +4,7 @@ import glob
 from pathlib import Path
 import pandas as pd
 from ..config import Settings
+from ..utils.columns import find_proboscis_distance_percentage_column, find_proboscis_xy_columns
 
 def main(cfg: Settings):
     root = Path(cfg.main_directory).expanduser().resolve()
@@ -17,8 +18,15 @@ def main(cfg: Settings):
                 continue
             try:
                 df = pd.read_csv(p)
-                cols = ["frame", "timestamp", "x_class2","y_class2","x_class6","y_class6","distance_percentage_2_6"]
-                cols = [c for c in cols if c in df.columns]
+                cols = [c for c in ("frame", "timestamp", "x_class2", "y_class2") if c in df.columns]
+                x_prob, y_prob = find_proboscis_xy_columns(df)
+                if x_prob and x_prob not in cols:
+                    cols.append(x_prob)
+                if y_prob and y_prob not in cols:
+                    cols.append(y_prob)
+                pct_col = find_proboscis_distance_percentage_column(df)
+                if pct_col and pct_col not in cols:
+                    cols.append(pct_col)
                 out = dest / ("updated_" + p.name)
                 df[cols].to_csv(out, index=False)
                 print(f"[RMS] {p.name} → {out.name}")

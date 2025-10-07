@@ -12,6 +12,10 @@ from PIL import Image
 from moviepy.editor import CompositeVideoClip, VideoClip, VideoFileClip
 
 from ..config import Settings
+from ..utils.columns import (
+    find_proboscis_distance_percentage_column,
+    find_proboscis_xy_columns,
+)
 
 # Display defaults mirror the notebook example
 plt.rcParams.update(
@@ -118,11 +122,16 @@ def timestamp_to_seconds(value) -> float:
     return float("nan")
 
 
+def _normalise_column_name(name: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "", str(name).lower())
+
+
 def find_col(df: pd.DataFrame, candidates: List[str]) -> Optional[str]:
-    cols = set(df.columns)
+    lookup = {_normalise_column_name(col): col for col in df.columns}
     for cand in candidates:
-        if cand in cols:
-            return cand
+        key = _normalise_column_name(cand)
+        if key in lookup:
+            return lookup[key]
     return None
 
 
@@ -189,13 +198,15 @@ def odor_window_from_ofm(df: pd.DataFrame, time_col: str) -> Optional[Tuple[floa
 
 
 def compute_angle_deg_at_point2(df: pd.DataFrame) -> pd.Series:
-    required = {"x_class2", "y_class2", "x_class6", "y_class6"}
-    if not required.issubset(df.columns):
+    x2_col = find_col(df, ["x_class2", "x_class_2", "class2_x"])
+    y2_col = find_col(df, ["y_class2", "y_class_2", "class2_y"])
+    x_prob, y_prob = find_proboscis_xy_columns(df)
+    if not all((x2_col, y2_col, x_prob, y_prob)):
         raise ValueError("Missing columns for angle computation")
-    p2x = df["x_class2"].astype(float).to_numpy()
-    p2y = df["y_class2"].astype(float).to_numpy()
-    p3x = df["x_class6"].astype(float).to_numpy()
-    p3y = df["y_class6"].astype(float).to_numpy()
+    p2x = pd.to_numeric(df[x2_col], errors="coerce").to_numpy()
+    p2y = pd.to_numeric(df[y2_col], errors="coerce").to_numpy()
+    p3x = pd.to_numeric(df[x_prob], errors="coerce").to_numpy()
+    p3y = pd.to_numeric(df[y_prob], errors="coerce").to_numpy()
     ux, uy = (ANCHOR_X - p2x), (ANCHOR_Y - p2y)
     vx, vy = (p3x - p2x), (p3y - p2y)
     dot = ux * vx + uy * vy
@@ -214,8 +225,6 @@ def find_fly_reference_angle(csvs_raw: List[Path]) -> float:
         try:
             df = pd.read_csv(path)
         except Exception:
-            continue
-        if not {"x_class2", "y_class2", "x_class6", "y_class6"}.issubset(df.columns):
             continue
         try:
             angle = compute_angle_deg_at_point2(df)
@@ -257,8 +266,6 @@ def compute_fly_max_abs_centered(csvs_raw: List[Path], ref_angle: float) -> floa
         try:
             df = pd.read_csv(path)
         except Exception:
-            continue
-        if not {"x_class2", "y_class2", "x_class6", "y_class6"}.issubset(df.columns):
             continue
         try:
             angle = compute_angle_deg_at_point2(df)
@@ -581,16 +588,9 @@ def _series_rms_from_rmscalc(
     odor_on, odor_off = odor_window
     total_duration = pre_sec + (odor_off - odor_on) + post_sec
 
-    pct_col = find_col(
-        df,
-        [
-            "distance_class1_class2_pct",
-            "distance_percentage",
-            "distance_percent",
-            "distance_pct",
-            "distance_percentage_2_6",
-        ],
-    )
+    pct_col = find_proboscis_distance_percentage_column(df)
+    if pct_col is None:
+        pct_col = find_col(df, ["distance_class1_class2_pct"])
     if pct_col is None:
         return None
 

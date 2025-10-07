@@ -62,9 +62,11 @@ MONTHS = (
 
 ANGLE_COLS = ["angle_centered_pct", "angle_centered_percentage", "angle_pct"]
 DIST_COLS = [
-    "distance_percentage_2_6",
+    "distance_percentage_2_8",
     "distance_percentage",
+    "distance_percent",
     "distance_pct",
+    "distance_percentage_2_6",
     "measure",
     "value",
 ]
@@ -309,15 +311,33 @@ def _resolve_column_alias(df: pd.DataFrame, *aliases: str) -> str | None:
 def _compute_angle_deg(df: pd.DataFrame) -> pd.Series:
     x2_col = _resolve_column_alias(df, "x_class2", "x_class_2", "class2_x")
     y2_col = _resolve_column_alias(df, "y_class2", "y_class_2", "class2_y")
-    x6_col = _resolve_column_alias(df, "x_class6", "x_class_6", "class6_x")
-    y6_col = _resolve_column_alias(df, "y_class6", "y_class_6", "class6_y")
-    if not all((x2_col, y2_col, x6_col, y6_col)):
-        raise ValueError("Missing class2/class6 coordinate columns for angle computation.")
+    x_prob_col = _resolve_column_alias(
+        df,
+        "x_class8",
+        "x_class_8",
+        "class8_x",
+        "x_proboscis",
+        "x_class6",
+        "x_class_6",
+        "class6_x",
+    )
+    y_prob_col = _resolve_column_alias(
+        df,
+        "y_class8",
+        "y_class_8",
+        "class8_y",
+        "y_proboscis",
+        "y_class6",
+        "y_class_6",
+        "class6_y",
+    )
+    if not all((x2_col, y2_col, x_prob_col, y_prob_col)):
+        raise ValueError("Missing class2/proboscis coordinate columns for angle computation.")
 
     p2x = pd.to_numeric(df[x2_col], errors="coerce").astype(float)
     p2y = pd.to_numeric(df[y2_col], errors="coerce").astype(float)
-    p3x = pd.to_numeric(df[x6_col], errors="coerce").astype(float)
-    p3y = pd.to_numeric(df[y6_col], errors="coerce").astype(float)
+    p3x = pd.to_numeric(df[x_prob_col], errors="coerce").astype(float)
+    p3y = pd.to_numeric(df[y_prob_col], errors="coerce").astype(float)
 
     ux = ANCHOR_X - p2x
     uy = ANCHOR_Y - p2y
@@ -578,8 +598,8 @@ class CombineConfig:
     odor_on_s: float = 30.0
     odor_off_s: float = 60.0
     odor_latency_s: float = 0.0
-    angle_suffixes: tuple[str, ...] = ("*merged.csv", "*class_2_6.csv")
-    distance_suffixes: tuple[str, ...] = ("*merged.csv", "*class_2_6.csv")
+    angle_suffixes: tuple[str, ...] = ("*merged.csv", "*class_2_8.csv", "*class_2_6.csv")
+    distance_suffixes: tuple[str, ...] = ("*merged.csv", "*class_2_8.csv", "*class_2_6.csv")
 
     @property
     def window_frames(self) -> int:

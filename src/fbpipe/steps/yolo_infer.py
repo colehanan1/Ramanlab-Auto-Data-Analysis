@@ -10,9 +10,19 @@ from ..config import Settings
 from ..utils.timestamps import pick_timestamp_column, pick_frame_column, to_seconds_series
 from ..utils.vision import order_corners, xyxy_to_cxcywh
 from ..utils.track import SingleClassTracker
+from ..utils.columns import (
+    PROBOSCIS_CLASS,
+    PROBOSCIS_CORNERS_COL,
+    PROBOSCIS_DISTANCE_COL,
+    PROBOSCIS_TRACK_COL,
+    PROBOSCIS_X_COL,
+    PROBOSCIS_Y_COL,
+)
 
 log = logging.getLogger("fbpipe.yolo")
 logging.getLogger("ultralytics").setLevel(logging.WARNING)
+
+TRACKED_CLASSES = (1, 2, PROBOSCIS_CLASS)
 
 def _flow_nudge(prev_gray, gray, box_xyxy, flow_skip_edge: int, flow_params: dict):
     if prev_gray is None: return box_xyxy
@@ -27,18 +37,16 @@ def _flow_nudge(prev_gray, gray, box_xyxy, flow_skip_edge: int, flow_params: dic
     return nudged
 
 def _process_frame(frame, frame_number, current_timestamp, trackers: Dict[int, SingleClassTracker],
-                   prev_gray, anchor, settings: Settings, predict_fn):
+                   prev_gray, anchor, settings: Settings, predict_fn, eye_lock: Dict[str, Optional[object]]):
     CONF_THRES = settings.conf_thres
     FLOW_PARAMS = dict(pyr_scale=0.5, levels=3, winsize=15, iterations=3, poly_n=5, poly_sigma=1.2, flags=0)
 
     r = predict_fn(frame, CONF_THRES)[0]
 
     dets_by_class: Dict[int, Tuple[np.ndarray, np.ndarray]] = {
-        1:(np.zeros((0,4),np.float32), np.zeros((0,),np.float32)),
-        2:(np.zeros((0,4),np.float32), np.zeros((0,),np.float32)),
-        6:(np.zeros((0,4),np.float32), np.zeros((0,),np.float32)),
+        cls: (np.zeros((0, 4), np.float32), np.zeros((0,), np.float32)) for cls in TRACKED_CLASSES
     }
-    obb_corners_by_class: Dict[int, Optional[List[List[float]]]] = {1: None, 2: None, 6: None}
+    obb_corners_by_class: Dict[int, Optional[List[List[float]]]] = {cls: None for cls in TRACKED_CLASSES}
 
     if hasattr(r, 'obb') and r.obb is not None:
         xyxyxyxy = r.obb.xyxyxyxy.cpu().numpy()
@@ -68,7 +76,7 @@ def _process_frame(frame, frame_number, current_timestamp, trackers: Dict[int, S
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
     out_by_class = {}
-    for cls_id in [1,2,6]:
+    for cls_id in TRACKED_CLASSES:
         boxes, scores = dets_by_class[cls_id]
         best_track = trackers[cls_id].step(boxes, scores)
         corners = obb_corners_by_class[cls_id]
@@ -82,20 +90,35 @@ def _process_frame(frame, frame_number, current_timestamp, trackers: Dict[int, S
         cx, cy, w, h = xyxy_to_cxcywh(box)
         out_by_class[cls_id] = dict(track_id=best_track.id, x=float(cx), y=float(cy), corners=(corners if corners is not None else np.nan))
 
+    det_eye = out_by_class.get(2)
+    if det_eye is not None:
+        if eye_lock.get("coords") is None and not (np.isnan(det_eye["x"]) or np.isnan(det_eye["y"])):
+            eye_lock["coords"] = (det_eye["x"], det_eye["y"])
+            eye_lock["track_id"] = det_eye["track_id"]
+            eye_lock["corners"] = det_eye["corners"]
+        elif eye_lock.get("coords") is not None:
+            locked_x, locked_y = eye_lock["coords"]
+            out_by_class[2] = dict(
+                track_id=eye_lock.get("track_id", np.nan),
+                x=locked_x,
+                y=locked_y,
+                corners=eye_lock.get("corners", np.nan),
+            )
+
     # distances
     def compute_distance(a, b):
         return float(np.hypot(a["x"] - b["x"], a["y"] - b["y"]))
 
     det1 = out_by_class.get(1, {"track_id":np.nan,"x":np.nan,"y":np.nan,"corners":np.nan})
     det2 = out_by_class.get(2, {"track_id":np.nan,"x":np.nan,"y":np.nan,"corners":np.nan})
-    det6 = out_by_class.get(6, {"track_id":np.nan,"x":np.nan,"y":np.nan,"corners":np.nan})
+    det_prob = out_by_class.get(PROBOSCIS_CLASS, {"track_id":np.nan,"x":np.nan,"y":np.nan,"corners":np.nan})
     AX, AY = anchor
 
-    d12 = d26 = d2A = np.nan
+    d12 = d2p = d2A = np.nan
     if not (np.isnan(det1["x"]) or np.isnan(det2["x"])):
         d12 = compute_distance(det1, det2); cv2.line(frame, (int(det1["x"]), int(det1["y"])), (int(det2["x"]), int(det2["y"])), (0,255,0), 6)
-    if not (np.isnan(det2["x"]) or np.isnan(det6["x"])):
-        d26 = compute_distance(det2, det6); cv2.line(frame, (int(det2["x"]), int(det2["y"])), (int(det6["x"]), int(det6["y"])), (255,0,0), 6)
+    if not (np.isnan(det2["x"]) or np.isnan(det_prob["x"])):
+        d2p = compute_distance(det2, det_prob); cv2.line(frame, (int(det2["x"]), int(det2["y"])), (int(det_prob["x"]), int(det_prob["y"])), (255,0,0), 6)
     if not np.isnan(det2["x"]):
         d2A = float(np.hypot(det2["x"] - AX, det2["y"] - AY))
         cv2.line(frame, (int(det2["x"]), int(det2["y"])), (int(AX), int(AY)), (0,165,255), 6)
@@ -106,18 +129,21 @@ def _process_frame(frame, frame_number, current_timestamp, trackers: Dict[int, S
         cross = v1[0]*v2[1] - v1[1]*v2[0]
         return float(np.degrees(np.arctan2(abs(cross), dot)))
     angle_deg = np.nan
-    if not (np.isnan(det2["x"]) or np.isnan(det6["x"])):
-        v_26 = (det6["x"] - det2["x"], det6["y"] - det2["y"])
+    if not (np.isnan(det2["x"]) or np.isnan(det_prob["x"])):
+        v_2p = (det_prob["x"] - det2["x"], det_prob["y"] - det2["y"])
         v_2A = (AX - det2["x"], AY - det2["y"])
-        angle_deg = angle_deg_between(v_26, v_2A)
+        angle_deg = angle_deg_between(v_2p, v_2A)
 
     row = {
         "frame": frame_number, "timestamp": current_timestamp,
         "track_id_class1": det1["track_id"], "x_class1": det1["x"], "y_class1": det1["y"], "corners_class1": str(det1["corners"]),
         "track_id_class2": det2["track_id"], "x_class2": det2["x"], "y_class2": det2["y"], "corners_class2": str(det2["corners"]),
-        "track_id_class6": det6["track_id"], "x_class6": det6["x"], "y_class6": det6["y"], "corners_class6": str(det6["corners"]),
+        PROBOSCIS_TRACK_COL: det_prob["track_id"],
+        PROBOSCIS_X_COL: det_prob["x"],
+        PROBOSCIS_Y_COL: det_prob["y"],
+        PROBOSCIS_CORNERS_COL: str(det_prob["corners"]),
         "x_anchor": AX, "y_anchor": AY,
-        "distance_1_2": d12, "distance_2_6": d26, "distance_2_anchor": d2A,
+        "distance_1_2": d12, PROBOSCIS_DISTANCE_COL: d2p, "distance_2_anchor": d2A,
         "angle_deg_c2_26_vs_anchor": angle_deg
     }
     return frame, row, gray
@@ -238,13 +264,15 @@ def main(cfg: Settings):
             writer = cv2.VideoWriter(str(out_mp4), cv2.VideoWriter_fourcc(*"mp4v"), fps, (w, h))
 
             trackers = {
-                1: SingleClassTracker(iou_thres=cfg.iou_match_thres, max_age=cfg.max_age, ema_alpha=cfg.ema_alpha),
-                2: SingleClassTracker(iou_thres=cfg.iou_match_thres, max_age=cfg.max_age, ema_alpha=cfg.ema_alpha),
-                6: SingleClassTracker(iou_thres=cfg.iou_match_thres, max_age=cfg.max_age, ema_alpha=cfg.ema_alpha),
+                cls: SingleClassTracker(
+                    iou_thres=cfg.iou_match_thres, max_age=cfg.max_age, ema_alpha=cfg.ema_alpha
+                )
+                for cls in TRACKED_CLASSES
             }
 
             rows = []
             prev_gray = None
+            eye_lock = {"coords": None, "track_id": None, "corners": None}
             frame_idx = 0
             t0 = time.time()
             while cap.isOpened() and frame_idx <= max_frame:
@@ -253,7 +281,7 @@ def main(cfg: Settings):
                 if (w, h) != (1080, 1080):
                     frame = cv2.resize(frame, (1080,1080), interpolation=cv2.INTER_LINEAR)
                 ts = timestamps.get(frame_idx, frame_idx / fps)
-                frame, row, prev_gray = _process_frame(frame, frame_idx, ts, trackers, prev_gray, (AX,AY), cfg, predict_fn)
+                frame, row, prev_gray = _process_frame(frame, frame_idx, ts, trackers, prev_gray, (AX,AY), cfg, predict_fn, eye_lock)
                 writer.write(frame)
                 rows.append(row)
                 frame_idx += 1

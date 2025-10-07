@@ -371,7 +371,7 @@ def _parse_collect_args(subparser: argparse.ArgumentParser) -> None:
     subparser.add_argument(
         "--measure-cols",
         nargs="+",
-        default=["distance_percentage", "distance_percentage_2_6"],
+        default=["distance_percentage_2_8", "distance_percentage", "distance_percentage_2_6"],
         help="Ordered list of candidate measurement columns.",
     )
     subparser.add_argument(
