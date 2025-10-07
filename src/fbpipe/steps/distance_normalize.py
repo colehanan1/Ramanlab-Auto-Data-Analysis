@@ -4,6 +4,13 @@ from pathlib import Path
 import glob, json
 import numpy as np, pandas as pd
 from ..config import Settings
+from ..utils.columns import (
+    PROBOSCIS_DISTANCE_COL,
+    PROBOSCIS_DISTANCE_PCT_COL,
+    PROBOSCIS_MAX_DISTANCE_COL,
+    PROBOSCIS_MIN_DISTANCE_COL,
+    find_proboscis_distance_column,
+)
 
 def main(cfg: Settings):
     root = Path(cfg.main_directory).expanduser().resolve()
@@ -17,8 +24,10 @@ def main(cfg: Settings):
         csvs = glob.glob(str(fly / "**" / "*merged.csv"), recursive=True)
         for f in csvs:
             df = pd.read_csv(f)
-            if "distance_2_6" not in df.columns: continue
-            d = pd.to_numeric(df["distance_2_6"], errors="coerce").to_numpy()
+            dist_col = find_proboscis_distance_column(df)
+            if dist_col is None:
+                continue
+            d = pd.to_numeric(df[dist_col], errors="coerce").to_numpy()
             perc = np.empty_like(d, dtype=float)
             over = d > gmax; under = d < gmin; inr = ~(over | under)
             perc[over] = 101.0; perc[under] = -1.0
@@ -26,7 +35,22 @@ def main(cfg: Settings):
                 perc[inr] = 100.0 * (d[inr] - gmin) / (gmax - gmin)
             else:
                 perc[inr] = 0.0
-            df["distance_percentage_2_6"] = perc
-            df["min_distance_2_6"] = gmin; df["max_distance_2_6"] = gmax
+            df[dist_col] = d
+            df[PROBOSCIS_DISTANCE_COL] = d
+            if "distance_2_6" in df.columns:
+                df["distance_2_6"] = d
+
+            df[PROBOSCIS_DISTANCE_PCT_COL] = perc
+            df["distance_percentage"] = perc
+            for legacy_pct in ("distance_percentage_2_6", "distance_pct_2_6", "distance_percent", "distance_pct"):
+                if legacy_pct in df.columns:
+                    df[legacy_pct] = perc
+
+            df[PROBOSCIS_MIN_DISTANCE_COL] = gmin
+            df[PROBOSCIS_MAX_DISTANCE_COL] = gmax
+            if "min_distance_2_6" in df.columns:
+                df["min_distance_2_6"] = gmin
+            if "max_distance_2_6" in df.columns:
+                df["max_distance_2_6"] = gmax
             df.to_csv(f, index=False)
             print(f"[NORM] Updated {f}")

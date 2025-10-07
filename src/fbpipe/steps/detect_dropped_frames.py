@@ -4,6 +4,7 @@ import glob
 from pathlib import Path
 import pandas as pd
 from ..config import Settings
+from ..utils.columns import find_proboscis_distance_column
 
 def main(cfg: Settings):
     root = Path(cfg.main_directory).expanduser().resolve()
@@ -20,8 +21,9 @@ def main(cfg: Settings):
             expected = set(range(minf, maxf+1))
             missing = sorted(expected - set(present))
             dropped = []
-            if "distance_2_6" in df.columns:
-                dropped = df[df["distance_2_6"].isna()]["frame"].tolist()
+            dist_col = find_proboscis_distance_column(df)
+            if dist_col:
+                dropped = df[df[dist_col].isna()]["frame"].tolist()
             all_dropped = sorted(set(missing) | set(dropped))
             out = Path(f).with_suffix("").as_posix() + "_dropped_frames.txt"
             with open(out, "w", encoding="utf-8") as fp:

@@ -4,6 +4,7 @@ from pathlib import Path
 import json, glob
 import pandas as pd
 from ..config import Settings
+from ..utils.columns import find_proboscis_distance_column
 
 def main(cfg: Settings):
     root = Path(cfg.main_directory).expanduser().resolve()
@@ -12,8 +13,10 @@ def main(cfg: Settings):
         gmin, gmax = float("inf"), float("-inf")
         for f in csvs:
             df = pd.read_csv(f)
-            if "distance_2_6" not in df.columns: continue
-            dist = pd.to_numeric(df["distance_2_6"], errors="coerce")
+            dist_col = find_proboscis_distance_column(df)
+            if dist_col is None:
+                continue
+            dist = pd.to_numeric(df[dist_col], errors="coerce")
             mask = dist.between(cfg.class2_min, cfg.class2_max, inclusive="both")
             vals = dist[mask]
             if vals.empty: continue
