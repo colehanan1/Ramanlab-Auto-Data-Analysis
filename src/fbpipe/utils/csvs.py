@@ -67,87 +67,40 @@ def _sorted_by_slot(paths: Iterable[Path]) -> List[Path]:
     )
 
 def gather_distance_csvs(base_dir: Path) -> List[Path]:
-    """Return distance CSVs under ``base_dir`` (per-fly exports only).
+    """Return only per-fly distance CSV exports under ``base_dir``.
 
-    If a trial only has merged exports available a ``FileNotFoundError`` is
-    raised so callers do not silently fall back to merged data.
+    The discovery logic ignores historical ``*_distances_merged.csv`` artefacts
+    entirely so downstream steps never fall back to the deprecated format.
     """
 
     base_dir = Path(base_dir)
     if not base_dir.exists():
         return []
 
-    fly_specific = [p for p in base_dir.rglob("*_fly*_distances.csv") if p.is_file()]
-    merged = [p for p in base_dir.rglob(f"*{_MERGED_SUFFIX}") if p.is_file()]
+    per_fly = [p for p in base_dir.rglob("*_fly*_distances.csv") if p.is_file()]
 
-    by_parent: Dict[Path, Dict[str, Dict[str, List[Path]]]] = {}
+    by_parent: Dict[Path, Dict[str, List[Path]]] = {}
 
-    def _base_key(path: Path) -> Tuple[Path, str]:
+    for path in per_fly:
         parent = _normalise_parent(path.parent)
         base = distance_base_name(path)
-        return parent, base
-
-    for path in fly_specific:
-        parent, base = _base_key(path)
-        parent_map = by_parent.setdefault(parent, {})
-        bucket = parent_map.setdefault(base, {"specific": [], "merged": []})
-        bucket["specific"].append(path)
-
-    for path in merged:
-        parent, base = _base_key(path)
-        parent_map = by_parent.setdefault(parent, {})
-        bucket = parent_map.setdefault(base, {"specific": [], "merged": []})
-        bucket["merged"].append(path)
+        by_parent.setdefault(parent, {}).setdefault(base, []).append(path)
 
     debug_enabled = bool(os.environ.get("FBPIPE_DEBUG_CSV"))
-    debug_rows: List[Tuple[str, str, List[str], List[str]]] = []
+    if debug_enabled:
+        print("[CSV] gather_distance_csvs debug dump:")
 
     results: List[Path] = []
-    merged_only: List[Tuple[Path, str, List[Path]]] = []
-
     for parent in sorted(by_parent.keys(), key=lambda p: str(p)):
         base_map = by_parent[parent]
         for base in sorted(base_map.keys()):
-            bucket = base_map[base]
-            if bucket["specific"]:
-                chosen = _sorted_by_slot(bucket["specific"])
-                results.extend(chosen)
-            elif bucket["merged"]:
-                merged_only.append((parent, base, bucket["merged"]))
-
+            chosen = _sorted_by_slot(base_map[base])
+            results.extend(chosen)
             if debug_enabled:
-                debug_rows.append(
-                    (
-                        str(parent),
-                        base,
-                        [p.name for p in bucket["specific"]],
-                        [p.name for p in bucket["merged"]],
-                    )
-                )
-
-    if debug_enabled and debug_rows:
-        print("[CSV] gather_distance_csvs debug dump:")
-        for parent, base, specific, merged_list in debug_rows:
-            if specific:
                 print(
-                    f"[CSV] {parent} :: base={base} "
-                    f"using specific={specific} (merged candidates={merged_list})"
+                    f"[CSV] {parent} :: base={base} using specific="
+                    f"{[p.name for p in chosen]}"
                 )
-            else:
-                print(
-                    f"[CSV] {parent} :: base={base} ignoring merged-only candidates={merged_list}"
-                )
-
-    if merged_only:
-        details = []
-        for parent, base, paths in merged_only:
-            merged_names = ", ".join(sorted(p.name for p in paths))
-            details.append(f"{parent} :: {base} → {merged_names}")
-        raise FileNotFoundError(
-            "Per-fly distance CSV exports are required but missing. "
-            "Re-run YOLO inference to generate *_fly{N}_distances.csv files. "
-            "Merged-only candidates encountered:\n" + "\n".join(details)
-        )
 
     return results
 
