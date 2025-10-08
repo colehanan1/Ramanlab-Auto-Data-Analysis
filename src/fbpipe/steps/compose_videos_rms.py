@@ -16,6 +16,7 @@ from ..utils.columns import (
     find_proboscis_distance_percentage_column,
     find_proboscis_xy_columns,
 )
+from ..utils.fly_files import iter_fly_distance_csvs
 
 # Display defaults mirror the notebook example
 plt.rcParams.update(
@@ -287,16 +288,36 @@ def _infer_category_from_path(path: Path) -> Optional[str]:
     return None
 
 
-def _discover_trials(fly_dir: Path, category: str) -> List[int]:
-    trials: set[int] = set()
-    rdir = fly_dir / "RMS_calculations"
-    if rdir.is_dir():
-        for path in rdir.glob("*merged.csv"):
-            if category in path.name.lower():
-                idx = extract_trial_index(path.stem, category)
-                if idx is not None:
-                    trials.add(idx)
-    return sorted(trials)
+def _collect_trial_csvs(
+    fly_dir: Path, category: str
+) -> Dict[int, List[Tuple[str, int, Path]]]:
+    base = fly_dir / "RMS_calculations"
+    results: Dict[int, Dict[str, Tuple[int, Path]]] = {}
+    if not base.is_dir():
+        return {}
+
+    category_lower = category.lower()
+    for path, token, slot_idx in iter_fly_distance_csvs(base, recursive=True):
+        name_lower = path.name.lower()
+        if category_lower not in name_lower:
+            continue
+        trial = extract_trial_index(path.stem, category_lower)
+        if trial is None:
+            continue
+
+        entries = results.setdefault(trial, {})
+        existing = entries.get(token)
+        prefer_new = name_lower.startswith("updated_")
+        if existing is None or (prefer_new and not existing[1].name.lower().startswith("updated_")):
+            entries[token] = (slot_idx, path)
+
+    ordered: Dict[int, List[Tuple[str, int, Path]]] = {}
+    for trial, entry_map in results.items():
+        ordered[trial] = sorted(
+            [(token, slot_idx, path) for token, (slot_idx, path) in entry_map.items()],
+            key=lambda item: item[1],
+        )
+    return ordered
 
 
 def _find_video_for_trial(fly_dir: Path, category: str, tri: int) -> Optional[Path]:
@@ -421,9 +442,12 @@ def _ead_compute_trim_min_max(fly_dir: Path) -> Optional[Tuple[float, float]]:
     if not base.is_dir():
         return None
     values: List[np.ndarray] = []
-    for path in sorted(base.glob("*merged.csv")):
+    for path, _, _ in iter_fly_distance_csvs(base, recursive=True):
         try:
-            arr = pd.to_numeric(pd.read_csv(path, usecols=[DIST_COL_ROBUST])[DIST_COL_ROBUST], errors="coerce").to_numpy()
+            arr = pd.to_numeric(
+                pd.read_csv(path, usecols=[DIST_COL_ROBUST])[DIST_COL_ROBUST],
+                errors="coerce",
+            ).to_numpy()
         except Exception:
             continue
         values.append(arr)
@@ -460,61 +484,67 @@ def main(cfg: Settings) -> None:
         fly_name = fly_dir.name
         print(f"\n=== Fly: {fly_name} ===")
         for category in ("training", "testing"):
-            trials = _discover_trials(fly_dir, category)
-            if not trials:
+            trial_map = _collect_trial_csvs(fly_dir, category)
+            if not trial_map:
                 print(f"  [{category}] No trials discovered.")
                 continue
 
             out_root = fly_dir / VIDEO_INPUT_DIR / VIDEO_OUTPUT_SUBDIR
             out_root.mkdir(parents=True, exist_ok=True)
 
-            for tri in trials:
+            for tri, slot_entries in sorted(trial_map.items()):
                 video_path = _find_video_for_trial(fly_dir, category, tri)
                 if not video_path:
                     print(f"  [{category} {tri}] ⤫ No matching video in {VIDEO_INPUT_DIR}/{category}/")
                     continue
 
-                series = _series_rms_from_rmscalc(
-                    fly_dir,
-                    category,
-                    tri,
-                    cfg.fps_default,
-                    pre_sec,
-                    odor_duration,
-                    post_sec,
-                    odor_latency,
-                )
-                if series is None:
-                    print(f"  [{category} {tri}] ⤫ No RMS series (RMS_calculations); skipping.")
-                    continue
+                slot_success = False
+                for token, _slot_idx, csv_path in slot_entries:
+                    slot_label = token.replace("_distances", "")
+                    series = _series_rms_from_rmscalc(
+                        csv_path,
+                        cfg.fps_default,
+                        pre_sec,
+                        odor_duration,
+                        post_sec,
+                        odor_latency,
+                    )
+                    if series is None:
+                        print(f"  [{category} {tri} {slot_label}] ⤫ No RMS series; skipping.")
+                        continue
 
-                t, rms, odor_on, odor_off, threshold = series
-                xlim = (float(np.nanmin(t)), float(np.nanmax(t)))
+                    t, rms, odor_on, odor_off, threshold = series
+                    xlim = (float(np.nanmin(t)), float(np.nanmax(t)))
 
-                out_mp4 = out_root / f"{fly_name}_{category}_{tri}_LINES_rms.mp4"
-                if out_mp4.exists():
-                    print(f"  [{category} {tri}] ⤫ Exists, skipping: {out_mp4.name}")
-                    continue
+                    out_mp4 = out_root / f"{fly_name}_{slot_label}_{category}_{tri}_LINES_rms.mp4"
+                    if out_mp4.exists():
+                        print(f"  [{category} {tri} {slot_label}] ⤫ Exists, skipping: {out_mp4.name}")
+                        slot_success = True
+                        continue
 
-                print(f"  [{category} {tri}] ✓ Video: {video_path.name} → {out_mp4.name}")
-                ok = _compose_lineplot_video(
-                    video_path,
-                    [{"t": t, "y": rms, "label": "RMS", "color": "blue"}],
-                    xlim,
-                    odor_on,
-                    odor_off,
-                    out_mp4,
-                    panel_height_fraction=PANEL_HEIGHT_FRACTION,
-                    ylim=YLIM,
-                    threshold=threshold,
-                )
+                    print(
+                        f"  [{category} {tri} {slot_label}] ✓ Video: {video_path.name} → {out_mp4.name}"
+                    )
+                    ok = _compose_lineplot_video(
+                        video_path,
+                        [{"t": t, "y": rms, "label": "RMS", "color": "blue"}],
+                        xlim,
+                        odor_on,
+                        odor_off,
+                        out_mp4,
+                        panel_height_fraction=PANEL_HEIGHT_FRACTION,
+                        ylim=YLIM,
+                        threshold=threshold,
+                    )
 
-                if ok:
-                    print(f"  [{category} {tri}] [SAVED] {out_mp4.name}")
-                    if delete_source_after:
-                        _safe_unlink(video_path)
-                else:
-                    print(f"  [{category} {tri}] ⤫ Render failed; source retained.")
+                    if ok:
+                        slot_success = True
+                        print(f"  [{category} {tri} {slot_label}] [SAVED] {out_mp4.name}")
+                    else:
+                        print(f"  [{category} {tri} {slot_label}] ⤫ Render failed; source retained.")
+
+                if delete_source_after and slot_success:
+                    _safe_unlink(video_path)
 
             if delete_source_after:
                 category_dir = fly_dir / VIDEO_INPUT_DIR / category
@@ -530,38 +560,24 @@ def main(cfg: Settings) -> None:
                 _maybe_rmdir_empty(cat_root)
 
 
-_cached_series: Dict[Tuple[Path, str, int], Tuple[np.ndarray, np.ndarray, float, float, float]] = {}
+_cached_series: Dict[Path, Tuple[np.ndarray, np.ndarray, float, float, float]] = {}
 
 
 def _series_rms_from_rmscalc(
-    fly_dir: Path,
-    category: str,
-    trial_index: int,
+    csv_path: Path,
     fps_default: float,
     pre_sec: float,
     odor_duration: float,
     post_sec: float,
     odor_latency: float,
 ) -> Optional[Tuple[np.ndarray, np.ndarray, float, float, float]]:
-    cache_key = (fly_dir, category, trial_index)
-    if cache_key in _cached_series:
-        return _cached_series[cache_key]
+    real_path = csv_path.resolve()
+    if real_path in _cached_series:
+        return _cached_series[real_path]
 
-    base = fly_dir / "RMS_calculations"
-    if not base.is_dir():
+    if not csv_path.exists():
         return None
 
-    candidates = sorted(
-        [
-            path
-            for path in base.glob("*merged.csv")
-            if category in path.name.lower() and extract_trial_index(path.stem, category) == trial_index
-        ]
-    )
-    if not candidates:
-        return None
-
-    csv_path = candidates[0]
     df = pd.read_csv(csv_path)
     df.columns = df.columns.str.strip()
 
@@ -615,5 +631,5 @@ def _series_rms_from_rmscalc(
     threshold = mu + THRESH_K * sd if np.isfinite(mu) and np.isfinite(sd) else float("nan")
 
     payload = (t_axis, rms.astype(float), float(odor_on), float(odor_off), threshold)
-    _cached_series[cache_key] = payload
+    _cached_series[real_path] = payload
     return payload
