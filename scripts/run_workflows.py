@@ -14,9 +14,10 @@ import yaml
 # Add project root and src directory to sys.path for imports to work
 project_root = Path(__file__).parent.parent.resolve()
 src_root = project_root / "src"
-sys.path.insert(0, str(project_root))
-if str(src_root) not in sys.path:
-    sys.path.insert(0, str(src_root))
+for candidate in (project_root, src_root):
+    path_str = str(candidate)
+    if path_str not in sys.path:
+        sys.path.insert(0, path_str)
 
 try:
     from fbpipe.pipeline import ORDERED_STEPS
