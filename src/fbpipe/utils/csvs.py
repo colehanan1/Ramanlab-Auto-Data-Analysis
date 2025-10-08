@@ -67,7 +67,7 @@ def _sorted_by_slot(paths: Iterable[Path]) -> List[Path]:
     )
 
 def gather_distance_csvs(base_dir: Path) -> List[Path]:
-    """Return distance CSVs under ``base_dir`` with per-fly preference."""
+    """Return distance CSVs under ``base_dir`` (per-fly exports only)."""
 
     base_dir = Path(base_dir)
     if not base_dir.exists():
@@ -107,8 +107,14 @@ def gather_distance_csvs(base_dir: Path) -> List[Path]:
                 chosen = _sorted_by_slot(bucket["specific"])
                 results.extend(chosen)
             else:
-                chosen = sorted(bucket["merged"], key=lambda p: p.name.lower())
-                results.extend(chosen)
+                if bucket["merged"]:
+                    ignored = ", ".join(
+                        p.name for p in sorted(bucket["merged"], key=lambda p: p.name.lower())
+                    )
+                    print(
+                        "[CSV] WARNING: ignoring merged distance CSV(s) because per-fly exports are required:"
+                        f" {ignored}"
+                    )
 
             if debug_enabled:
                 debug_rows.append(
@@ -129,6 +135,8 @@ def gather_distance_csvs(base_dir: Path) -> List[Path]:
                     f"using specific={specific} (merged candidates={merged_list})"
                 )
             else:
-                print(f"[CSV] {parent} :: base={base} using merged={merged_list}")
+                print(
+                    f"[CSV] {parent} :: base={base} ignoring merged-only candidates={merged_list}"
+                )
 
     return results

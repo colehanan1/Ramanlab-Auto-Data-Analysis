@@ -112,7 +112,8 @@ python -m fbpipe.steps.distance_stats --config config.yaml
 The pipeline now exports up to four concurrent flies (class-2 eyes paired with
 class-8 proboscis tracks) from a single video. No extra entry point is required:
 once configured, `make run` or `python -m fbpipe.steps.yolo_infer --config
-config.yaml` automatically fans the merged CSV into per-fly files.
+config.yaml` automatically emits per-fly CSVs (`*_fly{N}_distances.csv`). A
+merged view is still stored for manual inspection, but the pipeline ignores it.
 
 1. **Configure limits** – edit `config.yaml` (or corresponding environment
    variables) under the `yolo` section:
@@ -135,8 +136,9 @@ config.yaml` automatically fans the merged CSV into per-fly files.
 
    The step emits:
 
-   - `*_distances_merged.csv`: merged view with all fly slots and metadata.
-    - `*_fly{N}_distances.csv`: one file per populated slot with the legacy
+   - `*_distances_merged.csv`: merged view with all fly slots and metadata
+     (kept for reference only).
+   - `*_fly{N}_distances.csv`: one file per populated slot with the legacy
       single-fly schema.【F:src/fbpipe/steps/yolo_infer.py†L320-L349】 These
       exports now include a `fly_slot` integer (1–4) and a
       `distance_variant` label (e.g. `fly1`) so downstream processing can
@@ -144,9 +146,9 @@ config.yaml` automatically fans the merged CSV into per-fly files.
 
 3. **Inspect outputs** – annotated videos and CSVs land in the processed folder
    created beside each source video. Downstream steps (distance stats,
-   normalization, RMS, etc.) consume the merged CSVs without additional
-   configuration, while the combined angle×distance workflow now recognises
-   `*_fly{N}_distances.csv` files and emits slot-tagged envelopes such as
+   normalization, RMS, etc.) now consume `*_fly{N}_distances.csv` files without
+   additional configuration. The combined angle×distance workflow also
+   recognises these per-fly exports and emits slot-tagged envelopes such as
    `testing_1_fly1_angle_distance_rms_envelope.csv` with the `fly_slot` and
    `distance_variant` metadata preserved throughout.【F:scripts/envelope_combined.py†L600-L783】
 
@@ -158,18 +160,18 @@ considered unpaired.
 
 ## Debugging CSV discovery
 
-Set `FBPIPE_DEBUG_CSV=1` to print how the pipeline chooses between per-fly
-distance exports (e.g., `october_07_fly_1_training_4_fly1_distances.csv`) and
-legacy merged fallbacks. Combine it with targeted runs to isolate misbehaving
-steps:
+Set `FBPIPE_DEBUG_CSV=1` to print how the pipeline discovers per-fly distance
+exports (e.g., `october_07_fly_1_training_4_fly1_distances.csv`) and which
+directories still contain ignored merged-only files. Combine it with targeted
+runs to isolate misbehaving steps:
 
 ```bash
 FBPIPE_DEBUG_CSV=1 make run STEP=distance_normalize
 ```
 
 The debug dump lists each inspected directory, the detected trial base, and the
-candidate files for that base so you can immediately see whether a merged CSV is
-incorrectly winning.
+candidate files for that base so you can immediately see whether any merged CSVs
+remain (they are now skipped entirely).
 
 ## GPU requirements
 
