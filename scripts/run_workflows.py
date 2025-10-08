@@ -11,8 +11,12 @@ from typing import Any, Mapping, Sequence
 
 import yaml
 
-# Add project root to sys.path for imports to work
-sys.path.insert(0, str(Path(__file__).parent.parent.resolve()))
+# Add project root and src directory to sys.path for imports to work
+project_root = Path(__file__).parent.parent.resolve()
+src_root = project_root / "src"
+sys.path.insert(0, str(project_root))
+if str(src_root) not in sys.path:
+    sys.path.insert(0, str(src_root))
 
 from scripts.envelope_visuals import (
     EnvelopePlotConfig,

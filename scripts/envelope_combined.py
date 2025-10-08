@@ -23,6 +23,7 @@ import math
 import os
 import re
 import shutil
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Iterator, List, Mapping, MutableMapping, Optional, Sequence
@@ -34,6 +35,14 @@ from matplotlib import gridspec
 from matplotlib.colors import ListedColormap
 from matplotlib.patches import Patch
 from scipy.signal import hilbert
+
+# Ensure project imports resolve when executed as a script
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+SRC_ROOT = PROJECT_ROOT / "src"
+for candidate in (PROJECT_ROOT, SRC_ROOT):
+    path_str = str(candidate)
+    if path_str not in sys.path:
+        sys.path.insert(0, path_str)
 
 from scripts import envelope_visuals
 from scripts.envelope_visuals import (
