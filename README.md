@@ -139,7 +139,10 @@ config.yaml` automatically fans the merged CSV into per-fly files.
 3. **Inspect outputs** – annotated videos and CSVs land in the processed folder
    created beside each source video. Downstream steps (distance stats,
    normalization, RMS, etc.) consume the merged CSVs without additional
-   configuration.
+   configuration, while the combined angle×distance workflow now recognises
+   `*_fly{N}_distances.csv` files and emits slot-tagged envelopes such as
+   `testing_1_fly1_angle_distance_rms_envelope.csv` with the `fly_slot` and
+   `distance_variant` metadata preserved throughout.【F:scripts/envelope_combined.py†L600-L783】
 
 When you add more flies per video, confirm that your YOLO model reliably
 separates the class-2 detections. Raising `zero_iou_epsilon` loosens the

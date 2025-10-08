@@ -17,6 +17,7 @@ run efficiently.
 from __future__ import annotations
 
 import argparse
+import fnmatch
 import json
 import math
 import os
@@ -24,7 +25,7 @@ import re
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, Iterator, Mapping, MutableMapping, Sequence
+from typing import Iterable, Iterator, List, Mapping, MutableMapping, Optional, Sequence
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -43,6 +44,7 @@ from scripts.envelope_visuals import (
     resolve_dataset_output_dir,
     should_write,
 )
+from fbpipe.utils.csvs import extract_fly_slot, gather_distance_csvs
 
 
 MONTHS = (
@@ -82,6 +84,17 @@ ANCHOR_Y = 540.0
 MANDATORY_WIDE_EXCLUDES = {
     Path("/securedstorage/DATAsec/cole/Data-secured/opto_benz/").expanduser().resolve()
 }
+
+
+@dataclass(frozen=True)
+class TrialEntry:
+    """Descriptor for a per-trial CSV candidate."""
+
+    label: str
+    path: Path
+    category: str
+    fly_slot: Optional[int] = None
+    distance_variant: Optional[str] = None
 
 ODOR_CANON = {
     "acv": "ACV",
@@ -271,27 +284,96 @@ def _trial_label(path: Path) -> str:
     return path.stem
 
 
+def _trial_csv_candidates(
+    fly_dir: Path,
+    suffix_globs: Iterable[str] | str,
+    *,
+    prefer_distance: bool = False,
+) -> list[Path]:
+    patterns = [suffix_globs] if isinstance(suffix_globs, str) else list(suffix_globs)
+    if not patterns:
+        return []
+
+    pattern_lower = [pat.lower() for pat in patterns]
+    month_dirs = [p for p in fly_dir.rglob("*") if _is_month_folder(p)]
+    search_roots = month_dirs or [fly_dir]
+
+    def _matches(path: Path) -> bool:
+        name = path.name.lower()
+        return any(fnmatch.fnmatch(name, pat) for pat in pattern_lower)
+
+    candidates: list[Path] = []
+    seen: set[Path] = set()
+
+    if prefer_distance:
+        for root in search_roots:
+            for path in gather_distance_csvs(root):
+                if not path.is_file():
+                    continue
+                if not _matches(path):
+                    continue
+                name_lower = path.name.lower()
+                if "training" not in name_lower and "testing" not in name_lower:
+                    continue
+                real = path.resolve()
+                if real in seen:
+                    continue
+                seen.add(real)
+                candidates.append(path)
+    else:
+        for root in search_roots:
+            for pattern in patterns:
+                for path in root.rglob(pattern):
+                    if not path.is_file():
+                        continue
+                    name_lower = path.name.lower()
+                    if "training" not in name_lower and "testing" not in name_lower:
+                        continue
+                    real = path.resolve()
+                    if real in seen:
+                        continue
+                    seen.add(real)
+                    candidates.append(path)
+
+    return candidates if prefer_distance else sorted(candidates)
+
+
 def _locate_trials(
     fly_dir: Path,
     suffix_globs: Iterable[str] | str,
     required_cols: Sequence[str],
-) -> list[tuple[str, Path, str]]:
-    patterns = [suffix_globs] if isinstance(suffix_globs, str) else list(suffix_globs)
-    month_dirs = [p for p in fly_dir.rglob("*") if _is_month_folder(p)]
-    found: set[Path] = set()
-    for month_dir in month_dirs:
-        for pattern in patterns:
-            found.update(Path(p) for p in month_dir.rglob(pattern))
+    *,
+    prefer_distance: bool = False,
+) -> list[TrialEntry]:
+    candidates = _trial_csv_candidates(
+        fly_dir,
+        suffix_globs,
+        prefer_distance=prefer_distance,
+    )
 
-    results: list[tuple[str, Path, str]] = []
-    for csv_path in sorted(found):
+    results: list[TrialEntry] = []
+    for csv_path in candidates:
         try:
             header = pd.read_csv(csv_path, nrows=5)
         except Exception:
             continue
         if not _pick_column(header, required_cols):
             continue
-        results.append((csv_path.stem, csv_path, _infer_category(csv_path)))
+
+        slot = extract_fly_slot(csv_path) if prefer_distance else None
+        variant = None
+        if prefer_distance:
+            variant = f"fly{slot}" if slot is not None else "merged"
+
+        results.append(
+            TrialEntry(
+                label=csv_path.stem,
+                path=csv_path,
+                category=_infer_category(csv_path),
+                fly_slot=slot,
+                distance_variant=variant,
+            )
+        )
     return results
 
 
@@ -357,26 +439,6 @@ def _compute_angle_deg(df: pd.DataFrame) -> pd.Series:
         angles[valid.to_numpy()] = np.degrees(ang)
 
     return pd.Series(angles, index=df.index, name="angle_ARB_deg")
-
-
-def _trial_csv_candidates(fly_dir: Path, suffix_globs: Iterable[str] | str) -> list[Path]:
-    patterns = [suffix_globs] if isinstance(suffix_globs, str) else list(suffix_globs)
-    candidates: list[Path] = []
-    seen: set[Path] = set()
-    for pattern in patterns:
-        for path in fly_dir.rglob(pattern):
-            if not path.is_file():
-                continue
-            if "training" not in path.name.lower() and "testing" not in path.name.lower():
-                continue
-            real = path.resolve()
-            if real in seen:
-                continue
-            seen.add(real)
-            candidates.append(path)
-    return sorted(candidates)
-
-
 def _find_reference_angle(csv_paths: Sequence[Path]) -> float:
     best: tuple[int, float, float] | None = None
     for path in csv_paths:
@@ -515,17 +577,20 @@ def _ensure_angle_percentages(fly_dir: Path, suffix_globs: Iterable[str] | str) 
         print(f"[{fly_dir.name}] centered angle normalisation applied to {updates} file(s).")
 
 
-def _index_testing(entries: Sequence[tuple[str, Path, str]]) -> tuple[dict[str, Path], dict[str, Path]]:
-    indexed: dict[str, Path] = {}
-    fallback: dict[str, Path] = {}
-    for label, path, category in entries:
-        if category.lower() != "testing":
+def _index_testing(
+    entries: Sequence[TrialEntry],
+) -> tuple[dict[str, list[TrialEntry]], dict[str, list[TrialEntry]]]:
+    indexed: dict[str, list[TrialEntry]] = {}
+    fallback: dict[str, list[TrialEntry]] = {}
+    for entry in entries:
+        if entry.category.lower() != "testing":
             continue
-        match = TESTING_REGEX.search(label)
+        match = TESTING_REGEX.search(entry.label)
         if match:
-            indexed[match.group(0).lower()] = path
+            key = match.group(0).lower()
+            indexed.setdefault(key, []).append(entry)
         else:
-            fallback[label.lower()] = path
+            fallback.setdefault(entry.label.lower(), []).append(entry)
     return indexed, fallback
 
 
@@ -599,7 +664,12 @@ class CombineConfig:
     odor_off_s: float = 60.0
     odor_latency_s: float = 0.0
     angle_suffixes: tuple[str, ...] = ("*merged.csv", "*class_2_8.csv", "*class_2_6.csv")
-    distance_suffixes: tuple[str, ...] = ("*merged.csv", "*class_2_8.csv", "*class_2_6.csv")
+    distance_suffixes: tuple[str, ...] = (
+        "*fly*_distances.csv",
+        "*merged.csv",
+        "*class_2_8.csv",
+        "*class_2_6.csv",
+    )
 
     @property
     def window_frames(self) -> int:
@@ -616,15 +686,24 @@ def combine_distance_angle(cfg: CombineConfig) -> None:
     for fly_dir in sorted(p for p in cfg.root.iterdir() if p.is_dir()):
         fly_name = fly_dir.name
         _ensure_angle_percentages(fly_dir, cfg.angle_suffixes)
-        angle_entries = _locate_trials(fly_dir, cfg.angle_suffixes, ANGLE_COLS)
-        distance_entries = _locate_trials(fly_dir, cfg.distance_suffixes, DIST_COLS)
+        angle_entries = _locate_trials(
+            fly_dir,
+            cfg.angle_suffixes,
+            ANGLE_COLS,
+        )
+        distance_entries = _locate_trials(
+            fly_dir,
+            cfg.distance_suffixes,
+            DIST_COLS,
+            prefer_distance=True,
+        )
 
         if not distance_entries:
             print(f"[{fly_name}] No testing distance trials found — skipping.")
             continue
 
         angle_idx, angle_fallback = _index_testing(angle_entries)
-        dist_idx, _ = _index_testing(distance_entries)
+        dist_idx, dist_fallback = _index_testing(distance_entries)
 
         out_csv_dir = fly_dir / "angle_distance_rms_envelope"
         out_fig_dir = out_csv_dir / "plots"
@@ -632,15 +711,36 @@ def combine_distance_angle(cfg: CombineConfig) -> None:
         out_fig_dir.mkdir(parents=True, exist_ok=True)
 
         completed = skipped = 0
-        for test_id, dist_path in sorted(dist_idx.items()):
-            angle_path = angle_idx.get(test_id) or angle_fallback.get(dist_path.stem.lower())
+        cases: list[tuple[str, TrialEntry]] = []
+        for key in sorted(dist_idx):
+            for entry in dist_idx[key]:
+                cases.append((key, entry))
+        for key in sorted(dist_fallback):
+            for entry in dist_fallback[key]:
+                cases.append((key, entry))
+
+        for test_id, dist_entry in cases:
+            angle_candidates = angle_idx.get(test_id)
+            angle_path: Optional[Path] = angle_candidates[0].path if angle_candidates else None
             if angle_path is None:
-                print(f"[WARN] {fly_name} {test_id}: no matching angle file — skipped.")
+                dist_stem = dist_entry.path.stem.lower()
+                fallback_candidates = angle_fallback.get(dist_stem)
+                if fallback_candidates:
+                    angle_path = fallback_candidates[0].path
+            if angle_path is None:
+                print(
+                    f"[WARN] {fly_name} {test_id}: no matching angle file for {dist_entry.path.name} — skipped."
+                )
                 skipped += 1
                 continue
 
+            slot = dist_entry.fly_slot if dist_entry.fly_slot is not None else 0
+            variant = dist_entry.distance_variant or (f"fly{slot}" if slot else "merged")
+            variant_suffix = f"_{variant}" if variant else ""
+            title_variant = f" ({variant})" if variant and variant != "merged" else ""
+
             try:
-                dist_df = pd.read_csv(dist_path)
+                dist_df = pd.read_csv(dist_entry.path)
                 dist_col = _pick_column(dist_df, DIST_COLS)
                 if not dist_col:
                     raise ValueError("missing distance column")
@@ -687,7 +787,15 @@ def combine_distance_angle(cfg: CombineConfig) -> None:
                         "envelope_of_rms": envelope,
                     }
                 )
-                out_csv = out_csv_dir / f"{test_id}_angle_distance_rms_envelope.csv"
+                out_df["fly_slot"] = slot
+                out_df["distance_variant"] = variant
+                out_df["source_distance_csv"] = str(dist_entry.path)
+                out_df["source_angle_csv"] = str(angle_path)
+
+                out_csv = (
+                    out_csv_dir
+                    / f"{test_id}{variant_suffix}_angle_distance_rms_envelope.csv"
+                )
                 out_df.to_csv(out_csv, index=False)
 
                 plt.figure(figsize=(12, 4))
@@ -708,22 +816,25 @@ def combine_distance_angle(cfg: CombineConfig) -> None:
                         color="red",
                     )
                 plt.title(
-                    f"{fly_name} — {test_id}: Envelope(RMS(distance × angle-mult))"
+                    f"{fly_name} — {test_id}{title_variant}: Envelope(RMS(distance × angle-mult))"
                 )
                 plt.xlabel("Time (s)")
                 plt.ylabel("Envelope of RMS (arb.)")
                 plt.margins(x=0)
                 plt.grid(True, alpha=0.3)
-                out_png = out_fig_dir / f"{fly_name}_{test_id}_env_rms_angle_distance.png"
+                out_png = (
+                    out_fig_dir
+                    / f"{fly_name}_{test_id}{variant_suffix}_env_rms_angle_distance.png"
+                )
                 plt.savefig(out_png, dpi=300, bbox_inches="tight")
                 plt.close()
 
                 print(
-                    f"[OK] {fly_name} {test_id} → CSV: {out_csv.name} | FIG: {out_png.name}"
+                    f"[OK] {fly_name} {test_id}{title_variant} → CSV: {out_csv.name} | FIG: {out_png.name}"
                 )
                 completed += 1
             except Exception as exc:
-                print(f"[WARN] {fly_name} {test_id} → {exc}")
+                print(f"[WARN] {fly_name} {test_id}{title_variant} → {exc}")
                 skipped += 1
 
         print(f"[{fly_name}] completed: {completed}, skipped: {skipped}")
