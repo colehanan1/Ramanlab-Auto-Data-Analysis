@@ -1,5 +1,12 @@
 from __future__ import annotations
-import time, logging, cv2, numpy as np, pandas as pd
+
+import logging
+import math
+import time
+
+import cv2
+import numpy as np
+import pandas as pd
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 from ultralytics import YOLO
@@ -9,7 +16,8 @@ import gc  # Add this import
 from ..config import Settings
 from ..utils.timestamps import pick_timestamp_column, pick_frame_column, to_seconds_series
 from ..utils.vision import order_corners, xyxy_to_cxcywh
-from ..utils.track import SingleClassTracker
+from ..utils.track import MultiObjectTracker, SingleClassTracker
+from ..utils.multi_fly import EyeAnchorManager, StablePairing, enforce_zero_iou_and_topk
 from ..utils.columns import (
     PROBOSCIS_CLASS,
     PROBOSCIS_CORNERS_COL,
@@ -22,7 +30,9 @@ from ..utils.columns import (
 log = logging.getLogger("fbpipe.yolo")
 logging.getLogger("ultralytics").setLevel(logging.WARNING)
 
-TRACKED_CLASSES = (1, 2, PROBOSCIS_CLASS)
+EYE_CLASS = 2
+SINGLE_TRACK_CLASSES = (1,)
+ALL_TRACKED_CLASSES = SINGLE_TRACK_CLASSES + (EYE_CLASS, PROBOSCIS_CLASS)
 
 def _flow_nudge(prev_gray, gray, box_xyxy, flow_skip_edge: int, flow_params: dict):
     if prev_gray is None: return box_xyxy
@@ -36,117 +46,308 @@ def _flow_nudge(prev_gray, gray, box_xyxy, flow_skip_edge: int, flow_params: dic
     nudged[0::2] += dx; nudged[1::2] += dy
     return nudged
 
-def _process_frame(frame, frame_number, current_timestamp, trackers: Dict[int, SingleClassTracker],
-                   prev_gray, anchor, settings: Settings, predict_fn, eye_lock: Dict[str, Optional[object]]):
-    CONF_THRES = settings.conf_thres
-    FLOW_PARAMS = dict(pyr_scale=0.5, levels=3, winsize=15, iterations=3, poly_n=5, poly_sigma=1.2, flags=0)
-
-    r = predict_fn(frame, CONF_THRES)[0]
-
-    dets_by_class: Dict[int, Tuple[np.ndarray, np.ndarray]] = {
-        cls: (np.zeros((0, 4), np.float32), np.zeros((0,), np.float32)) for cls in TRACKED_CLASSES
+def _collect_detections(result) -> Dict[int, Dict[str, np.ndarray]]:
+    out: Dict[int, Dict[str, List[np.ndarray]]] = {
+        cls: {"boxes": [], "scores": [], "corners": []} for cls in ALL_TRACKED_CLASSES
     }
-    obb_corners_by_class: Dict[int, Optional[List[List[float]]]] = {cls: None for cls in TRACKED_CLASSES}
 
-    if hasattr(r, 'obb') and r.obb is not None:
-        xyxyxyxy = r.obb.xyxyxyxy.cpu().numpy()
-        cls_arr  = r.obb.cls.cpu().numpy().astype(int)
-        conf_arr = (r.obb.conf.cpu().numpy() if hasattr(r.obb, 'conf') and r.obb.conf is not None
-                    else np.ones_like(cls_arr, dtype=np.float32))
-        for i, (c, s) in enumerate(zip(cls_arr, conf_arr)):
-            if c not in dets_by_class: continue
-            corners = xyxyxyxy[i].reshape(4,2)
-            x1, y1 = corners[:,0].min(), corners[:,1].min()
-            x2, y2 = corners[:,0].max(), corners[:,1].max()
-            prev_boxes, prev_scores = dets_by_class[c]
-            if len(prev_scores)==0 or s > prev_scores[0]:
-                dets_by_class[c] = (np.array([[x1,y1,x2,y2]], dtype=np.float32), np.array([s], dtype=np.float32))
-                obb_corners_by_class[c] = order_corners(corners)
+    if hasattr(result, "obb") and result.obb is not None:
+        xyxyxyxy = result.obb.xyxyxyxy.cpu().numpy()
+        cls_arr = result.obb.cls.cpu().numpy().astype(int)
+        if hasattr(result.obb, "conf") and result.obb.conf is not None:
+            conf_arr = result.obb.conf.cpu().numpy()
+        else:
+            conf_arr = np.ones_like(cls_arr, dtype=np.float32)
+        for idx, (cls_id, conf) in enumerate(zip(cls_arr, conf_arr)):
+            if cls_id not in out:
+                continue
+            corners = xyxyxyxy[idx].reshape(4, 2)
+            x1, y1 = corners[:, 0].min(), corners[:, 1].min()
+            x2, y2 = corners[:, 0].max(), corners[:, 1].max()
+            out[cls_id]["boxes"].append(np.array([x1, y1, x2, y2], dtype=np.float32))
+            out[cls_id]["scores"].append(float(conf))
+            out[cls_id]["corners"].append(order_corners(corners))
     else:
-        xyxy = r.boxes.xyxy.cpu().numpy() if (r.boxes is not None and len(r.boxes)>0) else np.zeros((0,4), np.float32)
-        cls_arr  = r.boxes.cls.cpu().numpy().astype(int) if (r.boxes is not None and len(r.boxes)>0) else np.zeros((0,), int)
-        conf_arr = r.boxes.conf.cpu().numpy().astype(np.float32) if (r.boxes is not None and len(r.boxes)>0) else np.zeros((0,), np.float32)
-        for b, c, s in zip(xyxy, cls_arr, conf_arr):
-            if c not in dets_by_class: continue
-            prev_boxes, prev_scores = dets_by_class[c]
-            if len(prev_scores)==0 or s > prev_scores[0]:
-                dets_by_class[c] = (np.array([b], dtype=np.float32), np.array([s], np.float32))
-                obb_corners_by_class[c] = None
+        if result.boxes is not None and len(result.boxes) > 0:
+            xyxy = result.boxes.xyxy.cpu().numpy().astype(np.float32)
+            cls_arr = result.boxes.cls.cpu().numpy().astype(int)
+            conf_arr = result.boxes.conf.cpu().numpy().astype(np.float32)
+            for box, cls_id, conf in zip(xyxy, cls_arr, conf_arr):
+                if cls_id not in out:
+                    continue
+                out[cls_id]["boxes"].append(box)
+                out[cls_id]["scores"].append(float(conf))
+                out[cls_id]["corners"].append(None)
+
+    parsed: Dict[int, Dict[str, np.ndarray]] = {}
+    for cls_id, data in out.items():
+        boxes = np.stack(data["boxes"], axis=0) if data["boxes"] else np.zeros((0, 4), np.float32)
+        scores = np.array(data["scores"], dtype=np.float32) if data["scores"] else np.zeros((0,), np.float32)
+        parsed[cls_id] = {"boxes": boxes, "scores": scores, "corners": data["corners"]}
+    return parsed
+
+
+def _angle_deg_between(v1: Tuple[float, float], v2: Tuple[float, float]) -> float:
+    dot = v1[0] * v2[0] + v1[1] * v2[1]
+    cross = v1[0] * v2[1] - v1[1] * v2[0]
+    return float(np.degrees(np.arctan2(abs(cross), dot)))
+
+
+def _prepare_single_class_input(
+    boxes: np.ndarray, scores: np.ndarray, corners: List[Optional[List[float]]]
+) -> Tuple[np.ndarray, np.ndarray, Optional[List[float]]]:
+    if boxes.shape[0] == 0:
+        return np.zeros((0, 4), np.float32), np.zeros((0,), np.float32), None
+    best_idx = int(np.argmax(scores))
+    selected_corners = corners[best_idx] if corners and best_idx < len(corners) else None
+    return boxes[[best_idx]], scores[[best_idx]], selected_corners
+
+
+def _scan_initial_fly_count(
+    cap,
+    max_frames: int,
+    target_size: Tuple[int, int],
+    settings: Settings,
+    predict_fn,
+):
+    """Infer the number of flies present using the first ``max_frames`` frames."""
+
+    eye_mgr = EyeAnchorManager(max_eyes=settings.max_flies, zero_iou_eps=settings.zero_iou_epsilon)
+    frames_checked = 0
+    target_w, target_h = target_size
+
+    while frames_checked < max_frames:
+        ok, frame = cap.read()
+        if not ok:
+            break
+
+        h, w = frame.shape[:2]
+        if (w, h) != (target_w, target_h):
+            frame = cv2.resize(frame, (target_w, target_h), interpolation=cv2.INTER_LINEAR)
+
+        result = predict_fn(frame, settings.conf_thres)[0]
+        dets = _collect_detections(result)
+        cls2_boxes = dets.get(EYE_CLASS, {}).get("boxes", np.zeros((0, 4), np.float32))
+        cls2_scores = dets.get(EYE_CLASS, {}).get("scores", np.zeros((0,), np.float32))
+        cls2_boxes, cls2_scores = enforce_zero_iou_and_topk(
+            cls2_boxes,
+            cls2_scores,
+            settings.max_flies,
+            eps=settings.zero_iou_epsilon,
+        )
+
+        eye_mgr.try_update_from_dets(cls2_boxes, cls2_scores)
+        frames_checked += 1
+
+        if eye_mgr.confirmed:
+            break
+
+    return len(eye_mgr.anchor_ids)
+
+
+def _process_frame(
+    frame,
+    frame_number,
+    current_timestamp,
+    single_trackers: Dict[int, SingleClassTracker],
+    prev_gray,
+    anchor,
+    settings: Settings,
+    predict_fn,
+    eye_mgr: EyeAnchorManager,
+    cls8_tracker: MultiObjectTracker,
+    pairer: StablePairing,
+    active_max_flies: int,
+):
+    conf_thres = settings.conf_thres
+    flow_params = dict(pyr_scale=0.5, levels=3, winsize=15, iterations=3, poly_n=5, poly_sigma=1.2, flags=0)
+
+    result = predict_fn(frame, conf_thres)[0]
+    dets = _collect_detections(result)
 
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
-    out_by_class = {}
-    for cls_id in TRACKED_CLASSES:
-        boxes, scores = dets_by_class[cls_id]
-        best_track = trackers[cls_id].step(boxes, scores)
-        corners = obb_corners_by_class[cls_id]
-        if best_track is None:
-            out_by_class[cls_id] = dict(track_id=np.nan, x=np.nan, y=np.nan, corners=np.nan)
+    single_outputs: Dict[int, Dict[str, float]] = {}
+    for cls_id in SINGLE_TRACK_CLASSES:
+        boxes = dets.get(cls_id, {}).get("boxes", np.zeros((0, 4), np.float32))
+        scores = dets.get(cls_id, {}).get("scores", np.zeros((0,), np.float32))
+        corners_list = dets.get(cls_id, {}).get("corners", [])
+        boxes, scores, selected_corners = _prepare_single_class_input(boxes, scores, corners_list)
+        tracker = single_trackers[cls_id]
+        track = tracker.step(boxes, scores)
+        if track is None:
+            single_outputs[cls_id] = dict(track_id=np.nan, x=np.nan, y=np.nan, corners=np.nan)
             continue
-        box = best_track.box_xyxy
-        if settings.use_optical_flow and best_track.time_since_update > 0:
-            box = _process_frame.flow_nudge(prev_gray, gray, box) if False else _flow_nudge(prev_gray, gray, box, settings.flow_skip_edge, FLOW_PARAMS)
-            best_track.box_xyxy = box
-        cx, cy, w, h = xyxy_to_cxcywh(box)
-        out_by_class[cls_id] = dict(track_id=best_track.id, x=float(cx), y=float(cy), corners=(corners if corners is not None else np.nan))
+        if settings.use_optical_flow and track.time_since_update > 0:
+            track.box_xyxy = _flow_nudge(prev_gray, gray, track.box_xyxy, settings.flow_skip_edge, flow_params)
+        cx, cy, _, _ = xyxy_to_cxcywh(track.box_xyxy)
+        single_outputs[cls_id] = dict(
+            track_id=track.id,
+            x=float(cx),
+            y=float(cy),
+            corners=selected_corners if selected_corners is not None else np.nan,
+        )
 
-    det_eye = out_by_class.get(2)
-    if det_eye is not None:
-        if eye_lock.get("coords") is None and not (np.isnan(det_eye["x"]) or np.isnan(det_eye["y"])):
-            eye_lock["coords"] = (det_eye["x"], det_eye["y"])
-            eye_lock["track_id"] = det_eye["track_id"]
-            eye_lock["corners"] = det_eye["corners"]
-        elif eye_lock.get("coords") is not None:
-            locked_x, locked_y = eye_lock["coords"]
-            out_by_class[2] = dict(
-                track_id=eye_lock.get("track_id", np.nan),
-                x=locked_x,
-                y=locked_y,
-                corners=eye_lock.get("corners", np.nan),
-            )
+    cls2_boxes = dets.get(EYE_CLASS, {}).get("boxes", np.zeros((0, 4), np.float32))
+    cls2_scores = dets.get(EYE_CLASS, {}).get("scores", np.zeros((0,), np.float32))
+    cls2_boxes, cls2_scores = enforce_zero_iou_and_topk(
+        cls2_boxes,
+        cls2_scores,
+        active_max_flies,
+        eps=settings.zero_iou_epsilon,
+    )
+    eye_mgr.try_update_from_dets(cls2_boxes, cls2_scores)
+    eye_centers = eye_mgr.get_centers()
+    eye_ids = eye_mgr.anchor_ids
 
-    # distances
-    def compute_distance(a, b):
-        return float(np.hypot(a["x"] - b["x"], a["y"] - b["y"]))
+    cls8_boxes = dets.get(PROBOSCIS_CLASS, {}).get("boxes", np.zeros((0, 4), np.float32))
+    cls8_scores = dets.get(PROBOSCIS_CLASS, {}).get("scores", np.zeros((0,), np.float32))
+    if cls8_boxes.shape[0] > 0:
+        order = np.argsort(-cls8_scores)[: settings.max_proboscis_tracks]
+        cls8_boxes = cls8_boxes[order]
+        cls8_scores = cls8_scores[order]
 
-    det1 = out_by_class.get(1, {"track_id":np.nan,"x":np.nan,"y":np.nan,"corners":np.nan})
-    det2 = out_by_class.get(2, {"track_id":np.nan,"x":np.nan,"y":np.nan,"corners":np.nan})
-    det_prob = out_by_class.get(PROBOSCIS_CLASS, {"track_id":np.nan,"x":np.nan,"y":np.nan,"corners":np.nan})
-    AX, AY = anchor
+    tracks8 = cls8_tracker.step(cls8_boxes, cls8_scores)
 
-    d12 = d2p = d2A = np.nan
-    if not (np.isnan(det1["x"]) or np.isnan(det2["x"])):
-        d12 = compute_distance(det1, det2); cv2.line(frame, (int(det1["x"]), int(det1["y"])), (int(det2["x"]), int(det2["y"])), (0,255,0), 6)
-    if not (np.isnan(det2["x"]) or np.isnan(det_prob["x"])):
-        d2p = compute_distance(det2, det_prob); cv2.line(frame, (int(det2["x"]), int(det2["y"])), (int(det_prob["x"]), int(det_prob["y"])), (255,0,0), 6)
-    if not np.isnan(det2["x"]):
-        d2A = float(np.hypot(det2["x"] - AX, det2["y"] - AY))
-        cv2.line(frame, (int(det2["x"]), int(det2["y"])), (int(AX), int(AY)), (0,165,255), 6)
+    if settings.use_optical_flow:
+        for track in tracks8:
+            if track.time_since_update > 0:
+                track.box_xyxy = _flow_nudge(prev_gray, gray, track.box_xyxy, settings.flow_skip_edge, flow_params)
 
-    # angle @ class2 between (2→6) and (2→ANCHOR)
-    def angle_deg_between(v1, v2):
-        dot = v1[0]*v2[0] + v1[1]*v2[1]
-        cross = v1[0]*v2[1] - v1[1]*v2[0]
-        return float(np.degrees(np.arctan2(abs(cross), dot)))
-    angle_deg = np.nan
-    if not (np.isnan(det2["x"]) or np.isnan(det_prob["x"])):
-        v_2p = (det_prob["x"] - det2["x"], det_prob["y"] - det2["y"])
-        v_2A = (AX - det2["x"], AY - det2["y"])
-        angle_deg = angle_deg_between(v_2p, v_2A)
+    pairer.step(eye_ids, eye_centers, tracks8)
 
-    row = {
-        "frame": frame_number, "timestamp": current_timestamp,
-        "track_id_class1": det1["track_id"], "x_class1": det1["x"], "y_class1": det1["y"], "corners_class1": str(det1["corners"]),
-        "track_id_class2": det2["track_id"], "x_class2": det2["x"], "y_class2": det2["y"], "corners_class2": str(det2["corners"]),
-        PROBOSCIS_TRACK_COL: det_prob["track_id"],
-        PROBOSCIS_X_COL: det_prob["x"],
-        PROBOSCIS_Y_COL: det_prob["y"],
-        PROBOSCIS_CORNERS_COL: str(det_prob["corners"]),
-        "x_anchor": AX, "y_anchor": AY,
-        "distance_1_2": d12, PROBOSCIS_DISTANCE_COL: d2p, "distance_2_anchor": d2A,
-        "angle_deg_c2_26_vs_anchor": angle_deg
+    eye_mgr.draw(frame)
+    for track in tracks8:
+        x1, y1, x2, y2 = track.box_xyxy.astype(int)
+        cv2.rectangle(frame, (x1, y1), (x2, y2), (255, 0, 0), 3)
+        cx, cy, _, _ = xyxy_to_cxcywh(track.box_xyxy)
+        cv2.putText(
+            frame,
+            f"c8 id={track.id}",
+            (x1, max(0, y1 - 8)),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.6,
+            (255, 0, 0),
+            2,
+        )
+        cv2.circle(frame, (int(cx), int(cy)), 4, (255, 0, 0), -1)
+
+    cls8_by_id = {t.id: t for t in tracks8}
+
+    row: Dict[str, float] = {
+        "frame": frame_number,
+        "timestamp": current_timestamp,
+        "x_anchor": anchor[0],
+        "y_anchor": anchor[1],
     }
+
+    det_class1 = single_outputs.get(1, {"track_id": np.nan, "x": np.nan, "y": np.nan, "corners": np.nan})
+    row.update(
+        {
+            "track_id_class1": det_class1["track_id"],
+            "x_class1": det_class1["x"],
+            "y_class1": det_class1["y"],
+            "corners_class1": str(det_class1["corners"]),
+        }
+    )
+
+    AX, AY = anchor
+    for idx in range(settings.max_flies):
+        if idx < len(eye_centers):
+            ex, ey = eye_centers[idx]
+            eye_id = eye_ids[idx]
+            row[f"eye_{idx}_track_id"] = eye_id
+            row[f"eye_{idx}_x"] = ex
+            row[f"eye_{idx}_y"] = ey
+            row[f"dist_eye_{idx}_anchor"] = float(np.hypot(ex - AX, ey - AY))
+
+            c8_id = pairer.eye_to_cls8.get(eye_id)
+            row[f"cls8_{idx}_track_id"] = np.nan if c8_id is None else c8_id
+            if c8_id is not None and int(c8_id) in cls8_by_id:
+                track = cls8_by_id[int(c8_id)]
+                cx, cy, _, _ = xyxy_to_cxcywh(track.box_xyxy)
+                row[f"cls8_{idx}_x"] = float(cx)
+                row[f"cls8_{idx}_y"] = float(cy)
+                row[f"dist_eye_{idx}_cls8_{idx}"] = float(np.hypot(cx - ex, cy - ey))
+                cv2.line(frame, (int(ex), int(ey)), (int(cx), int(cy)), (0, 255, 0), 4)
+                v_eye_prob = (cx - ex, cy - ey)
+                v_eye_anchor = (AX - ex, AY - ey)
+                row[f"angle_eye_{idx}_cls8_vs_anchor"] = _angle_deg_between(v_eye_prob, v_eye_anchor)
+            else:
+                row[f"cls8_{idx}_x"] = np.nan
+                row[f"cls8_{idx}_y"] = np.nan
+                row[f"dist_eye_{idx}_cls8_{idx}"] = np.nan
+                row[f"angle_eye_{idx}_cls8_vs_anchor"] = np.nan
+
+            if not np.isnan(det_class1["x"]):
+                row[f"distance_class1_eye_{idx}"] = float(
+                    np.hypot(det_class1["x"] - ex, det_class1["y"] - ey)
+                )
+            else:
+                row[f"distance_class1_eye_{idx}"] = np.nan
+
+            cv2.line(frame, (int(ex), int(ey)), (int(AX), int(AY)), (0, 165, 255), 2)
+        else:
+            row[f"eye_{idx}_track_id"] = np.nan
+            row[f"eye_{idx}_x"] = np.nan
+            row[f"eye_{idx}_y"] = np.nan
+            row[f"cls8_{idx}_track_id"] = np.nan
+            row[f"cls8_{idx}_x"] = np.nan
+            row[f"cls8_{idx}_y"] = np.nan
+            row[f"dist_eye_{idx}_cls8_{idx}"] = np.nan
+            row[f"angle_eye_{idx}_cls8_vs_anchor"] = np.nan
+            row[f"dist_eye_{idx}_anchor"] = np.nan
+            row[f"distance_class1_eye_{idx}"] = np.nan
+
     return frame, row, gray
+
+
+def _export_per_fly_csvs(
+    df: pd.DataFrame,
+    out_dir: Path,
+    folder_name: str,
+    cfg: Settings,
+    active_max_flies: int,
+) -> List[Path]:
+    per_fly_paths: List[Path] = []
+    for idx in range(active_max_flies):
+        eye_x_col = f"eye_{idx}_x"
+        if eye_x_col not in df.columns or df[eye_x_col].notna().sum() == 0:
+            continue
+
+        slot_df = pd.DataFrame(
+            {
+                "frame": df["frame"],
+                "timestamp": df["timestamp"],
+                "track_id_class1": df.get("track_id_class1", np.nan),
+                "x_class1": df.get("x_class1", np.nan),
+                "y_class1": df.get("y_class1", np.nan),
+                "corners_class1": df.get("corners_class1", np.nan),
+                "track_id_class2": df[f"eye_{idx}_track_id"],
+                "x_class2": df[eye_x_col],
+                "y_class2": df[f"eye_{idx}_y"],
+                "corners_class2": np.nan,
+                PROBOSCIS_TRACK_COL: df[f"cls8_{idx}_track_id"],
+                PROBOSCIS_X_COL: df[f"cls8_{idx}_x"],
+                PROBOSCIS_Y_COL: df[f"cls8_{idx}_y"],
+                PROBOSCIS_CORNERS_COL: np.nan,
+                "x_anchor": df["x_anchor"],
+                "y_anchor": df["y_anchor"],
+                "distance_1_2": df[f"distance_class1_eye_{idx}"],
+                PROBOSCIS_DISTANCE_COL: df[f"dist_eye_{idx}_cls8_{idx}"],
+                "distance_2_anchor": df[f"dist_eye_{idx}_anchor"],
+                "angle_deg_c2_26_vs_anchor": df[f"angle_eye_{idx}_cls8_vs_anchor"],
+            }
+        )
+
+        if slot_df[["track_id_class2", "x_class2", "y_class2"]].notna().sum().sum() == 0:
+            continue
+
+        csv_path = out_dir / f"{folder_name}_fly{idx + 1}_distances.csv"
+        slot_df.to_csv(csv_path, index=False)
+        per_fly_paths.append(csv_path)
+
+    return per_fly_paths
 
 def _is_cuda_failure(exc: Exception) -> bool:
     msg = str(exc).lower()
@@ -234,6 +435,31 @@ def main(cfg: Settings):
                 print(f"[YOLO] Cannot open {video_path}")
                 continue
 
+            original_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)) or 1080
+            original_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) or 1080
+            target_w, target_h = (1080, 1080) if (original_w, original_h) != (1080, 1080) else (original_w, original_h)
+
+            scan_frames = 5
+            detected_flies = _scan_initial_fly_count(cap, scan_frames, (target_w, target_h), cfg, predict_fn)
+            if not cap.set(cv2.CAP_PROP_POS_FRAMES, 0):
+                cap.release()
+                cap = cv2.VideoCapture(str(video_path))
+                if not cap.isOpened():
+                    print(f"[YOLO] Cannot reopen {video_path} after warm-up scan")
+                    continue
+
+            if detected_flies == 0:
+                print(
+                    f"[YOLO] {video_path.name}: no eyes detected in first {scan_frames} frames; "
+                    f"using configured max ({cfg.max_flies})."
+                )
+                active_max_flies = cfg.max_flies
+            else:
+                active_max_flies = min(detected_flies, cfg.max_flies)
+                print(
+                    f"[YOLO] {video_path.name}: detected {active_max_flies} fly/fly slots from first {scan_frames} frames."
+                )
+
             total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) or 0
             max_frame = total_frames-1 if total_frames>0 else 10**9
             timestamps = {}
@@ -263,16 +489,26 @@ def main(cfg: Settings):
             h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) or 1080
             writer = cv2.VideoWriter(str(out_mp4), cv2.VideoWriter_fourcc(*"mp4v"), fps, (w, h))
 
-            trackers = {
+            single_trackers = {
                 cls: SingleClassTracker(
                     iou_thres=cfg.iou_match_thres, max_age=cfg.max_age, ema_alpha=cfg.ema_alpha
                 )
-                for cls in TRACKED_CLASSES
+                for cls in SINGLE_TRACK_CLASSES
             }
+            eye_mgr = EyeAnchorManager(max_eyes=active_max_flies, zero_iou_eps=cfg.zero_iou_epsilon)
+            cls8_tracker = MultiObjectTracker(
+                iou_thres=cfg.iou_match_thres,
+                max_age=cfg.max_age,
+                ema_alpha=cfg.ema_alpha,
+                max_tracks=cfg.max_proboscis_tracks,
+            )
+            pairer = StablePairing(max_pairs=active_max_flies)
+
+            target_w, target_h = (1080, 1080) if (w, h) != (1080, 1080) else (w, h)
+            pairer.rebind_max_dist_px = cfg.pair_rebind_ratio * math.hypot(target_w, target_h)
 
             rows = []
             prev_gray = None
-            eye_lock = {"coords": None, "track_id": None, "corners": None}
             frame_idx = 0
             t0 = time.time()
             while cap.isOpened() and frame_idx <= max_frame:
@@ -281,10 +517,31 @@ def main(cfg: Settings):
                 if (w, h) != (1080, 1080):
                     frame = cv2.resize(frame, (1080,1080), interpolation=cv2.INTER_LINEAR)
                 ts = timestamps.get(frame_idx, frame_idx / fps)
-                frame, row, prev_gray = _process_frame(frame, frame_idx, ts, trackers, prev_gray, (AX,AY), cfg, predict_fn, eye_lock)
+                frame, row, prev_gray = _process_frame(
+                    frame,
+                    frame_idx,
+                    ts,
+                    single_trackers,
+                    prev_gray,
+                    (AX, AY),
+                    cfg,
+                    predict_fn,
+                    eye_mgr,
+                    cls8_tracker,
+                    pairer,
+                    active_max_flies,
+                )
                 writer.write(frame)
                 rows.append(row)
                 frame_idx += 1
             cap.release(); writer.release()
-            pd.DataFrame(rows).to_csv(out_dir / f"{folder_name}_distances_merged.csv", index=False)
-            print(f"[YOLO] {video_path.name} → {out_dir} in {time.time()-t0:.1f}s")
+            df_rows = pd.DataFrame(rows)
+            merged_csv_path = out_dir / f"{folder_name}_distances_merged.csv"
+            df_rows.to_csv(merged_csv_path, index=False)
+
+            per_fly_paths = _export_per_fly_csvs(df_rows, out_dir, folder_name, cfg, active_max_flies)
+
+            extra_msg = ""
+            if per_fly_paths:
+                extra_msg = " (per-fly CSVs: " + ", ".join(p.name for p in per_fly_paths) + ")"
+            print(f"[YOLO] {video_path.name} → {out_dir} in {time.time()-t0:.1f}s{extra_msg}")

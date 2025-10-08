@@ -101,6 +101,49 @@ python -m fbpipe.steps.distance_stats --config config.yaml
 ...
 ```
 
+## Multi-fly YOLO inference
+
+The pipeline now exports up to four concurrent flies (class-2 eyes paired with
+class-8 proboscis tracks) from a single video. No extra entry point is required:
+once configured, `make run` or `python -m fbpipe.steps.yolo_infer --config
+config.yaml` automatically fans the merged CSV into per-fly files.
+
+1. **Configure limits** – edit `config.yaml` (or corresponding environment
+   variables) under the `yolo` section:
+
+   | Key | Purpose |
+   | --- | --- |
+   | `max_flies` | Number of eye anchors (slots) to track; defaults to 4. |
+   | `max_proboscis_tracks` | Number of proboscis tracks kept after confidence filtering. |
+   | `pair_rebind_ratio` | Fraction of the frame diagonal used as the rebinding radius when an eye temporarily loses its paired proboscis. |
+   | `zero_iou_epsilon` | Numeric tolerance for enforcing non-overlapping eye anchors. |
+
+   Environment overrides are available (e.g., `MAX_FLIES=3 make run`).【F:config.yaml†L11-L33】【F:src/fbpipe/config.py†L11-L72】
+
+2. **Run inference** – execute `make run` for the entire pipeline or call the
+   YOLO step directly if you only need detections:
+
+   ```bash
+   python -m fbpipe.steps.yolo_infer --config config.yaml
+   ```
+
+   The step emits:
+
+   - `*_distances_merged.csv`: merged view with all fly slots and metadata.
+   - `*_fly{N}_distances.csv`: one file per populated slot with the legacy
+     single-fly schema.【F:src/fbpipe/steps/yolo_infer.py†L234-L318】
+
+3. **Inspect outputs** – annotated videos and CSVs land in the processed folder
+   created beside each source video. Downstream steps (distance stats,
+   normalization, RMS, etc.) consume the merged CSVs without additional
+   configuration.
+
+When you add more flies per video, confirm that your YOLO model reliably
+separates the class-2 detections. Raising `zero_iou_epsilon` loosens the
+non-overlap constraint if detections sit close together, while reducing
+`pair_rebind_ratio` tightens how far a proboscis track can drift before it is
+considered unpaired.
+
 ## GPU requirements
 
 The pipeline expects a CUDA-capable GPU for production workloads. Setting `allow_cpu: true` (or `ALLOW_CPU=true` via environment) now **forces** the YOLO step to run entirely on CPU, which is useful for smoke tests or when the local CUDA stack is unstable. If CUDA initialisation or inference fails while GPU mode is requested and `allow_cpu` is enabled, the step logs a warning and permanently switches to CPU for the rest of the run. CPU mode is significantly slower and should only be used for debugging.

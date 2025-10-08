@@ -28,6 +28,10 @@ class Settings:
     ema_alpha: float = 0.20
     use_optical_flow: bool = True
     flow_skip_edge: int = 10
+    max_flies: int = 4
+    max_proboscis_tracks: int = 4
+    pair_rebind_ratio: float = 0.20
+    zero_iou_epsilon: float = 1e-8
 
     # distance limits
     class2_min: float = 70.0
@@ -75,6 +79,10 @@ def load_settings(config_path: str | Path) -> Settings:
         ema_alpha=float(os.getenv("EMA_ALPHA", yolo.get("ema_alpha", 0.20))),
         use_optical_flow=(os.getenv("USE_OPTICAL_FLOW", str(yolo.get("use_optical_flow", True))).lower()=="true"),
         flow_skip_edge=int(os.getenv("FLOW_SKIP_EDGE", yolo.get("flow_skip_edge", 10))),
+        max_flies=int(os.getenv("MAX_FLIES", yolo.get("max_flies", 4))),
+        max_proboscis_tracks=int(os.getenv("MAX_PROBOSCIS_TRACKS", yolo.get("max_proboscis_tracks", 4))),
+        pair_rebind_ratio=float(os.getenv("PAIR_REBIND_RATIO", yolo.get("pair_rebind_ratio", 0.20))),
+        zero_iou_epsilon=float(os.getenv("ZERO_IOU_EPSILON", yolo.get("zero_iou_epsilon", 1e-8))),
 
         class2_min=float(os.getenv("CLASS2_MIN", dist_limits.get("class2_min", 70.0))),
         class2_max=float(os.getenv("CLASS2_MAX", dist_limits.get("class2_max", 250.0))),

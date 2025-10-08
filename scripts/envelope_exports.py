@@ -37,6 +37,7 @@ from scipy.signal import hilbert
 TIMESTAMP_CANDIDATES = ("UTC_ISO", "Timestamp", "Number", "MonoNs")
 FRAME_CANDIDATES = ("Frame", "FrameNumber", "Frame Number")
 TRIAL_REGEX = re.compile(r"(testing|training)_(\d+)", re.IGNORECASE)
+FLY_SLOT_REGEX = re.compile(r"(fly\d+)_distances", re.IGNORECASE)
 
 
 def _nanmin(values: np.ndarray) -> float:
@@ -185,6 +186,13 @@ def collect_envelopes(cfg: CollectConfig) -> None:
                     print(f"[SKIP] {csv_path.name}: none of {cfg.measure_cols} present.")
                     continue
 
+                slot_token = _fly_slot_from_name(csv_path.name)
+                if slot_token:
+                    slot_label = slot_token.replace("_distances", "")
+                    fly_id = f"{fly}_{slot_label}"
+                else:
+                    fly_id = fly
+
                 try:
                     n_frames = pd.read_csv(csv_path, usecols=[measure_col]).shape[0]
                 except Exception as exc:  # pragma: no cover - purely defensive
@@ -194,7 +202,7 @@ def collect_envelopes(cfg: CollectConfig) -> None:
                 items.append(
                     {
                         "dataset": dataset,
-                        "fly": fly,
+                        "fly": fly_id,
                         "csv_path": csv_path,
                         "trial_type": _infer_trial_type(csv_path),
                         "trial_label": _trial_label(csv_path),
@@ -463,4 +471,10 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
 
 if __name__ == "__main__":  # pragma: no cover
     main()
+
+def _fly_slot_from_name(name: str) -> Optional[str]:
+    match = FLY_SLOT_REGEX.search(name.lower())
+    if match:
+        return match.group(1)
+    return None
 
