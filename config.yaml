@@ -11,7 +11,7 @@ cuda_allow_tf32: true
 yolo:
   conf_thres: 0.40
   iou_match_thres: 0.25
-  max_age: 15
+  max_age: 5
   ema_alpha: 0.20
   use_optical_flow: true
   flow_skip_edge: 10
