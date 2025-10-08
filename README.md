@@ -31,6 +31,12 @@ cp .env.example .env
 
 # 3) Run everything (env must stay active)
 make run   # or: python -m fbpipe.pipeline --config config.yaml all
+
+# Optional: run an individual pipeline step
+make run STEP=distance_stats
+
+# Discover available steps
+make steps
 ```
 
 ### Using an existing Conda environment
@@ -149,6 +155,21 @@ separates the class-2 detections. Raising `zero_iou_epsilon` loosens the
 non-overlap constraint if detections sit close together, while reducing
 `pair_rebind_ratio` tightens how far a proboscis track can drift before it is
 considered unpaired.
+
+## Debugging CSV discovery
+
+Set `FBPIPE_DEBUG_CSV=1` to print how the pipeline chooses between per-fly
+distance exports (e.g., `october_07_fly_1_training_4_fly1_distances.csv`) and
+legacy merged fallbacks. Combine it with targeted runs to isolate misbehaving
+steps:
+
+```bash
+FBPIPE_DEBUG_CSV=1 make run STEP=distance_normalize
+```
+
+The debug dump lists each inspected directory, the detected trial base, and the
+candidate files for that base so you can immediately see whether a merged CSV is
+incorrectly winning.
 
 ## GPU requirements
 

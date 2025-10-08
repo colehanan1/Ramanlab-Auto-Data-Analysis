@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import os
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
@@ -94,14 +95,40 @@ def gather_distance_csvs(base_dir: Path) -> List[Path]:
         bucket = parent_map.setdefault(base, {"specific": [], "merged": []})
         bucket["merged"].append(path)
 
+    debug_enabled = bool(os.environ.get("FBPIPE_DEBUG_CSV"))
+    debug_rows: List[Tuple[str, str, List[str], List[str]]] = []
+
     results: List[Path] = []
     for parent in sorted(by_parent.keys(), key=lambda p: str(p)):
         base_map = by_parent[parent]
         for base in sorted(base_map.keys()):
             bucket = base_map[base]
             if bucket["specific"]:
-                results.extend(_sorted_by_slot(bucket["specific"]))
+                chosen = _sorted_by_slot(bucket["specific"])
+                results.extend(chosen)
             else:
-                results.extend(sorted(bucket["merged"], key=lambda p: p.name.lower()))
+                chosen = sorted(bucket["merged"], key=lambda p: p.name.lower())
+                results.extend(chosen)
+
+            if debug_enabled:
+                debug_rows.append(
+                    (
+                        str(parent),
+                        base,
+                        [p.name for p in bucket["specific"]],
+                        [p.name for p in bucket["merged"]],
+                    )
+                )
+
+    if debug_enabled and debug_rows:
+        print("[CSV] gather_distance_csvs debug dump:")
+        for parent, base, specific, merged_list in debug_rows:
+            if specific:
+                print(
+                    f"[CSV] {parent} :: base={base} "
+                    f"using specific={specific} (merged candidates={merged_list})"
+                )
+            else:
+                print(f"[CSV] {parent} :: base={base} using merged={merged_list}")
 
     return results

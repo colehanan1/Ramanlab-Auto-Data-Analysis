@@ -7,7 +7,7 @@ import argparse
 import subprocess
 import sys
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any, Iterable, Mapping, Sequence
 
 import yaml
 
@@ -17,6 +17,14 @@ src_root = project_root / "src"
 sys.path.insert(0, str(project_root))
 if str(src_root) not in sys.path:
     sys.path.insert(0, str(src_root))
+
+try:
+    from fbpipe.pipeline import ORDERED_STEPS
+except Exception as exc:  # pragma: no cover - import-time dependency issues
+    ORDERED_STEPS: tuple[Any, ...] = ()
+    _ORDERED_STEPS_ERROR = exc
+else:
+    _ORDERED_STEPS_ERROR = None
 
 from scripts.envelope_visuals import (
     EnvelopePlotConfig,
@@ -229,8 +237,13 @@ def _run_combined(cfg: Mapping[str, Any] | None) -> None:
         secure_copy_and_cleanup(resolved_sources, str(dest))
 
 
-def _run_pipeline(config_path: Path) -> None:
-    cmd = [sys.executable, "-m", "fbpipe.pipeline", "--config", str(config_path), "all"]
+def _run_pipeline(config_path: Path, steps: Iterable[str] | None = None) -> None:
+    cmd = [sys.executable, "-m", "fbpipe.pipeline", "--config", str(config_path)]
+    step_list = tuple(steps) if steps else ()
+    if not step_list:
+        cmd.append("all")
+    else:
+        cmd.extend(step_list)
     print(f"[analysis] pipeline → {' '.join(cmd)}")
     try:
         subprocess.run(cmd, check=True)
@@ -244,21 +257,48 @@ def _run_pipeline(config_path: Path) -> None:
 def main(argv: Sequence[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", default="config.yaml", help="Path to pipeline configuration YAML.")
+    parser.add_argument(
+        "--pipeline-step",
+        action="append",
+        dest="pipeline_steps",
+        default=None,
+        help="Run a specific pipeline step (can be provided multiple times).",
+    )
+    parser.add_argument(
+        "--list-steps",
+        action="store_true",
+        help="List available pipeline steps and exit.",
+    )
     args = parser.parse_args(argv)
 
     config_path = Path(args.config).expanduser().resolve()
     if not config_path.exists():
         raise FileNotFoundError(f"Configuration file not found: {config_path}")
 
+    if args.list_steps:
+        if _ORDERED_STEPS_ERROR is not None:
+            raise RuntimeError(
+                "Unable to import pipeline steps. Ensure optional dependencies (e.g., OpenCV) are installed."
+            ) from _ORDERED_STEPS_ERROR
+        print("Available pipeline steps:")
+        for step in ORDERED_STEPS:
+            print(f"  {step.name:>20}  - {step.description}")
+        return
+
     with config_path.open("r", encoding="utf-8") as fh:
         data = yaml.safe_load(fh) or {}
 
-    _run_pipeline(config_path)
+    step_names = tuple(args.pipeline_steps or ())
+    _run_pipeline(config_path, step_names)
 
-    analysis_cfg = data.get("analysis") or {}
-    _run_envelope_visuals(analysis_cfg.get("envelope_visuals"))
-    _run_training(analysis_cfg.get("training"))
-    _run_combined(analysis_cfg.get("combined"))
+    full_run = not step_names or step_names == ("all",)
+    if full_run:
+        analysis_cfg = data.get("analysis") or {}
+        _run_envelope_visuals(analysis_cfg.get("envelope_visuals"))
+        _run_training(analysis_cfg.get("training"))
+        _run_combined(analysis_cfg.get("combined"))
+    else:
+        print("[analysis] Skipping downstream analysis because a partial pipeline run was requested.")
 
 
 if __name__ == "__main__":  # pragma: no cover
