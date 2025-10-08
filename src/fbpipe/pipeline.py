@@ -31,7 +31,11 @@ class Step:
 # stats, OFM state annotations require the RMS copies, and the video overlay
 # comes last so that all metadata is already embedded in the CSVs.
 ORDERED_STEPS: tuple[Step, ...] = (
-    Step("yolo", yolo_infer.main, "Run Ultralytics YOLO inference and export merged CSVs"),
+    Step(
+        "yolo",
+        yolo_infer.main,
+        "Run Ultralytics YOLO inference and export per-fly CSVs",
+    ),
     Step("distance_stats", distance_stats.main, "Derive global class-2 distance bounds per fly"),
     Step("distance_normalize", distance_normalize.main, "Convert distances into percentage scores"),
     Step("detect_dropped_frames", detect_dropped_frames.main, "Report missing frames and NaN segments"),

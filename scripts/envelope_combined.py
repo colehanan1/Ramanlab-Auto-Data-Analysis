@@ -370,9 +370,15 @@ def _locate_trials(
             continue
 
         slot = extract_fly_slot(csv_path) if prefer_distance else None
-        variant = None
-        if prefer_distance:
-            variant = f"fly{slot}" if slot is not None else "merged"
+
+        if prefer_distance and slot is None:
+            print(
+                f"[SKIP] {csv_path.name}: missing fly slot metadata; "
+                "per-fly distance exports are required."
+            )
+            continue
+
+        variant = f"fly{slot}" if prefer_distance else None
 
         results.append(
             TrialEntry(
@@ -673,12 +679,7 @@ class CombineConfig:
     odor_off_s: float = 60.0
     odor_latency_s: float = 0.0
     angle_suffixes: tuple[str, ...] = ("*merged.csv", "*class_2_8.csv", "*class_2_6.csv")
-    distance_suffixes: tuple[str, ...] = (
-        "*fly*_distances.csv",
-        "*merged.csv",
-        "*class_2_8.csv",
-        "*class_2_6.csv",
-    )
+    distance_suffixes: tuple[str, ...] = ("*fly*_distances.csv",)
 
     @property
     def window_frames(self) -> int:
@@ -744,9 +745,9 @@ def combine_distance_angle(cfg: CombineConfig) -> None:
                 continue
 
             slot = dist_entry.fly_slot if dist_entry.fly_slot is not None else 0
-            variant = dist_entry.distance_variant or (f"fly{slot}" if slot else "merged")
+            variant = dist_entry.distance_variant or (f"fly{slot}" if slot else None)
             variant_suffix = f"_{variant}" if variant else ""
-            title_variant = f" ({variant})" if variant and variant != "merged" else ""
+            title_variant = f" ({variant})" if variant else ""
 
             try:
                 dist_df = pd.read_csv(dist_entry.path)

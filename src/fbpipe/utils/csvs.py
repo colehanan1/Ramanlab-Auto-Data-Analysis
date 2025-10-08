@@ -67,7 +67,11 @@ def _sorted_by_slot(paths: Iterable[Path]) -> List[Path]:
     )
 
 def gather_distance_csvs(base_dir: Path) -> List[Path]:
-    """Return distance CSVs under ``base_dir`` (per-fly exports only)."""
+    """Return distance CSVs under ``base_dir`` (per-fly exports only).
+
+    If a trial only has merged exports available a ``FileNotFoundError`` is
+    raised so callers do not silently fall back to merged data.
+    """
 
     base_dir = Path(base_dir)
     if not base_dir.exists():
@@ -99,6 +103,8 @@ def gather_distance_csvs(base_dir: Path) -> List[Path]:
     debug_rows: List[Tuple[str, str, List[str], List[str]]] = []
 
     results: List[Path] = []
+    merged_only: List[Tuple[Path, str, List[Path]]] = []
+
     for parent in sorted(by_parent.keys(), key=lambda p: str(p)):
         base_map = by_parent[parent]
         for base in sorted(base_map.keys()):
@@ -106,15 +112,8 @@ def gather_distance_csvs(base_dir: Path) -> List[Path]:
             if bucket["specific"]:
                 chosen = _sorted_by_slot(bucket["specific"])
                 results.extend(chosen)
-            else:
-                if bucket["merged"]:
-                    ignored = ", ".join(
-                        p.name for p in sorted(bucket["merged"], key=lambda p: p.name.lower())
-                    )
-                    print(
-                        "[CSV] WARNING: ignoring merged distance CSV(s) because per-fly exports are required:"
-                        f" {ignored}"
-                    )
+            elif bucket["merged"]:
+                merged_only.append((parent, base, bucket["merged"]))
 
             if debug_enabled:
                 debug_rows.append(
@@ -139,4 +138,16 @@ def gather_distance_csvs(base_dir: Path) -> List[Path]:
                     f"[CSV] {parent} :: base={base} ignoring merged-only candidates={merged_list}"
                 )
 
+    if merged_only:
+        details = []
+        for parent, base, paths in merged_only:
+            merged_names = ", ".join(sorted(p.name for p in paths))
+            details.append(f"{parent} :: {base} → {merged_names}")
+        raise FileNotFoundError(
+            "Per-fly distance CSV exports are required but missing. "
+            "Re-run YOLO inference to generate *_fly{N}_distances.csv files. "
+            "Merged-only candidates encountered:\n" + "\n".join(details)
+        )
+
     return results
+

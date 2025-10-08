@@ -113,7 +113,9 @@ The pipeline now exports up to four concurrent flies (class-2 eyes paired with
 class-8 proboscis tracks) from a single video. No extra entry point is required:
 once configured, `make run` or `python -m fbpipe.steps.yolo_infer --config
 config.yaml` automatically emits per-fly CSVs (`*_fly{N}_distances.csv`). A
-merged view is still stored for manual inspection, but the pipeline ignores it.
+merged view is still stored for manual inspection, but the pipeline now refuses
+to consume it—missing per-fly exports cause a hard failure so problems surface
+immediately.
 
 1. **Configure limits** – edit `config.yaml` (or corresponding environment
    variables) under the `yolo` section:
@@ -137,7 +139,7 @@ merged view is still stored for manual inspection, but the pipeline ignores it.
    The step emits:
 
    - `*_distances_merged.csv`: merged view with all fly slots and metadata
-     (kept for reference only).
+     (kept for reference only and ignored by the automated pipeline).
    - `*_fly{N}_distances.csv`: one file per populated slot with the legacy
       single-fly schema.【F:src/fbpipe/steps/yolo_infer.py†L320-L349】 These
       exports now include a `fly_slot` integer (1–4) and a
@@ -162,7 +164,7 @@ considered unpaired.
 
 Set `FBPIPE_DEBUG_CSV=1` to print how the pipeline discovers per-fly distance
 exports (e.g., `october_07_fly_1_training_4_fly1_distances.csv`) and which
-directories still contain ignored merged-only files. Combine it with targeted
+directories still trigger the merged-only failure guard. Combine it with targeted
 runs to isolate misbehaving steps:
 
 ```bash
@@ -171,7 +173,7 @@ FBPIPE_DEBUG_CSV=1 make run STEP=distance_normalize
 
 The debug dump lists each inspected directory, the detected trial base, and the
 candidate files for that base so you can immediately see whether any merged CSVs
-remain (they are now skipped entirely).
+remain (the run now aborts instead of silently falling back).
 
 ## GPU requirements
 

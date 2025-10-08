@@ -202,7 +202,13 @@ def collect_envelopes(cfg: CollectConfig) -> None:
                     continue
 
                 slot = extract_fly_slot(csv_path)
-                variant = f"fly{slot}" if slot is not None else "merged"
+                if slot is None:
+                    print(
+                        f"[SKIP] {csv_path.name}: missing fly slot metadata; "
+                        "per-fly distance exports are required."
+                    )
+                    continue
+                variant = f"fly{slot}"
 
                 items.append(
                     {
@@ -213,7 +219,7 @@ def collect_envelopes(cfg: CollectConfig) -> None:
                         "trial_label": _trial_label(csv_path),
                         "measure_col": measure_col,
                         "n_frames": n_frames,
-                        "fly_slot": slot if slot is not None else 0,
+                        "fly_slot": slot,
                         "distance_variant": variant,
                     }
                 )
