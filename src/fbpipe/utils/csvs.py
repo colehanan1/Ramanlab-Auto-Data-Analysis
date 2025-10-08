@@ -26,11 +26,8 @@ def extract_fly_slot(path: Path | str) -> Optional[int]:
     match = _FLY_SLOT_PATTERN.search(name)
     if not match:
         return None
-    try:
-        return int(match.group(1))
-    except ValueError:
-        return None
-
+    slot = int(match.group(1))  # safe: regex ensures digits
+    return slot if slot > 0 else None
 def _normalise_parent(path: Path) -> Path:
     try:
         return path.resolve()
