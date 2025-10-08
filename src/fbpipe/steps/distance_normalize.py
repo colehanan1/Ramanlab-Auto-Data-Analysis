@@ -1,8 +1,10 @@
 
 from __future__ import annotations
 from pathlib import Path
-import glob, json
+import json
+
 import numpy as np, pandas as pd
+
 from ..config import Settings
 from ..utils.columns import (
     PROBOSCIS_DISTANCE_COL,
@@ -11,6 +13,7 @@ from ..utils.columns import (
     PROBOSCIS_MIN_DISTANCE_COL,
     find_proboscis_distance_column,
 )
+from ..utils.csvs import gather_distance_csvs
 
 def main(cfg: Settings):
     root = Path(cfg.main_directory).expanduser().resolve()
@@ -21,7 +24,7 @@ def main(cfg: Settings):
             continue
         stats = json.loads(stats_path.read_text(encoding="utf-8"))
         gmin = stats["global_min"]; gmax = stats["global_max"]
-        csvs = glob.glob(str(fly / "**" / "*merged.csv"), recursive=True)
+        csvs = gather_distance_csvs(fly)
         for f in csvs:
             df = pd.read_csv(f)
             dist_col = find_proboscis_distance_column(df)

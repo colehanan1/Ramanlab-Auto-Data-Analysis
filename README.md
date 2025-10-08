@@ -130,8 +130,11 @@ config.yaml` automatically fans the merged CSV into per-fly files.
    The step emits:
 
    - `*_distances_merged.csv`: merged view with all fly slots and metadata.
-   - `*_fly{N}_distances.csv`: one file per populated slot with the legacy
-     single-fly schema.【F:src/fbpipe/steps/yolo_infer.py†L234-L318】
+    - `*_fly{N}_distances.csv`: one file per populated slot with the legacy
+      single-fly schema.【F:src/fbpipe/steps/yolo_infer.py†L320-L349】 These
+      exports now include a `fly_slot` integer (1–4) and a
+      `distance_variant` label (e.g. `fly1`) so downstream processing can
+      identify the contributing individual.【F:src/fbpipe/steps/yolo_infer.py†L320-L349】
 
 3. **Inspect outputs** – annotated videos and CSVs land in the processed folder
    created beside each source video. Downstream steps (distance stats,

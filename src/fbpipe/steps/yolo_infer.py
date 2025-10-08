@@ -337,6 +337,8 @@ def _export_per_fly_csvs(
                 PROBOSCIS_DISTANCE_COL: df[f"dist_eye_{idx}_cls8_{idx}"],
                 "distance_2_anchor": df[f"dist_eye_{idx}_anchor"],
                 "angle_deg_c2_26_vs_anchor": df[f"angle_eye_{idx}_cls8_vs_anchor"],
+                "fly_slot": idx + 1,
+                "distance_variant": f"fly{idx + 1}",
             }
         )
 

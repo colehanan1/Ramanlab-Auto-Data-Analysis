@@ -1,15 +1,18 @@
 
 from __future__ import annotations
 from pathlib import Path
-import json, glob
+import json
+
 import pandas as pd
+
 from ..config import Settings
 from ..utils.columns import find_proboscis_distance_column
+from ..utils.csvs import gather_distance_csvs
 
 def main(cfg: Settings):
     root = Path(cfg.main_directory).expanduser().resolve()
     for fly in [p for p in root.iterdir() if p.is_dir()]:
-        csvs = glob.glob(str(fly / "**" / "*merged.csv"), recursive=True)
+        csvs = gather_distance_csvs(fly)
         gmin, gmax = float("inf"), float("-inf")
         for f in csvs:
             df = pd.read_csv(f)

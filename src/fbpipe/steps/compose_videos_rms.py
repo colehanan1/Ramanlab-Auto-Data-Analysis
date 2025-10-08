@@ -16,6 +16,7 @@ from ..utils.columns import (
     find_proboscis_distance_percentage_column,
     find_proboscis_xy_columns,
 )
+from ..utils.csvs import extract_fly_slot, gather_distance_csvs
 
 # Display defaults mirror the notebook example
 plt.rcParams.update(
@@ -291,7 +292,7 @@ def _discover_trials(fly_dir: Path, category: str) -> List[int]:
     trials: set[int] = set()
     rdir = fly_dir / "RMS_calculations"
     if rdir.is_dir():
-        for path in rdir.glob("*merged.csv"):
+        for path in gather_distance_csvs(rdir):
             if category in path.name.lower():
                 idx = extract_trial_index(path.stem, category)
                 if idx is not None:
@@ -421,7 +422,7 @@ def _ead_compute_trim_min_max(fly_dir: Path) -> Optional[Tuple[float, float]]:
     if not base.is_dir():
         return None
     values: List[np.ndarray] = []
-    for path in sorted(base.glob("*merged.csv")):
+    for path in gather_distance_csvs(base):
         try:
             arr = pd.to_numeric(pd.read_csv(path, usecols=[DIST_COL_ROBUST])[DIST_COL_ROBUST], errors="coerce").to_numpy()
         except Exception:
@@ -551,13 +552,12 @@ def _series_rms_from_rmscalc(
     if not base.is_dir():
         return None
 
-    candidates = sorted(
-        [
-            path
-            for path in base.glob("*merged.csv")
-            if category in path.name.lower() and extract_trial_index(path.stem, category) == trial_index
-        ]
-    )
+    candidates = [
+        path
+        for path in gather_distance_csvs(base)
+        if category in path.name.lower() and extract_trial_index(path.stem, category) == trial_index
+    ]
+    candidates.sort(key=lambda p: (extract_fly_slot(p) or 0, p.name.lower()))
     if not candidates:
         return None
 

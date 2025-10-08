@@ -21,6 +21,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Iterator, List, Optional, Sequence
@@ -28,6 +29,13 @@ from typing import Iterable, Iterator, List, Optional, Sequence
 import numpy as np
 import pandas as pd
 from scipy.signal import hilbert
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+SRC_ROOT = REPO_ROOT / "src"
+if str(SRC_ROOT) not in sys.path:
+    sys.path.insert(0, str(SRC_ROOT))
+
+from fbpipe.utils.csvs import extract_fly_slot, gather_distance_csvs
 
 
 # ---------------------------------------------------------------------------
@@ -125,15 +133,17 @@ def _find_trial_csvs(fly_dir: Path) -> Iterator[Path]:
     search_root = fly_dir / "RMS_calculations"
     if not search_root.is_dir():
         search_root = fly_dir
-    patterns = ("**/*testing*.csv", "**/*training*.csv")
+
     seen: set[Path] = set()
-    for pattern in patterns:
-        for csv_path in search_root.glob(pattern):
-            if csv_path.is_file():
-                resolved = csv_path.resolve()
-                if resolved not in seen:
-                    seen.add(resolved)
-                    yield resolved
+    for csv_path in gather_distance_csvs(search_root):
+        name = ("/".join(csv_path.parts)).lower()
+        if "testing" not in name and "training" not in name:
+            continue
+        resolved = csv_path.resolve()
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        yield resolved
 
 
 # ---------------------------------------------------------------------------
@@ -191,6 +201,9 @@ def collect_envelopes(cfg: CollectConfig) -> None:
                     print(f"[WARN] Skip {csv_path.name}: count error: {exc}")
                     continue
 
+                slot = extract_fly_slot(csv_path)
+                variant = f"fly{slot}" if slot is not None else "merged"
+
                 items.append(
                     {
                         "dataset": dataset,
@@ -200,6 +213,8 @@ def collect_envelopes(cfg: CollectConfig) -> None:
                         "trial_label": _trial_label(csv_path),
                         "measure_col": measure_col,
                         "n_frames": n_frames,
+                        "fly_slot": slot if slot is not None else 0,
+                        "distance_variant": variant,
                     }
                 )
                 max_len = max(max_len, n_frames)
@@ -213,6 +228,8 @@ def collect_envelopes(cfg: CollectConfig) -> None:
     cols = [
         "dataset",
         "fly",
+        "distance_variant",
+        "fly_slot",
         "trial_type",
         "trial_label",
         "fps",
@@ -261,6 +278,8 @@ def collect_envelopes(cfg: CollectConfig) -> None:
         row = [
             item["dataset"],
             item["fly"],
+            item["distance_variant"],
+            item["fly_slot"],
             item["trial_type"],
             item["trial_label"],
             fps,
@@ -270,7 +289,7 @@ def collect_envelopes(cfg: CollectConfig) -> None:
         if len(env) < max_len:
             row.extend([np.nan] * (max_len - len(env)))
         elif len(env) > max_len:
-            row = row[: 5 + max_len]
+            row = row[: 7 + max_len]
 
         pd.DataFrame([row], columns=cols).to_csv(cfg.out_csv, mode="a", header=False, index=False)
 
@@ -293,7 +312,15 @@ class ConvertConfig:
 def convert_wide_csv(cfg: ConvertConfig) -> None:
     df = pd.read_csv(cfg.input_csv)
 
-    meta_candidates = ["dataset", "fly", "trial_type", "trial_label", "fps"]
+    meta_candidates = [
+        "dataset",
+        "fly",
+        "distance_variant",
+        "fly_slot",
+        "trial_type",
+        "trial_label",
+        "fps",
+    ]
     meta_cols = [col for col in meta_candidates if col in df.columns]
     if not meta_cols:
         raise RuntimeError("No metadata columns found. Expected at least one of: dataset, fly, trial_type, trial_label, fps.")
