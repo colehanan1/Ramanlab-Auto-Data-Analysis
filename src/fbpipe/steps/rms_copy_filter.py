@@ -7,7 +7,7 @@ import pandas as pd
 
 from ..config import Settings
 from ..utils.columns import find_proboscis_distance_percentage_column, find_proboscis_xy_columns
-from ..utils.csvs import extract_fly_slot, gather_distance_csvs
+from ..utils.csvs import distance_base_name, extract_fly_slot, gather_distance_csvs
 
 def main(cfg: Settings):
     root = Path(cfg.main_directory).expanduser().resolve()
@@ -15,6 +15,7 @@ def main(cfg: Settings):
         dest = fly / "RMS_calculations"
         dest.mkdir(exist_ok=True)
         csvs = gather_distance_csvs(fly)
+        cleaned_bases: set[str] = set()
         for f in csvs:
             p = Path(f)
             if str(dest) in str(p.parent):
@@ -32,11 +33,20 @@ def main(cfg: Settings):
                     cols.append(pct_col)
 
                 slot = extract_fly_slot(p)
+                base_name = distance_base_name(p)
                 if slot is not None:
                     if "fly_slot" in df.columns and "fly_slot" not in cols:
                         cols.append("fly_slot")
                     if "distance_variant" in df.columns and "distance_variant" not in cols:
                         cols.append("distance_variant")
+                    if base_name not in cleaned_bases:
+                        cleaned_bases.add(base_name)
+                        for candidate in dest.glob("updated_*_distances_merged.csv"):
+                            try:
+                                if distance_base_name(candidate) == base_name:
+                                    candidate.unlink(missing_ok=True)
+                            except Exception:
+                                continue
                 out = dest / ("updated_" + p.name)
                 df[cols].to_csv(out, index=False)
                 print(f"[RMS] {p.name} → {out.name}")
