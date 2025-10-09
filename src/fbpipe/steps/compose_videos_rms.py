@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import io
 import re
+import shutil
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, cast
 
 import numpy as np
 import pandas as pd
@@ -47,6 +48,18 @@ PCT_COL_ROBUST = "distance_class1_class2_pct"
 DIST_COL_ROBUST = "distance_class1_class2"
 TRIM_FRAC = 0.05
 VIDEO_EXTS_CHECK = VIDEO_EXTS  # alias for clarity
+LINE_COLOR_CYCLE = [
+    "#1f77b4",
+    "#d62728",
+    "#2ca02c",
+    "#ff7f0e",
+    "#9467bd",
+    "#8c564b",
+    "#e377c2",
+    "#7f7f7f",
+    "#bcbd22",
+    "#17becf",
+]
 
 MONTHS = (
     "january",
@@ -125,6 +138,13 @@ def timestamp_to_seconds(value) -> float:
 
 def _normalise_column_name(name: str) -> str:
     return re.sub(r"[^a-z0-9]+", "", str(name).lower())
+
+
+def _format_series_label(label: str) -> str:
+    cleaned = label.replace("_", " ").strip()
+    cleaned = re.sub(r"(?<=\D)(\d+)", r" \1", cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned)
+    return cleaned.title() if cleaned else label
 
 
 def find_col(df: pd.DataFrame, candidates: List[str]) -> Optional[str]:
@@ -499,8 +519,10 @@ def main(cfg: Settings) -> None:
                     continue
 
                 slot_success = False
+                series_payloads: List[Dict[str, object]] = []
                 for token, _slot_idx, csv_path in slot_entries:
                     slot_label = token.replace("_distances", "")
+                    out_mp4 = out_root / f"{fly_name}_{slot_label}_{category}_{tri}_LINES_rms.mp4"
                     series = _series_rms_from_rmscalc(
                         csv_path,
                         cfg.fps_default,
@@ -513,35 +535,126 @@ def main(cfg: Settings) -> None:
                         print(f"  [{category} {tri} {slot_label}] ⤫ No RMS series; skipping.")
                         continue
 
-                    t, rms, odor_on, odor_off, threshold = series
-                    xlim = (float(np.nanmin(t)), float(np.nanmax(t)))
-
-                    out_mp4 = out_root / f"{fly_name}_{slot_label}_{category}_{tri}_LINES_rms.mp4"
-                    if out_mp4.exists():
-                        print(f"  [{category} {tri} {slot_label}] ⤫ Exists, skipping: {out_mp4.name}")
-                        slot_success = True
-                        continue
-
-                    print(
-                        f"  [{category} {tri} {slot_label}] ✓ Video: {video_path.name} → {out_mp4.name}"
-                    )
-                    ok = _compose_lineplot_video(
-                        video_path,
-                        [{"t": t, "y": rms, "label": "RMS", "color": "blue"}],
-                        xlim,
-                        odor_on,
-                        odor_off,
-                        out_mp4,
-                        panel_height_fraction=PANEL_HEIGHT_FRACTION,
-                        ylim=YLIM,
-                        threshold=threshold,
+                    color_idx = len(series_payloads) % len(LINE_COLOR_CYCLE)
+                    series_payloads.append(
+                        {
+                            "slot_label": slot_label,
+                            "series": series,
+                            "color": LINE_COLOR_CYCLE[color_idx],
+                            "out_mp4": out_mp4,
+                        }
                     )
 
-                    if ok:
-                        slot_success = True
-                        print(f"  [{category} {tri} {slot_label}] [SAVED] {out_mp4.name}")
+                if not series_payloads:
+                    continue
+
+                label_summary = ", ".join(
+                    _format_series_label(payload["slot_label"]) for payload in series_payloads
+                )
+                primary_entry = series_payloads[0]
+                primary_output = cast(Path, primary_entry["out_mp4"])
+
+                action = "↻ Overwriting" if primary_output.exists() else "✓ Video"
+                print(
+                    f"  [{category} {tri}] {action}: {video_path.name} → {primary_output.name} "
+                    f"(lines: {label_summary})"
+                )
+
+                xmins: List[float] = []
+                xmaxs: List[float] = []
+                odor_ons: List[float] = []
+                odor_offs: List[float] = []
+                thresholds: List[float] = []
+
+                for payload in series_payloads:
+                    t, rms, odor_on, odor_off, threshold = cast(
+                        Tuple[np.ndarray, np.ndarray, float, float, float], payload["series"]
+                    )
+                    t = np.asarray(t, dtype=float)
+                    finite_t = t[np.isfinite(t)]
+                    if finite_t.size:
+                        xmins.append(float(finite_t.min()))
+                        xmaxs.append(float(finite_t.max()))
+                    if np.isfinite(odor_on):
+                        odor_ons.append(float(odor_on))
+                    if np.isfinite(odor_off):
+                        odor_offs.append(float(odor_off))
+                    if np.isfinite(threshold):
+                        thresholds.append(float(threshold))
+
+                if xmins and xmaxs:
+                    xlim = (min(xmins), max(xmaxs))
+                else:
+                    max_len = max(
+                        len(cast(Tuple[np.ndarray, np.ndarray, float, float, float], payload["series"])[0])
+                        for payload in series_payloads
+                    )
+                    xlim = (0.0, float(max_len))
+
+                odor_on_val = float(min(odor_ons)) if odor_ons else None
+                odor_off_val = float(max(odor_offs)) if odor_offs else None
+
+                threshold_val: Optional[float]
+                if thresholds:
+                    base = thresholds[0]
+                    if any(not np.isclose(base, other, rtol=1e-3, atol=1e-3) for other in thresholds[1:]):
+                        threshold_val = None
                     else:
-                        print(f"  [{category} {tri} {slot_label}] ⤫ Render failed; source retained.")
+                        threshold_val = base
+                else:
+                    threshold_val = None
+
+                series_list = []
+                for payload in series_payloads:
+                    t, rms, _odor_on, _odor_off, _threshold = cast(
+                        Tuple[np.ndarray, np.ndarray, float, float, float], payload["series"]
+                    )
+                    series_list.append(
+                        {
+                            "t": np.asarray(t, dtype=float),
+                            "y": np.asarray(rms, dtype=float),
+                            "label": _format_series_label(str(payload["slot_label"])),
+                            "color": payload["color"],
+                        }
+                    )
+
+                ok = _compose_lineplot_video(
+                    video_path,
+                    series_list,
+                    xlim,
+                    odor_on_val,
+                    odor_off_val,
+                    primary_output,
+                    panel_height_fraction=PANEL_HEIGHT_FRACTION,
+                    ylim=YLIM,
+                    threshold=threshold_val,
+                )
+
+                if not ok:
+                    print(
+                        f"  [{category} {tri} {primary_entry['slot_label']}] ⤫ Render failed; source retained."
+                    )
+                    continue
+
+                slot_success = True
+                print(
+                    f"  [{category} {tri} {primary_entry['slot_label']}] [SAVED] {primary_output.name}"
+                )
+
+                for payload in series_payloads[1:]:
+                    dest = cast(Path, payload["out_mp4"])
+                    existed = dest.exists()
+                    try:
+                        shutil.copy2(primary_output, dest)
+                        tag = "[UPDATED]" if existed else "[SAVED]"
+                        print(
+                            f"  [{category} {tri} {payload['slot_label']}] {tag} {dest.name}"
+                        )
+                        slot_success = True
+                    except Exception as exc:
+                        print(
+                            f"  [{category} {tri} {payload['slot_label']}] ⤫ Copy failed: {exc}"
+                        )
 
                 if delete_source_after and slot_success:
                     _safe_unlink(video_path)
