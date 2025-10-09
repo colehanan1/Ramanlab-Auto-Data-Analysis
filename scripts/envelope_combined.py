@@ -24,7 +24,7 @@ import re
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, Iterator, Mapping, MutableMapping, Sequence
+from typing import Iterable, Iterator, Mapping, MutableMapping, Optional, Sequence
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -75,6 +75,7 @@ TIMESTAMP_COLS = ["UTC_ISO", "Timestamp", "Number", "MonoNs"]
 FRAME_COLS = ["Frame", "FrameNumber", "Frame Number"]
 TRIAL_REGEX = re.compile(r"(testing|training)_(\d+)", re.IGNORECASE)
 TESTING_REGEX = re.compile(r"testing_(\d+)", re.IGNORECASE)
+FLY_SLOT_REGEX = re.compile(r"(fly\d+)_distances", re.IGNORECASE)
 
 ANCHOR_X = 1080.0
 ANCHOR_Y = 540.0
@@ -522,10 +523,18 @@ def _index_testing(entries: Sequence[tuple[str, Path, str]]) -> tuple[dict[str, 
         if category.lower() != "testing":
             continue
         match = TESTING_REGEX.search(label)
+        slot_match = FLY_SLOT_REGEX.search(path.stem)
+        slot_label = slot_match.group(1).lower() if slot_match else None
         if match:
-            indexed[match.group(0).lower()] = path
+            base_key = match.group(0).lower()
+            if slot_label:
+                indexed[f"{base_key}_{slot_label}"] = path
+            indexed.setdefault(base_key, path)
         else:
-            fallback[label.lower()] = path
+            key = label.lower()
+            if slot_label:
+                indexed[f"{key}_{slot_label}"] = path
+            fallback[key] = path
     return indexed, fallback
 
 
@@ -598,8 +607,18 @@ class CombineConfig:
     odor_on_s: float = 30.0
     odor_off_s: float = 60.0
     odor_latency_s: float = 0.0
-    angle_suffixes: tuple[str, ...] = ("*merged.csv", "*class_2_8.csv", "*class_2_6.csv")
-    distance_suffixes: tuple[str, ...] = ("*merged.csv", "*class_2_8.csv", "*class_2_6.csv")
+    angle_suffixes: tuple[str, ...] = (
+        "*fly*_distances.csv",
+        "*merged.csv",
+        "*class_2_8.csv",
+        "*class_2_6.csv",
+    )
+    distance_suffixes: tuple[str, ...] = (
+        "*fly*_distances.csv",
+        "*merged.csv",
+        "*class_2_8.csv",
+        "*class_2_6.csv",
+    )
 
     @property
     def window_frames(self) -> int:
@@ -624,7 +643,20 @@ def combine_distance_angle(cfg: CombineConfig) -> None:
             continue
 
         angle_idx, angle_fallback = _index_testing(angle_entries)
-        dist_idx, _ = _index_testing(distance_entries)
+
+        dist_idx: dict[str, tuple[Path, str, Optional[str]]] = {}
+        for label, path, category in distance_entries:
+            if category.lower() != "testing":
+                continue
+            match = TESTING_REGEX.search(label)
+            base_key = match.group(0).lower() if match else label.lower()
+            slot_match = FLY_SLOT_REGEX.search(path.stem)
+            slot_label = slot_match.group(1).lower() if slot_match else None
+            key = f"{base_key}_{slot_label}" if slot_label else base_key
+            prefer_new = path.name.lower().startswith("updated_")
+            existing = dist_idx.get(key)
+            if existing is None or (prefer_new and not existing[0].name.lower().startswith("updated_")):
+                dist_idx[key] = (path, base_key, slot_label)
 
         out_csv_dir = fly_dir / "angle_distance_rms_envelope"
         out_fig_dir = out_csv_dir / "plots"
@@ -632,10 +664,17 @@ def combine_distance_angle(cfg: CombineConfig) -> None:
         out_fig_dir.mkdir(parents=True, exist_ok=True)
 
         completed = skipped = 0
-        for test_id, dist_path in sorted(dist_idx.items()):
-            angle_path = angle_idx.get(test_id) or angle_fallback.get(dist_path.stem.lower())
+        for key, (dist_path, base_key, slot_label) in sorted(dist_idx.items()):
+            lookup_keys = [key, base_key]
+            angle_path: Optional[Path] = None
+            for candidate in lookup_keys:
+                angle_path = angle_idx.get(candidate)
+                if angle_path:
+                    break
             if angle_path is None:
-                print(f"[WARN] {fly_name} {test_id}: no matching angle file — skipped.")
+                angle_path = angle_fallback.get(dist_path.stem.lower())
+            if angle_path is None:
+                print(f"[WARN] {fly_name} {key}: no matching angle file — skipped.")
                 skipped += 1
                 continue
 
@@ -676,6 +715,8 @@ def combine_distance_angle(cfg: CombineConfig) -> None:
                 combined_rms = _rolling_rms(combined, cfg.window_frames)
                 envelope = _hilbert_envelope(combined_rms, cfg.window_frames)
 
+                slot_suffix = f"_{slot_label}" if slot_label else ""
+                test_id = f"{base_key}{slot_suffix}".replace("__", "_")
                 out_df = pd.DataFrame(
                     {
                         "time_s": time_dist,

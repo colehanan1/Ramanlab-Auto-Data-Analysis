@@ -37,6 +37,8 @@ from scipy.signal import hilbert
 TIMESTAMP_CANDIDATES = ("UTC_ISO", "Timestamp", "Number", "MonoNs")
 FRAME_CANDIDATES = ("Frame", "FrameNumber", "Frame Number")
 TRIAL_REGEX = re.compile(r"(testing|training)_(\d+)", re.IGNORECASE)
+FLY_SLOT_REGEX = re.compile(r"(fly\d+)_distances", re.IGNORECASE)
+FLY_NUMBER_REGEX = re.compile(r"fly(\d+)", re.IGNORECASE)
 
 
 def _nanmin(values: np.ndarray) -> float:
@@ -185,6 +187,24 @@ def collect_envelopes(cfg: CollectConfig) -> None:
                     print(f"[SKIP] {csv_path.name}: none of {cfg.measure_cols} present.")
                     continue
 
+                slot_token = _fly_slot_from_name(csv_path.name)
+                fly_number = _fly_number_from_name(csv_path.name)
+                if slot_token:
+                    slot_label = slot_token.replace("_distances", "")
+                    fly_id = f"{fly}_{slot_label}"
+                    if fly_number is None:
+                        fly_number = _fly_number_from_name(slot_label)
+                else:
+                    fly_id = fly
+                    if fly_number is None:
+                        fly_number = _fly_number_from_name(fly)
+
+                fly_number_label = str(fly_number) if fly_number is not None else "UNKNOWN"
+                if fly_number is None:
+                    print(
+                        f"[WARN] {csv_path.name}: fly number not detected from filename; using 'UNKNOWN'."
+                    )
+
                 try:
                     n_frames = pd.read_csv(csv_path, usecols=[measure_col]).shape[0]
                 except Exception as exc:  # pragma: no cover - purely defensive
@@ -194,8 +214,9 @@ def collect_envelopes(cfg: CollectConfig) -> None:
                 items.append(
                     {
                         "dataset": dataset,
-                        "fly": fly,
+                        "fly": fly_id,
                         "csv_path": csv_path,
+                        "fly_number": fly_number_label,
                         "trial_type": _infer_trial_type(csv_path),
                         "trial_label": _trial_label(csv_path),
                         "measure_col": measure_col,
@@ -213,6 +234,7 @@ def collect_envelopes(cfg: CollectConfig) -> None:
     cols = [
         "dataset",
         "fly",
+        "fly_number",
         "trial_type",
         "trial_label",
         "fps",
@@ -261,6 +283,7 @@ def collect_envelopes(cfg: CollectConfig) -> None:
         row = [
             item["dataset"],
             item["fly"],
+            item["fly_number"],
             item["trial_type"],
             item["trial_label"],
             fps,
@@ -270,7 +293,7 @@ def collect_envelopes(cfg: CollectConfig) -> None:
         if len(env) < max_len:
             row.extend([np.nan] * (max_len - len(env)))
         elif len(env) > max_len:
-            row = row[: 5 + max_len]
+            row = row[: 6 + max_len]
 
         pd.DataFrame([row], columns=cols).to_csv(cfg.out_csv, mode="a", header=False, index=False)
 
@@ -293,7 +316,7 @@ class ConvertConfig:
 def convert_wide_csv(cfg: ConvertConfig) -> None:
     df = pd.read_csv(cfg.input_csv)
 
-    meta_candidates = ["dataset", "fly", "trial_type", "trial_label", "fps"]
+    meta_candidates = ["dataset", "fly", "fly_number", "trial_type", "trial_label", "fps"]
     meta_cols = [col for col in meta_candidates if col in df.columns]
     if not meta_cols:
         raise RuntimeError("No metadata columns found. Expected at least one of: dataset, fly, trial_type, trial_label, fps.")
@@ -463,4 +486,20 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
 
 if __name__ == "__main__":  # pragma: no cover
     main()
+
+def _fly_slot_from_name(name: str) -> Optional[str]:
+    match = FLY_SLOT_REGEX.search(name.lower())
+    if match:
+        return match.group(1)
+    return None
+
+
+def _fly_number_from_name(name: str) -> Optional[int]:
+    match = FLY_NUMBER_REGEX.search(name.lower())
+    if match:
+        try:
+            return int(match.group(1))
+        except ValueError:  # pragma: no cover - defensive guard
+            return None
+    return None
 
