@@ -76,6 +76,7 @@ FRAME_COLS = ["Frame", "FrameNumber", "Frame Number"]
 TRIAL_REGEX = re.compile(r"(testing|training)_(\d+)", re.IGNORECASE)
 TESTING_REGEX = re.compile(r"testing_(\d+)", re.IGNORECASE)
 FLY_SLOT_REGEX = re.compile(r"(fly\d+)_distances", re.IGNORECASE)
+FLY_NUMBER_REGEX = re.compile(r"fly(\d+)", re.IGNORECASE)
 
 ANCHOR_X = 1080.0
 ANCHOR_Y = 540.0
@@ -244,6 +245,20 @@ def _angle_multiplier(angle_pct: np.ndarray) -> np.ndarray:
     ]
     multipliers = [0.25, 0.50, 0.75, 1.00, 1.25, 1.50, 1.75, 2.00]
     return np.select(conditions, multipliers, default=np.nan)
+
+
+def _extract_fly_number(*candidates: Optional[str]) -> Optional[int]:
+    for candidate in candidates:
+        if not candidate:
+            continue
+        match = FLY_NUMBER_REGEX.search(candidate)
+        if not match:
+            continue
+        try:
+            return int(match.group(1))
+        except ValueError:
+            print(f"[WARN] fly number token in '{candidate}' was not a valid integer.")
+    return None
 
 
 def _is_month_folder(path: Path) -> bool:
@@ -717,6 +732,15 @@ def combine_distance_angle(cfg: CombineConfig) -> None:
 
                 slot_suffix = f"_{slot_label}" if slot_label else ""
                 test_id = f"{base_key}{slot_suffix}".replace("__", "_")
+                fly_number = _extract_fly_number(slot_label, dist_path.stem, fly_name)
+                fly_number_label = (
+                    str(fly_number) if fly_number is not None else "UNKNOWN"
+                )
+                if fly_number is None:
+                    print(
+                        f"[WARN] {dist_path.name}: could not determine fly number; using 'UNKNOWN'."
+                    )
+
                 out_df = pd.DataFrame(
                     {
                         "time_s": time_dist,
@@ -726,6 +750,7 @@ def combine_distance_angle(cfg: CombineConfig) -> None:
                         "combined_base": combined,
                         "rolling_rms": combined_rms,
                         "envelope_of_rms": envelope,
+                        "fly_number": fly_number_label,
                     }
                 )
                 out_csv = out_csv_dir / f"{test_id}_angle_distance_rms_envelope.csv"

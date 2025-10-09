@@ -1,14 +1,17 @@
 import json
 import sys
 from pathlib import Path
+from typing import Sequence
 
 import numpy as np
 import pandas as pd
 
 project_root = Path(__file__).resolve().parents[1]
+sys.path.append(str(project_root))
 sys.path.append(str(project_root / "src"))
 sys.path.append(str(project_root / "scripts"))
 
+from envelope_combined import CombineConfig, combine_distance_angle
 from envelope_exports import CollectConfig, ConvertConfig, collect_envelopes, convert_wide_csv
 from fbpipe.config import Settings
 from fbpipe.steps import detect_dropped_frames, distance_normalize, distance_stats
@@ -26,6 +29,30 @@ def _write_dummy_csv(path: Path) -> None:
             "max_distance_2_8": [0.0, 0.0, 0.0, 0.0],
         }
     )
+    df.to_csv(path, index=False)
+
+
+def _write_distance_angle_csv(
+    path: Path,
+    *,
+    distance_pct: Sequence[float],
+    angle_pct: Sequence[float],
+) -> None:
+    frames = np.arange(len(distance_pct))
+    base_x = 150.0
+    base_y = 200.0
+    df = pd.DataFrame(
+        {
+            "frame": frames,
+            "distance_percentage": distance_pct,
+            "angle_centered_pct": angle_pct,
+            "x_class2": np.full(len(frames), base_x),
+            "y_class2": np.full(len(frames), base_y),
+            "x_proboscis": base_x + 20.0,
+            "y_proboscis": base_y + 10.0,
+        }
+    )
+    path.parent.mkdir(parents=True, exist_ok=True)
     df.to_csv(path, index=False)
 
 
@@ -125,3 +152,42 @@ def test_collect_and_convert_capture_fly_number(tmp_path):
     assert "fly_number" in code_maps["code_maps"]
     assert code_maps["code_maps"]["fly_number"].get("3") == 1
     assert code_maps["column_order"][2] == "fly_number"
+
+
+def test_combine_distance_angle_includes_fly_number_column(tmp_path):
+    root = tmp_path / "experiment"
+    fly_dir = root / "october_07_session"
+    month_dir = fly_dir / "october"
+
+    for idx, distance in enumerate((
+        [10.0, 20.0, 30.0, 40.0],
+        [15.0, 25.0, 35.0, 45.0],
+    ), start=1):
+        csv_name = f"october_07_fly_1_testing_1_fly{idx}_distances.csv"
+        csv_path = month_dir / "RMS_calculations" / csv_name
+        angle_series = [0.0, 5.0 * idx, 10.0 * idx, 15.0 * idx]
+        _write_distance_angle_csv(
+            csv_path,
+            distance_pct=distance,
+            angle_pct=angle_series,
+        )
+
+    combine_cfg = CombineConfig(root=root, fps_default=40.0, window_sec=0.25)
+    combine_distance_angle(combine_cfg)
+
+    out_csv_dir = fly_dir / "angle_distance_rms_envelope"
+    csv_outputs = sorted(out_csv_dir.glob("*angle_distance_rms_envelope.csv"))
+    assert len(csv_outputs) == 2
+
+    observed_numbers = set()
+    for csv_path in csv_outputs:
+        df = pd.read_csv(csv_path)
+        assert "fly_number" in df.columns
+        unique_numbers = set(df["fly_number"].astype(str))
+        assert len(unique_numbers) == 1
+        observed_numbers.update(unique_numbers)
+
+    assert observed_numbers == {"1", "2"}
+
+    plot_outputs = sorted((out_csv_dir / "plots").glob("*.png"))
+    assert len(plot_outputs) == 2
