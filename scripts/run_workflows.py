@@ -221,8 +221,26 @@ def _run_combined(cfg: Mapping[str, Any] | None) -> None:
             raise ValueError("combined.secure_cleanup.sources must list at least one directory.")
         dest = _ensure_path(secure_cfg.get("destination"), "secure_cleanup.destination")
         resolved_sources = [str(_ensure_path(src, "secure_cleanup.sources")) for src in sources]
-        print(f"[analysis] combined.secure_cleanup → {dest}")
-        secure_copy_and_cleanup(resolved_sources, str(dest))
+        perform_cleanup_cfg = secure_cfg.get("perform_cleanup")
+        if perform_cleanup_cfg is None:
+            perform_cleanup = True
+        elif isinstance(perform_cleanup_cfg, str):
+            perform_cleanup = perform_cleanup_cfg.strip().lower() in {
+                "1",
+                "true",
+                "yes",
+                "on",
+            }
+        else:
+            perform_cleanup = bool(perform_cleanup_cfg)
+        print(
+            f"[analysis] combined.secure_cleanup → dest={dest} sources={resolved_sources} perform_cleanup={perform_cleanup}"
+        )
+        secure_copy_and_cleanup(
+            resolved_sources,
+            str(dest),
+            perform_cleanup=perform_cleanup,
+        )
 
 
 def _run_pipeline(config_path: Path) -> None:

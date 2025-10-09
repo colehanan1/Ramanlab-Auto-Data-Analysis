@@ -24,7 +24,7 @@ import re
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, Iterator, Mapping, MutableMapping, Sequence
+from typing import Iterable, Iterator, Mapping, MutableMapping, Optional, Sequence
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -75,6 +75,8 @@ TIMESTAMP_COLS = ["UTC_ISO", "Timestamp", "Number", "MonoNs"]
 FRAME_COLS = ["Frame", "FrameNumber", "Frame Number"]
 TRIAL_REGEX = re.compile(r"(testing|training)_(\d+)", re.IGNORECASE)
 TESTING_REGEX = re.compile(r"testing_(\d+)", re.IGNORECASE)
+FLY_SLOT_REGEX = re.compile(r"(fly\d+)_distances", re.IGNORECASE)
+FLY_NUMBER_REGEX = re.compile(r"fly(\d+)", re.IGNORECASE)
 
 ANCHOR_X = 1080.0
 ANCHOR_Y = 540.0
@@ -245,6 +247,20 @@ def _angle_multiplier(angle_pct: np.ndarray) -> np.ndarray:
     return np.select(conditions, multipliers, default=np.nan)
 
 
+def _extract_fly_number(*candidates: Optional[str]) -> Optional[int]:
+    for candidate in candidates:
+        if not candidate:
+            continue
+        match = FLY_NUMBER_REGEX.search(candidate)
+        if not match:
+            continue
+        try:
+            return int(match.group(1))
+        except ValueError:
+            print(f"[WARN] fly number token in '{candidate}' was not a valid integer.")
+    return None
+
+
 def _is_month_folder(path: Path) -> bool:
     return path.is_dir() and path.name.lower().startswith(MONTHS)
 
@@ -279,19 +295,30 @@ def _locate_trials(
     patterns = [suffix_globs] if isinstance(suffix_globs, str) else list(suffix_globs)
     month_dirs = [p for p in fly_dir.rglob("*") if _is_month_folder(p)]
     found: set[Path] = set()
+    print(
+        f"[DEBUG] {fly_dir.name}: scanning {len(month_dirs)} month directories for patterns {patterns}"
+    )
     for month_dir in month_dirs:
         for pattern in patterns:
             found.update(Path(p) for p in month_dir.rglob(pattern))
 
     results: list[tuple[str, Path, str]] = []
     for csv_path in sorted(found):
+        print(f"[DEBUG] {fly_dir.name}: evaluating {csv_path}")
         try:
             header = pd.read_csv(csv_path, nrows=5)
         except Exception:
+            print(f"[WARN] {fly_dir.name}: failed to read header from {csv_path}")
             continue
         if not _pick_column(header, required_cols):
+            print(
+                f"[SKIP] {csv_path.name}: required columns {required_cols} missing. Available={list(header.columns)}"
+            )
             continue
         results.append((csv_path.stem, csv_path, _infer_category(csv_path)))
+        print(
+            f"[DEBUG] {fly_dir.name}: accepted {csv_path.name} as {_infer_category(csv_path)}"
+        )
     return results
 
 
@@ -522,10 +549,18 @@ def _index_testing(entries: Sequence[tuple[str, Path, str]]) -> tuple[dict[str, 
         if category.lower() != "testing":
             continue
         match = TESTING_REGEX.search(label)
+        slot_match = FLY_SLOT_REGEX.search(path.stem)
+        slot_label = slot_match.group(1).lower() if slot_match else None
         if match:
-            indexed[match.group(0).lower()] = path
+            base_key = match.group(0).lower()
+            if slot_label:
+                indexed[f"{base_key}_{slot_label}"] = path
+            indexed.setdefault(base_key, path)
         else:
-            fallback[label.lower()] = path
+            key = label.lower()
+            if slot_label:
+                indexed[f"{key}_{slot_label}"] = path
+            fallback[key] = path
     return indexed, fallback
 
 
@@ -598,8 +633,18 @@ class CombineConfig:
     odor_on_s: float = 30.0
     odor_off_s: float = 60.0
     odor_latency_s: float = 0.0
-    angle_suffixes: tuple[str, ...] = ("*merged.csv", "*class_2_8.csv", "*class_2_6.csv")
-    distance_suffixes: tuple[str, ...] = ("*merged.csv", "*class_2_8.csv", "*class_2_6.csv")
+    angle_suffixes: tuple[str, ...] = (
+        "*fly*_distances.csv",
+        "*merged.csv",
+        "*class_2_8.csv",
+        "*class_2_6.csv",
+    )
+    distance_suffixes: tuple[str, ...] = (
+        "*fly*_distances.csv",
+        "*merged.csv",
+        "*class_2_8.csv",
+        "*class_2_6.csv",
+    )
 
     @property
     def window_frames(self) -> int:
@@ -607,6 +652,10 @@ class CombineConfig:
 
 
 def combine_distance_angle(cfg: CombineConfig) -> None:
+    print(
+        "[DEBUG] combine_distance_angle → root=%s, fps_default=%.3f, window_frames=%d"
+        % (cfg.root, cfg.fps_default, cfg.window_frames)
+    )
     odor_latency = max(cfg.odor_latency_s, 0.0)
     odor_on_cmd = cfg.odor_on_s
     odor_off_cmd = cfg.odor_off_s
@@ -615,6 +664,7 @@ def combine_distance_angle(cfg: CombineConfig) -> None:
 
     for fly_dir in sorted(p for p in cfg.root.iterdir() if p.is_dir()):
         fly_name = fly_dir.name
+        print(f"\n[DEBUG] Processing fly: {fly_name} ({fly_dir})")
         _ensure_angle_percentages(fly_dir, cfg.angle_suffixes)
         angle_entries = _locate_trials(fly_dir, cfg.angle_suffixes, ANGLE_COLS)
         distance_entries = _locate_trials(fly_dir, cfg.distance_suffixes, DIST_COLS)
@@ -624,7 +674,30 @@ def combine_distance_angle(cfg: CombineConfig) -> None:
             continue
 
         angle_idx, angle_fallback = _index_testing(angle_entries)
-        dist_idx, _ = _index_testing(distance_entries)
+        print(
+            f"[DEBUG] {fly_name}: angle_idx keys={list(angle_idx.keys())}, fallback={list(angle_fallback.keys())}"
+        )
+
+        dist_idx: dict[str, tuple[Path, str, Optional[str]]] = {}
+        for label, path, category in distance_entries:
+            if category.lower() != "testing":
+                continue
+            match = TESTING_REGEX.search(label)
+            base_key = match.group(0).lower() if match else label.lower()
+            slot_match = FLY_SLOT_REGEX.search(path.stem)
+            slot_label = slot_match.group(1).lower() if slot_match else None
+            key = f"{base_key}_{slot_label}" if slot_label else base_key
+            prefer_new = path.name.lower().startswith("updated_")
+            existing = dist_idx.get(key)
+            if existing is None or (prefer_new and not existing[0].name.lower().startswith("updated_")):
+                dist_idx[key] = (path, base_key, slot_label)
+                print(
+                    f"[DEBUG] {fly_name}: registered distance CSV {path} → key={key}, slot_label={slot_label}"
+                )
+            else:
+                print(
+                    f"[DEBUG] {fly_name}: kept existing distance CSV for key={key}; candidate was {path}"
+                )
 
         out_csv_dir = fly_dir / "angle_distance_rms_envelope"
         out_fig_dir = out_csv_dir / "plots"
@@ -632,18 +705,32 @@ def combine_distance_angle(cfg: CombineConfig) -> None:
         out_fig_dir.mkdir(parents=True, exist_ok=True)
 
         completed = skipped = 0
-        for test_id, dist_path in sorted(dist_idx.items()):
-            angle_path = angle_idx.get(test_id) or angle_fallback.get(dist_path.stem.lower())
+        for key, (dist_path, base_key, slot_label) in sorted(dist_idx.items()):
+            lookup_keys = [key, base_key]
+            angle_path: Optional[Path] = None
+            for candidate in lookup_keys:
+                angle_path = angle_idx.get(candidate)
+                if angle_path:
+                    break
             if angle_path is None:
-                print(f"[WARN] {fly_name} {test_id}: no matching angle file — skipped.")
+                angle_path = angle_fallback.get(dist_path.stem.lower())
+            if angle_path is None:
+                print(f"[WARN] {fly_name} {key}: no matching angle file — skipped.")
                 skipped += 1
                 continue
+
+            print(
+                f"[DEBUG] {fly_name}: pairing distance={dist_path.name} with angle={angle_path.name}; slot_label={slot_label}"
+            )
 
             try:
                 dist_df = pd.read_csv(dist_path)
                 dist_col = _pick_column(dist_df, DIST_COLS)
                 if not dist_col:
                     raise ValueError("missing distance column")
+                print(
+                    f"[DEBUG] {fly_name}: distance columns={list(dist_df.columns)} selected={dist_col}"
+                )
                 dist_pct = (
                     pd.to_numeric(dist_df[dist_col], errors="coerce")
                     .fillna(0.0)
@@ -656,6 +743,9 @@ def combine_distance_angle(cfg: CombineConfig) -> None:
                 angle_col = _pick_column(angle_df, ANGLE_COLS)
                 if not angle_col:
                     raise ValueError("missing angle column")
+                print(
+                    f"[DEBUG] {fly_name}: angle columns={list(angle_df.columns)} selected={angle_col}"
+                )
                 time_ang = _time_axis(angle_df, cfg.fps_default)
                 angle_vals = pd.to_numeric(angle_df[angle_col], errors="coerce").to_numpy()
 
@@ -676,6 +766,21 @@ def combine_distance_angle(cfg: CombineConfig) -> None:
                 combined_rms = _rolling_rms(combined, cfg.window_frames)
                 envelope = _hilbert_envelope(combined_rms, cfg.window_frames)
 
+                slot_suffix = f"_{slot_label}" if slot_label else ""
+                test_id = f"{base_key}{slot_suffix}".replace("__", "_")
+                fly_number = _extract_fly_number(slot_label, dist_path.stem, fly_name)
+                fly_number_label = (
+                    str(fly_number) if fly_number is not None else "UNKNOWN"
+                )
+                if fly_number is None:
+                    print(
+                        f"[WARN] {dist_path.name}: could not determine fly number; using 'UNKNOWN'."
+                    )
+                else:
+                    print(
+                        f"[DEBUG] {fly_name}: fly_number={fly_number_label} derived from slot_label={slot_label}"
+                    )
+
                 out_df = pd.DataFrame(
                     {
                         "time_s": time_dist,
@@ -685,10 +790,14 @@ def combine_distance_angle(cfg: CombineConfig) -> None:
                         "combined_base": combined,
                         "rolling_rms": combined_rms,
                         "envelope_of_rms": envelope,
+                        "fly_number": fly_number_label,
                     }
                 )
                 out_csv = out_csv_dir / f"{test_id}_angle_distance_rms_envelope.csv"
                 out_df.to_csv(out_csv, index=False)
+                print(
+                    f"[DEBUG] {fly_name}: wrote {out_csv.name} rows={len(out_df)} fly_number={fly_number_label}"
+                )
 
                 plt.figure(figsize=(12, 4))
                 plt.plot(time_dist, envelope, linewidth=1.5)
@@ -734,11 +843,17 @@ def combine_distance_angle(cfg: CombineConfig) -> None:
 # ---------------------------------------------------------------------------
 
 
-def secure_copy_and_cleanup(sources: Sequence[str], destination: str) -> None:
+def secure_copy_and_cleanup(
+    sources: Sequence[str], destination: str, perform_cleanup: bool = True
+) -> None:
+    source_list = list(sources)
+    print(
+        f"[DEBUG] secure_copy_and_cleanup → sources={source_list}, dest={destination}, perform_cleanup={perform_cleanup}"
+    )
     dest_root = Path(destination).expanduser().resolve()
     dest_root.mkdir(parents=True, exist_ok=True)
 
-    for source in _normalise_roots(sources):
+    for source in _normalise_roots(source_list):
         dest_path = dest_root / source.name
         print(f"\nCopying from {source} → {dest_path}")
         dest_path.mkdir(parents=True, exist_ok=True)
@@ -757,7 +872,11 @@ def secure_copy_and_cleanup(sources: Sequence[str], destination: str) -> None:
 
     print("\nCopy phase completed successfully.")
 
-    for source in _normalise_roots(sources):
+    if not perform_cleanup:
+        print("[INFO] Cleanup disabled; source directories left untouched.")
+        return
+
+    for source in _normalise_roots(source_list):
         print(f"\nCleaning up {source}...")
         for fly_folder in source.iterdir():
             if not fly_folder.is_dir():
@@ -838,6 +957,9 @@ def build_wide_csv(
     fps_fallback: float = 40.0,
     exclude_roots: Sequence[str] | None = None,
 ) -> None:
+    print(
+        f"[DEBUG] build_wide_csv → roots={list(roots)} output={output_csv} measure_cols={list(measure_cols)}"
+    )
     out_path = Path(output_csv).expanduser().resolve()
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -854,16 +976,32 @@ def build_wide_csv(
         dataset = root.name
         for fly_dir in sorted(p for p in root.iterdir() if p.is_dir()):
             fly = fly_dir.name
+            print(f"[DEBUG] build_wide_csv: scanning fly_dir={fly_dir}")
             for csv_path in _find_trial_csvs(fly_dir):
                 try:
                     header = pd.read_csv(csv_path, nrows=0)
                 except Exception as exc:
                     print(f"[WARN] Skip {csv_path.name}: header read error: {exc}")
                     continue
+                print(
+                    f"[DEBUG] build_wide_csv: candidate={csv_path.name} columns={list(header.columns)}"
+                )
                 measure = _pick_column(header, measure_cols)
                 if measure is None:
                     print(f"[SKIP] {csv_path.name}: none of {measure_cols} present.")
                     continue
+                slot_match = FLY_SLOT_REGEX.search(csv_path.stem)
+                slot_label = slot_match.group(1) if slot_match else None
+                fly_number = _extract_fly_number(slot_label, csv_path.stem, fly_dir.name)
+                fly_number_label = str(fly_number) if fly_number is not None else "UNKNOWN"
+                if fly_number is None:
+                    print(
+                        f"[WARN] build_wide_csv: {csv_path.name} lacks fly number token; using 'UNKNOWN'"
+                    )
+                else:
+                    print(
+                        f"[DEBUG] build_wide_csv: {csv_path.name} fly_number={fly_number_label}"
+                    )
                 try:
                     n_rows = pd.read_csv(csv_path, usecols=[measure]).shape[0]
                 except Exception as exc:
@@ -873,6 +1011,7 @@ def build_wide_csv(
                     {
                         "dataset": dataset,
                         "fly": fly,
+                        "fly_number": fly_number_label,
                         "csv_path": csv_path,
                         "measure_col": measure,
                     }
@@ -882,7 +1021,7 @@ def build_wide_csv(
     if not items:
         raise RuntimeError("No eligible testing/training CSVs found in provided roots.")
 
-    metadata = ["dataset", "fly", "trial_type", "trial_label", "fps"]
+    metadata = ["dataset", "fly", "fly_number", "trial_type", "trial_label", "fps"]
     value_cols = [f"dir_val_{idx}" for idx in range(max_len)]
     header_df = pd.DataFrame(columns=metadata + value_cols)
     header_df.to_csv(out_path, index=False)
@@ -919,8 +1058,20 @@ def build_wide_csv(
 
         trial_type = _infer_category(csv_path)
         label = _trial_label(csv_path)
+        fly_number_label = str(item.get("fly_number", "UNKNOWN"))
+        print(
+            f"[DEBUG] build_wide_csv: writing dataset={item['dataset']} fly={item['fly']} fly_number={fly_number_label} fps={fps:.3f} frames={len(values)}"
+        )
 
-        row = [item["dataset"], item["fly"], trial_type, label, float(fps)] + list(values)
+        row = [
+            item["dataset"],
+            item["fly"],
+            fly_number_label,
+            trial_type,
+            label,
+            float(fps),
+            *list(values),
+        ]
         if len(values) < max_len:
             row.extend([np.nan] * (max_len - len(values)))
         elif len(values) > max_len:
@@ -938,12 +1089,16 @@ def wide_to_matrix(input_csv: str, output_dir: str) -> None:
     out_dir = Path(output_dir).expanduser().resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    df = pd.read_csv(csv_path)
-    meta_cols = [
-        column
-        for column in ("dataset", "fly", "trial_type", "trial_label", "fps")
-        if column in df.columns
+    df = pd.read_csv(csv_path, dtype={"fly_number": str})
+    meta_preference = [
+        "dataset",
+        "fly",
+        "fly_number",
+        "trial_type",
+        "trial_label",
+        "fps",
     ]
+    meta_cols = [column for column in meta_preference if column in df.columns]
     if not meta_cols:
         raise RuntimeError(
             "No metadata columns found. Expected at least dataset/fly/trial_type/trial_label."
@@ -1233,6 +1388,19 @@ def build_parser() -> argparse.ArgumentParser:
     copy_parser = subparsers.add_parser("secure-sync", help="Copy datasets then clean source directories.")
     copy_parser.add_argument("--source", action="append", required=True, help="Source directory (repeatable).")
     copy_parser.add_argument("--dest", required=True, help="Destination root directory.")
+    copy_parser.add_argument(
+        "--perform-cleanup",
+        dest="perform_cleanup",
+        action="store_true",
+        default=True,
+        help="After copying, delete non-essential files from the source directories.",
+    )
+    copy_parser.add_argument(
+        "--no-cleanup",
+        dest="perform_cleanup",
+        action="store_false",
+        help="Skip deleting source files after copying (use with caution).",
+    )
 
     wide_parser = subparsers.add_parser("wide", help="Build wide CSV of direction values.")
     wide_parser.add_argument("--root", action="append", required=True, help="Root directory (repeatable).")
@@ -1320,7 +1488,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         return
 
     if args.command == "secure-sync":
-        secure_copy_and_cleanup(args.source, args.dest)
+        secure_copy_and_cleanup(args.source, args.dest, perform_cleanup=args.perform_cleanup)
         return
 
     if args.command == "wide":

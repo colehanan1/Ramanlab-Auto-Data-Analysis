@@ -37,6 +37,8 @@ from scipy.signal import hilbert
 TIMESTAMP_CANDIDATES = ("UTC_ISO", "Timestamp", "Number", "MonoNs")
 FRAME_CANDIDATES = ("Frame", "FrameNumber", "Frame Number")
 TRIAL_REGEX = re.compile(r"(testing|training)_(\d+)", re.IGNORECASE)
+FLY_SLOT_REGEX = re.compile(r"(fly\d+)_distances", re.IGNORECASE)
+FLY_NUMBER_REGEX = re.compile(r"fly(\d+)", re.IGNORECASE)
 
 
 def _nanmin(values: np.ndarray) -> float:
@@ -125,15 +127,22 @@ def _find_trial_csvs(fly_dir: Path) -> Iterator[Path]:
     search_root = fly_dir / "RMS_calculations"
     if not search_root.is_dir():
         search_root = fly_dir
+    print(
+        f"[DEBUG]    Searching for trial CSVs under {search_root}"
+    )
     patterns = ("**/*testing*.csv", "**/*training*.csv")
     seen: set[Path] = set()
+    yielded = False
     for pattern in patterns:
         for csv_path in search_root.glob(pattern):
             if csv_path.is_file():
                 resolved = csv_path.resolve()
                 if resolved not in seen:
                     seen.add(resolved)
+                    yielded = True
                     yield resolved
+    if not yielded:
+        print(f"[DEBUG]    No CSVs matched testing/training glob in {search_root}")
 
 
 # ---------------------------------------------------------------------------
@@ -162,6 +171,15 @@ def _resolve_measure_column(df: pd.DataFrame, candidates: Sequence[str]) -> Opti
 
 
 def collect_envelopes(cfg: CollectConfig) -> None:
+    print(
+        "[DEBUG] collect_envelopes → roots=%s, measure_cols=%s, window_frames=%s"
+        % (
+            [str(r) for r in cfg.roots],
+            list(cfg.measure_cols),
+            cfg.window_frames,
+        )
+    )
+
     items: List[dict] = []
     max_len = 0
 
@@ -169,21 +187,55 @@ def collect_envelopes(cfg: CollectConfig) -> None:
         root = root.expanduser().resolve()
         if not root.is_dir():
             raise FileNotFoundError(f"Not a directory: {root}")
+        print(f"[DEBUG] Scanning dataset root: {root}")
         dataset = root.name
 
         for fly_dir in sorted((p for p in root.iterdir() if p.is_dir())):
+            print(f"[DEBUG]  ↳ Fly directory: {fly_dir}")
             fly = fly_dir.name
+            found_any = False
             for csv_path in _find_trial_csvs(fly_dir):
+                found_any = True
+                print(
+                    f"[DEBUG]   ↳ Candidate CSV: {csv_path}"
+                )
                 try:
                     header_df = pd.read_csv(csv_path, nrows=0)
                 except Exception as exc:  # pragma: no cover - purely defensive
                     print(f"[WARN] Skip {csv_path.name}: header read error: {exc}")
                     continue
 
+                print(
+                    "[DEBUG]     Available columns=%s"
+                    % list(header_df.columns)
+                )
                 measure_col = _resolve_measure_column(header_df, cfg.measure_cols)
                 if measure_col is None:
                     print(f"[SKIP] {csv_path.name}: none of {cfg.measure_cols} present.")
                     continue
+                print(f"[DEBUG]     Selected measure column: {measure_col}")
+
+                slot_token = _fly_slot_from_name(csv_path.name)
+                fly_number = _fly_number_from_name(csv_path.name)
+                if slot_token:
+                    slot_label = slot_token.replace("_distances", "")
+                    fly_id = f"{fly}_{slot_label}"
+                    if fly_number is None:
+                        fly_number = _fly_number_from_name(slot_label)
+                else:
+                    fly_id = fly
+                    if fly_number is None:
+                        fly_number = _fly_number_from_name(fly)
+
+                fly_number_label = str(fly_number) if fly_number is not None else "UNKNOWN"
+                if fly_number is None:
+                    print(
+                        f"[WARN] {csv_path.name}: fly number not detected from filename; using 'UNKNOWN'."
+                    )
+                else:
+                    print(
+                        f"[DEBUG]     Parsed fly_number={fly_number_label} from name tokens"
+                    )
 
                 try:
                     n_frames = pd.read_csv(csv_path, usecols=[measure_col]).shape[0]
@@ -191,11 +243,16 @@ def collect_envelopes(cfg: CollectConfig) -> None:
                     print(f"[WARN] Skip {csv_path.name}: count error: {exc}")
                     continue
 
+                print(
+                    f"[DEBUG]     Frame count={n_frames} for column={measure_col}"
+                )
+
                 items.append(
                     {
                         "dataset": dataset,
-                        "fly": fly,
+                        "fly": fly_id,
                         "csv_path": csv_path,
+                        "fly_number": fly_number_label,
                         "trial_type": _infer_trial_type(csv_path),
                         "trial_label": _trial_label(csv_path),
                         "measure_col": measure_col,
@@ -203,6 +260,11 @@ def collect_envelopes(cfg: CollectConfig) -> None:
                     }
                 )
                 max_len = max(max_len, n_frames)
+
+            if not found_any:
+                print(
+                    f"[DEBUG]   ↳ No testing/training CSVs detected under {fly_dir}"
+                )
 
     if not items:
         raise RuntimeError("No eligible testing/training CSVs found in provided roots.")
@@ -213,6 +275,7 @@ def collect_envelopes(cfg: CollectConfig) -> None:
     cols = [
         "dataset",
         "fly",
+        "fly_number",
         "trial_type",
         "trial_label",
         "fps",
@@ -228,11 +291,16 @@ def collect_envelopes(cfg: CollectConfig) -> None:
 
         try:
             hdr2 = pd.read_csv(csv_path, nrows=0)
-        except Exception:  # pragma: no cover - defensive
+        except Exception as exc:  # pragma: no cover - defensive
+            print(f"[WARN] {csv_path.name}: failed to read header for FPS columns: {exc}")
             hdr2 = pd.DataFrame()
 
         frame_col = _pick_column(FRAME_CANDIDATES, hdr2)
         ts_col = _pick_column(TIMESTAMP_CANDIDATES, hdr2)
+
+        print(
+            f"[DEBUG] {csv_path.name}: frame_col={frame_col}, timestamp_col={ts_col}"
+        )
 
         fps = float("nan")
         if frame_col is not None and ts_col is not None:
@@ -258,9 +326,14 @@ def collect_envelopes(cfg: CollectConfig) -> None:
 
         env = _compute_envelope(df[measure_col], cfg.window_frames).astype(float)
 
+        print(
+            f"[DEBUG] {csv_path.name}: envelope_length={len(env)}, fly_number={item['fly_number']}"
+        )
+
         row = [
             item["dataset"],
             item["fly"],
+            item["fly_number"],
             item["trial_type"],
             item["trial_label"],
             fps,
@@ -270,9 +343,15 @@ def collect_envelopes(cfg: CollectConfig) -> None:
         if len(env) < max_len:
             row.extend([np.nan] * (max_len - len(env)))
         elif len(env) > max_len:
-            row = row[: 5 + max_len]
+            row = row[: 6 + max_len]
 
-        pd.DataFrame([row], columns=cols).to_csv(cfg.out_csv, mode="a", header=False, index=False)
+        pd.DataFrame([row], columns=cols).to_csv(
+            cfg.out_csv, mode="a", header=False, index=False
+        )
+
+        print(
+            f"[DEBUG] Appended row for fly={item['fly']} fly_number={item['fly_number']} frames={len(env)}"
+        )
 
     print(f"[OK] Wrote combined envelope table: {cfg.out_csv}")
 
@@ -291,16 +370,24 @@ class ConvertConfig:
 
 
 def convert_wide_csv(cfg: ConvertConfig) -> None:
+    print(
+        f"[DEBUG] convert_wide_csv → input={cfg.input_csv}, output_dir={cfg.out_dir}"
+    )
     df = pd.read_csv(cfg.input_csv)
+    print(
+        f"[DEBUG] Loaded wide CSV with shape={df.shape} columns={list(df.columns)}"
+    )
 
-    meta_candidates = ["dataset", "fly", "trial_type", "trial_label", "fps"]
+    meta_candidates = ["dataset", "fly", "fly_number", "trial_type", "trial_label", "fps"]
     meta_cols = [col for col in meta_candidates if col in df.columns]
     if not meta_cols:
         raise RuntimeError("No metadata columns found. Expected at least one of: dataset, fly, trial_type, trial_label, fps.")
+    print(f"[DEBUG] Metadata columns detected: {meta_cols}")
 
     env_cols = [col for col in df.columns if col not in meta_cols]
     if not env_cols:
         raise RuntimeError("No envelope columns found.")
+    print(f"[DEBUG] Envelope columns detected: {env_cols[:5]}{'...' if len(env_cols) > 5 else ''}")
 
     code_maps: dict[str, dict[str, int]] = {}
     for col in meta_cols:
@@ -312,15 +399,19 @@ def convert_wide_csv(cfg: ConvertConfig) -> None:
                 mapping[value] = next_code
                 next_code += 1
         code_maps[col] = mapping
+        print(f"[DEBUG] Encoded {col}: {mapping}")
 
     df_num = df.copy()
     for col, mapping in code_maps.items():
         df_num[col] = df_num[col].astype(str).map(mapping).fillna(0).astype(np.int32)
+        print(f"[DEBUG] Column {col} mapped to numeric codes")
 
     df_num[env_cols] = df_num[env_cols].apply(pd.to_numeric, errors="coerce").fillna(0.0)
+    print("[DEBUG] Envelope values coerced to numeric with NaNs filled as 0.0")
 
     ordered_cols = meta_cols + env_cols
     matrix_f16 = df_num[ordered_cols].to_numpy(dtype=np.float16)
+    print(f"[DEBUG] Float16 matrix shape={matrix_f16.shape}")
 
     cfg.out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -463,4 +554,20 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
 
 if __name__ == "__main__":  # pragma: no cover
     main()
+
+def _fly_slot_from_name(name: str) -> Optional[str]:
+    match = FLY_SLOT_REGEX.search(name.lower())
+    if match:
+        return match.group(1)
+    return None
+
+
+def _fly_number_from_name(name: str) -> Optional[int]:
+    match = FLY_NUMBER_REGEX.search(name.lower())
+    if match:
+        try:
+            return int(match.group(1))
+        except ValueError:  # pragma: no cover - defensive guard
+            return None
+    return None
 
