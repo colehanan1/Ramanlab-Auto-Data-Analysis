@@ -38,6 +38,7 @@ TIMESTAMP_CANDIDATES = ("UTC_ISO", "Timestamp", "Number", "MonoNs")
 FRAME_CANDIDATES = ("Frame", "FrameNumber", "Frame Number")
 TRIAL_REGEX = re.compile(r"(testing|training)_(\d+)", re.IGNORECASE)
 FLY_SLOT_REGEX = re.compile(r"(fly\d+)_distances", re.IGNORECASE)
+FLY_NUMBER_REGEX = re.compile(r"fly[_\-\s]*(\d+)", re.IGNORECASE)
 
 
 def _nanmin(values: np.ndarray) -> float:
@@ -203,6 +204,7 @@ def collect_envelopes(cfg: CollectConfig) -> None:
                     {
                         "dataset": dataset,
                         "fly": fly_id,
+                        "fly_number": _fly_number_from_name(csv_path.name),
                         "csv_path": csv_path,
                         "trial_type": _infer_trial_type(csv_path),
                         "trial_label": _trial_label(csv_path),
@@ -221,11 +223,13 @@ def collect_envelopes(cfg: CollectConfig) -> None:
     cols = [
         "dataset",
         "fly",
+        "fly_number",
         "trial_type",
         "trial_label",
         "fps",
         *[f"env_{i}" for i in range(max_len)],
     ]
+    meta_len = len(cols) - max_len
 
     cfg.out_csv.parent.mkdir(parents=True, exist_ok=True)
     pd.DataFrame(columns=cols).to_csv(cfg.out_csv, index=False)
@@ -266,9 +270,11 @@ def collect_envelopes(cfg: CollectConfig) -> None:
 
         env = _compute_envelope(df[measure_col], cfg.window_frames).astype(float)
 
+        fly_number = item.get("fly_number")
         row = [
             item["dataset"],
             item["fly"],
+            float(fly_number) if fly_number is not None else np.nan,
             item["trial_type"],
             item["trial_label"],
             fps,
@@ -278,7 +284,7 @@ def collect_envelopes(cfg: CollectConfig) -> None:
         if len(env) < max_len:
             row.extend([np.nan] * (max_len - len(env)))
         elif len(env) > max_len:
-            row = row[: 5 + max_len]
+            row = row[: meta_len + max_len]
 
         pd.DataFrame([row], columns=cols).to_csv(cfg.out_csv, mode="a", header=False, index=False)
 
@@ -301,18 +307,34 @@ class ConvertConfig:
 def convert_wide_csv(cfg: ConvertConfig) -> None:
     df = pd.read_csv(cfg.input_csv)
 
-    meta_candidates = ["dataset", "fly", "trial_type", "trial_label", "fps"]
+    meta_candidates = ["dataset", "fly", "fly_number", "trial_type", "trial_label", "fps"]
     meta_cols = [col for col in meta_candidates if col in df.columns]
     if not meta_cols:
-        raise RuntimeError("No metadata columns found. Expected at least one of: dataset, fly, trial_type, trial_label, fps.")
+        raise RuntimeError(
+            "No metadata columns found. Expected at least one of: dataset, fly, fly_number, trial_type, trial_label, fps."
+        )
 
     env_cols = [col for col in df.columns if col not in meta_cols]
     if not env_cols:
         raise RuntimeError("No envelope columns found.")
 
     code_maps: dict[str, dict[str, int]] = {}
+    numeric_meta_cols: List[str] = []
+    categorical_meta_cols: List[str] = []
     for col in meta_cols:
-        uniques = pd.Series(df[col].astype(str).fillna("UNKNOWN")).unique().tolist()
+        series = df[col]
+        numeric_series = pd.to_numeric(series, errors="coerce")
+        non_null_mask = series.notna()
+        if non_null_mask.any() and numeric_series[non_null_mask].notna().all():
+            df[col] = numeric_series
+            numeric_meta_cols.append(col)
+            continue
+        if not non_null_mask.any():
+            df[col] = numeric_series
+            numeric_meta_cols.append(col)
+            continue
+
+        uniques = pd.Series(series.astype(str).fillna("UNKNOWN")).unique().tolist()
         mapping: dict[str, int] = {"UNKNOWN": 0}
         next_code = 1
         for value in uniques:
@@ -320,10 +342,15 @@ def convert_wide_csv(cfg: ConvertConfig) -> None:
                 mapping[value] = next_code
                 next_code += 1
         code_maps[col] = mapping
+        categorical_meta_cols.append(col)
 
     df_num = df.copy()
-    for col, mapping in code_maps.items():
+    for col in categorical_meta_cols:
+        mapping = code_maps[col]
         df_num[col] = df_num[col].astype(str).map(mapping).fillna(0).astype(np.int32)
+
+    for col in numeric_meta_cols:
+        df_num[col] = pd.to_numeric(df_num[col], errors="coerce").fillna(0.0)
 
     df_num[env_cols] = df_num[env_cols].apply(pd.to_numeric, errors="coerce").fillna(0.0)
 
@@ -341,11 +368,21 @@ def convert_wide_csv(cfg: ConvertConfig) -> None:
         fh.write("# Columns (in order):\n")
         for idx, col in enumerate(ordered_cols):
             fh.write(f"{idx:>5}: {col}\n")
-        fh.write("\n# Metadata code maps (string → integer code)\n")
-        for col in meta_cols:
-            fh.write(f"\n[{col}]\n")
-            for code, name in sorted(((code, name) for name, code in code_maps[col].items()), key=lambda x: x[0]):
-                fh.write(f"{code:>5} : {name}\n")
+        if categorical_meta_cols:
+            fh.write("\n# Metadata code maps (string → integer code)\n")
+            for col in categorical_meta_cols:
+                fh.write(f"\n[{col}]\n")
+                for code, name in sorted(
+                    ((code, name) for name, code in code_maps[col].items()), key=lambda x: x[0]
+                ):
+                    fh.write(f"{code:>5} : {name}\n")
+        else:
+            fh.write("\n# No categorical metadata columns required code maps.\n")
+
+        if numeric_meta_cols:
+            fh.write("\n# Metadata columns stored as numeric values:\n")
+            for col in numeric_meta_cols:
+                fh.write(f"- {col}\n")
         fh.write("\nNotes:\n")
         fh.write("- Matrix dtype is float16 (16-bit). Metadata codes are stored as float16 numbers in the matrix.\n")
         fh.write("- Envelope NaNs (shorter videos) were replaced with 0.0.\n")
@@ -353,7 +390,15 @@ def convert_wide_csv(cfg: ConvertConfig) -> None:
 
     json_path = cfg.codes_json or (cfg.out_dir / "code_maps.json")
     with json_path.open("w", encoding="utf-8") as jf:
-        json.dump({"column_order": ordered_cols, "code_maps": code_maps}, jf, indent=2)
+        json.dump(
+            {
+                "column_order": ordered_cols,
+                "code_maps": code_maps,
+                "numeric_columns": numeric_meta_cols,
+            },
+            jf,
+            indent=2,
+        )
 
     print(f"[OK] Saved 16-bit matrix: {matrix_path}  (shape={matrix_f16.shape}, dtype={matrix_f16.dtype})")
     print(f"[OK] Saved key:           {key_path}")
@@ -476,5 +521,15 @@ def _fly_slot_from_name(name: str) -> Optional[str]:
     match = FLY_SLOT_REGEX.search(name.lower())
     if match:
         return match.group(1)
+    return None
+
+
+def _fly_number_from_name(name: str) -> Optional[int]:
+    match = FLY_NUMBER_REGEX.search(name)
+    if match:
+        try:
+            return int(match.group(1))
+        except ValueError:  # pragma: no cover - defensive
+            return None
     return None
 
