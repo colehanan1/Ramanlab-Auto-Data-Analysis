@@ -26,7 +26,7 @@ anchor_y: 540.0
 
 # Distance stats
 distance_limits:
-  class2_min: 70.0
+  class2_min: 50.0
   class2_max: 250.0
 
 # Envelope / RMS
