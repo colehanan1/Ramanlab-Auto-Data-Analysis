@@ -38,7 +38,6 @@ TIMESTAMP_CANDIDATES = ("UTC_ISO", "Timestamp", "Number", "MonoNs")
 FRAME_CANDIDATES = ("Frame", "FrameNumber", "Frame Number")
 TRIAL_REGEX = re.compile(r"(testing|training)_(\d+)", re.IGNORECASE)
 FLY_SLOT_REGEX = re.compile(r"(fly\d+)_distances", re.IGNORECASE)
-FLY_NUMBER_REGEX = re.compile(r"fly(\d+)", re.IGNORECASE)
 
 
 def _nanmin(values: np.ndarray) -> float:
@@ -236,6 +235,13 @@ def collect_envelopes(cfg: CollectConfig) -> None:
                     print(
                         f"[DEBUG]     Parsed fly_number={fly_number_label} from name tokens"
                     )
+
+                slot_token = _fly_slot_from_name(csv_path.name)
+                if slot_token:
+                    slot_label = slot_token.replace("_distances", "")
+                    fly_id = f"{fly}_{slot_label}"
+                else:
+                    fly_id = fly
 
                 try:
                     n_frames = pd.read_csv(csv_path, usecols=[measure_col]).shape[0]
@@ -559,15 +565,5 @@ def _fly_slot_from_name(name: str) -> Optional[str]:
     match = FLY_SLOT_REGEX.search(name.lower())
     if match:
         return match.group(1)
-    return None
-
-
-def _fly_number_from_name(name: str) -> Optional[int]:
-    match = FLY_NUMBER_REGEX.search(name.lower())
-    if match:
-        try:
-            return int(match.group(1))
-        except ValueError:  # pragma: no cover - defensive guard
-            return None
     return None
 
