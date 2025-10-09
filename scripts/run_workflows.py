@@ -233,6 +233,7 @@ def _run_combined(cfg: Mapping[str, Any] | None) -> None:
             }
         else:
             perform_cleanup = bool(perform_cleanup_cfg)
+        perform_cleanup = bool(secure_cfg.get("perform_cleanup", False))
         print(
             f"[analysis] combined.secure_cleanup → dest={dest} sources={resolved_sources} perform_cleanup={perform_cleanup}"
         )

@@ -237,6 +237,13 @@ def collect_envelopes(cfg: CollectConfig) -> None:
                         f"[DEBUG]     Parsed fly_number={fly_number_label} from name tokens"
                     )
 
+                slot_token = _fly_slot_from_name(csv_path.name)
+                if slot_token:
+                    slot_label = slot_token.replace("_distances", "")
+                    fly_id = f"{fly}_{slot_label}"
+                else:
+                    fly_id = fly
+
                 try:
                     n_frames = pd.read_csv(csv_path, usecols=[measure_col]).shape[0]
                 except Exception as exc:  # pragma: no cover - purely defensive
@@ -344,6 +351,11 @@ def collect_envelopes(cfg: CollectConfig) -> None:
             row.extend([np.nan] * (max_len - len(env)))
         elif len(env) > max_len:
             row = row[: 6 + max_len]
+
+        pd.DataFrame([row], columns=cols).to_csv(
+            cfg.out_csv, mode="a", header=False, index=False
+        )
+
 
         pd.DataFrame([row], columns=cols).to_csv(
             cfg.out_csv, mode="a", header=False, index=False

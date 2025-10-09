@@ -13,6 +13,8 @@ sys.path.append(str(project_root / "scripts"))
 
 from envelope_combined import CombineConfig, combine_distance_angle
 from envelope_exports import CollectConfig, ConvertConfig, collect_envelopes, convert_wide_csv
+sys.path.append(str(Path(__file__).resolve().parents[1] / "src"))
+
 from fbpipe.config import Settings
 from fbpipe.steps import detect_dropped_frames, distance_normalize, distance_stats
 from fbpipe.utils.fly_files import iter_fly_distance_csvs

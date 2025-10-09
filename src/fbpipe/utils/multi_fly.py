@@ -3,7 +3,6 @@ from __future__ import annotations
 import math
 from typing import Dict, List, Optional, Tuple
 
-import cv2
 import numpy as np
 
 from .vision import iou, xyxy_to_cxcywh
@@ -89,10 +88,16 @@ class EyeAnchorManager:
         return centers
 
     def draw(self, frame) -> None:
+        try:
+            import cv2  # local import to keep module importable without OpenCV
+        except Exception:
+            return  # silently skip drawing if OpenCV is not installed
+
+        centers = self.get_centers()
         for idx, b in enumerate(self.anchors_xyxy):
             x1, y1, x2, y2 = b.astype(int)
             cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 255), 3)
-            cx, cy = map(int, self.get_centers()[idx])
+            cx, cy = map(int, centers[idx])
             cv2.putText(
                 frame,
                 f"eye{idx} id={self.anchor_ids[idx]}",

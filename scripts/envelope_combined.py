@@ -845,6 +845,7 @@ def combine_distance_angle(cfg: CombineConfig) -> None:
 
 def secure_copy_and_cleanup(
     sources: Sequence[str], destination: str, perform_cleanup: bool = True
+    sources: Sequence[str], destination: str, perform_cleanup: bool = False
 ) -> None:
     source_list = list(sources)
     print(
@@ -1400,6 +1401,9 @@ def build_parser() -> argparse.ArgumentParser:
         dest="perform_cleanup",
         action="store_false",
         help="Skip deleting source files after copying (use with caution).",
+    )
+        action="store_true",
+        help="After copying, delete non-essential files from the source directories.",
     )
 
     wide_parser = subparsers.add_parser("wide", help="Build wide CSV of direction values.")
