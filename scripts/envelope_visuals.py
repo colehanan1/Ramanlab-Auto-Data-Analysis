@@ -247,7 +247,7 @@ def _load_matrix(matrix_path: Path, codes_json: Path) -> tuple[pd.DataFrame, lis
     code_maps: Mapping[str, Mapping[str, int]] = meta["code_maps"]
     df = pd.DataFrame(matrix, columns=ordered_cols)
 
-    decode_candidates = ["dataset", "fly", "trial_type", "trial_label"]
+    decode_candidates = ["dataset", "fly", "fly_number", "trial_type", "trial_label"]
     rev_maps = {
         col: {int(code): label for label, code in mapping.items()}
         for col, mapping in code_maps.items()
@@ -271,7 +271,12 @@ def _load_matrix(matrix_path: Path, codes_json: Path) -> tuple[pd.DataFrame, lis
     else:
         df["fps"] = np.nan
 
-    env_cols = [col for col in ordered_cols if col not in {"fps", "dataset", "fly", "trial_type", "trial_label"}]
+    env_cols = [
+        col
+        for col in ordered_cols
+        if col
+        not in {"fps", "dataset", "fly", "fly_number", "trial_type", "trial_label"}
+    ]
     return df, env_cols
 
 
@@ -634,6 +639,16 @@ def generate_envelope_plots(cfg: EnvelopePlotConfig) -> None:
             f"No {trial_type} trials found in matrix; cannot build envelope plots."
         )
 
+    if "fly_number" not in df.columns:
+        df["fly_number"] = "UNKNOWN"
+    else:
+        df["fly_number"] = (
+            df["fly_number"]
+            .astype(str)
+            .str.strip()
+            .replace({"": "UNKNOWN", "nan": "UNKNOWN", "None": "UNKNOWN"})
+        )
+
     df["fps"] = df["fps"].replace([np.inf, -np.inf], np.nan).fillna(cfg.fps_default)
     df["dataset_canon"] = df["dataset"].map(_canon_dataset)
 
@@ -655,7 +670,7 @@ def generate_envelope_plots(cfg: EnvelopePlotConfig) -> None:
     linger = max(cfg.latency_sec, 0.0)
     x_max_limit = odor_off_effective + linger + cfg.after_show_sec
 
-    for fly, fly_df in df.groupby("fly"):
+    for (fly, fly_number), fly_df in df.groupby(["fly", "fly_number"], sort=False):
         fly_df = fly_df.sort_values("trial_label", key=lambda s: s.map(_trial_num))
         indices = fly_df.index.to_numpy()
         trial_curves: list[tuple[str, np.ndarray, np.ndarray, float, bool]] = []
@@ -663,9 +678,18 @@ def generate_envelope_plots(cfg: EnvelopePlotConfig) -> None:
 
         dataset_candidates = [dataset_lookup[idx] for idx in indices if dataset_lookup[idx]]
         folder_dir = resolve_dataset_output_dir(cfg.out_dir, dataset_candidates or ("UNKNOWN",))
+        fly_number_label = str(fly_number)
+        suffix = "" if fly_number_label.upper() == "UNKNOWN" else f"_fly{fly_number_label}"
         out_path = folder_dir / (
-            f"{fly}_{trial_type}_envelope_trials_by_odor_"
+            f"{fly}{suffix}_{trial_type}_envelope_trials_by_odor_"
             f"{int(cfg.after_show_sec)}_shifted.png"
+        )
+        print(
+            "[DEBUG] envelope_plots: generating",
+            f"fly={fly}",
+            f"fly_number={fly_number_label}",
+            f"trials={len(indices)}",
+            f"output={out_path}",
         )
         if out_path.exists() and not cfg.overwrite:
             continue
@@ -763,8 +787,11 @@ def generate_envelope_plots(cfg: EnvelopePlotConfig) -> None:
             title_fontsize=9,
         )
 
+        fly_caption = fly
+        if fly_number_label.upper() != "UNKNOWN":
+            fly_caption = f"{fly} — Fly {fly_number_label}"
         fig.suptitle(
-            f"{fly} {trial_type.title()} Trials — RMS of Proboscis vs Eye Distance",
+            f"{fly_caption} {trial_type.title()} Trials — RMS of Proboscis vs Eye Distance",
             y=0.995,
             fontsize=14,
             weight="bold",
