@@ -1089,12 +1089,16 @@ def wide_to_matrix(input_csv: str, output_dir: str) -> None:
     out_dir = Path(output_dir).expanduser().resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    df = pd.read_csv(csv_path)
-    meta_cols = [
-        column
-        for column in ("dataset", "fly", "trial_type", "trial_label", "fps")
-        if column in df.columns
+    df = pd.read_csv(csv_path, dtype={"fly_number": str})
+    meta_preference = [
+        "dataset",
+        "fly",
+        "fly_number",
+        "trial_type",
+        "trial_label",
+        "fps",
     ]
+    meta_cols = [column for column in meta_preference if column in df.columns]
     if not meta_cols:
         raise RuntimeError(
             "No metadata columns found. Expected at least dataset/fly/trial_type/trial_label."

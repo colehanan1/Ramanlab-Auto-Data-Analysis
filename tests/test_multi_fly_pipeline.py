@@ -191,3 +191,6 @@ def test_combine_distance_angle_includes_fly_number_column(tmp_path):
 
     plot_outputs = sorted((out_csv_dir / "plots").glob("*.png"))
     assert len(plot_outputs) == 2
+    plot_names = {path.name for path in plot_outputs}
+    assert any("_fly1_" in name for name in plot_names)
+    assert any("_fly2_" in name for name in plot_names)
