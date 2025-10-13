@@ -26,7 +26,7 @@ anchor_y: 540.0
 
 # Distance stats
 distance_limits:
-  class2_min: 50.0
+  class2_min: 10.0
   class2_max: 250.0
 
 # Envelope / RMS
@@ -112,6 +112,7 @@ analysis:
         - "/securedstorage/DATAsec/cole/Data-secured/opto_EB/"
         - "/securedstorage/DATAsec/cole/Data-secured/opto_benz_1/"
         - "/securedstorage/DATAsec/cole/Data-secured/opto_hex/"
+        - "/securedstorage/DATAsec/cole/Data-secured/hex_control/"
       output_csv: "/home/ramanlab/Documents/cole/Data/Opto/Combined/all_envelope_rows_wide.csv"
       measure_cols: ["envelope_of_rms"]
       fps_fallback: 40.0
@@ -166,3 +167,5 @@ analysis:
         - "/home/ramanlab/Documents/cole/Data/flys/opto_EB/"
         - "/home/ramanlab/Documents/cole/Data/flys/opto_benz_1/"
         - "/home/ramanlab/Documents/cole/Data/flys/opto_hex/"
+        - "/home/ramanlab/Documents/cole/Data/flys/hex_control/"
+
