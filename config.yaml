@@ -1,7 +1,7 @@
 
 # Project configuration
 model_path: "/home/ramanlab/Documents/cole/sam2/notebooks/YOLOProjectProboscisLegs/runs/obb/train5/weights/best.pt"
-main_directory: "/home/ramanlab/Documents/cole/Data/flys/opto_benz_1/"
+main_directory: "/home/ramanlab/Documents/cole/Data/flys/opto_hex/"
 
 # Compute
 allow_cpu: false
@@ -11,7 +11,7 @@ cuda_allow_tf32: true
 yolo:
   conf_thres: 0.40
   iou_match_thres: 0.25
-  max_age: 15
+  max_age: 5
   ema_alpha: 0.20
   use_optical_flow: true
   flow_skip_edge: 10
@@ -26,7 +26,7 @@ anchor_y: 540.0
 
 # Distance stats
 distance_limits:
-  class2_min: 70.0
+  class2_min: 10.0
   class2_max: 250.0
 
 # Envelope / RMS
@@ -98,7 +98,7 @@ analysis:
       overwrite: false
   combined:
     combine:
-      root: "/home/ramanlab/Documents/cole/Data/flys/opto_benz_1//"
+      root: "/home/ramanlab/Documents/cole/Data/flys/opto_hex/"
       fps_default: 40.0
       window_sec: 0.25
       odor_on: 30.0
@@ -106,12 +106,13 @@ analysis:
       odor_latency_s: 2.15
     wide:
       mirror:
-        - source: "/home/ramanlab/Documents/cole/Data/flys/opto_benz_1//"
-          destination: "/securedstorage/DATAsec/cole/Data-secured/opto_benz_1//"
+        - source: "/home/ramanlab/Documents/cole/Data/flys/opto_hex/"
+          destination: "/securedstorage/DATAsec/cole/Data-secured/opto_hex/"
       roots:
         - "/securedstorage/DATAsec/cole/Data-secured/opto_EB/"
         - "/securedstorage/DATAsec/cole/Data-secured/opto_benz_1/"
         - "/securedstorage/DATAsec/cole/Data-secured/opto_hex/"
+        - "/securedstorage/DATAsec/cole/Data-secured/hex_control/"
       output_csv: "/home/ramanlab/Documents/cole/Data/Opto/Combined/all_envelope_rows_wide.csv"
       measure_cols: ["envelope_of_rms"]
       fps_fallback: 40.0
@@ -166,3 +167,5 @@ analysis:
         - "/home/ramanlab/Documents/cole/Data/flys/opto_EB/"
         - "/home/ramanlab/Documents/cole/Data/flys/opto_benz_1/"
         - "/home/ramanlab/Documents/cole/Data/flys/opto_hex/"
+        - "/home/ramanlab/Documents/cole/Data/flys/hex_control/"
+
