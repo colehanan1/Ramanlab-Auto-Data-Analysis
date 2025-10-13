@@ -11,7 +11,15 @@ sys.path.append(str(project_root))
 sys.path.append(str(project_root / "src"))
 sys.path.append(str(project_root / "scripts"))
 
-from envelope_combined import CombineConfig, combine_distance_angle
+from envelope_combined import (
+    AUC_COLUMNS,
+    AFTER_FRAMES,
+    BEFORE_FRAMES,
+    DURING_FRAMES,
+    CombineConfig,
+    build_wide_csv,
+    combine_distance_angle,
+)
 from envelope_exports import CollectConfig, ConvertConfig, collect_envelopes, convert_wide_csv
 from fbpipe.config import Settings
 from fbpipe.steps import detect_dropped_frames, distance_normalize, distance_stats
@@ -137,6 +145,16 @@ def test_collect_and_convert_capture_fly_number(tmp_path):
     assert "fly_number" in df.columns
     assert str(df.loc[0, "fly_number"]) == "3"
     assert df.loc[0, "fly"] == "october_07_session_fly3"
+    for col in (
+        "AUC-Before",
+        "AUC-During",
+        "AUC-After",
+        "AUC-During-Before-Ratio",
+        "AUC-After-Before-Ratio",
+        "TimeToPeak-During",
+        "Peak-Value",
+    ):
+        assert col in df.columns
 
     convert_cfg = ConvertConfig(
         input_csv=out_csv,
@@ -194,3 +212,26 @@ def test_combine_distance_angle_includes_fly_number_column(tmp_path):
     plot_names = {path.name for path in plot_outputs}
     assert any("_fly1_" in name for name in plot_names)
     assert any("_fly2_" in name for name in plot_names)
+
+
+def test_build_wide_csv_adds_auc_columns(tmp_path):
+    dataset_root = tmp_path / "secured_dataset"
+    fly_dir = dataset_root / "session_a"
+    csv_dir = fly_dir / "angle_distance_rms_envelope"
+    csv_dir.mkdir(parents=True, exist_ok=True)
+
+    csv_path = csv_dir / "session_a_testing_1_fly1_distances.csv"
+    before = np.full(BEFORE_FRAMES, 1.0)
+    during = np.linspace(1.0, 5.0, DURING_FRAMES)
+    after = np.full(AFTER_FRAMES, 1.0)
+    values = np.concatenate([before, during, after])
+    pd.DataFrame({"envelope_of_rms": values}).to_csv(csv_path, index=False)
+
+    out_csv = tmp_path / "all_envelope_rows_wide.csv"
+    build_wide_csv([str(dataset_root)], str(out_csv), measure_cols=["envelope_of_rms"], fps_fallback=40.0)
+
+    df = pd.read_csv(out_csv)
+    for column in AUC_COLUMNS:
+        assert column in df.columns
+    assert np.isfinite(df.loc[0, "AUC-During"])
+    assert abs(df.loc[0, "Peak-Value"] - 5.0) < 1e-6

@@ -34,6 +34,21 @@ from matplotlib.colors import ListedColormap
 from matplotlib.patches import Patch
 from scipy.signal import hilbert
 
+
+AUC_COLUMNS = (
+    "AUC-Before",
+    "AUC-During",
+    "AUC-After",
+    "AUC-During-Before-Ratio",
+    "AUC-After-Before-Ratio",
+    "TimeToPeak-During",
+    "Peak-Value",
+)
+
+BEFORE_FRAMES = 1260
+DURING_FRAMES = 1200
+AFTER_FRAMES = 1200
+
 from scripts import envelope_visuals
 from scripts.envelope_visuals import (
     EnvelopePlotConfig,
@@ -620,6 +635,99 @@ def _extract_env(row: pd.Series, env_cols: Sequence[str]) -> np.ndarray:
     return env
 
 
+def _effective_fps(value: float, *, fallback: float, default: float) -> float:
+    for candidate in (value, fallback, default):
+        if np.isfinite(candidate) and candidate > 0:
+            return float(candidate)
+    return 0.0
+
+
+def _segment_bounds(total_len: int) -> tuple[int, int, int, int]:
+    before_end = max(0, min(BEFORE_FRAMES, total_len))
+    during_start = before_end
+    during_end = max(during_start, min(during_start + DURING_FRAMES, total_len))
+    after_end = max(during_end, min(during_end + AFTER_FRAMES, total_len))
+    return before_end, during_start, during_end, after_end
+
+
+def _segment_auc(values: np.ndarray, threshold: float, dt: float) -> float:
+    if values.size == 0 or dt <= 0:
+        return 0.0
+    finite = values[np.isfinite(values)]
+    if finite.size == 0:
+        return 0.0
+    diff = finite - threshold
+    positive = diff[diff > 0]
+    if positive.size == 0:
+        return 0.0
+    return float(np.sum(positive) * dt)
+
+
+def _compute_trial_metrics(
+    values: np.ndarray,
+    fps: float,
+    *,
+    fallback_fps: float,
+    default_fps: float,
+    fly_before_mean: float,
+) -> dict[str, float]:
+    env = np.asarray(values, dtype=float)
+    total_len = env.size
+    before_end, during_start, during_end, after_end = _segment_bounds(total_len)
+
+    before = env[:before_end]
+    during = env[during_start:during_end]
+    after = env[during_end:after_end]
+
+    before_mean = float(np.nanmean(before)) if before.size else math.nan
+    before_std = float(np.nanstd(before)) if before.size else 0.0
+
+    baseline = fly_before_mean
+    if not np.isfinite(baseline):
+        baseline = before_mean
+    if not np.isfinite(baseline):
+        baseline = 0.0
+    if not np.isfinite(before_std):
+        before_std = 0.0
+
+    threshold = baseline + 3.0 * before_std
+
+    fps_eff = _effective_fps(fps, fallback=fallback_fps, default=default_fps)
+    dt = 1.0 / fps_eff if fps_eff > 0 else 0.0
+
+    auc_before = _segment_auc(before, threshold, dt)
+    auc_during = _segment_auc(during, threshold, dt)
+    auc_after = _segment_auc(after, threshold, dt)
+
+    during_ratio = float(auc_during / auc_before) if auc_before > 0 else float("nan")
+    after_ratio = float(auc_after / auc_before) if auc_before > 0 else float("nan")
+
+    peak_value = float("nan")
+    time_to_peak = float("nan")
+    if during.size:
+        finite_during = during[np.isfinite(during)]
+        if finite_during.size:
+            peak_value = float(np.max(finite_during))
+
+    if total_len and fps_eff > 0:
+        try:
+            global_peak_idx = int(np.nanargmax(env))
+        except ValueError:
+            global_peak_idx = -1
+        if during_start <= global_peak_idx < during_end:
+            time_to_peak = (global_peak_idx - during_start) / fps_eff
+
+    return {
+        "AUC-Before": float(auc_before),
+        "AUC-During": float(auc_during),
+        "AUC-After": float(auc_after),
+        "AUC-During-Before-Ratio": during_ratio,
+        "AUC-After-Before-Ratio": after_ratio,
+        "TimeToPeak-During": time_to_peak,
+        "Peak-Value": peak_value,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Combined distance × angle processing
 # ---------------------------------------------------------------------------
@@ -1011,6 +1119,7 @@ def build_wide_csv(
                     {
                         "dataset": dataset,
                         "fly": fly,
+                        "fly_key": f"{dataset}::{fly}",
                         "fly_number": fly_number_label,
                         "csv_path": csv_path,
                         "measure_col": measure,
@@ -1021,9 +1130,37 @@ def build_wide_csv(
     if not items:
         raise RuntimeError("No eligible testing/training CSVs found in provided roots.")
 
+    fly_before_totals: dict[str, tuple[float, int]] = {}
+    for item in items:
+        csv_path = Path(item["csv_path"])
+        measure = str(item["measure_col"])
+        if _infer_category(csv_path).lower() != "testing":
+            continue
+        try:
+            df_before = pd.read_csv(csv_path, usecols=[measure], nrows=BEFORE_FRAMES)
+        except Exception as exc:
+            print(f"[WARN] build_wide_csv: failed to read before segment from {csv_path.name}: {exc}")
+            continue
+        series = pd.to_numeric(df_before[measure], errors="coerce").astype(float).to_numpy()
+        if series.size == 0:
+            continue
+        finite_mask = np.isfinite(series)
+        if not np.any(finite_mask):
+            continue
+        total, count = fly_before_totals.get(item["fly_key"], (0.0, 0))
+        fly_before_totals[item["fly_key"]] = (
+            total + float(np.nansum(series[finite_mask])),
+            count + int(np.sum(finite_mask)),
+        )
+
+    fly_before_means = {
+        key: (total / count if count > 0 else float("nan"))
+        for key, (total, count) in fly_before_totals.items()
+    }
+
     metadata = ["dataset", "fly", "fly_number", "trial_type", "trial_label", "fps"]
     value_cols = [f"dir_val_{idx}" for idx in range(max_len)]
-    header_df = pd.DataFrame(columns=metadata + value_cols)
+    header_df = pd.DataFrame(columns=metadata + list(AUC_COLUMNS) + value_cols)
     header_df.to_csv(out_path, index=False)
 
     for item in items:
@@ -1063,6 +1200,14 @@ def build_wide_csv(
             f"[DEBUG] build_wide_csv: writing dataset={item['dataset']} fly={item['fly']} fly_number={fly_number_label} fps={fps:.3f} frames={len(values)}"
         )
 
+        metrics = _compute_trial_metrics(
+            values,
+            fps,
+            fallback_fps=fps_fallback,
+            default_fps=fps_fallback,
+            fly_before_mean=fly_before_means.get(item["fly_key"], float("nan")),
+        )
+
         row = [
             item["dataset"],
             item["fly"],
@@ -1070,14 +1215,21 @@ def build_wide_csv(
             trial_type,
             label,
             float(fps),
+            metrics["AUC-Before"],
+            metrics["AUC-During"],
+            metrics["AUC-After"],
+            metrics["AUC-During-Before-Ratio"],
+            metrics["AUC-After-Before-Ratio"],
+            metrics["TimeToPeak-During"],
+            metrics["Peak-Value"],
             *list(values),
         ]
         if len(values) < max_len:
             row.extend([np.nan] * (max_len - len(values)))
         elif len(values) > max_len:
-            row = row[: len(metadata) + max_len]
+            row = row[: len(metadata) + len(AUC_COLUMNS) + max_len]
 
-        pd.DataFrame([row], columns=metadata + value_cols).to_csv(
+        pd.DataFrame([row], columns=metadata + list(AUC_COLUMNS) + value_cols).to_csv(
             out_path, index=False, mode="a", header=False
         )
 

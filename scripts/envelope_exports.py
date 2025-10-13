@@ -31,6 +31,26 @@ from scipy.signal import hilbert
 
 
 # ---------------------------------------------------------------------------
+# Constants for per-trial summaries
+
+
+AUC_COLUMNS = (
+    "AUC-Before",
+    "AUC-During",
+    "AUC-After",
+    "AUC-During-Before-Ratio",
+    "AUC-After-Before-Ratio",
+    "TimeToPeak-During",
+    "Peak-Value",
+)
+
+# Frame windows follow existing reaction-matrix conventions (≈30 s at 40 FPS)
+BEFORE_FRAMES = 1260
+DURING_FRAMES = 1200
+AFTER_FRAMES = 1200
+
+
+# ---------------------------------------------------------------------------
 # Shared helpers
 
 
@@ -46,6 +66,100 @@ def _nanmin(values: np.ndarray) -> float:
     if not np.any(mask):
         return 0.0
     return float(np.min(values[mask]))
+
+
+def _effective_fps(value: float, *, fallback: float, default: float) -> float:
+    for candidate in (value, fallback, default):
+        if np.isfinite(candidate) and candidate > 0:
+            return float(candidate)
+    return 0.0
+
+
+def _segment_bounds(total_len: int) -> tuple[int, int, int, int]:
+    before_end = max(0, min(BEFORE_FRAMES, total_len))
+    during_start = before_end
+    during_end = max(during_start, min(during_start + DURING_FRAMES, total_len))
+    after_end = max(during_end, min(during_end + AFTER_FRAMES, total_len))
+    return before_end, during_start, during_end, after_end
+
+
+def _segment_auc(values: np.ndarray, threshold: float, dt: float) -> float:
+    if values.size == 0 or dt <= 0:
+        return 0.0
+    finite = values[np.isfinite(values)]
+    if finite.size == 0:
+        return 0.0
+    diff = finite - threshold
+    positive = diff[diff > 0]
+    if positive.size == 0:
+        return 0.0
+    return float(np.sum(positive) * dt)
+
+
+def _compute_trial_metrics(
+    env: np.ndarray,
+    fps: float,
+    *,
+    fallback_fps: float,
+    default_fps: float,
+    fly_before_mean: float,
+) -> dict[str, float]:
+    total_len = env.size
+    before_end, during_start, during_end, after_end = _segment_bounds(total_len)
+
+    before = env[:before_end]
+    during = env[during_start:during_end]
+    after = env[during_end:after_end]
+
+    before_mean = float(np.nanmean(before)) if before.size else np.nan
+    before_std = float(np.nanstd(before)) if before.size else 0.0
+
+    baseline = fly_before_mean
+    if not np.isfinite(baseline):
+        baseline = before_mean
+    if not np.isfinite(baseline):
+        baseline = 0.0
+    if not np.isfinite(before_std):
+        before_std = 0.0
+
+    threshold = baseline + 3.0 * before_std
+
+    fps_eff = _effective_fps(fps, fallback=fallback_fps, default=default_fps)
+    dt = 1.0 / fps_eff if fps_eff > 0 else 0.0
+
+    auc_before = _segment_auc(before, threshold, dt)
+    auc_during = _segment_auc(during, threshold, dt)
+    auc_after = _segment_auc(after, threshold, dt)
+
+    during_ratio = float(auc_during / auc_before) if auc_before > 0 else float("nan")
+    after_ratio = float(auc_after / auc_before) if auc_before > 0 else float("nan")
+
+    peak_value = float("nan")
+    time_to_peak = float("nan")
+    if during.size:
+        finite_during = during[np.isfinite(during)]
+        if finite_during.size:
+            peak_value = float(np.max(finite_during))
+
+    if total_len and fps_eff > 0:
+        finite_env = env[np.isfinite(env)]
+        if finite_env.size:
+            try:
+                global_peak_idx = int(np.nanargmax(env))
+            except ValueError:
+                global_peak_idx = -1
+            if during_start <= global_peak_idx < during_end:
+                time_to_peak = (global_peak_idx - during_start) / fps_eff
+
+    return {
+        "AUC-Before": float(auc_before),
+        "AUC-During": float(auc_during),
+        "AUC-After": float(auc_after),
+        "AUC-During-Before-Ratio": during_ratio,
+        "AUC-After-Before-Ratio": after_ratio,
+        "TimeToPeak-During": time_to_peak,
+        "Peak-Value": peak_value,
+    }
 
 
 def _pick_column(candidates: Sequence[str], df: pd.DataFrame) -> Optional[str]:
@@ -272,6 +386,7 @@ def collect_envelopes(cfg: CollectConfig) -> None:
     print(f"[INFO] Datasets: {[root.name for root in cfg.roots]}")
     print(f"[INFO] Discovered {len(items)} videos. Max frames = {max_len}")
 
+    env_cols = [f"env_{i}" for i in range(max_len)]
     cols = [
         "dataset",
         "fly",
@@ -279,12 +394,12 @@ def collect_envelopes(cfg: CollectConfig) -> None:
         "trial_type",
         "trial_label",
         "fps",
-        *[f"env_{i}" for i in range(max_len)],
+        *AUC_COLUMNS,
+        *env_cols,
     ]
 
-    cfg.out_csv.parent.mkdir(parents=True, exist_ok=True)
-    pd.DataFrame(columns=cols).to_csv(cfg.out_csv, index=False)
-
+    trial_rows: List[dict] = []
+    fly_before_totals: dict[str, tuple[float, int]] = {}
     for item in items:
         csv_path = item["csv_path"]
         measure_col = item["measure_col"]
@@ -330,28 +445,65 @@ def collect_envelopes(cfg: CollectConfig) -> None:
             f"[DEBUG] {csv_path.name}: envelope_length={len(env)}, fly_number={item['fly_number']}"
         )
 
-        row = [
-            item["dataset"],
-            item["fly"],
-            item["fly_number"],
-            item["trial_type"],
-            item["trial_label"],
-            fps,
-            *env.tolist(),
-        ]
-
-        if len(env) < max_len:
-            row.extend([np.nan] * (max_len - len(env)))
-        elif len(env) > max_len:
-            row = row[: 6 + max_len]
-
-        pd.DataFrame([row], columns=cols).to_csv(
-            cfg.out_csv, mode="a", header=False, index=False
+        trial_rows.append(
+            {
+                "dataset": item["dataset"],
+                "fly": item["fly"],
+                "fly_number": item["fly_number"],
+                "trial_type": item["trial_type"],
+                "trial_label": item["trial_label"],
+                "fps": fps,
+                "env": env,
+            }
         )
+
+        if item["trial_type"].lower() == "testing":
+            before_len = min(BEFORE_FRAMES, env.size)
+            if before_len > 0:
+                before_segment = env[:before_len]
+                finite_mask = np.isfinite(before_segment)
+                if np.any(finite_mask):
+                    sum_before = float(np.nansum(before_segment[finite_mask]))
+                    count_before = int(np.sum(finite_mask))
+                    total, count = fly_before_totals.get(item["fly"], (0.0, 0))
+                    fly_before_totals[item["fly"]] = (
+                        total + sum_before,
+                        count + count_before,
+                    )
 
         print(
-            f"[DEBUG] Appended row for fly={item['fly']} fly_number={item['fly_number']} frames={len(env)}"
+            f"[DEBUG] Buffered row for fly={item['fly']} fly_number={item['fly_number']} frames={len(env)}"
         )
+
+    fly_before_means = {
+        fly: (total / count if count > 0 else float("nan"))
+        for fly, (total, count) in fly_before_totals.items()
+    }
+
+    records: List[dict] = []
+    for row in trial_rows:
+        env = row["env"]
+        metrics = _compute_trial_metrics(
+            env,
+            row["fps"],
+            fallback_fps=cfg.fallback_fps,
+            default_fps=cfg.fps_default,
+            fly_before_mean=fly_before_means.get(row["fly"], float("nan")),
+        )
+
+        padded = np.full(max_len, np.nan, dtype=float)
+        valid = min(env.size, max_len)
+        if valid:
+            padded[:valid] = env[:valid]
+
+        record = {key: row[key] for key in ("dataset", "fly", "fly_number", "trial_type", "trial_label", "fps")}
+        record.update(metrics)
+        record.update({col: padded[idx] for idx, col in enumerate(env_cols)})
+        records.append(record)
+
+    df_out = pd.DataFrame.from_records(records, columns=cols)
+    cfg.out_csv.parent.mkdir(parents=True, exist_ok=True)
+    df_out.to_csv(cfg.out_csv, index=False)
 
     print(f"[OK] Wrote combined envelope table: {cfg.out_csv}")
 
