@@ -137,6 +137,16 @@ def test_collect_and_convert_capture_fly_number(tmp_path):
     assert "fly_number" in df.columns
     assert str(df.loc[0, "fly_number"]) == "3"
     assert df.loc[0, "fly"] == "october_07_session_fly3"
+    for col in (
+        "AUC-Before",
+        "AUC-During",
+        "AUC-After",
+        "AUC-During-Before-Ratio",
+        "AUC-After-Before-Ratio",
+        "TimeToPeak-During",
+        "Peak-Value",
+    ):
+        assert col in df.columns
 
     convert_cfg = ConvertConfig(
         input_csv=out_csv,
