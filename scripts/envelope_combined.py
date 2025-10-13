@@ -91,7 +91,6 @@ FRAME_COLS = ["Frame", "FrameNumber", "Frame Number"]
 TRIAL_REGEX = re.compile(r"(testing|training)_(\d+)", re.IGNORECASE)
 TESTING_REGEX = re.compile(r"testing_(\d+)", re.IGNORECASE)
 FLY_SLOT_REGEX = re.compile(r"(fly\d+)_distances", re.IGNORECASE)
-FLY_NUMBER_REGEX = re.compile(r"fly(\d+)", re.IGNORECASE)
 
 ANCHOR_X = 1080.0
 ANCHOR_Y = 540.0
@@ -782,9 +781,6 @@ def combine_distance_angle(cfg: CombineConfig) -> None:
             continue
 
         angle_idx, angle_fallback = _index_testing(angle_entries)
-        print(
-            f"[DEBUG] {fly_name}: angle_idx keys={list(angle_idx.keys())}, fallback={list(angle_fallback.keys())}"
-        )
 
         dist_idx: dict[str, tuple[Path, str, Optional[str]]] = {}
         for label, path, category in distance_entries:
@@ -799,13 +795,6 @@ def combine_distance_angle(cfg: CombineConfig) -> None:
             existing = dist_idx.get(key)
             if existing is None or (prefer_new and not existing[0].name.lower().startswith("updated_")):
                 dist_idx[key] = (path, base_key, slot_label)
-                print(
-                    f"[DEBUG] {fly_name}: registered distance CSV {path} → key={key}, slot_label={slot_label}"
-                )
-            else:
-                print(
-                    f"[DEBUG] {fly_name}: kept existing distance CSV for key={key}; candidate was {path}"
-                )
 
         out_csv_dir = fly_dir / "angle_distance_rms_envelope"
         out_fig_dir = out_csv_dir / "plots"
@@ -876,19 +865,6 @@ def combine_distance_angle(cfg: CombineConfig) -> None:
 
                 slot_suffix = f"_{slot_label}" if slot_label else ""
                 test_id = f"{base_key}{slot_suffix}".replace("__", "_")
-                fly_number = _extract_fly_number(slot_label, dist_path.stem, fly_name)
-                fly_number_label = (
-                    str(fly_number) if fly_number is not None else "UNKNOWN"
-                )
-                if fly_number is None:
-                    print(
-                        f"[WARN] {dist_path.name}: could not determine fly number; using 'UNKNOWN'."
-                    )
-                else:
-                    print(
-                        f"[DEBUG] {fly_name}: fly_number={fly_number_label} derived from slot_label={slot_label}"
-                    )
-
                 out_df = pd.DataFrame(
                     {
                         "time_s": time_dist,

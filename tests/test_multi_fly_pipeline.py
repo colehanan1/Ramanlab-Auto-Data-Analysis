@@ -1,15 +1,11 @@
 import json
 import sys
 from pathlib import Path
-from typing import Sequence
 
 import numpy as np
 import pandas as pd
 
-project_root = Path(__file__).resolve().parents[1]
-sys.path.append(str(project_root))
-sys.path.append(str(project_root / "src"))
-sys.path.append(str(project_root / "scripts"))
+sys.path.append(str(Path(__file__).resolve().parents[1] / "src"))
 
 from envelope_combined import (
     AUC_COLUMNS,
@@ -37,30 +33,6 @@ def _write_dummy_csv(path: Path) -> None:
             "max_distance_2_8": [0.0, 0.0, 0.0, 0.0],
         }
     )
-    df.to_csv(path, index=False)
-
-
-def _write_distance_angle_csv(
-    path: Path,
-    *,
-    distance_pct: Sequence[float],
-    angle_pct: Sequence[float],
-) -> None:
-    frames = np.arange(len(distance_pct))
-    base_x = 150.0
-    base_y = 200.0
-    df = pd.DataFrame(
-        {
-            "frame": frames,
-            "distance_percentage": distance_pct,
-            "angle_centered_pct": angle_pct,
-            "x_class2": np.full(len(frames), base_x),
-            "y_class2": np.full(len(frames), base_y),
-            "x_proboscis": base_x + 20.0,
-            "y_proboscis": base_y + 10.0,
-        }
-    )
-    path.parent.mkdir(parents=True, exist_ok=True)
     df.to_csv(path, index=False)
 
 
@@ -120,8 +92,7 @@ def test_distance_pipeline_creates_stats_and_normalizes(tmp_path):
     assert report_file.exists()
     report_text = report_file.read_text()
     assert "2" in report_text  # frame 2 contains NaN distance
-    assert "Total dropped frames" in report_text
-
+    assert "Total dropped frames" in report_text 
 
 def test_collect_and_convert_capture_fly_number(tmp_path):
     root = tmp_path / "experiment"
