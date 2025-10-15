@@ -44,6 +44,8 @@ REQUIRED_COLUMNS = [
     "y_class8",
 ]
 
+FPS_VALUE = 40
+
 
 @dataclass(frozen=True, order=True)
 class FlyKey:
@@ -272,8 +274,6 @@ def _build_frame_columns(max_frames: int) -> List[str]:
             ]
         )
     return columns
-
-
 def build_output_dataframe(results: List[TrialAggregation]) -> pd.DataFrame:
     metadata_columns = [
         "dataset",
@@ -281,6 +281,7 @@ def build_output_dataframe(results: List[TrialAggregation]) -> pd.DataFrame:
         "fly_number",
         "trial_type",
         "trial_label",
+        "fps",
     ]
 
     if not results:
@@ -303,6 +304,7 @@ def build_output_dataframe(results: List[TrialAggregation]) -> pd.DataFrame:
                 "fly_number": int(result.key.fly_num),
                 "trial_type": "testing",
                 "trial_label": trial_label,
+                "fps": FPS_VALUE,
             }
         )
         row["__trial_index__"] = int(result.trial)
@@ -370,6 +372,7 @@ def _run_self_check(logger: logging.Logger) -> None:
         "fly_number",
         "trial_type",
         "trial_label",
+        "fps",
         "eye_x_f0",
         "eye_y_f0",
         "prob_x_f0",
@@ -424,6 +427,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 "fly_number",
                 "trial_type",
                 "trial_label",
+                "fps",
             ]
         )
     else:
