@@ -36,6 +36,7 @@ DEFAULT_FPS_FALLBACK = 30.0
 MAX_HEATMAP_FRAMES = 3600
 TESTING_AGGREGATE_RANGE = range(6, 11)
 TESTING_LABEL_PATTERN = re.compile(r"testing[\s_-]?(\d+)", re.IGNORECASE)
+TRAILING_INT_PATTERN = re.compile(r"(\d+)(?!.*\d)")
 
 
 @dataclass
@@ -202,13 +203,18 @@ def detect_dirval_columns(df: pd.DataFrame, prefix: str) -> List[str]:
 
 
 def canonical_label(label: object) -> str:
-    """Normalise label values to readable strings."""
+    """Normalise label values to readable strings for comparisons."""
 
     if isinstance(label, numbers.Integral):
         return str(int(label))
     if isinstance(label, float) and float(label).is_integer():
         return str(int(label))
-    return str(label)
+
+    text = str(label).strip()
+    match = TRAILING_INT_PATTERN.search(text)
+    if match:
+        return match.group(1)
+    return text
 
 
 def filter_by_labels(df: pd.DataFrame, labels: Sequence[object]) -> pd.DataFrame:
@@ -777,9 +783,8 @@ def process(
 
         for group_name, label_set in label_groups.items():
             label = label_set[0]
-            if label in labels_train:
-                folder = out_base
-            elif label in labels_test:
+            label_display = canonical_label(label)
+            if label in labels_train or label in labels_test:
                 folder = out_base
             else:
                 continue
@@ -797,20 +802,20 @@ def process(
             if heatmap is None:
                 continue
             n_trials = heatmap.matrix.shape[0]
-            title = f"{dataset} | Fly {fly} | Odor {label} | n={n_trials}"
+            title = f"{dataset} | Fly {fly} | Odor {label_display} | n={n_trials}"
             vlimits = compute_vlimits(heatmap.matrix, args.vclip)
             fig = plot_heatmap(heatmap, title, vlimits)
-            base_path = folder / f"odor_{label}_heatmap"
+            base_path = folder / f"odor_{label_display}_heatmap"
             save_figure(fig, base_path, args.dpi)
             avg_fig = plot_mean_sem(heatmap, title + " Mean ± SEM")
-            save_figure(avg_fig, folder / f"odor_{label}_heatmap_avg", args.dpi)
+            save_figure(avg_fig, folder / f"odor_{label_display}_heatmap_avg", args.dpi)
             summary_path = base_path.with_suffix(".json")
             write_summary_json(
                 summary_path,
                 {
                     "dataset": dataset,
                     "fly": fly,
-                    "label": label,
+                    "label": label_display,
                     "n_trials": n_trials,
                     "vlimits": [float(v) for v in vlimits],
                     "normalize": args.normalize,
@@ -821,7 +826,16 @@ def process(
                 },
             )
             summary_records.append(
-                build_summary_record(dataset, str(fly), f"Odor {label}", n_trials, heatmap.truncation, vlimits, args.normalize, args.sort_by)
+                build_summary_record(
+                    dataset,
+                    str(fly),
+                    f"Odor {label_display}",
+                    n_trials,
+                    heatmap.truncation,
+                    vlimits,
+                    args.normalize,
+                    args.sort_by,
+                )
             )
 
         dataset_groups.setdefault(dataset, {})

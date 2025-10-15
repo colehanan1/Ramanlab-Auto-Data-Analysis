@@ -18,6 +18,12 @@ def test_detect_dirval_columns_sorted():
     assert cols == ["dir_val_1", "dir_val_2", "dir_val_10"]
 
 
+def test_canonical_label_parses_testing_suffix():
+    assert heatmaps.canonical_label("testing_10") == "10"
+    assert heatmaps.canonical_label("Training-3") == "3"
+    assert heatmaps.canonical_label("other") == "other"
+
+
 def test_prepare_heatmap_matrix_normalise_and_sort():
     df = pd.DataFrame(
         {
@@ -55,7 +61,7 @@ def test_main_smoke(tmp_path):
         {
             "dataset": ["d1", "d1", "d1", "d1"],
             "fly": ["A", "A", "A", "A"],
-            "trial_label": [2, 1, 4, "testing_6"],
+            "trial_label": [2, "testing_1", 4, "testing_6"],
             "fps": [30, 30, 30, 30],
             "dir_val_0": [0.1, 0.2, 0.3, 0.4],
             "dir_val_1": [0.2, 0.3, 0.4, 0.5],
@@ -81,6 +87,7 @@ def test_main_smoke(tmp_path):
     )
     assert code == 0
     assert (outdir / "d1" / "A" / "odor_2_heatmap.png").exists()
+    assert (outdir / "d1" / "A" / "odor_1_heatmap.png").exists()
     assert (outdir / "d1" / "A" / "train_combined_heatmap.png").exists()
     assert (outdir / "d1" / "combined" / "dataset_combined.png").exists()
     assert (outdir / "d1" / "combined" / "testing_6_across_flies_heatmap.png").exists()
