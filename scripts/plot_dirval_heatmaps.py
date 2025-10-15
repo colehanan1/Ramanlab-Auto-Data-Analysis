@@ -643,7 +643,7 @@ def dataset_allflies_combined(
     outdir: Path,
     vclip: Optional[Tuple[float, float]],
     dry_trials: int,
-) -> List[Mapping[str, object]]:
+) -> Tuple[List[Mapping[str, object]], Dict[str, HeatmapData]]:
     """Build combined heatmaps that aggregate all flies for train/test labels."""
 
     if dataset_df.empty:
@@ -714,7 +714,7 @@ def dataset_allflies_combined(
         )
 
     if not aggregated_heatmaps:
-        return summary_records
+        return summary_records, aggregated_heatmaps
 
     labels = [name for name in ("TRAIN-COMBINED", "TEST-COMBINED") if name in aggregated_heatmaps]
     fig, axes = plt.subplots(1, len(labels), figsize=(len(labels) * 4, 3), squeeze=False)
@@ -750,7 +750,7 @@ def dataset_allflies_combined(
     overview_base = combined_dir / "dataset_all_flies_combined"
     save_figure(fig, overview_base, dpi)
 
-    return summary_records
+    return summary_records, aggregated_heatmaps
 
 
 def dataset_testing_label_figure(
@@ -764,19 +764,19 @@ def dataset_testing_label_figure(
     outdir: Path,
     vclip: Optional[Tuple[float, float]],
     dry_trials: int,
-) -> List[Mapping[str, object]]:
+) -> Tuple[List[Mapping[str, object]], Dict[str, HeatmapData]]:
     """Generate dataset-level aggregated testing heatmaps and overview figure."""
 
     if dataset_df.empty:
         LOGGER.info("No rows supplied for dataset=%s aggregated testing figure", dataset)
-        return []
+        return [], {}
 
     working_df = dataset_df.copy()
     working_df["_testing_index"] = working_df["trial_label"].map(testing_label_index)
     mask = working_df["_testing_index"].isin(TESTING_AGGREGATE_RANGE)
     if not mask.any():
         LOGGER.info("Dataset=%s lacks testing_6-10 labels; skipping aggregated figure", dataset)
-        return []
+        return [], {}
 
     summary_records: List[Mapping[str, object]] = []
     heatmaps: Dict[str, HeatmapData] = {}
@@ -840,7 +840,7 @@ def dataset_testing_label_figure(
 
     if not heatmaps:
         LOGGER.info("No aggregated testing heatmaps generated for dataset=%s", dataset)
-        return summary_records
+        return summary_records, heatmaps
 
     labels = sorted(heatmaps.keys())
     cols = min(3, len(labels))
@@ -883,6 +883,148 @@ def dataset_testing_label_figure(
     fig.tight_layout(rect=(0, 0, 1, 0.96))
     overview_base = combined_dir / "dataset_testing_overview"
     save_figure(fig, overview_base, dpi)
+
+    return summary_records, heatmaps
+
+
+def dataset_combined_average_heatmap(
+    dataset: str,
+    combined_heatmaps: Mapping[str, HeatmapData],
+    testing_heatmaps: Mapping[str, HeatmapData],
+    outdir: Path,
+    dpi: int,
+    normalise: str,
+    sort_by: str,
+    vclip: Optional[Tuple[float, float]],
+) -> List[Mapping[str, object]]:
+    """Create a combined average heatmap across train/test groupings."""
+
+    sources: List[Tuple[str, HeatmapData]] = []
+    for label in ("TRAIN-COMBINED", "TEST-COMBINED"):
+        heatmap = combined_heatmaps.get(label)
+        if heatmap is not None and heatmap.matrix.size:
+            sources.append((label, heatmap))
+
+    for idx in TESTING_AGGREGATE_RANGE:
+        label = f"testing_{idx}"
+        heatmap = testing_heatmaps.get(label)
+        if heatmap is not None and heatmap.matrix.size:
+            sources.append((label, heatmap))
+
+    if not sources:
+        LOGGER.info(
+            "Dataset=%s lacks combined averages; skipping average heatmap", dataset
+        )
+        return []
+
+    min_length = min(hm.matrix.shape[1] for _, hm in sources if hm.matrix.shape[1] > 0)
+    if min_length <= 0:
+        LOGGER.info(
+            "Dataset=%s combined averages have zero-length matrices; skipping", dataset
+        )
+        return []
+
+    mean_rows: List[np.ndarray] = []
+    labels: List[str] = []
+    group_metadata: List[Mapping[str, object]] = []
+
+    for label, heatmap in sources:
+        clipped_matrix = heatmap.matrix[:, :min_length]
+        with np.errstate(all="ignore"):
+            mean_series = np.nanmean(clipped_matrix, axis=0)
+        if not np.isfinite(mean_series).any():
+            LOGGER.warning(
+                "All-NaN mean for dataset=%s label=%s when building combined average",
+                dataset,
+                label,
+            )
+            continue
+        mean_rows.append(mean_series)
+        labels.append(label)
+        group_metadata.append(
+            {
+                "label": label,
+                "n_trials": int(heatmap.matrix.shape[0]),
+                "source_mean_length": float(heatmap.mean_length),
+                "truncated_length": int(min_length),
+            }
+        )
+
+    if not mean_rows:
+        LOGGER.info("No valid averages computed for dataset=%s", dataset)
+        return []
+
+    average_matrix = np.vstack(mean_rows)
+    reference_axis = sources[0][1].time_axis
+    if reference_axis.size >= min_length:
+        time_axis = reference_axis[:min_length]
+    else:
+        step = 1.0 if reference_axis.size == 0 else np.nanmean(np.diff(reference_axis))
+        if not math.isfinite(step) or step <= 0:
+            step = 1.0
+        time_axis = np.linspace(0.0, step * (min_length - 1), num=min_length)
+
+    vlimits = compute_vlimits(average_matrix, vclip, normalise)
+    fig, ax = plt.subplots(figsize=(6, max(2, len(labels) * 0.6)))
+    extent = (
+        float(time_axis[0]),
+        float(time_axis[-1]) if time_axis.size > 1 else float(time_axis[0] + 1.0),
+        -0.5,
+        len(labels) - 0.5,
+    )
+    im = ax.imshow(
+        average_matrix,
+        aspect="auto",
+        origin="lower",
+        cmap="viridis",
+        vmin=vlimits[0],
+        vmax=vlimits[1],
+        extent=extent,
+    )
+    ax.set_xlabel("Time (s)")
+    ax.set_ylabel("Combined groups")
+    ax.set_yticks(np.arange(len(labels)))
+    ax.set_yticklabels([label.replace("_", " ").title() for label in labels])
+    title = f"{dataset} | Combined Averages"
+    ax.set_title(title)
+    label_text, ticks = colourbar_params(normalise, vlimits)
+    colourbar = fig.colorbar(im, ax=ax)
+    colourbar.set_label(label_text)
+    if ticks is not None:
+        colourbar.set_ticks(ticks)
+    fig.tight_layout()
+
+    combined_dir = outdir / dataset / "combined"
+    ensure_directory(combined_dir)
+    base_path = combined_dir / "dataset_combined_average_heatmap"
+    save_figure(fig, base_path, dpi)
+    summary_path = base_path.with_suffix(".json")
+    write_summary_json(
+        summary_path,
+        {
+            "dataset": dataset,
+            "mode": "combined-average",
+            "normalize": normalise,
+            "sort_by": sort_by,
+            "vlimits": [float(v) for v in vlimits],
+            "groups": group_metadata,
+        },
+    )
+
+    summary_records: List[Mapping[str, object]] = []
+    for meta in group_metadata:
+        summary_records.append(
+            build_summary_record(
+                dataset,
+                "ALL-FLIES",
+                f"{meta['label']}-AVERAGE",
+                meta["n_trials"],
+                meta["truncated_length"],
+                vlimits,
+                normalise,
+                sort_by,
+            )
+        )
 
     return summary_records
 
@@ -1059,34 +1201,46 @@ def process(
 
     for dataset, frames in processed_dataset_rows.items():
         dataset_df = pd.concat(frames, ignore_index=True)
-        summary_records.extend(
-            dataset_allflies_combined(
-                dataset,
-                dataset_df,
-                dir_cols,
-                labels_train,
-                labels_test,
-                args.normalize,
-                args.sort_by,
-                fps_tracker,
-                args.dpi,
-                args.outdir,
-                args.vclip,
-                args.dry_run if args.dry_run else 0,
-            )
+        allflies_summary, combined_heatmaps = dataset_allflies_combined(
+            dataset,
+            dataset_df,
+            dir_cols,
+            labels_train,
+            labels_test,
+            args.normalize,
+            args.sort_by,
+            fps_tracker,
+            args.dpi,
+            args.outdir,
+            args.vclip,
+            args.dry_run if args.dry_run else 0,
         )
+        summary_records.extend(allflies_summary)
+
+        testing_summary, testing_heatmaps = dataset_testing_label_figure(
+            dataset,
+            dataset_df,
+            dir_cols,
+            args.normalize,
+            args.sort_by,
+            fps_tracker,
+            args.dpi,
+            args.outdir,
+            args.vclip,
+            args.dry_run if args.dry_run else 0,
+        )
+        summary_records.extend(testing_summary)
+
         summary_records.extend(
-            dataset_testing_label_figure(
+            dataset_combined_average_heatmap(
                 dataset,
-                dataset_df,
-                dir_cols,
+                combined_heatmaps,
+                testing_heatmaps,
+                args.outdir,
+                args.dpi,
                 args.normalize,
                 args.sort_by,
-                fps_tracker,
-                args.dpi,
-                args.outdir,
                 args.vclip,
-                args.dry_run if args.dry_run else 0,
             )
         )
 
