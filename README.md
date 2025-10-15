@@ -155,6 +155,26 @@ The pipeline expects a CUDA-capable GPU for production workloads. Setting `allow
 - Video overlay deletes source trial videos after composing by default; toggle in `config.yaml`.
 - See `docs/pipeline_overview.md` for a deeper look at how the steps are orchestrated.
 
+## dir_val heatmap utility
+
+Generate per-fly odor heatmaps, combined-condition views, and mean ± SEM traces from a wide CSV:
+
+```bash
+python scripts/plot_dirval_heatmaps.py \
+  --csv /path/to/all_envelope_rows_wide.csv \
+  --dataset opto_EB \
+  --outdir results/heatmaps \
+  --labels-train 2 4 5 \
+  --labels-test 1 3 \
+  --colprefix dir_val_ \
+  --normalize zscore \
+  --sort-by peak \
+  --grid-cols 2 \
+  --dpi 300 \
+  --dry-run 0 \
+  --log-level INFO
+```
+
 ## Nightly automation
 
 To run the full pipeline every night at midnight, use the bundled cron helpers:
