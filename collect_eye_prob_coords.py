@@ -54,13 +54,11 @@ class FlyKey:
     slot: int
     source_root: Path
 
-    def metadata_tuple(self) -> Tuple[str, str, int, int]:
-        return (
-            str(self.source_root),
-            self.date_tag,
-            self.fly_num,
-            self.slot,
-        )
+    def dataset_name(self) -> str:
+        return self.source_root.name
+
+    def fly_label(self) -> str:
+        return f"{self.date_tag}_fly_{self.fly_num}"
 
 
 @dataclass
@@ -278,13 +276,11 @@ def _build_frame_columns(max_frames: int) -> List[str]:
 
 def build_output_dataframe(results: List[TrialAggregation]) -> pd.DataFrame:
     metadata_columns = [
-        "source_root",
-        "date_tag",
-        "fly_num",
-        "slot",
-        "trial",
-        "n_trials",
-        "total_frames",
+        "dataset",
+        "fly",
+        "fly_number",
+        "trial_type",
+        "trial_label",
     ]
 
     if not results:
@@ -297,18 +293,19 @@ def build_output_dataframe(results: List[TrialAggregation]) -> pd.DataFrame:
     rows: List[Dict[str, object]] = []
     for result in results:
         row: Dict[str, object] = {col: "" for col in columns}
-        source_root, date_tag, fly_num, slot = result.key.metadata_tuple()
+        dataset_name = result.key.dataset_name()
+        fly_label = result.key.fly_label()
+        trial_label = f"testing_{int(result.trial)}"
         row.update(
             {
-                "source_root": source_root,
-                "date_tag": date_tag,
-                "fly_num": int(fly_num),
-                "slot": int(slot),
-                "trial": int(result.trial),
-                "n_trials": int(result.n_trials_for_fly),
-                "total_frames": int(result.total_frames),
+                "dataset": dataset_name,
+                "fly": fly_label,
+                "fly_number": int(result.key.fly_num),
+                "trial_type": "testing",
+                "trial_label": trial_label,
             }
         )
+        row["__trial_index__"] = int(result.trial)
 
         for frame_index, values in enumerate(result.frames):
             base = frame_index * 4
@@ -324,8 +321,14 @@ def build_output_dataframe(results: List[TrialAggregation]) -> pd.DataFrame:
 
         rows.append(row)
 
-    df = pd.DataFrame(rows, columns=columns)
-    df.sort_values(by=["date_tag", "fly_num", "slot", "trial"], inplace=True, kind="mergesort")
+    df = pd.DataFrame(rows)
+    df.sort_values(
+        by=["dataset", "fly", "__trial_index__"],
+        inplace=True,
+        kind="mergesort",
+    )
+    df.drop(columns=["__trial_index__"], inplace=True)
+    df = df.reindex(columns=columns, fill_value="")
     df.reset_index(drop=True, inplace=True)
     return df
 
@@ -362,13 +365,11 @@ def _run_self_check(logger: logging.Logger) -> None:
 
     df = build_output_dataframe([trial1, trial2, trial3])
     expected_columns = [
-        "source_root",
-        "date_tag",
-        "fly_num",
-        "slot",
-        "trial",
-        "n_trials",
-        "total_frames",
+        "dataset",
+        "fly",
+        "fly_number",
+        "trial_type",
+        "trial_label",
         "eye_x_f0",
         "eye_y_f0",
         "prob_x_f0",
@@ -379,6 +380,8 @@ def _run_self_check(logger: logging.Logger) -> None:
         "prob_y_f1",
     ]
     assert list(df.columns) == expected_columns, "Unexpected column layout in self-check"
+    assert df.loc[0, "dataset"] == "src1"
+    assert df.loc[0, "trial_label"] == "testing_1"
     assert df.loc[1, "eye_x_f1"] == "", "Padding failed for missing frames"
     logger.info("Self-check completed successfully")
 
@@ -416,13 +419,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             _run_self_check(logger)
         df = pd.DataFrame(
             columns=[
-                "source_root",
-                "date_tag",
-                "fly_num",
-                "slot",
-                "trial",
-                "n_trials",
-                "total_frames",
+                "dataset",
+                "fly",
+                "fly_number",
+                "trial_type",
+                "trial_label",
             ]
         )
     else:
