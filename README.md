@@ -155,6 +155,30 @@ The pipeline expects a CUDA-capable GPU for production workloads. Setting `allow
 - Video overlay deletes source trial videos after composing by default; toggle in `config.yaml`.
 - See `docs/pipeline_overview.md` for a deeper look at how the steps are orchestrated.
 
+## dir_val heatmap utility
+
+Generate per-fly odor heatmaps, combined-condition views, and mean ± SEM traces from a wide CSV. The utility now caps every heatmap to the first 3,600 frames and produces dataset-wide aggregates that stack all `testing_6`–`testing_10` trials across flies alongside the per-fly combined figure. A second dataset overview renders a single heatmap where each row is the across-fly average trace for `TRAIN-COMBINED`, `TEST-COMBINED`, and `testing_6`–`testing_10`, making it easy to spot cross-fly consensus dynamics at a glance:
+
+```bash
+python scripts/plot_dirval_heatmaps.py \
+  --csv /path/to/all_envelope_rows_wide.csv \
+  --dataset opto_EB \
+  --outdir results/heatmaps \
+  --labels-train 2 4 5 \
+  --labels-test 1 3 \
+  --colprefix dir_val_ \
+  --normalize zscore \
+  --sort-by peak \
+  --grid-cols 2 \
+  --dpi 300 \
+  --dry-run 0 \
+  --log-level INFO
+```
+
+### Colour scaling and normalisation
+
+Historically the plots relied on z-score normalisation and percentile clipping to highlight relative structure within each trial. With the latest update every heatmap defaults to the physical `dir_val` scale: the colour bar spans `0` (dark purple) to `200` (bright yellow) whenever `--normalize none` is active, ensuring consistent interpretation across flies and datasets. Opt into `--normalize zscore` when you explicitly want per-trial standardisation; in that mode the code falls back to the robust percentile-driven limits so the colour bar reflects standard deviations rather than raw millimetre values.
+
 ## Nightly automation
 
 To run the full pipeline every night at midnight, use the bundled cron helpers:
