@@ -1,7 +1,8 @@
 """collect_eye_prob_coords.py
 
 Discover and aggregate testing CSV files containing eye/proboscis coordinates
-into a single wide CSV suitable for downstream analysis.
+into a single wide CSV suitable for downstream analysis (capped at the first
+3600 frames per trial across all outputs).
 
 Usage examples:
     python collect_eye_prob_coords.py
@@ -47,6 +48,7 @@ REQUIRED_COLUMNS = [
 ]
 
 FPS_VALUE = 40
+MAX_FRAMES = 3600
 
 
 @dataclass(frozen=True, order=True)
@@ -241,7 +243,17 @@ def process_files(
                 continue
 
             numeric_df = df[REQUIRED_COLUMNS].apply(pd.to_numeric, errors="coerce")
-            frame_count = len(numeric_df)
+            original_frame_count = len(numeric_df)
+            if original_frame_count > MAX_FRAMES:
+                logger.info(
+                    "Truncating %s trial %d from %d to %d frame(s)",
+                    key,
+                    trial,
+                    original_frame_count,
+                    MAX_FRAMES,
+                )
+            truncated_df = numeric_df.iloc[:MAX_FRAMES]
+            frame_count = len(truncated_df)
             logger.debug(
                 "Processed file %s with %d frames for %s trial %d",
                 path,
@@ -250,7 +262,7 @@ def process_files(
                 trial,
             )
 
-            trial_frames = list(numeric_df.itertuples(index=False, name=None))
+            trial_frames = list(truncated_df.itertuples(index=False, name=None))
             processed_trials.append((trial, trial_frames))
             total_trials += 1
 
@@ -299,7 +311,7 @@ def build_output_dataframe(results: List[TrialAggregation]) -> pd.DataFrame:
     if not results:
         return pd.DataFrame(columns=metadata_columns)
 
-    max_frames = max(result.total_frames for result in results)
+    max_frames = min(max(result.total_frames for result in results), MAX_FRAMES)
     frame_columns = _build_frame_columns(max_frames)
     columns = metadata_columns + frame_columns
 
@@ -488,7 +500,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         json_location = "dry-run (no output)"
         logger.info("Dry-run enabled; outputs not written")
 
-    global_max_frames = max((result.total_frames for result in processing.fly_results), default=0)
+    global_max_frames = min(
+        max((result.total_frames for result in processing.fly_results), default=0), MAX_FRAMES
+    )
     logger.info(
         "Summary: %d trial row(s), %d processed trial(s), max frames per trial %d | Outputs -> CSV: %s | NPY: %s | JSON: %s",
         len(processing.fly_results),
