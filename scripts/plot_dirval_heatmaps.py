@@ -40,10 +40,21 @@ TESTING_LABEL_PATTERN = re.compile(r"testing[\s_-]?(\d+)", re.IGNORECASE)
 TRAILING_INT_PATTERN = re.compile(r"(\d+)(?!.*\d)")
 
 
-def colour_label_for(normalise: str) -> str:
-    """Return an appropriate colour-bar label for the normalisation mode."""
+def colourbar_params(normalise: str, vlimits: Tuple[float, float]) -> Tuple[str, Optional[List[float]]]:
+    """Return colour-bar label and tick positions based on scaling."""
 
-    return "z-score" if normalise == "zscore" else "dir_val"
+    if normalise == "zscore":
+        return "z-score", None
+
+    vmin, vmax = vlimits
+    label = f"dir_val ({vmin:.0f}–{vmax:.0f})"
+
+    if not (math.isfinite(vmin) and math.isfinite(vmax)) or vmax <= vmin:
+        return label, None
+
+    ticks = np.linspace(vmin, vmax, num=5)
+    ticks = [float(round(tick, 2)) for tick in ticks]
+    return label, ticks
 
 
 @dataclass
@@ -420,8 +431,8 @@ def plot_heatmap(
     heatmap: HeatmapData,
     title: str,
     vlimits: Tuple[float, float],
+    normalise: str,
     cmap: str = "viridis",
-    colour_label: str = "Value",
 ) -> plt.Figure:
     """Render a heatmap figure and return the figure object."""
 
@@ -443,7 +454,11 @@ def plot_heatmap(
     ax.set_title(title)
     ax.set_xlabel("Time (s)")
     ax.set_ylabel("Trials")
-    fig.colorbar(im, ax=ax, label=colour_label)
+    label, ticks = colourbar_params(normalise, vlimits)
+    colourbar = fig.colorbar(im, ax=ax)
+    colourbar.set_label(label)
+    if ticks is not None:
+        colourbar.set_ticks(ticks)
     ax.set_xlim(heatmap.time_axis[0], heatmap.time_axis[-1] if heatmap.time_axis.size > 1 else heatmap.time_axis[0] + 1)
     fig.tight_layout()
     return fig
@@ -566,7 +581,6 @@ def dataset_combined_figure(
     cols = max(grid_cols, len(available_labels))
     rows = n_flies
     fig, axes = plt.subplots(rows, cols, figsize=(cols * 4, rows * 3), squeeze=False)
-    colour_label = colour_label_for(normalise)
 
     for row_idx, (fly, heatmap_dict) in enumerate(sorted(fly_heatmaps.items())):
         for col_idx in range(cols):
@@ -597,7 +611,11 @@ def dataset_combined_figure(
             )
             ax.set_xlabel("Time (s)")
             ax.set_ylabel("Trials")
-            fig.colorbar(im, ax=ax, label=colour_label)
+            label_text, ticks = colourbar_params(normalise, vlimits)
+            colourbar = fig.colorbar(im, ax=ax)
+            colourbar.set_label(label_text)
+            if ticks is not None:
+                colourbar.set_ticks(ticks)
 
     for row_axes in axes:
         for ax in row_axes:
@@ -636,7 +654,6 @@ def dataset_allflies_combined(
 
     summary_records: List[Mapping[str, object]] = []
     aggregated_heatmaps: Dict[str, HeatmapData] = {}
-    colour_label = colour_label_for(normalise)
     group_map = {
         "TRAIN-COMBINED": tuple(labels_train),
         "TEST-COMBINED": tuple(labels_test),
@@ -662,7 +679,7 @@ def dataset_allflies_combined(
         vlimits = compute_vlimits(heatmap.matrix, vclip, normalise)
         title = f"{dataset} | All Flies | {name} | n={heatmap.matrix.shape[0]}"
         base = combined_dir / f"{name.lower().replace('-', '_')}_all_flies_heatmap"
-        fig = plot_heatmap(heatmap, title, vlimits, colour_label=colour_label)
+        fig = plot_heatmap(heatmap, title, vlimits, normalise)
         save_figure(fig, base, dpi)
         avg_fig = plot_mean_sem(heatmap, title + " Mean ± SEM")
         save_figure(avg_fig, combined_dir / f"{name.lower().replace('-', '_')}_all_flies_heatmap_avg", dpi)
@@ -722,7 +739,11 @@ def dataset_allflies_combined(
         ax.set_title(f"{name}")
         ax.set_xlabel("Time (s)")
         ax.set_ylabel("Trials")
-        fig.colorbar(im, ax=ax, label=colour_label)
+        label_text, ticks = colourbar_params(normalise, vlimits)
+        colourbar = fig.colorbar(im, ax=ax)
+        colourbar.set_label(label_text)
+        if ticks is not None:
+            colourbar.set_ticks(ticks)
 
     fig.suptitle(f"Dataset {dataset} | All Flies Combined")
     fig.tight_layout(rect=(0, 0, 1, 0.95))
@@ -761,8 +782,6 @@ def dataset_testing_label_figure(
     heatmaps: Dict[str, HeatmapData] = {}
     combined_dir = outdir / dataset / "combined"
     ensure_directory(combined_dir)
-    colour_label = colour_label_for(normalise)
-
     for test_idx in TESTING_AGGREGATE_RANGE:
         label_key = f"testing_{test_idx}"
         label_df = working_df[working_df["_testing_index"] == test_idx]
@@ -785,7 +804,7 @@ def dataset_testing_label_figure(
         n_trials = heatmap.matrix.shape[0]
         title = f"{dataset} | {label_key.replace('_', ' ').title()} | n={n_trials}"
         vlimits = compute_vlimits(heatmap.matrix, vclip, normalise)
-        fig = plot_heatmap(heatmap, title, vlimits, colour_label=colour_label)
+        fig = plot_heatmap(heatmap, title, vlimits, normalise)
         base_path = combined_dir / f"{label_key}_across_flies_heatmap"
         save_figure(fig, base_path, dpi)
         avg_fig = plot_mean_sem(heatmap, title + " Mean ± SEM")
@@ -851,7 +870,11 @@ def dataset_testing_label_figure(
         ax.set_title(label_key.replace("_", " ").title())
         ax.set_xlabel("Time (s)")
         ax.set_ylabel("Trials")
-        fig.colorbar(im, ax=ax, label=colour_label)
+        label_text, ticks = colourbar_params(normalise, vlimits)
+        colourbar = fig.colorbar(im, ax=ax)
+        colourbar.set_label(label_text)
+        if ticks is not None:
+            colourbar.set_ticks(ticks)
 
     for ax in axes.flatten()[len(labels):]:
         ax.axis("off")
@@ -891,7 +914,6 @@ def process(
 
     fps_tracker = MissingFpsTracker()
     summary_records: List[Mapping[str, object]] = []
-    colour_label = colour_label_for(args.normalize)
 
     fly_limit = args.dry_run if args.dry_run else None
     processed_flies = 0
@@ -940,7 +962,7 @@ def process(
             n_trials = heatmap.matrix.shape[0]
             title = f"{dataset} | Fly {fly} | Odor {label_display} | n={n_trials}"
             vlimits = compute_vlimits(heatmap.matrix, args.vclip, args.normalize)
-            fig = plot_heatmap(heatmap, title, vlimits, colour_label=colour_label)
+            fig = plot_heatmap(heatmap, title, vlimits, args.normalize)
             base_path = folder / f"odor_{label_display}_heatmap"
             save_figure(fig, base_path, args.dpi)
             avg_fig = plot_mean_sem(heatmap, title + " Mean ± SEM")
@@ -997,7 +1019,7 @@ def process(
             n_trials = heatmap.matrix.shape[0]
             title = f"{dataset} | Fly {fly} | {combined_name} | n={n_trials}"
             vlimits = compute_vlimits(heatmap.matrix, args.vclip, args.normalize)
-            fig = plot_heatmap(heatmap, title, vlimits, colour_label=colour_label)
+            fig = plot_heatmap(heatmap, title, vlimits, args.normalize)
             base_path = out_base / f"{combined_name.lower().replace('-', '_')}_heatmap"
             save_figure(fig, base_path, args.dpi)
             avg_fig = plot_mean_sem(heatmap, title + " Mean ± SEM")

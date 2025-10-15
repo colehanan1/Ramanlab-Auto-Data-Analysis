@@ -32,6 +32,16 @@ def test_compute_vlimits_uses_dirval_range_by_default():
     assert zmin < zmax
 
 
+def test_colourbar_params_for_dirval_and_zscore():
+    label, ticks = heatmaps.colourbar_params("none", heatmaps.DEFAULT_DIRVAL_RANGE)
+    assert label == "dir_val (0–200)"
+    assert ticks == [0.0, 50.0, 100.0, 150.0, 200.0]
+
+    z_label, z_ticks = heatmaps.colourbar_params("zscore", (-1.5, 2.5))
+    assert z_label == "z-score"
+    assert z_ticks is None
+
+
 def test_prepare_heatmap_matrix_normalise_and_sort():
     df = pd.DataFrame(
         {
