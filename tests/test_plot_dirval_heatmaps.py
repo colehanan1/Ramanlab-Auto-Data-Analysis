@@ -114,6 +114,12 @@ def test_main_smoke(tmp_path):
     assert (outdir / "d1" / "combined" / "testing_6_across_flies_heatmap.png").exists()
     assert (outdir / "d1" / "combined" / "dataset_testing_overview.png").exists()
     assert (outdir / "d1" / "combined" / "dataset_combined_average_heatmap.png").exists()
+    assert (
+        outdir
+        / "d1"
+        / "combined"
+        / "dataset_all_flies_combined_mean_overview.png"
+    ).exists()
 
     summary_json = outdir / "d1" / "A" / "odor_2_heatmap.json"
     data = json.loads(summary_json.read_text())

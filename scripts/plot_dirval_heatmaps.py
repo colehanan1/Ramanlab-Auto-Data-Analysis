@@ -464,16 +464,23 @@ def plot_heatmap(
     return fig
 
 
-def plot_mean_sem(heatmap: HeatmapData, title: str) -> plt.Figure:
-    """Render mean ± SEM plot for the provided heatmap data."""
+def compute_mean_sem(matrix: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Return mean, SEM, and counts across trials for a heatmap matrix."""
 
-    matrix = heatmap.matrix
     mean = np.nanmean(matrix, axis=0)
     counts = np.sum(np.isfinite(matrix), axis=0)
     with np.errstate(divide="ignore", invalid="ignore"):
         sem = np.nanstd(matrix, axis=0)
         sem = np.divide(sem, np.sqrt(np.maximum(counts, 1)), where=counts > 0)
     sem = np.where(counts > 0, sem, np.nan)
+    return mean, sem, counts
+
+
+def plot_mean_sem(heatmap: HeatmapData, title: str) -> plt.Figure:
+    """Render mean ± SEM plot for the provided heatmap data."""
+
+    matrix = heatmap.matrix
+    mean, sem, _ = compute_mean_sem(matrix)
 
     fig, ax = plt.subplots(figsize=(8, 3))
     ax.plot(heatmap.time_axis, mean, label="Mean")
@@ -1029,6 +1036,127 @@ def dataset_combined_average_heatmap(
     return summary_records
 
 
+def dataset_all_flies_mean_overview(
+    dataset: str,
+    combined_heatmaps: Mapping[str, HeatmapData],
+    testing_heatmaps: Mapping[str, HeatmapData],
+    outdir: Path,
+    dpi: int,
+    normalise: str,
+    sort_by: str,
+    vclip: Optional[Tuple[float, float]],
+) -> List[Mapping[str, object]]:
+    """Create a multi-panel figure of mean ± SEM traces across all combined groups."""
+
+    order: List[Tuple[str, str, Mapping[str, HeatmapData]]] = [
+        ("TEST-COMBINED", "Test Combined", combined_heatmaps),
+        ("TRAIN-COMBINED", "Train Combined", combined_heatmaps),
+    ]
+    for idx in TESTING_AGGREGATE_RANGE:
+        key = f"testing_{idx}"
+        display = f"Testing {idx}"
+        order.append((key, display, testing_heatmaps))
+
+    entries: List[Mapping[str, object]] = []
+    for key, display, source in order:
+        heatmap = source.get(key) if source else None
+        if heatmap is None or heatmap.matrix.size == 0:
+            LOGGER.debug(
+                "Skipping combined mean overview entry for dataset=%s key=%s due to missing data",
+                dataset,
+                key,
+            )
+            continue
+        mean, sem, counts = compute_mean_sem(heatmap.matrix)
+        entries.append(
+            {
+                "key": key,
+                "display": display,
+                "heatmap": heatmap,
+                "mean": mean,
+                "sem": sem,
+                "counts": counts,
+                "n_trials": int(heatmap.matrix.shape[0]),
+                "vlimits": compute_vlimits(heatmap.matrix, vclip, normalise),
+            }
+        )
+
+    if not entries:
+        LOGGER.info(
+            "Dataset=%s lacks data for combined mean overview; skipping figure", dataset
+        )
+        return []
+
+    fig, axes = plt.subplots(
+        len(entries),
+        1,
+        figsize=(8, max(3, len(entries) * 2.2)),
+        sharex=False,
+        squeeze=False,
+    )
+
+    for ax, entry in zip(axes.flatten(), entries):
+        heatmap = entry["heatmap"]
+        mean = entry["mean"]
+        sem = entry["sem"]
+        time_axis = heatmap.time_axis
+        ax.plot(time_axis, mean, color="C0", label="Mean")
+        if np.any(np.isfinite(sem)):
+            lower = mean - sem
+            upper = mean + sem
+            ax.fill_between(time_axis, lower, upper, alpha=0.3, color="C0", label="±SEM")
+        ax.set_title(entry["display"])
+        ax.set_ylabel("dir_val")
+        ax.legend(loc="upper right")
+        ax.grid(True, alpha=0.2)
+    axes.flatten()[-1].set_xlabel("Time (s)")
+
+    fig.suptitle(f"{dataset} | All Flies Mean ± SEM Overview")
+    fig.tight_layout(rect=(0, 0, 1, 0.96))
+
+    combined_dir = outdir / dataset / "combined"
+    ensure_directory(combined_dir)
+    base_path = combined_dir / "dataset_all_flies_combined_mean_overview"
+    save_figure(fig, base_path, dpi)
+
+    summary_path = base_path.with_suffix(".json")
+    write_summary_json(
+        summary_path,
+        {
+            "dataset": dataset,
+            "mode": "all-flies-mean-overview",
+            "normalize": normalise,
+            "sort_by": sort_by,
+            "groups": [
+                {
+                    "label": entry["key"],
+                    "display": entry["display"],
+                    "n_trials": entry["n_trials"],
+                    "value_range": [float(v) for v in entry["vlimits"]],
+                }
+                for entry in entries
+            ],
+        },
+    )
+
+    summary_records: List[Mapping[str, object]] = []
+    for entry in entries:
+        summary_records.append(
+            build_summary_record(
+                dataset,
+                "ALL-FLIES",
+                f"{entry['key']}-MEAN-OVERVIEW",
+                entry["n_trials"],
+                entry["heatmap"].truncation,
+                entry["vlimits"],
+                normalise,
+                sort_by,
+            )
+        )
+
+    return summary_records
+
+
 def process(
     args: argparse.Namespace,
 ) -> Mapping[str, object]:
@@ -1233,6 +1361,19 @@ def process(
 
         summary_records.extend(
             dataset_combined_average_heatmap(
+                dataset,
+                combined_heatmaps,
+                testing_heatmaps,
+                args.outdir,
+                args.dpi,
+                args.normalize,
+                args.sort_by,
+                args.vclip,
+            )
+        )
+
+        summary_records.extend(
+            dataset_all_flies_mean_overview(
                 dataset,
                 combined_heatmaps,
                 testing_heatmaps,
