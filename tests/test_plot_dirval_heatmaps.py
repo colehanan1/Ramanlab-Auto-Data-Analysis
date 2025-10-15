@@ -24,6 +24,14 @@ def test_canonical_label_parses_testing_suffix():
     assert heatmaps.canonical_label("other") == "other"
 
 
+def test_compute_vlimits_uses_dirval_range_by_default():
+    data = np.array([[0.0, 50.0], [150.0, 210.0]])
+    vmin, vmax = heatmaps.compute_vlimits(data, None, "none")
+    assert (vmin, vmax) == heatmaps.DEFAULT_DIRVAL_RANGE
+    zmin, zmax = heatmaps.compute_vlimits(data, None, "zscore")
+    assert zmin < zmax
+
+
 def test_prepare_heatmap_matrix_normalise_and_sort():
     df = pd.DataFrame(
         {

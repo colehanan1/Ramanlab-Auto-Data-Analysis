@@ -29,6 +29,7 @@ import matplotlib.pyplot as plt  # noqa: E402
 LOGGER = logging.getLogger("plot_dirval_heatmaps")
 DEFAULT_OUTDIR = Path("results") / "heatmaps"
 DEFAULT_VPERCENTILES = (2.0, 98.0)
+DEFAULT_DIRVAL_RANGE = (0.0, 200.0)
 DEFAULT_LABELS_TRAIN = (2, 4, 5)
 DEFAULT_LABELS_TEST = (1, 3)
 DEFAULT_GRID_COLS = 2
@@ -37,6 +38,12 @@ MAX_HEATMAP_FRAMES = 3600
 TESTING_AGGREGATE_RANGE = range(6, 11)
 TESTING_LABEL_PATTERN = re.compile(r"testing[\s_-]?(\d+)", re.IGNORECASE)
 TRAILING_INT_PATTERN = re.compile(r"(\d+)(?!.*\d)")
+
+
+def colour_label_for(normalise: str) -> str:
+    """Return an appropriate colour-bar label for the normalisation mode."""
+
+    return "z-score" if normalise == "zscore" else "dir_val"
 
 
 @dataclass
@@ -284,18 +291,22 @@ def sort_trials(matrix: np.ndarray, sort_by: str) -> np.ndarray:
     return order
 
 
-def compute_vlimits(data: np.ndarray, vclip: Optional[Tuple[float, float]]) -> Tuple[float, float]:
+def compute_vlimits(
+    data: np.ndarray, vclip: Optional[Tuple[float, float]], normalise: str
+) -> Tuple[float, float]:
     """Compute colour limits based on either fixed values or percentiles."""
 
     finite = data[np.isfinite(data)]
     if finite.size == 0:
-        return (0.0, 1.0)
+        return DEFAULT_DIRVAL_RANGE
     if vclip is not None:
         return float(vclip[0]), float(vclip[1])
-    vmin, vmax = np.percentile(finite, DEFAULT_VPERCENTILES)
-    if vmin == vmax:
-        vmax = vmin + 1e-6
-    return float(vmin), float(vmax)
+    if normalise == "zscore":
+        vmin, vmax = np.percentile(finite, DEFAULT_VPERCENTILES)
+        if vmin == vmax:
+            vmax = vmin + 1e-6
+        return float(vmin), float(vmax)
+    return DEFAULT_DIRVAL_RANGE
 
 
 def prepare_heatmap_matrix(
@@ -410,6 +421,7 @@ def plot_heatmap(
     title: str,
     vlimits: Tuple[float, float],
     cmap: str = "viridis",
+    colour_label: str = "Value",
 ) -> plt.Figure:
     """Render a heatmap figure and return the figure object."""
 
@@ -431,7 +443,7 @@ def plot_heatmap(
     ax.set_title(title)
     ax.set_xlabel("Time (s)")
     ax.set_ylabel("Trials")
-    fig.colorbar(im, ax=ax, label="Value")
+    fig.colorbar(im, ax=ax, label=colour_label)
     ax.set_xlim(heatmap.time_axis[0], heatmap.time_axis[-1] if heatmap.time_axis.size > 1 else heatmap.time_axis[0] + 1)
     fig.tight_layout()
     return fig
@@ -537,6 +549,7 @@ def dataset_combined_figure(
     labels_order: Sequence[str],
     grid_cols: int,
     vclip: Optional[Tuple[float, float]],
+    normalise: str,
 ) -> None:
     """Create a dataset-level figure showing combined heatmaps per fly."""
 
@@ -553,6 +566,7 @@ def dataset_combined_figure(
     cols = max(grid_cols, len(available_labels))
     rows = n_flies
     fig, axes = plt.subplots(rows, cols, figsize=(cols * 4, rows * 3), squeeze=False)
+    colour_label = colour_label_for(normalise)
 
     for row_idx, (fly, heatmap_dict) in enumerate(sorted(fly_heatmaps.items())):
         for col_idx in range(cols):
@@ -566,7 +580,7 @@ def dataset_combined_figure(
             if heatmap is None:
                 ax.axis("off")
                 continue
-            vlimits = compute_vlimits(heatmap.matrix, vclip)
+            vlimits = compute_vlimits(heatmap.matrix, vclip, normalise)
             im = ax.imshow(
                 heatmap.matrix,
                 aspect="auto",
@@ -583,7 +597,7 @@ def dataset_combined_figure(
             )
             ax.set_xlabel("Time (s)")
             ax.set_ylabel("Trials")
-            fig.colorbar(im, ax=ax)
+            fig.colorbar(im, ax=ax, label=colour_label)
 
     for row_axes in axes:
         for ax in row_axes:
@@ -622,6 +636,7 @@ def dataset_allflies_combined(
 
     summary_records: List[Mapping[str, object]] = []
     aggregated_heatmaps: Dict[str, HeatmapData] = {}
+    colour_label = colour_label_for(normalise)
     group_map = {
         "TRAIN-COMBINED": tuple(labels_train),
         "TEST-COMBINED": tuple(labels_test),
@@ -644,10 +659,10 @@ def dataset_allflies_combined(
         if heatmap is None:
             continue
         aggregated_heatmaps[name] = heatmap
-        vlimits = compute_vlimits(heatmap.matrix, vclip)
+        vlimits = compute_vlimits(heatmap.matrix, vclip, normalise)
         title = f"{dataset} | All Flies | {name} | n={heatmap.matrix.shape[0]}"
         base = combined_dir / f"{name.lower().replace('-', '_')}_all_flies_heatmap"
-        fig = plot_heatmap(heatmap, title, vlimits)
+        fig = plot_heatmap(heatmap, title, vlimits, colour_label=colour_label)
         save_figure(fig, base, dpi)
         avg_fig = plot_mean_sem(heatmap, title + " Mean ± SEM")
         save_figure(avg_fig, combined_dir / f"{name.lower().replace('-', '_')}_all_flies_heatmap_avg", dpi)
@@ -689,7 +704,7 @@ def dataset_allflies_combined(
     for idx, name in enumerate(labels):
         heatmap = aggregated_heatmaps[name]
         ax = axes[0][idx]
-        vlimits = compute_vlimits(heatmap.matrix, vclip)
+        vlimits = compute_vlimits(heatmap.matrix, vclip, normalise)
         im = ax.imshow(
             heatmap.matrix,
             aspect="auto",
@@ -707,7 +722,7 @@ def dataset_allflies_combined(
         ax.set_title(f"{name}")
         ax.set_xlabel("Time (s)")
         ax.set_ylabel("Trials")
-        fig.colorbar(im, ax=ax)
+        fig.colorbar(im, ax=ax, label=colour_label)
 
     fig.suptitle(f"Dataset {dataset} | All Flies Combined")
     fig.tight_layout(rect=(0, 0, 1, 0.95))
@@ -746,6 +761,7 @@ def dataset_testing_label_figure(
     heatmaps: Dict[str, HeatmapData] = {}
     combined_dir = outdir / dataset / "combined"
     ensure_directory(combined_dir)
+    colour_label = colour_label_for(normalise)
 
     for test_idx in TESTING_AGGREGATE_RANGE:
         label_key = f"testing_{test_idx}"
@@ -768,8 +784,8 @@ def dataset_testing_label_figure(
         heatmaps[label_key] = heatmap
         n_trials = heatmap.matrix.shape[0]
         title = f"{dataset} | {label_key.replace('_', ' ').title()} | n={n_trials}"
-        vlimits = compute_vlimits(heatmap.matrix, vclip)
-        fig = plot_heatmap(heatmap, title, vlimits)
+        vlimits = compute_vlimits(heatmap.matrix, vclip, normalise)
+        fig = plot_heatmap(heatmap, title, vlimits, colour_label=colour_label)
         base_path = combined_dir / f"{label_key}_across_flies_heatmap"
         save_figure(fig, base_path, dpi)
         avg_fig = plot_mean_sem(heatmap, title + " Mean ± SEM")
@@ -817,7 +833,7 @@ def dataset_testing_label_figure(
         col = idx % cols
         ax = axes[row][col]
         heatmap = heatmaps[label_key]
-        vlimits = compute_vlimits(heatmap.matrix, vclip)
+        vlimits = compute_vlimits(heatmap.matrix, vclip, normalise)
         im = ax.imshow(
             heatmap.matrix,
             aspect="auto",
@@ -835,7 +851,7 @@ def dataset_testing_label_figure(
         ax.set_title(label_key.replace("_", " ").title())
         ax.set_xlabel("Time (s)")
         ax.set_ylabel("Trials")
-        fig.colorbar(im, ax=ax)
+        fig.colorbar(im, ax=ax, label=colour_label)
 
     for ax in axes.flatten()[len(labels):]:
         ax.axis("off")
@@ -875,6 +891,7 @@ def process(
 
     fps_tracker = MissingFpsTracker()
     summary_records: List[Mapping[str, object]] = []
+    colour_label = colour_label_for(args.normalize)
 
     fly_limit = args.dry_run if args.dry_run else None
     processed_flies = 0
@@ -922,8 +939,8 @@ def process(
                 continue
             n_trials = heatmap.matrix.shape[0]
             title = f"{dataset} | Fly {fly} | Odor {label_display} | n={n_trials}"
-            vlimits = compute_vlimits(heatmap.matrix, args.vclip)
-            fig = plot_heatmap(heatmap, title, vlimits)
+            vlimits = compute_vlimits(heatmap.matrix, args.vclip, args.normalize)
+            fig = plot_heatmap(heatmap, title, vlimits, colour_label=colour_label)
             base_path = folder / f"odor_{label_display}_heatmap"
             save_figure(fig, base_path, args.dpi)
             avg_fig = plot_mean_sem(heatmap, title + " Mean ± SEM")
@@ -979,8 +996,8 @@ def process(
             dataset_groups[dataset].setdefault(str(fly), {})[combined_name] = heatmap
             n_trials = heatmap.matrix.shape[0]
             title = f"{dataset} | Fly {fly} | {combined_name} | n={n_trials}"
-            vlimits = compute_vlimits(heatmap.matrix, args.vclip)
-            fig = plot_heatmap(heatmap, title, vlimits)
+            vlimits = compute_vlimits(heatmap.matrix, args.vclip, args.normalize)
+            fig = plot_heatmap(heatmap, title, vlimits, colour_label=colour_label)
             base_path = out_base / f"{combined_name.lower().replace('-', '_')}_heatmap"
             save_figure(fig, base_path, args.dpi)
             avg_fig = plot_mean_sem(heatmap, title + " Mean ± SEM")
@@ -1015,6 +1032,7 @@ def process(
             labels_order=("TRAIN-COMBINED", "TEST-COMBINED"),
             grid_cols=args.grid_cols,
             vclip=args.vclip,
+            normalise=args.normalize,
         )
 
     for dataset, frames in processed_dataset_rows.items():
