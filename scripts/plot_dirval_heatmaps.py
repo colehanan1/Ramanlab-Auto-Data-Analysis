@@ -598,6 +598,125 @@ def dataset_combined_figure(
     save_figure(fig, base_path, dpi)
 
 
+def dataset_allflies_combined(
+    dataset: str,
+    dataset_df: pd.DataFrame,
+    dir_cols: Sequence[str],
+    labels_train: Sequence[int],
+    labels_test: Sequence[int],
+    normalise: str,
+    sort_by: str,
+    fps_tracker: MissingFpsTracker,
+    dpi: int,
+    outdir: Path,
+    vclip: Optional[Tuple[float, float]],
+    dry_trials: int,
+) -> List[Mapping[str, object]]:
+    """Build combined heatmaps that aggregate all flies for train/test labels."""
+
+    if dataset_df.empty:
+        return []
+
+    combined_dir = outdir / dataset / "combined"
+    ensure_directory(combined_dir)
+
+    summary_records: List[Mapping[str, object]] = []
+    aggregated_heatmaps: Dict[str, HeatmapData] = {}
+    group_map = {
+        "TRAIN-COMBINED": tuple(labels_train),
+        "TEST-COMBINED": tuple(labels_test),
+    }
+
+    for name, labels in group_map.items():
+        subset = filter_by_labels(dataset_df, labels)
+        if subset.empty:
+            continue
+        heatmap = prepare_heatmap_matrix(
+            subset,
+            dir_cols,
+            normalise,
+            sort_by,
+            fps_tracker,
+            dataset,
+            "ALL-FLIES",
+            dry_trials,
+        )
+        if heatmap is None:
+            continue
+        aggregated_heatmaps[name] = heatmap
+        vlimits = compute_vlimits(heatmap.matrix, vclip)
+        title = f"{dataset} | All Flies | {name} | n={heatmap.matrix.shape[0]}"
+        base = combined_dir / f"{name.lower().replace('-', '_')}_all_flies_heatmap"
+        fig = plot_heatmap(heatmap, title, vlimits)
+        save_figure(fig, base, dpi)
+        avg_fig = plot_mean_sem(heatmap, title + " Mean ± SEM")
+        save_figure(avg_fig, combined_dir / f"{name.lower().replace('-', '_')}_all_flies_heatmap_avg", dpi)
+        summary_path = base.with_suffix(".json")
+        write_summary_json(
+            summary_path,
+            {
+                "dataset": dataset,
+                "fly": "ALL-FLIES",
+                "label": name,
+                "labels": [canonical_label(l) for l in labels],
+                "n_trials": int(heatmap.matrix.shape[0]),
+                "vlimits": [float(v) for v in vlimits],
+                "normalize": normalise,
+                "sort_by": sort_by,
+                "fps_median": float(np.nanmedian(heatmap.fps_values)),
+                "mean_length": float(heatmap.mean_length),
+                "truncated_length": int(heatmap.truncation) if heatmap.truncation is not None else None,
+            },
+        )
+        summary_records.append(
+            build_summary_record(
+                dataset,
+                "ALL-FLIES",
+                name,
+                heatmap.matrix.shape[0],
+                heatmap.truncation,
+                vlimits,
+                normalise,
+                sort_by,
+            )
+        )
+
+    if not aggregated_heatmaps:
+        return summary_records
+
+    labels = [name for name in ("TRAIN-COMBINED", "TEST-COMBINED") if name in aggregated_heatmaps]
+    fig, axes = plt.subplots(1, len(labels), figsize=(len(labels) * 4, 3), squeeze=False)
+    for idx, name in enumerate(labels):
+        heatmap = aggregated_heatmaps[name]
+        ax = axes[0][idx]
+        vlimits = compute_vlimits(heatmap.matrix, vclip)
+        im = ax.imshow(
+            heatmap.matrix,
+            aspect="auto",
+            origin="lower",
+            cmap="viridis",
+            vmin=vlimits[0],
+            vmax=vlimits[1],
+            extent=(
+                heatmap.time_axis[0],
+                heatmap.time_axis[-1] if heatmap.time_axis.size > 1 else heatmap.time_axis[0] + 1,
+                0,
+                heatmap.matrix.shape[0],
+            ),
+        )
+        ax.set_title(f"{name}")
+        ax.set_xlabel("Time (s)")
+        ax.set_ylabel("Trials")
+        fig.colorbar(im, ax=ax)
+
+    fig.suptitle(f"Dataset {dataset} | All Flies Combined")
+    fig.tight_layout(rect=(0, 0, 1, 0.95))
+    overview_base = combined_dir / "dataset_all_flies_combined"
+    save_figure(fig, overview_base, dpi)
+
+    return summary_records
+
+
 def dataset_testing_label_figure(
     dataset: str,
     dataset_df: pd.DataFrame,
@@ -900,6 +1019,22 @@ def process(
 
     for dataset, frames in processed_dataset_rows.items():
         dataset_df = pd.concat(frames, ignore_index=True)
+        summary_records.extend(
+            dataset_allflies_combined(
+                dataset,
+                dataset_df,
+                dir_cols,
+                labels_train,
+                labels_test,
+                args.normalize,
+                args.sort_by,
+                fps_tracker,
+                args.dpi,
+                args.outdir,
+                args.vclip,
+                args.dry_run if args.dry_run else 0,
+            )
+        )
         summary_records.extend(
             dataset_testing_label_figure(
                 dataset,

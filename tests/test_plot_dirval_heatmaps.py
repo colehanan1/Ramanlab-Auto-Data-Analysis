@@ -90,6 +90,9 @@ def test_main_smoke(tmp_path):
     assert (outdir / "d1" / "A" / "odor_1_heatmap.png").exists()
     assert (outdir / "d1" / "A" / "train_combined_heatmap.png").exists()
     assert (outdir / "d1" / "combined" / "dataset_combined.png").exists()
+    assert (outdir / "d1" / "combined" / "train_combined_all_flies_heatmap.png").exists()
+    assert (outdir / "d1" / "combined" / "test_combined_all_flies_heatmap.png").exists()
+    assert (outdir / "d1" / "combined" / "dataset_all_flies_combined.png").exists()
     assert (outdir / "d1" / "combined" / "testing_6_across_flies_heatmap.png").exists()
     assert (outdir / "d1" / "combined" / "dataset_testing_overview.png").exists()
 
