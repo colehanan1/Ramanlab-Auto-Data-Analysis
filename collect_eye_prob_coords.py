@@ -7,11 +7,13 @@ Usage examples:
     python collect_eye_prob_coords.py
     python collect_eye_prob_coords.py --verbose --out /home/ramanlab/Documents/cole/Data/Opto/all_eye_prob_coords_wide.csv
     python collect_eye_prob_coords.py --sources /path/a /path/b --dry-run
+    python collect_eye_prob_coords.py --out results.csv --npy-out results.npy --json-out results.json
 """
 
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import os
 import sys
@@ -106,6 +108,16 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         "--out",
         default=DEFAULT_OUTPUT,
         help="Output CSV path (directories will be created if absent).",
+    )
+    parser.add_argument(
+        "--npy-out",
+        default=None,
+        help="Optional NumPy .npy output path. Defaults to the CSV path with a .npy suffix.",
+    )
+    parser.add_argument(
+        "--json-out",
+        default=None,
+        help="Optional JSON output path. Defaults to the CSV path with a .json suffix.",
     )
     parser.add_argument(
         "--verbose",
@@ -403,6 +415,24 @@ def write_output(df: pd.DataFrame, out_path: Path, logger: logging.Logger) -> No
     logger.info("Wrote output CSV: %s", out_path)
 
 
+def write_numpy_output(df: pd.DataFrame, out_path: Path, logger: logging.Logger) -> None:
+    ensure_output_directory(out_path, logger)
+    array_data = df.to_numpy(dtype=object)
+    np.save(out_path, array_data, allow_pickle=True)
+    logger.info("Wrote output NPY: %s", out_path)
+
+
+def write_json_output(df: pd.DataFrame, out_path: Path, logger: logging.Logger) -> None:
+    ensure_output_directory(out_path, logger)
+    payload = {
+        "columns": list(df.columns),
+        "data": df.fillna("").values.tolist(),
+    }
+    with out_path.open("w", encoding="utf-8") as handle:
+        json.dump(payload, handle, ensure_ascii=False, indent=2)
+    logger.info("Wrote output JSON: %s", out_path)
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = parse_args(argv)
     logger = configure_logging(args.verbose)
@@ -436,18 +466,37 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if not args.dry_run:
         out_path = Path(args.out).expanduser().resolve()
         write_output(df, out_path, logger)
+
+        npy_path = (
+            Path(args.npy_out).expanduser().resolve() if args.npy_out else out_path.with_suffix(".npy")
+        )
+        write_numpy_output(df, npy_path, logger)
+
+        json_path = (
+            Path(args.json_out).expanduser().resolve()
+            if args.json_out
+            else out_path.with_suffix(".json")
+        )
+        write_json_output(df, json_path, logger)
+
         output_location = str(out_path)
+        npy_location = str(npy_path)
+        json_location = str(json_path)
     else:
         output_location = "dry-run (no output)"
-        logger.info("Dry-run enabled; output CSV not written")
+        npy_location = "dry-run (no output)"
+        json_location = "dry-run (no output)"
+        logger.info("Dry-run enabled; outputs not written")
 
     global_max_frames = max((result.total_frames for result in processing.fly_results), default=0)
     logger.info(
-        "Summary: %d trial row(s), %d processed trial(s), max frames per trial %d | Output: %s",
+        "Summary: %d trial row(s), %d processed trial(s), max frames per trial %d | Outputs -> CSV: %s | NPY: %s | JSON: %s",
         len(processing.fly_results),
         processing.total_trials,
         global_max_frames,
         output_location,
+        npy_location,
+        json_location,
     )
     if processing.skipped_files:
         logger.info("Skipped %d file(s).", len(processing.skipped_files))
