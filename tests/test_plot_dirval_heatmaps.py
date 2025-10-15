@@ -53,13 +53,13 @@ def test_main_smoke(tmp_path):
     csv_path = tmp_path / "wide.csv"
     df = pd.DataFrame(
         {
-            "dataset": ["d1", "d1", "d1"],
-            "fly": ["A", "A", "A"],
-            "trial_label": [2, 1, 4],
-            "fps": [30, 30, 30],
-            "dir_val_0": [0.1, 0.2, 0.3],
-            "dir_val_1": [0.2, 0.3, 0.4],
-            "dir_val_2": [0.3, 0.4, 0.5],
+            "dataset": ["d1", "d1", "d1", "d1"],
+            "fly": ["A", "A", "A", "A"],
+            "trial_label": [2, 1, 4, "testing_6"],
+            "fps": [30, 30, 30, 30],
+            "dir_val_0": [0.1, 0.2, 0.3, 0.4],
+            "dir_val_1": [0.2, 0.3, 0.4, 0.5],
+            "dir_val_2": [0.3, 0.4, 0.5, 0.6],
         }
     )
     df.to_csv(csv_path, index=False)
@@ -83,6 +83,8 @@ def test_main_smoke(tmp_path):
     assert (outdir / "d1" / "A" / "odor_2_heatmap.png").exists()
     assert (outdir / "d1" / "A" / "train_combined_heatmap.png").exists()
     assert (outdir / "d1" / "combined" / "dataset_combined.png").exists()
+    assert (outdir / "d1" / "combined" / "testing_6_across_flies_heatmap.png").exists()
+    assert (outdir / "d1" / "combined" / "dataset_testing_overview.png").exists()
 
     summary_json = outdir / "d1" / "A" / "odor_2_heatmap.json"
     data = json.loads(summary_json.read_text())

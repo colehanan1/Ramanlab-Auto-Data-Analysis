@@ -11,6 +11,7 @@ import argparse
 import json
 import logging
 import math
+import numbers
 import re
 import sys
 from dataclasses import dataclass
@@ -30,9 +31,11 @@ DEFAULT_OUTDIR = Path("results") / "heatmaps"
 DEFAULT_VPERCENTILES = (2.0, 98.0)
 DEFAULT_LABELS_TRAIN = (2, 4, 5)
 DEFAULT_LABELS_TEST = (1, 3)
-DEFAULT_OTHER_NAME = "OTHER-COMBINED"
 DEFAULT_GRID_COLS = 2
 DEFAULT_FPS_FALLBACK = 30.0
+MAX_HEATMAP_FRAMES = 3600
+TESTING_AGGREGATE_RANGE = range(6, 11)
+TESTING_LABEL_PATTERN = re.compile(r"testing[\s_-]?(\d+)", re.IGNORECASE)
 
 
 @dataclass
@@ -198,6 +201,38 @@ def detect_dirval_columns(df: pd.DataFrame, prefix: str) -> List[str]:
     return [name for _, name in matched]
 
 
+def canonical_label(label: object) -> str:
+    """Normalise label values to readable strings."""
+
+    if isinstance(label, numbers.Integral):
+        return str(int(label))
+    if isinstance(label, float) and float(label).is_integer():
+        return str(int(label))
+    return str(label)
+
+
+def filter_by_labels(df: pd.DataFrame, labels: Sequence[object]) -> pd.DataFrame:
+    """Return subset of ``df`` where ``trial_label`` matches any of ``labels``."""
+
+    if not labels:
+        return df.iloc[0:0]
+    canonical_labels = {canonical_label(label) for label in labels}
+    mask = df["trial_label"].map(canonical_label).isin(canonical_labels)
+    return df[mask]
+
+
+def testing_label_index(label: object) -> Optional[int]:
+    """Return testing label index when value matches ``testing_*`` pattern."""
+
+    match = TESTING_LABEL_PATTERN.match(str(label))
+    if not match:
+        return None
+    try:
+        return int(match.group(1))
+    except (TypeError, ValueError):  # pragma: no cover - defensive
+        return None
+
+
 def extract_timeseries(row: Mapping[str, float], columns: Sequence[str]) -> np.ndarray:
     """Extract a numeric time-series for a single row."""
 
@@ -315,7 +350,17 @@ def prepare_heatmap_matrix(
             fly,
             min_length,
         )
-    matrix = np.vstack([arr[:min_length] for arr in series_list])
+
+    target_length = min(min_length, MAX_HEATMAP_FRAMES)
+    if target_length < min_length:
+        LOGGER.info(
+            "Limiting trials for dataset=%s fly=%s to first %d frames (requested cap)",
+            dataset,
+            fly,
+            target_length,
+        )
+
+    matrix = np.vstack([arr[:target_length] for arr in series_list])
     mean_length = float(np.mean(lengths))
 
     order_idx = sort_trials(matrix, sort_by)
@@ -337,12 +382,13 @@ def prepare_heatmap_matrix(
             fps_avg,
         )
     time_axis = np.arange(matrix.shape[1]) / fps_avg
+    truncated = any(length > matrix.shape[1] for length in lengths)
     return HeatmapData(
         matrix=matrix,
         time_axis=time_axis,
         fps_values=fps_values,
         trial_indices=trial_indices,
-        truncation=min_length if any(t > 0 for t in truncations) else None,
+        truncation=matrix.shape[1] if truncated else None,
         mean_length=mean_length,
     )
 
@@ -474,13 +520,6 @@ def combined_label_groups(
         "TRAIN-COMBINED": tuple(labels_train),
         "TEST-COMBINED": tuple(labels_test),
     }
-    other_labels = sorted(
-        set(df["trial_label"].unique())
-        - set(labels_train)
-        - set(labels_test)
-    )
-    if other_labels:
-        groups[DEFAULT_OTHER_NAME] = tuple(other_labels)
     return groups
 
 
@@ -553,6 +592,137 @@ def dataset_combined_figure(
     save_figure(fig, base_path, dpi)
 
 
+def dataset_testing_label_figure(
+    dataset: str,
+    dataset_df: pd.DataFrame,
+    dir_cols: Sequence[str],
+    normalise: str,
+    sort_by: str,
+    fps_tracker: MissingFpsTracker,
+    dpi: int,
+    outdir: Path,
+    vclip: Optional[Tuple[float, float]],
+    dry_trials: int,
+) -> List[Mapping[str, object]]:
+    """Generate dataset-level aggregated testing heatmaps and overview figure."""
+
+    if dataset_df.empty:
+        LOGGER.info("No rows supplied for dataset=%s aggregated testing figure", dataset)
+        return []
+
+    working_df = dataset_df.copy()
+    working_df["_testing_index"] = working_df["trial_label"].map(testing_label_index)
+    mask = working_df["_testing_index"].isin(TESTING_AGGREGATE_RANGE)
+    if not mask.any():
+        LOGGER.info("Dataset=%s lacks testing_6-10 labels; skipping aggregated figure", dataset)
+        return []
+
+    summary_records: List[Mapping[str, object]] = []
+    heatmaps: Dict[str, HeatmapData] = {}
+    combined_dir = outdir / dataset / "combined"
+    ensure_directory(combined_dir)
+
+    for test_idx in TESTING_AGGREGATE_RANGE:
+        label_key = f"testing_{test_idx}"
+        label_df = working_df[working_df["_testing_index"] == test_idx]
+        if label_df.empty:
+            continue
+        subset = label_df.drop(columns=["_testing_index"])
+        heatmap = prepare_heatmap_matrix(
+            subset,
+            dir_cols,
+            normalise,
+            sort_by,
+            fps_tracker,
+            dataset,
+            label_key,
+            dry_trials,
+        )
+        if heatmap is None:
+            continue
+        heatmaps[label_key] = heatmap
+        n_trials = heatmap.matrix.shape[0]
+        title = f"{dataset} | {label_key.replace('_', ' ').title()} | n={n_trials}"
+        vlimits = compute_vlimits(heatmap.matrix, vclip)
+        fig = plot_heatmap(heatmap, title, vlimits)
+        base_path = combined_dir / f"{label_key}_across_flies_heatmap"
+        save_figure(fig, base_path, dpi)
+        avg_fig = plot_mean_sem(heatmap, title + " Mean ± SEM")
+        save_figure(avg_fig, combined_dir / f"{label_key}_across_flies_heatmap_avg", dpi)
+        summary_path = base_path.with_suffix(".json")
+        write_summary_json(
+            summary_path,
+            {
+                "dataset": dataset,
+                "fly": "ALL-FLIES",
+                "label": label_key,
+                "n_trials": n_trials,
+                "vlimits": [float(v) for v in vlimits],
+                "normalize": normalise,
+                "sort_by": sort_by,
+                "fps_median": float(np.nanmedian(heatmap.fps_values)),
+                "mean_length": float(heatmap.mean_length),
+                "truncated_length": int(heatmap.truncation) if heatmap.truncation is not None else None,
+            },
+        )
+        summary_records.append(
+            build_summary_record(
+                dataset,
+                "ALL-FLIES",
+                label_key,
+                n_trials,
+                heatmap.truncation,
+                vlimits,
+                normalise,
+                sort_by,
+            )
+        )
+
+    if not heatmaps:
+        LOGGER.info("No aggregated testing heatmaps generated for dataset=%s", dataset)
+        return summary_records
+
+    labels = sorted(heatmaps.keys())
+    cols = min(3, len(labels))
+    rows = math.ceil(len(labels) / cols)
+    fig, axes = plt.subplots(rows, cols, figsize=(cols * 4, rows * 3), squeeze=False)
+
+    for idx, label_key in enumerate(labels):
+        row = idx // cols
+        col = idx % cols
+        ax = axes[row][col]
+        heatmap = heatmaps[label_key]
+        vlimits = compute_vlimits(heatmap.matrix, vclip)
+        im = ax.imshow(
+            heatmap.matrix,
+            aspect="auto",
+            origin="lower",
+            cmap="viridis",
+            vmin=vlimits[0],
+            vmax=vlimits[1],
+            extent=(
+                heatmap.time_axis[0],
+                heatmap.time_axis[-1] if heatmap.time_axis.size > 1 else heatmap.time_axis[0] + 1,
+                0,
+                heatmap.matrix.shape[0],
+            ),
+        )
+        ax.set_title(label_key.replace("_", " ").title())
+        ax.set_xlabel("Time (s)")
+        ax.set_ylabel("Trials")
+        fig.colorbar(im, ax=ax)
+
+    for ax in axes.flatten()[len(labels):]:
+        ax.axis("off")
+
+    fig.suptitle(f"Dataset {dataset} Testing Aggregates")
+    fig.tight_layout(rect=(0, 0, 1, 0.96))
+    overview_base = combined_dir / "dataset_testing_overview"
+    save_figure(fig, overview_base, dpi)
+
+    return summary_records
+
+
 def process(
     args: argparse.Namespace,
 ) -> Mapping[str, object]:
@@ -585,6 +755,7 @@ def process(
     processed_flies = 0
 
     dataset_groups: Dict[str, Dict[str, HeatmapData]] = {}
+    processed_dataset_rows: Dict[str, List[pd.DataFrame]] = {}
 
     for (dataset, fly), fly_df in df.groupby(["dataset", "fly"]):
         if fly_limit is not None and processed_flies >= fly_limit:
@@ -612,7 +783,7 @@ def process(
                 folder = out_base
             else:
                 continue
-            subset = fly_df[fly_df["trial_label"].isin(label_set)]
+            subset = filter_by_labels(fly_df, label_set)
             heatmap = prepare_heatmap_matrix(
                 subset,
                 dir_cols,
@@ -654,9 +825,10 @@ def process(
             )
 
         dataset_groups.setdefault(dataset, {})
+        processed_dataset_rows.setdefault(dataset, []).append(fly_df)
 
         for combined_name, labels in combined_groups.items():
-            subset = fly_df[fly_df["trial_label"].isin(labels)]
+            subset = filter_by_labels(fly_df, labels)
             if subset.empty:
                 continue
             heatmap = prepare_heatmap_matrix(
@@ -687,7 +859,7 @@ def process(
                     "dataset": dataset,
                     "fly": fly,
                     "label": combined_name,
-                    "labels": [int(l) for l in labels],
+                    "labels": [canonical_label(l) for l in labels],
                     "n_trials": n_trials,
                     "vlimits": [float(v) for v in vlimits],
                     "normalize": args.normalize,
@@ -707,9 +879,26 @@ def process(
             fly_heatmaps,
             args.dpi,
             args.outdir,
-            labels_order=("TRAIN-COMBINED", "TEST-COMBINED", DEFAULT_OTHER_NAME),
+            labels_order=("TRAIN-COMBINED", "TEST-COMBINED"),
             grid_cols=args.grid_cols,
             vclip=args.vclip,
+        )
+
+    for dataset, frames in processed_dataset_rows.items():
+        dataset_df = pd.concat(frames, ignore_index=True)
+        summary_records.extend(
+            dataset_testing_label_figure(
+                dataset,
+                dataset_df,
+                dir_cols,
+                args.normalize,
+                args.sort_by,
+                fps_tracker,
+                args.dpi,
+                args.outdir,
+                args.vclip,
+                args.dry_run if args.dry_run else 0,
+            )
         )
 
     summary_df = summarise_counts(summary_records)
