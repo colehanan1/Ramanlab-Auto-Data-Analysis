@@ -26,10 +26,10 @@ import pandas as pd
 
 LOGGER_NAME = "collect_eye_prob_coords"
 DEFAULT_SOURCES = [
-    "/home/ramanlab/Documents/cole/Data/flys/opto_EB/",
-    "/home/ramanlab/Documents/cole/Data/flys/opto_benz_1/",
-    "/home/ramanlab/Documents/cole/Data/flys/opto_hex/",
-    "/home/ramanlab/Documents/cole/Data/flys/hex_control/",
+    "/securedstorage/DATAsec/cole/Data-secured/opto_EB/",
+    "/securedstorage/DATAsec/cole/Data-secured/opto_benz_1/",
+    "/securedstorage/DATAsec/cole/Data-secured/opto_hex/",
+    "/securedstorage/DATAsec/cole/Data-secured/hex_control/",
 ]
 DEFAULT_OUTPUT = "/home/ramanlab/Documents/cole/Data/Opto/all_eye_prob_coords_wide.csv"
 
