@@ -120,7 +120,6 @@ def generate_reaction_matrices_from_csv(cfg: SpreadsheetMatrixConfig) -> None:
             pretty_labels = [_display_odor(odor, trial) for trial in trial_list]
 
             during_matrix = np.full((len(fly_pairs), len(trial_list)), np.nan, dtype=float)
-            after_matrix = np.full_like(during_matrix, np.nan)
 
             fly_map = {pair: idx for idx, pair in enumerate(fly_pairs)}
             trial_map = {trial: idx for idx, trial in enumerate(trial_list)}
@@ -130,7 +129,6 @@ def generate_reaction_matrices_from_csv(cfg: SpreadsheetMatrixConfig) -> None:
                 j = trial_map[row["trial"]]
                 value = int(row["during_hit"])
                 during_matrix[i, j] = value
-                after_matrix[i, j] = int(row["after_hit"])
 
             odor_label = DISPLAY_LABEL.get(odor, odor)
             trained_display = DISPLAY_LABEL.get(odor, odor)
@@ -144,8 +142,9 @@ def generate_reaction_matrices_from_csv(cfg: SpreadsheetMatrixConfig) -> None:
 
             xtick_fs = 9 if n_trials <= 10 else (8 if n_trials <= 16 else 7)
 
-            during_counts = _compute_category_counts(during_matrix, pretty_labels, trained_display, cfg.include_hexanol)
-            after_counts = _compute_category_counts(after_matrix, pretty_labels, trained_display, cfg.include_hexanol)
+            during_counts = _compute_category_counts(
+                during_matrix, pretty_labels, trained_display, cfg.include_hexanol
+            )
 
             plt.rcParams.update(
                 {
@@ -158,17 +157,13 @@ def generate_reaction_matrices_from_csv(cfg: SpreadsheetMatrixConfig) -> None:
             fig = plt.figure(figsize=(fig_w, fig_h), constrained_layout=False)
             gs = gridspec.GridSpec(
                 2,
-                2,
+                1,
                 height_ratios=[3.0, 1.25],
-                width_ratios=[1, 1],
                 hspace=cfg.row_gap,
-                wspace=0.30,
             )
 
             ax_during = fig.add_subplot(gs[0, 0])
-            ax_after = fig.add_subplot(gs[0, 1])
             ax_dc = fig.add_subplot(gs[1, 0])
-            ax_ac = fig.add_subplot(gs[1, 1])
 
             ax_during.imshow(during_matrix, cmap=cmap, norm=norm, aspect="auto", interpolation="nearest")
             ax_during.set_title(f"{odor_label} — During (Spreadsheet)", fontsize=14, weight="bold")
@@ -176,23 +171,7 @@ def generate_reaction_matrices_from_csv(cfg: SpreadsheetMatrixConfig) -> None:
             ax_during.set_yticks([])
             ax_during.set_ylabel(f"{n_flies} Flies", fontsize=11)
 
-            ax_after.imshow(after_matrix, cmap=cmap, norm=norm, aspect="auto", interpolation="nearest")
-            ax_after.set_title(
-                f"{odor_label} — After (Spreadsheet)",
-                fontsize=14,
-                weight="bold",
-            )
-            _style_trained_xticks(ax_after, pretty_labels, trained_display, xtick_fs)
-            ax_after.set_yticks([])
-            ax_after.set_ylabel(f"{n_flies} Flies", fontsize=11)
-
             _plot_category_counts(ax_dc, during_counts, n_flies, "During — Fly Reaction Categories")
-            _plot_category_counts(
-                ax_ac,
-                after_counts,
-                n_flies,
-                "After — Fly Reaction Categories",
-            )
 
             legend_handles = [
                 Patch(facecolor="black", edgecolor="black", label="Prediction = 1"),
@@ -201,7 +180,7 @@ def generate_reaction_matrices_from_csv(cfg: SpreadsheetMatrixConfig) -> None:
             ax_during.legend(handles=legend_handles, loc="upper left", frameon=True, fontsize=9)
 
             shift_frac = cfg.bottom_shift_in / fig_h if fig_h else 0.0
-            for axis in (ax_dc, ax_ac):
+            for axis in (ax_dc,):
                 pos = axis.get_position()
                 new_y0 = max(0.05, pos.y0 - shift_frac)
                 axis.set_position([pos.x0, new_y0, pos.width, pos.height])
