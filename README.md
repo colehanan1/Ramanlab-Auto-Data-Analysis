@@ -8,6 +8,8 @@ End-to-end, reproducible pipeline that:
 4) Flags dropped frames, stages RMS-ready CSVs, and annotates OFM state.
 5) Organizes trial videos and renders line-panel videos with RMS overlays.
 6) Produces consistent, versioned outputs under each *fly* folder and hands matrix-ready data to the analysis scripts.
+7) Scores proboscis reactions with the `flybehavior-response` model CLI.
+8) Builds black/white reaction matrices directly from the model predictions.
 
 > **Minimum**: Linux + CUDA GPU. Set `model_path` and `main_directory` in `config.yaml` or `.env`.
 
@@ -92,6 +94,8 @@ fbpipe/
     update_ofm_state.py
     move_videos.py
     compose_videos_rms.py
+    predict_reactions.py
+    reaction_matrix.py
 ```
 
 Each step can also be run independently:
@@ -100,6 +104,18 @@ python -m fbpipe.steps.yolo_infer --config config.yaml
 python -m fbpipe.steps.distance_stats --config config.yaml
 ...
 ```
+
+The two reaction-analysis steps wrap the new automation:
+
+```bash
+python -m fbpipe.steps.predict_reactions --config config.yaml
+python -m fbpipe.steps.reaction_matrix --config config.yaml
+```
+
+The first command invokes the packaged `flybehavior-response predict` CLI to
+write a spreadsheet of binary responses. The second command feeds that
+spreadsheet into `scripts/reaction_matrix_from_spreadsheet.py`, reproducing the
+figure layout without manual intervention.
 
 ## Multi-fly YOLO inference
 

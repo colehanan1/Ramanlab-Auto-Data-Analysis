@@ -12,6 +12,8 @@ from .steps import (
     distance_normalize,
     distance_stats,
     move_videos,
+    predict_reactions,
+    reaction_matrix,
     rms_copy_filter,
     update_ofm_state,
     yolo_infer,
@@ -39,6 +41,16 @@ ORDERED_STEPS: tuple[Step, ...] = (
     Step("update_ofm_state", update_ofm_state.main, "Annotate RMS tables with OFM state transitions"),
     Step("move_videos", move_videos.main, "Stage annotated videos into the delivery directory"),
     Step("compose_videos_rms", compose_videos_rms.main, "Render RMS overlays onto exported videos"),
+    Step(
+        "predict_reactions",
+        predict_reactions.main,
+        "Run flybehavior-response to predict proboscis reactions",
+    ),
+    Step(
+        "reaction_matrix",
+        reaction_matrix.main,
+        "Generate reaction matrices from model predictions",
+    ),
 )
 
 STEP_REGISTRY = {step.name: step for step in ORDERED_STEPS}
