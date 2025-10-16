@@ -817,6 +817,17 @@ def combine_distance_angle(cfg: CombineConfig) -> None:
                 skipped += 1
                 continue
 
+            fly_number = _extract_fly_number(slot_label, dist_path.stem, fly_dir.name)
+            fly_number_label = str(fly_number) if fly_number is not None else "UNKNOWN"
+            if fly_number is None:
+                print(
+                    f"[WARN] {fly_name} {dist_path.name}: unable to infer fly number token; defaulting to 'UNKNOWN'"
+                )
+            else:
+                print(
+                    f"[DEBUG] {fly_name}: parsed fly number {fly_number_label} from slot={slot_label} stem={dist_path.stem}"
+                )
+
             print(
                 f"[DEBUG] {fly_name}: pairing distance={dist_path.name} with angle={angle_path.name}; slot_label={slot_label}"
             )
