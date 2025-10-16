@@ -29,7 +29,7 @@ import math
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Mapping, Sequence
+from typing import Mapping, Sequence, Tuple
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -209,6 +209,53 @@ def _display_odor(dataset_canon: str, trial_label: str) -> str:
     return mapping.get(dataset_canon, {}).get(number, trial_label)
 
 
+def _normalise_fly_label(value: object) -> str:
+    text = "UNKNOWN" if value is None else str(value).strip()
+    return text or "UNKNOWN"
+
+
+def _normalise_fly_number(value: object) -> str:
+    if value is None:
+        return "UNKNOWN"
+    text = str(value).strip()
+    if not text:
+        return "UNKNOWN"
+    lowered = text.lower()
+    if lowered in {"nan", "none", "unknown"}:
+        return "UNKNOWN"
+    return text
+
+
+def _normalise_fly_columns(df: pd.DataFrame) -> pd.DataFrame:
+    if "fly" not in df.columns:
+        df["fly"] = "UNKNOWN"
+    else:
+        df["fly"] = df["fly"].apply(_normalise_fly_label)
+
+    if "fly_number" not in df.columns:
+        df["fly_number"] = "UNKNOWN"
+    df["fly_number"] = df["fly_number"].apply(_normalise_fly_number)
+    return df
+
+
+def _fly_sort_key(fly: str, fly_number: str) -> Tuple[str, int, object]:
+    fly_norm = _normalise_fly_label(fly)
+    number_norm = _normalise_fly_number(fly_number)
+    try:
+        number_val = int(float(number_norm))
+        return (fly_norm.lower(), 0, number_val)
+    except ValueError:
+        return (fly_norm.lower(), 1, number_norm.lower())
+
+
+def _fly_row_label(fly: str, fly_number: str) -> str:
+    fly_norm = _normalise_fly_label(fly)
+    number_norm = _normalise_fly_number(fly_number)
+    if number_norm == "UNKNOWN":
+        return fly_norm
+    return f"{fly_norm} — Fly {number_norm}"
+
+
 def _is_trained_odor(dataset_canon: str, odor_name: str) -> bool:
     trained = DISPLAY_LABEL.get(dataset_canon, dataset_canon)
     return str(odor_name).strip().lower() == str(trained).strip().lower()
@@ -245,6 +292,8 @@ def _load_matrix(matrix_path: Path, codes_json: Path) -> tuple[pd.DataFrame, lis
 
     ordered_cols: list[str] = list(meta["column_order"])
     code_maps: Mapping[str, Mapping[str, int]] = meta["code_maps"]
+    metric_cols_meta = set(meta.get("metric_columns", []) or [])
+    env_cols_meta = list(meta.get("env_columns", []) or [])
     df = pd.DataFrame(matrix, columns=ordered_cols)
 
     decode_candidates = ["dataset", "fly", "fly_number", "trial_type", "trial_label"]
@@ -271,12 +320,26 @@ def _load_matrix(matrix_path: Path, codes_json: Path) -> tuple[pd.DataFrame, lis
     else:
         df["fps"] = np.nan
 
-    env_cols = [
-        col
-        for col in ordered_cols
-        if col
-        not in {"fps", "dataset", "fly", "fly_number", "trial_type", "trial_label"}
-    ]
+    if env_cols_meta:
+        env_cols = [col for col in env_cols_meta if col in df.columns]
+    else:
+        env_cols = [
+            col
+            for col in ordered_cols
+            if col
+            not in {
+                "fps",
+                "dataset",
+                "fly",
+                "fly_number",
+                "trial_type",
+                "trial_label",
+            }
+            and col not in metric_cols_meta
+        ]
+        prefixed = [col for col in env_cols if col.startswith("dir_val_")]
+        if prefixed:
+            env_cols = prefixed
     return df, env_cols
 
 
@@ -434,16 +497,24 @@ def generate_reaction_matrices(cfg: MatrixPlotConfig) -> None:
 
     df["fps"] = df["fps"].replace([np.inf, -np.inf], np.nan).fillna(cfg.fps_default)
     df["dataset_canon"] = df["dataset"].map(_canon_dataset)
+    df = _normalise_fly_columns(df)
 
     env_data = df[env_cols].to_numpy(np.float32, copy=False)
     dataset_vals = df["dataset_canon"].to_numpy(str)
     fly_vals = df["fly"].to_numpy(str)
+    fly_number_vals = df["fly_number"].to_numpy(str)
     trial_vals = df["trial_label"].to_numpy(str)
     fps_vals = df["fps"].to_numpy(float)
 
     scores = []
-    for env_row, dataset_val, fly_val, trial_val, fps_val in zip(
-        env_data, dataset_vals, fly_vals, trial_vals, fps_vals, strict=False
+    for env_row, dataset_val, fly_val, fly_number_val, trial_val, fps_val in zip(
+        env_data,
+        dataset_vals,
+        fly_vals,
+        fly_number_vals,
+        trial_vals,
+        fps_vals,
+        strict=False,
     ):
         env = _extract_env_row(env_row)
         during_hit, after_hit = _score_trial(env, float(fps_val), cfg)
@@ -451,6 +522,7 @@ def generate_reaction_matrices(cfg: MatrixPlotConfig) -> None:
             {
                 "dataset": dataset_val,
                 "fly": fly_val,
+                "fly_number": fly_number_val,
                 "trial": trial_val,
                 "trial_num": _trial_num(trial_val),
                 "during_hit": during_hit,
@@ -476,24 +548,31 @@ def generate_reaction_matrices(cfg: MatrixPlotConfig) -> None:
             if subset.empty:
                 continue
 
-            flies = sorted(subset["fly"].unique())
+            subset = subset.copy()
+            subset = _normalise_fly_columns(subset)
+            fly_pairs = [
+                (row.fly, row.fly_number)
+                for row in subset[["fly", "fly_number"]].drop_duplicates().itertuples(index=False)
+            ]
+            fly_pairs.sort(key=lambda pair: _fly_sort_key(*pair))
             trial_list = _trial_order_for(list(subset["trial"].unique()), order)
             pretty_labels = [_display_odor(odor, trial) for trial in trial_list]
 
-            during_matrix = np.full((len(flies), len(trial_list)), -1, dtype=int)
+            during_matrix = np.full((len(fly_pairs), len(trial_list)), -1, dtype=int)
             after_matrix = np.full_like(during_matrix, -1)
 
-            fly_map = {fly: idx for idx, fly in enumerate(flies)}
+            fly_map = {pair: idx for idx, pair in enumerate(fly_pairs)}
             trial_map = {trial: idx for idx, trial in enumerate(trial_list)}
             for _, row in subset.iterrows():
-                i = fly_map[row["fly"]]
+                key = (row["fly"], row["fly_number"])
+                i = fly_map[key]
                 j = trial_map[row["trial"]]
                 during_matrix[i, j] = int(row["during_hit"])
                 after_matrix[i, j] = int(row["after_hit"])
 
             odor_label = DISPLAY_LABEL.get(odor, odor)
             trained_display = DISPLAY_LABEL.get(odor, odor)
-            n_flies = len(flies)
+            n_flies = len(fly_pairs)
             n_trials = len(trial_list)
 
             base_w = max(10.0, 0.70 * n_trials + 6.0)
@@ -590,16 +669,31 @@ def generate_reaction_matrices(cfg: MatrixPlotConfig) -> None:
             row_key_path = odor_dir / f"{row_key_name}.txt"
             if should_write(row_key_path, cfg.overwrite):
                 with row_key_path.open("w", encoding="utf-8") as fh:
-                    for idx, fly in enumerate(flies):
-                        fh.write(f"Row {idx}: {fly}\n")
+                    for idx, (fly, fly_number) in enumerate(fly_pairs):
+                        label = _fly_row_label(fly, fly_number)
+                        fh.write(f"Row {idx}: {label}\n")
 
             if order == "trained-first":
                 export = subset.copy()
                 export["odor_sent"] = export["trial"].apply(lambda t: _display_odor(odor, t))
                 order_map = {trial: idx for idx, trial in enumerate(trial_list)}
                 export["trial_ord"] = export["trial"].map(order_map).fillna(10**9).astype(int)
-                export = export.sort_values(["fly", "trial_ord", "trial_num", "trial"])
-                export_cols = ["dataset", "fly", "trial_num", "odor_sent", "during_hit", "after_hit"]
+                export = export.sort_values([
+                    "fly",
+                    "fly_number",
+                    "trial_ord",
+                    "trial_num",
+                    "trial",
+                ])
+                export_cols = [
+                    "dataset",
+                    "fly",
+                    "fly_number",
+                    "trial_num",
+                    "odor_sent",
+                    "during_hit",
+                    "after_hit",
+                ]
                 export_path = odor_dir / f"binary_reactions_{odor.replace(' ', '_')}_{order_suffix}.csv"
                 if should_write(export_path, cfg.overwrite):
                     export.to_csv(export_path, columns=export_cols, index=False)
