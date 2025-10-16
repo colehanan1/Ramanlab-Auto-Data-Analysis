@@ -179,6 +179,23 @@ python scripts/plot_dirval_heatmaps.py \
 
 Historically the plots relied on z-score normalisation and percentile clipping to highlight relative structure within each trial. With the latest update every heatmap defaults to the physical `dir_val` scale: the colour bar spans `0` (dark purple) to `200` (bright yellow) whenever `--normalize none` is active, ensuring consistent interpretation across flies and datasets. Opt into `--normalize zscore` when you explicitly want per-trial standardisation; in that mode the code falls back to the robust percentile-driven limits so the colour bar reflects standard deviations rather than raw millimetre values.
 
+## Standalone analysis scripts
+
+### Reaction matrices from spreadsheet predictions
+
+Generate the black/white reaction matrices directly from the manual scoring
+spreadsheet used during the review process:
+
+```bash
+python scripts/reaction_matrix_from_spreadsheet.py \
+    --csv-path /home/ramanlab/PycharmProjects/FlyBehaviorScoring/artifacts/predictions_envelope_t2.csv \
+    --out-dir artifacts/reaction_matrices_spreadsheet \
+    --latency-sec 0.0
+```
+
+The command mirrors the original figure naming and will emit PNGs plus helper
+CSV/row-key exports under the chosen output directory.
+
 ## Nightly automation
 
 To run the full pipeline every night at midnight, use the bundled cron helpers:
