@@ -27,6 +27,11 @@ python -m pip install -r requirements.txt
 # (optional but recommended if you are developing):
 python -m pip install -e .
 
+# The requirements pin `numpy<2` so the packaged reaction model, which was
+# trained against NumPy 1.x, deserialises correctly. If your environment already
+# has NumPy 2.x installed, rerun the install command above to downgrade before
+# launching the pipeline.
+
 # 2) Configure paths
 cp .env.example .env
 # edit MODEL_PATH and MAIN_DIRECTORY, or edit config.yaml directly
@@ -45,6 +50,9 @@ python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
 # (optional but recommended if you are developing):
 python -m pip install -e .
+
+# As above, make sure the install step downgrades any pre-existing NumPy 2.x
+# builds; the reaction-scoring artifacts require NumPy 1.x semantics.
 ```
 
 The `make setup` target simply automates those steps against a fresh `venv`. Skipping it is safe as long as the active environment satisfies `requirements.txt` and provides CUDA-enabled builds of PyTorch/Ultralytics.

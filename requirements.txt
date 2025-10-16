@@ -1,6 +1,8 @@
 
 # Core scientific stack
-numpy>=1.24
+# Reaction prediction artifacts were trained on NumPy 1.x; keep the runtime below 2.0
+# so the bundled models load without re-exporting them.
+numpy>=1.24,<2
 pandas>=2.0
 matplotlib>=3.7
 scipy>=1.11
