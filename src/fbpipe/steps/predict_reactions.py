@@ -40,7 +40,7 @@ def main(cfg: Settings) -> None:
     ]
 
     env = os.environ.copy()
-    repo_root = Path(__file__).resolve().parents[2]
+    repo_root = Path(__file__).resolve().parents[3]
     existing_path = env.get("PYTHONPATH")
     path_parts = [str(repo_root)]
     if existing_path:

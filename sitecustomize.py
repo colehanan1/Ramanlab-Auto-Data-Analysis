@@ -33,12 +33,28 @@ def _patch_numpy_bit_generators() -> None:
             return cleaned
         return None
 
+    def _normalise_type(bit_generator: Any) -> str | None:
+        name: str | None = None
+        if hasattr(bit_generator, "__name__"):
+            module = getattr(bit_generator, "__module__", "") or ""
+            name = f"{module}.{bit_generator.__name__}" if module else bit_generator.__name__
+        elif hasattr(bit_generator, "__qualname__"):
+            name = bit_generator.__qualname__
+        if name is None:
+            return None
+        return _normalise_name(name)
+
     def _compat_ctor(bit_generator: Any = "MT19937") -> Any:
+        replacement: Any = bit_generator
         if isinstance(bit_generator, str):
             normalised = _normalise_name(bit_generator)
             if normalised is not None:
-                bit_generator = normalised
-        return original_ctor(bit_generator)
+                replacement = normalised
+        else:
+            normalised = _normalise_type(bit_generator)
+            if normalised is not None:
+                replacement = normalised
+        return original_ctor(replacement)
 
     _pickle.__bit_generator_ctor = _compat_ctor
 
