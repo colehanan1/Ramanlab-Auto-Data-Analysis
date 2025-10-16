@@ -33,6 +33,9 @@ from envelope_visuals import (
     _canon_dataset,
     _compute_category_counts,
     _display_odor,
+    _fly_row_label,
+    _fly_sort_key,
+    _normalise_fly_columns,
     _order_suffix,
     _plot_category_counts,
     _style_trained_xticks,
@@ -69,6 +72,7 @@ def _load_predictions(csv_path: Path) -> pd.DataFrame:
     df["fly"] = df["fly"].astype(str).str.strip()
     df["trial_label"] = df["trial_label"].astype(str).str.strip()
     df["prediction"] = pd.to_numeric(df["prediction"], errors="coerce")
+    df = _normalise_fly_columns(df)
 
     invalid = df["prediction"].dropna().unique()
     if not set(invalid).issubset({0, 1}):
@@ -105,17 +109,24 @@ def generate_reaction_matrices_from_csv(cfg: SpreadsheetMatrixConfig) -> None:
             if subset.empty:
                 continue
 
-            flies = sorted(subset["fly"].unique())
+            subset = subset.copy()
+            subset = _normalise_fly_columns(subset)
+            fly_pairs = [
+                (row.fly, row.fly_number)
+                for row in subset[["fly", "fly_number"]].drop_duplicates().itertuples(index=False)
+            ]
+            fly_pairs.sort(key=lambda pair: _fly_sort_key(*pair))
             trial_list = _trial_order_for(list(subset["trial"].unique()), order)
             pretty_labels = [_display_odor(odor, trial) for trial in trial_list]
 
-            during_matrix = np.full((len(flies), len(trial_list)), np.nan, dtype=float)
+            during_matrix = np.full((len(fly_pairs), len(trial_list)), np.nan, dtype=float)
             after_matrix = np.full_like(during_matrix, np.nan)
 
-            fly_map = {fly: idx for idx, fly in enumerate(flies)}
+            fly_map = {pair: idx for idx, pair in enumerate(fly_pairs)}
             trial_map = {trial: idx for idx, trial in enumerate(trial_list)}
             for _, row in subset.iterrows():
-                i = fly_map[row["fly"]]
+                key = (row["fly"], row["fly_number"])
+                i = fly_map[key]
                 j = trial_map[row["trial"]]
                 value = int(row["during_hit"])
                 during_matrix[i, j] = value
@@ -123,7 +134,7 @@ def generate_reaction_matrices_from_csv(cfg: SpreadsheetMatrixConfig) -> None:
 
             odor_label = DISPLAY_LABEL.get(odor, odor)
             trained_display = DISPLAY_LABEL.get(odor, odor)
-            n_flies = len(flies)
+            n_flies = len(fly_pairs)
             n_trials = len(trial_list)
 
             base_w = max(10.0, 0.70 * n_trials + 6.0)
@@ -213,16 +224,31 @@ def generate_reaction_matrices_from_csv(cfg: SpreadsheetMatrixConfig) -> None:
             row_key_path = odor_dir / f"{row_key_name}.txt"
             if should_write(row_key_path, cfg.overwrite):
                 with row_key_path.open("w", encoding="utf-8") as fh:
-                    for idx, fly in enumerate(flies):
-                        fh.write(f"Row {idx}: {fly}\n")
+                    for idx, (fly, fly_number) in enumerate(fly_pairs):
+                        label = _fly_row_label(fly, fly_number)
+                        fh.write(f"Row {idx}: {label}\n")
 
             if order == "trained-first":
                 export = subset.copy()
                 export["odor_sent"] = export["trial"].apply(lambda t: _display_odor(odor, t))
                 order_map = {trial: idx for idx, trial in enumerate(trial_list)}
                 export["trial_ord"] = export["trial"].map(order_map).fillna(10**9).astype(int)
-                export = export.sort_values(["fly", "trial_ord", "trial_num", "trial"])
-                export_cols = ["dataset", "fly", "trial_num", "odor_sent", "during_hit", "after_hit"]
+                export = export.sort_values([
+                    "fly",
+                    "fly_number",
+                    "trial_ord",
+                    "trial_num",
+                    "trial",
+                ])
+                export_cols = [
+                    "dataset",
+                    "fly",
+                    "fly_number",
+                    "trial_num",
+                    "odor_sent",
+                    "during_hit",
+                    "after_hit",
+                ]
                 export_path = odor_dir / f"binary_reactions_{odor.replace(' ', '_')}_{order_suffix}.csv"
                 if should_write(export_path, cfg.overwrite):
                     export.to_csv(export_path, columns=export_cols, index=False)
