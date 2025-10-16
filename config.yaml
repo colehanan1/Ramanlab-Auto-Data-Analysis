@@ -15,8 +15,8 @@ yolo:
   ema_alpha: 0.20
   use_optical_flow: true
   flow_skip_edge: 10
-  max_flies: 4
-  max_proboscis_tracks: 4
+  max_flies: 3
+  max_proboscis_tracks: 3
   pair_rebind_ratio: 0.20
   zero_iou_epsilon: 1.0e-8
 
