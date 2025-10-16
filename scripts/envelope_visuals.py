@@ -292,6 +292,8 @@ def _load_matrix(matrix_path: Path, codes_json: Path) -> tuple[pd.DataFrame, lis
 
     ordered_cols: list[str] = list(meta["column_order"])
     code_maps: Mapping[str, Mapping[str, int]] = meta["code_maps"]
+    metric_cols_meta = set(meta.get("metric_columns", []) or [])
+    env_cols_meta = list(meta.get("env_columns", []) or [])
     df = pd.DataFrame(matrix, columns=ordered_cols)
 
     decode_candidates = ["dataset", "fly", "fly_number", "trial_type", "trial_label"]
@@ -318,12 +320,26 @@ def _load_matrix(matrix_path: Path, codes_json: Path) -> tuple[pd.DataFrame, lis
     else:
         df["fps"] = np.nan
 
-    env_cols = [
-        col
-        for col in ordered_cols
-        if col
-        not in {"fps", "dataset", "fly", "fly_number", "trial_type", "trial_label"}
-    ]
+    if env_cols_meta:
+        env_cols = [col for col in env_cols_meta if col in df.columns]
+    else:
+        env_cols = [
+            col
+            for col in ordered_cols
+            if col
+            not in {
+                "fps",
+                "dataset",
+                "fly",
+                "fly_number",
+                "trial_type",
+                "trial_label",
+            }
+            and col not in metric_cols_meta
+        ]
+        prefixed = [col for col in env_cols if col.startswith("dir_val_")]
+        if prefixed:
+            env_cols = prefixed
     return df, env_cols
 
 

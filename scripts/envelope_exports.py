@@ -542,10 +542,17 @@ def convert_wide_csv(cfg: ConvertConfig) -> None:
         raise RuntimeError("No metadata columns found. Expected at least one of: dataset, fly, trial_type, trial_label, fps.")
     print(f"[DEBUG] Metadata columns detected: {meta_cols}")
 
-    env_cols = [col for col in df.columns if col not in meta_cols]
+    metric_cols = [col for col in AUC_COLUMNS if col in df.columns]
+    env_cols = [
+        col
+        for col in df.columns
+        if col not in meta_cols and col not in metric_cols
+    ]
     if not env_cols:
         raise RuntimeError("No envelope columns found.")
-    print(f"[DEBUG] Envelope columns detected: {env_cols[:5]}{'...' if len(env_cols) > 5 else ''}")
+    print(
+        f"[DEBUG] Envelope columns detected: {env_cols[:5]}{'...' if len(env_cols) > 5 else ''}"
+    )
 
     code_maps: dict[str, dict[str, int]] = {}
     for col in meta_cols:
@@ -564,11 +571,20 @@ def convert_wide_csv(cfg: ConvertConfig) -> None:
         df_num[col] = df_num[col].astype(str).map(mapping).fillna(0).astype(np.int32)
         print(f"[DEBUG] Column {col} mapped to numeric codes")
 
-    df_num[env_cols] = df_num[env_cols].apply(pd.to_numeric, errors="coerce").fillna(0.0)
-    print("[DEBUG] Envelope values coerced to numeric with NaNs filled as 0.0")
+    numeric_cols = metric_cols + env_cols
+    df_num[numeric_cols] = (
+        df_num[numeric_cols]
+        .apply(pd.to_numeric, errors="coerce")
+        .fillna(0.0)
+        .astype(np.float32, copy=False)
+    )
+    print("[DEBUG] Envelope + metric values coerced to numeric with NaNs filled as 0.0")
 
-    ordered_cols = meta_cols + env_cols
-    matrix_f16 = df_num[ordered_cols].to_numpy(dtype=np.float16)
+    ordered_cols = meta_cols + metric_cols + env_cols
+    matrix_f32 = df_num[ordered_cols].to_numpy(dtype=np.float32, copy=False)
+    finite_info = np.finfo(np.float16)
+    np.clip(matrix_f32, finite_info.min, finite_info.max, out=matrix_f32)
+    matrix_f16 = matrix_f32.astype(np.float16)
     print(f"[DEBUG] Float16 matrix shape={matrix_f16.shape}")
 
     cfg.out_dir.mkdir(parents=True, exist_ok=True)
@@ -594,7 +610,16 @@ def convert_wide_csv(cfg: ConvertConfig) -> None:
 
     json_path = cfg.codes_json or (cfg.out_dir / "code_maps.json")
     with json_path.open("w", encoding="utf-8") as jf:
-        json.dump({"column_order": ordered_cols, "code_maps": code_maps}, jf, indent=2)
+        json.dump(
+            {
+                "column_order": ordered_cols,
+                "code_maps": code_maps,
+                "metric_columns": metric_cols,
+                "env_columns": env_cols,
+            },
+            jf,
+            indent=2,
+        )
 
     print(f"[OK] Saved 16-bit matrix: {matrix_path}  (shape={matrix_f16.shape}, dtype={matrix_f16.dtype})")
     print(f"[OK] Saved key:           {key_path}")

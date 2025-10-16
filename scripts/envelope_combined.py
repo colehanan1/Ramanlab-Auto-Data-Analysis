@@ -1233,7 +1233,12 @@ def wide_to_matrix(input_csv: str, output_dir: str) -> None:
             "No metadata columns found. Expected at least dataset/fly/trial_type/trial_label."
         )
 
-    env_cols = [column for column in df.columns if column not in meta_cols]
+    metric_cols = [col for col in AUC_COLUMNS if col in df.columns]
+    env_cols = [
+        column
+        for column in df.columns
+        if column not in meta_cols and column not in metric_cols
+    ]
     if not env_cols:
         raise RuntimeError("No envelope columns found.")
 
@@ -1250,9 +1255,19 @@ def wide_to_matrix(input_csv: str, output_dir: str) -> None:
         code_maps[column] = mapping
         df_num[column] = df_num[column].astype(str).map(mapping).fillna(0).astype(np.int32)
 
-    df_num[env_cols] = df_num[env_cols].apply(pd.to_numeric, errors="coerce").fillna(0.0)
-    ordered_cols = meta_cols + env_cols
-    matrix = df_num[ordered_cols].to_numpy(dtype=np.float16)
+    env_numeric = (
+        df_num[metric_cols + env_cols]
+        .apply(pd.to_numeric, errors="coerce")
+        .fillna(0.0)
+        .astype(np.float32, copy=False)
+    )
+    df_num[metric_cols + env_cols] = env_numeric
+
+    ordered_cols = meta_cols + metric_cols + env_cols
+    matrix_float32 = df_num[ordered_cols].to_numpy(dtype=np.float32, copy=False)
+    finite_info = np.finfo(np.float16)
+    np.clip(matrix_float32, finite_info.min, finite_info.max, out=matrix_float32)
+    matrix = matrix_float32.astype(np.float16)
 
     matrix_path = out_dir / "envelope_matrix_float16.npy"
     codes_path = out_dir / "code_maps.json"
@@ -1260,7 +1275,16 @@ def wide_to_matrix(input_csv: str, output_dir: str) -> None:
 
     np.save(matrix_path, matrix)
     with open(codes_path, "w", encoding="utf-8") as fh:
-        json.dump({"column_order": ordered_cols, "code_maps": code_maps}, fh, indent=2)
+        json.dump(
+            {
+                "column_order": ordered_cols,
+                "code_maps": code_maps,
+                "metric_columns": metric_cols,
+                "env_columns": env_cols,
+            },
+            fh,
+            indent=2,
+        )
 
     with open(key_path, "w", encoding="utf-8") as fh:
         fh.write("# Envelope matrix schema (float16), row-wise\n")
