@@ -32,7 +32,7 @@ cp .env.example .env
 # edit MODEL_PATH and MAIN_DIRECTORY, or edit config.yaml directly
 
 # 3) Run everything (env must stay active)
-make run   # or: python -m fbpipe.pipeline --config config.yaml all
+make run   # or: python scripts/run_workflows.py --config config.yaml
 ```
 
 ### Using an existing Conda environment
@@ -105,7 +105,8 @@ python -m fbpipe.steps.distance_stats --config config.yaml
 ...
 ```
 
-The two reaction-analysis steps wrap the new automation:
+The two reaction-analysis steps wrap the new automation (run automatically at
+the end of `make run`):
 
 ```bash
 python -m fbpipe.steps.predict_reactions --config config.yaml
@@ -116,6 +117,10 @@ The first command invokes the packaged `flybehavior-response predict` CLI to
 write a spreadsheet of binary responses. The second command feeds that
 spreadsheet into `scripts/reaction_matrix_from_spreadsheet.py`, reproducing the
 figure layout without manual intervention.
+
+> **Note:** The repository ships a lightweight `sitecustomize.py` shim so the
+> `flybehavior-response` model, which was trained with NumPy 1.x, can be loaded
+> inside modern NumPy 2.x environments without re-exporting the artifact.
 
 ## Multi-fly YOLO inference
 

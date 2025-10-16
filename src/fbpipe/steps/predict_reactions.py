@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
 from pathlib import Path
 
@@ -38,6 +39,14 @@ def main(cfg: Settings) -> None:
         str(output_csv),
     ]
 
+    env = os.environ.copy()
+    repo_root = Path(__file__).resolve().parents[2]
+    existing_path = env.get("PYTHONPATH")
+    path_parts = [str(repo_root)]
+    if existing_path:
+        path_parts.append(existing_path)
+    env["PYTHONPATH"] = os.pathsep.join(path_parts)
+
     print("[REACTION] Running flybehavior-response →", " ".join(cmd))
-    subprocess.run(cmd, check=True)
+    subprocess.run(cmd, check=True, env=env)
     print(f"[REACTION] Wrote predictions to {output_csv}")

@@ -14,6 +14,9 @@ import yaml
 # Add project root to sys.path for imports to work
 sys.path.insert(0, str(Path(__file__).parent.parent.resolve()))
 
+from fbpipe.config import load_settings
+from fbpipe.steps import predict_reactions, reaction_matrix
+
 from scripts.envelope_visuals import (
     EnvelopePlotConfig,
     MatrixPlotConfig,
@@ -232,6 +235,38 @@ def _run_combined(cfg: Mapping[str, Any] | None) -> None:
         )
 
 
+def _run_reactions(config_path: Path) -> None:
+    settings = load_settings(config_path)
+    reaction_cfg = settings.reaction_prediction
+
+    missing = [
+        name
+        for name, value in (
+            ("reaction_prediction.data_csv", reaction_cfg.data_csv),
+            ("reaction_prediction.model_path", reaction_cfg.model_path),
+            ("reaction_prediction.output_csv", reaction_cfg.output_csv),
+        )
+        if not value
+    ]
+
+    if missing:
+        print(
+            "[REACTION] Skipping reaction prediction; missing configuration values: "
+            + ", ".join(missing)
+        )
+        return
+
+    print("[analysis] reactions.predict → flybehavior-response predict")
+    predict_reactions.main(settings)
+
+    if not reaction_cfg.matrix.out_dir:
+        print("[REACTION] Matrix generation skipped; reaction_prediction.matrix.out_dir is empty.")
+        return
+
+    print("[analysis] reactions.matrix → reaction_matrix_from_spreadsheet.py")
+    reaction_matrix.main(settings)
+
+
 def _run_pipeline(config_path: Path) -> None:
     cmd = [sys.executable, "-m", "fbpipe.pipeline", "--config", str(config_path), "all"]
     print(f"[analysis] pipeline → {' '.join(cmd)}")
@@ -262,6 +297,7 @@ def main(argv: Sequence[str] | None = None) -> None:
     _run_envelope_visuals(analysis_cfg.get("envelope_visuals"))
     _run_training(analysis_cfg.get("training"))
     _run_combined(analysis_cfg.get("combined"))
+    _run_reactions(config_path)
 
 
 if __name__ == "__main__":  # pragma: no cover
