@@ -16,3 +16,5 @@ ultralytics>=8.3.0,<9
 # Video composition
 moviepy>=1.0.3
 Pillow>=10.0
+
+flybehavior-response @ git+https://github.com/colehanan1/FlyBehaviorScoring.git
