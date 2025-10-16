@@ -239,7 +239,7 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--csv-path", type=Path, required=True, help="Path to the predictions spreadsheet.")
     parser.add_argument("--out-dir", type=Path, required=True, help="Directory for exported figures.")
-    parser.add_argument("--latency-sec", type=float, default=0.0, help="Mean odor transit latency in seconds.")
+    parser.add_argument("--latency-sec", type=float, default=2.15, help="Mean odor transit latency in seconds.")
     parser.add_argument("--after-window-sec", type=float, default=30.0, help="Window length used in filenames (seconds).")
     parser.add_argument("--row-gap", type=float, default=0.6, help="Vertical gap between matrix and bar charts.")
     parser.add_argument(
