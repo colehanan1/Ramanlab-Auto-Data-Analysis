@@ -91,6 +91,7 @@ FRAME_COLS = ["Frame", "FrameNumber", "Frame Number"]
 TRIAL_REGEX = re.compile(r"(testing|training)_(\d+)", re.IGNORECASE)
 TESTING_REGEX = re.compile(r"testing_(\d+)", re.IGNORECASE)
 FLY_SLOT_REGEX = re.compile(r"(fly\d+)_distances", re.IGNORECASE)
+FLY_NUMBER_REGEX = re.compile(r"fly\s*[_-]?\s*(\d+)", re.IGNORECASE)
 
 ANCHOR_X = 1080.0
 ANCHOR_Y = 540.0
