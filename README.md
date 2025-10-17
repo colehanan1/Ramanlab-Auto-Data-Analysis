@@ -30,9 +30,9 @@ python -m pip install -e .
 # The requirements pin `numpy<2` so the packaged reaction model, which was
 # trained against NumPy 1.x, deserialises correctly. If your environment already
 # has NumPy 2.x installed, rerun the install command above to downgrade before
-# launching the pipeline. Keep `sitecustomize.py` in place either way; its
-# MT19937 shim normalises the joblib payloads produced by the training repo and
-# transparently handles the NumPy 2.x upgrade path if you ever need it.
+# launching the pipeline. The bundled `sitecustomize.py` only activates its
+# MT19937 shim when it detects NumPy 2.x, so it stays inert once the downgrade
+# completes but future-proofs the workflow if you ever upgrade again.
 
 # 2) Configure paths
 cp .env.example .env
@@ -54,10 +54,10 @@ python -m pip install -r requirements.txt
 python -m pip install -e .
 
 # As above, make sure the install step downgrades any pre-existing NumPy 2.x
-# builds; the reaction-scoring artifacts require NumPy 1.x semantics. Retain the
-# bundled `sitecustomize.py` regardless—it keeps the MT19937 metadata in sync
-# across both NumPy 1.x and 2.x, so the CLI continues working even if another
-# dependency forces an upgrade later.
+# builds; the reaction-scoring artifacts require NumPy 1.x semantics. The
+# bundled `sitecustomize.py` now short-circuits under NumPy 1.x and only patches
+# MT19937 handling if a future dependency pulls in NumPy 2.x, so leave it in
+# place even after the downgrade.
 ```
 
 The `make setup` target simply automates those steps against a fresh `venv`. Skipping it is safe as long as the active environment satisfies `requirements.txt` and provides CUDA-enabled builds of PyTorch/Ultralytics.

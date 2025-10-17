@@ -7,12 +7,16 @@ from typing import Any
 import numpy as np
 
 
+def _numpy_major_version() -> int:
+    try:
+        return int(np.__version__.split(".")[0])
+    except Exception:
+        return 0
+
+
 def _normalise_mt19937_state(state: Any, target_name: str) -> Any:
     """Coerce legacy MT19937 payloads into a NumPy 2.x-friendly shape."""
-    try:
-        np_major = int(np.__version__.split(".")[0])
-    except Exception:
-        np_major = 0
+    np_major = _numpy_major_version()
     if np_major < 2:
         return state
 
@@ -31,6 +35,9 @@ def _normalise_mt19937_state(state: Any, target_name: str) -> Any:
 
 def _install_numpy_joblib_shims() -> None:
     """Register MT19937 compatibility hooks for joblib artifacts."""
+    if _numpy_major_version() < 2:
+        return
+
     try:
         np_pickle = importlib.import_module("numpy.random._pickle")
     except ModuleNotFoundError:
