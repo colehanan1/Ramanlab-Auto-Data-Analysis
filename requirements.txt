@@ -1,6 +1,8 @@
 
 # Core scientific stack
-numpy>=1.24
+# Reaction prediction artifacts were trained on NumPy 1.x; keep the runtime below 2.0
+# so the bundled models load without re-exporting them.
+numpy>=1.24,<2
 pandas>=2.0
 matplotlib>=3.7
 scipy>=1.11
@@ -16,5 +18,8 @@ ultralytics>=8.3.0,<9
 # Video composition
 moviepy>=1.0.3
 Pillow>=10.0
+
+pandas-stubs==2.2.3.250308
+types-pytz>=2022.1.1
 
 flybehavior-response @ git+https://github.com/colehanan1/FlyBehaviorScoring.git

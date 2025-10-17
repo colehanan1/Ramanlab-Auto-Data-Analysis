@@ -12,6 +12,8 @@ __all__ = [
     "update_ofm_state",
     "move_videos",
     "compose_videos_rms",
+    "predict_reactions",
+    "reaction_matrix",
 ]
 
 

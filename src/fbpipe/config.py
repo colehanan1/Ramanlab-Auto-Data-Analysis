@@ -1,10 +1,31 @@
 
 from __future__ import annotations
 import os, yaml
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 from dotenv import load_dotenv
+
+@dataclass
+class ReactionMatrixSettings:
+    out_dir: str = ""
+    latency_sec: float = 2.15
+    after_window_sec: float = 30.0
+    row_gap: float = 0.6
+    height_per_gap_in: float = 3.0
+    bottom_shift_in: float = 0.5
+    trial_orders: Tuple[str, ...] = ("observed", "trained-first")
+    include_hexanol: bool = True
+    overwrite: bool = False
+
+
+@dataclass
+class ReactionPredictionSettings:
+    data_csv: str = ""
+    model_path: str = ""
+    output_csv: str = ""
+    matrix: ReactionMatrixSettings = field(default_factory=ReactionMatrixSettings)
+
 
 @dataclass
 class Settings:
@@ -37,6 +58,9 @@ class Settings:
     class2_min: float = 70.0
     class2_max: float = 250.0
 
+    # reaction prediction
+    reaction_prediction: ReactionPredictionSettings = field(default_factory=ReactionPredictionSettings)
+
 def _get(d: Dict[str, Any], key: str, default: Any):
     return d.get(key, default)
 
@@ -58,6 +82,67 @@ def load_settings(config_path: str | Path) -> Settings:
     # nested
     yolo = data.get("yolo", {})
     dist_limits = data.get("distance_limits", {})
+    reaction_cfg = data.get("reaction_prediction", {})
+    reaction_matrix_cfg = reaction_cfg.get("matrix", {})
+
+    include_hex_cfg = reaction_matrix_cfg.get("include_hexanol", True)
+    if isinstance(include_hex_cfg, str):
+        include_hex_cfg = include_hex_cfg.lower() == "true"
+
+    overwrite_cfg = reaction_matrix_cfg.get("overwrite", False)
+    if isinstance(overwrite_cfg, str):
+        overwrite_cfg = overwrite_cfg.lower() == "true"
+
+    matrix_defaults = ReactionMatrixSettings(
+        out_dir=str(reaction_matrix_cfg.get("out_dir", "")),
+        latency_sec=float(reaction_matrix_cfg.get("latency_sec", 2.15)),
+        after_window_sec=float(reaction_matrix_cfg.get("after_window_sec", 30.0)),
+        row_gap=float(reaction_matrix_cfg.get("row_gap", 0.6)),
+        height_per_gap_in=float(reaction_matrix_cfg.get("height_per_gap_in", 3.0)),
+        bottom_shift_in=float(reaction_matrix_cfg.get("bottom_shift_in", 0.5)),
+        trial_orders=tuple(reaction_matrix_cfg.get("trial_orders", ("observed", "trained-first"))),
+        include_hexanol=bool(include_hex_cfg),
+        overwrite=bool(overwrite_cfg),
+    )
+
+    trial_orders_env = os.getenv("REACTION_MATRIX_TRIAL_ORDERS")
+    if trial_orders_env:
+        env_trials = [item.strip() for item in trial_orders_env.split(",") if item.strip()]
+        if env_trials:
+            matrix_defaults.trial_orders = tuple(env_trials)
+
+    include_hex_env = os.getenv("REACTION_MATRIX_INCLUDE_HEXANOL")
+    if include_hex_env is not None:
+        matrix_defaults.include_hexanol = include_hex_env.lower() == "true"
+
+    overwrite_env = os.getenv("REACTION_MATRIX_OVERWRITE")
+    if overwrite_env is not None:
+        matrix_defaults.overwrite = overwrite_env.lower() == "true"
+
+    matrix = ReactionMatrixSettings(
+        out_dir=str(os.getenv("REACTION_MATRIX_OUT_DIR", matrix_defaults.out_dir)),
+        latency_sec=float(os.getenv("REACTION_MATRIX_LATENCY_SEC", matrix_defaults.latency_sec)),
+        after_window_sec=float(
+            os.getenv("REACTION_MATRIX_AFTER_WINDOW_SEC", matrix_defaults.after_window_sec)
+        ),
+        row_gap=float(os.getenv("REACTION_MATRIX_ROW_GAP", matrix_defaults.row_gap)),
+        height_per_gap_in=float(
+            os.getenv("REACTION_MATRIX_HEIGHT_PER_GAP_IN", matrix_defaults.height_per_gap_in)
+        ),
+        bottom_shift_in=float(
+            os.getenv("REACTION_MATRIX_BOTTOM_SHIFT_IN", matrix_defaults.bottom_shift_in)
+        ),
+        trial_orders=matrix_defaults.trial_orders,
+        include_hexanol=matrix_defaults.include_hexanol,
+        overwrite=matrix_defaults.overwrite,
+    )
+
+    reaction_prediction = ReactionPredictionSettings(
+        data_csv=str(os.getenv("REACTION_DATA_CSV", reaction_cfg.get("data_csv", ""))),
+        model_path=str(os.getenv("REACTION_MODEL_PATH", reaction_cfg.get("model_path", ""))),
+        output_csv=str(os.getenv("REACTION_OUTPUT_CSV", reaction_cfg.get("output_csv", ""))),
+        matrix=matrix,
+    )
 
     return Settings(
         model_path=model_path,
@@ -86,4 +171,5 @@ def load_settings(config_path: str | Path) -> Settings:
 
         class2_min=float(os.getenv("CLASS2_MIN", dist_limits.get("class2_min", 70.0))),
         class2_max=float(os.getenv("CLASS2_MAX", dist_limits.get("class2_max", 250.0))),
+        reaction_prediction=reaction_prediction,
     )

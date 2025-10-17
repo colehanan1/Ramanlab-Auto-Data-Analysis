@@ -8,6 +8,8 @@ End-to-end, reproducible pipeline that:
 4) Flags dropped frames, stages RMS-ready CSVs, and annotates OFM state.
 5) Organizes trial videos and renders line-panel videos with RMS overlays.
 6) Produces consistent, versioned outputs under each *fly* folder and hands matrix-ready data to the analysis scripts.
+7) Scores proboscis reactions with the `flybehavior-response` model CLI.
+8) Builds black/white reaction matrices directly from the model predictions.
 
 > **Minimum**: Linux + CUDA GPU. Set `model_path` and `main_directory` in `config.yaml` or `.env`.
 
@@ -25,12 +27,19 @@ python -m pip install -r requirements.txt
 # (optional but recommended if you are developing):
 python -m pip install -e .
 
+# The requirements pin `numpy<2` so the packaged reaction model, which was
+# trained against NumPy 1.x, deserialises correctly. If your environment already
+# has NumPy 2.x installed, rerun the install command above to downgrade before
+# launching the pipeline. The bundled `sitecustomize.py` only activates its
+# MT19937 shim when it detects NumPy 2.x, so it stays inert once the downgrade
+# completes but future-proofs the workflow if you ever upgrade again.
+
 # 2) Configure paths
 cp .env.example .env
 # edit MODEL_PATH and MAIN_DIRECTORY, or edit config.yaml directly
 
 # 3) Run everything (env must stay active)
-make run   # or: python -m fbpipe.pipeline --config config.yaml all
+make run   # or: python scripts/run_workflows.py --config config.yaml
 ```
 
 ### Using an existing Conda environment
@@ -43,6 +52,12 @@ python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
 # (optional but recommended if you are developing):
 python -m pip install -e .
+
+# As above, make sure the install step downgrades any pre-existing NumPy 2.x
+# builds; the reaction-scoring artifacts require NumPy 1.x semantics. The
+# bundled `sitecustomize.py` now short-circuits under NumPy 1.x and only patches
+# MT19937 handling if a future dependency pulls in NumPy 2.x, so leave it in
+# place even after the downgrade.
 ```
 
 The `make setup` target simply automates those steps against a fresh `venv`. Skipping it is safe as long as the active environment satisfies `requirements.txt` and provides CUDA-enabled builds of PyTorch/Ultralytics.
@@ -92,6 +107,8 @@ fbpipe/
     update_ofm_state.py
     move_videos.py
     compose_videos_rms.py
+    predict_reactions.py
+    reaction_matrix.py
 ```
 
 Each step can also be run independently:
@@ -100,6 +117,19 @@ python -m fbpipe.steps.yolo_infer --config config.yaml
 python -m fbpipe.steps.distance_stats --config config.yaml
 ...
 ```
+
+The two reaction-analysis steps wrap the new automation (run automatically at
+the end of `make run`):
+
+```bash
+python -m fbpipe.steps.predict_reactions --config config.yaml
+python -m fbpipe.steps.reaction_matrix --config config.yaml
+```
+
+The first command invokes the packaged `flybehavior-response predict` CLI to
+write a spreadsheet of binary responses. The second command feeds that
+spreadsheet into `scripts/reaction_matrix_from_spreadsheet.py`, reproducing the
+figure layout without manual intervention.
 
 ## Multi-fly YOLO inference
 

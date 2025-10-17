@@ -44,6 +44,14 @@ from envelope_visuals import (
 )
 
 
+_RC_CONTEXT = {
+    "figure.dpi": 300,
+    "savefig.dpi": 300,
+    "axes.spines.top": False,
+    "axes.spines.right": False,
+}
+
+
 @dataclass
 class SpreadsheetMatrixConfig:
     """Configuration for building reaction matrices from a CSV spreadsheet."""
@@ -146,93 +154,90 @@ def generate_reaction_matrices_from_csv(cfg: SpreadsheetMatrixConfig) -> None:
                 during_matrix, pretty_labels, trained_display, cfg.include_hexanol
             )
 
-            plt.rcParams.update(
-                {
-                    "figure.dpi": 300,
-                    "savefig.dpi": 300,
-                    "axes.spines.top": False,
-                    "axes.spines.right": False,
-                }
-            )
-            fig = plt.figure(figsize=(fig_w, fig_h), constrained_layout=False)
-            gs = gridspec.GridSpec(
-                2,
-                1,
-                height_ratios=[3.0, 1.25],
-                hspace=cfg.row_gap,
-            )
+            with plt.rc_context(_RC_CONTEXT):
+                fig = plt.figure(figsize=(fig_w, fig_h), constrained_layout=False)
+                gs = gridspec.GridSpec(
+                    2,
+                    1,
+                    height_ratios=[3.0, 1.25],
+                    hspace=cfg.row_gap,
+                )
 
-            ax_during = fig.add_subplot(gs[0, 0])
-            ax_dc = fig.add_subplot(gs[1, 0])
+                ax_during = fig.add_subplot(gs[0, 0])
+                ax_dc = fig.add_subplot(gs[1, 0])
 
-            ax_during.imshow(during_matrix, cmap=cmap, norm=norm, aspect="auto", interpolation="nearest")
-            ax_during.set_title(f"{odor_label} — During (Spreadsheet)", fontsize=14, weight="bold")
-            _style_trained_xticks(ax_during, pretty_labels, trained_display, xtick_fs)
-            ax_during.set_yticks([])
-            ax_during.set_ylabel(f"{n_flies} Flies", fontsize=11)
+                ax_during.imshow(
+                    during_matrix, cmap=cmap, norm=norm, aspect="auto", interpolation="nearest"
+                )
+                ax_during.set_title(
+                    f"{odor_label} — During (Spreadsheet)", fontsize=14, weight="bold"
+                )
+                _style_trained_xticks(ax_during, pretty_labels, trained_display, xtick_fs)
+                ax_during.set_yticks([])
+                ax_during.set_ylabel(f"{n_flies} Flies", fontsize=11)
 
-            _plot_category_counts(ax_dc, during_counts, n_flies, "During — Fly Reaction Categories")
+                _plot_category_counts(ax_dc, during_counts, n_flies, "During — Fly Reaction Categories")
 
-            legend_handles = [
-                Patch(facecolor="black", edgecolor="black", label="Prediction = 1"),
-                Patch(facecolor="white", edgecolor="black", label="Prediction = 0"),
-            ]
-            ax_during.legend(handles=legend_handles, loc="upper left", frameon=True, fontsize=9)
-
-            shift_frac = cfg.bottom_shift_in / fig_h if fig_h else 0.0
-            for axis in (ax_dc,):
-                pos = axis.get_position()
-                new_y0 = max(0.05, pos.y0 - shift_frac)
-                axis.set_position([pos.x0, new_y0, pos.width, pos.height])
-
-            odor_dir = resolve_dataset_output_dir(cfg.out_dir, odor)
-
-            png_name = (
-                f"reaction_matrix_{odor.replace(' ', '_')}_{int(cfg.after_window_sec)}"
-                f"_latency_{cfg.latency_sec:.3f}s"
-            )
-            if order_suffix != "observed":
-                png_name += f"_{order_suffix}"
-            png_path = odor_dir / f"{png_name}.png"
-            if should_write(png_path, cfg.overwrite):
-                fig.savefig(png_path, dpi=300, bbox_inches="tight")
-
-            row_key_name = f"row_key_{odor.replace(' ', '_')}_{int(cfg.after_window_sec)}"
-            if order_suffix != "observed":
-                row_key_name += f"_{order_suffix}"
-            row_key_path = odor_dir / f"{row_key_name}.txt"
-            if should_write(row_key_path, cfg.overwrite):
-                with row_key_path.open("w", encoding="utf-8") as fh:
-                    for idx, (fly, fly_number) in enumerate(fly_pairs):
-                        label = _fly_row_label(fly, fly_number)
-                        fh.write(f"Row {idx}: {label}\n")
-
-            if order == "trained-first":
-                export = subset.copy()
-                export["odor_sent"] = export["trial"].apply(lambda t: _display_odor(odor, t))
-                order_map = {trial: idx for idx, trial in enumerate(trial_list)}
-                export["trial_ord"] = export["trial"].map(order_map).fillna(10**9).astype(int)
-                export = export.sort_values([
-                    "fly",
-                    "fly_number",
-                    "trial_ord",
-                    "trial_num",
-                    "trial",
-                ])
-                export_cols = [
-                    "dataset",
-                    "fly",
-                    "fly_number",
-                    "trial_num",
-                    "odor_sent",
-                    "during_hit",
-                    "after_hit",
+                legend_handles = [
+                    Patch(facecolor="black", edgecolor="black", label="Prediction = 1"),
+                    Patch(facecolor="white", edgecolor="black", label="Prediction = 0"),
                 ]
-                export_path = odor_dir / f"binary_reactions_{odor.replace(' ', '_')}_{order_suffix}.csv"
-                if should_write(export_path, cfg.overwrite):
-                    export.to_csv(export_path, columns=export_cols, index=False)
+                ax_during.legend(handles=legend_handles, loc="upper left", frameon=True, fontsize=9)
 
-            plt.close(fig)
+                shift_frac = cfg.bottom_shift_in / fig_h if fig_h else 0.0
+                for axis in (ax_dc,):
+                    pos = axis.get_position()
+                    new_y0 = max(0.05, pos.y0 - shift_frac)
+                    axis.set_position([pos.x0, new_y0, pos.width, pos.height])
+
+                odor_dir = resolve_dataset_output_dir(cfg.out_dir, odor)
+
+                png_name = (
+                    f"reaction_matrix_{odor.replace(' ', '_')}_{int(cfg.after_window_sec)}"
+                    f"_latency_{cfg.latency_sec:.3f}s"
+                )
+                if order_suffix != "observed":
+                    png_name += f"_{order_suffix}"
+                png_path = odor_dir / f"{png_name}.png"
+                if should_write(png_path, cfg.overwrite):
+                    fig.savefig(png_path, dpi=300, bbox_inches="tight")
+
+                row_key_name = f"row_key_{odor.replace(' ', '_')}_{int(cfg.after_window_sec)}"
+                if order_suffix != "observed":
+                    row_key_name += f"_{order_suffix}"
+                row_key_path = odor_dir / f"{row_key_name}.txt"
+                if should_write(row_key_path, cfg.overwrite):
+                    with row_key_path.open("w", encoding="utf-8") as fh:
+                        for idx, (fly, fly_number) in enumerate(fly_pairs):
+                            label = _fly_row_label(fly, fly_number)
+                            fh.write(f"Row {idx}: {label}\n")
+
+                if order == "trained-first":
+                    export = subset.copy()
+                    export["odor_sent"] = export["trial"].apply(lambda t: _display_odor(odor, t))
+                    order_map = {trial: idx for idx, trial in enumerate(trial_list)}
+                    export["trial_ord"] = export["trial"].map(order_map).fillna(10**9).astype(int)
+                    export = export.sort_values([
+                        "fly",
+                        "fly_number",
+                        "trial_ord",
+                        "trial_num",
+                        "trial",
+                    ])
+                    export_cols = [
+                        "dataset",
+                        "fly",
+                        "fly_number",
+                        "trial_num",
+                        "odor_sent",
+                        "during_hit",
+                        "after_hit",
+                    ]
+                    export_path = odor_dir / f"binary_reactions_{odor.replace(' ', '_')}_{order_suffix}.csv"
+                    if should_write(export_path, cfg.overwrite):
+                        export.to_csv(export_path, columns=export_cols, index=False)
+
+                plt.close(fig)
 
 
 def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
