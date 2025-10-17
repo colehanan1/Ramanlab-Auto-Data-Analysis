@@ -126,10 +126,6 @@ write a spreadsheet of binary responses. The second command feeds that
 spreadsheet into `scripts/reaction_matrix_from_spreadsheet.py`, reproducing the
 figure layout without manual intervention.
 
-> **Note:** The repository ships a lightweight `sitecustomize.py` shim so the
-> `flybehavior-response` model, which was trained with NumPy 1.x, can be loaded
-> inside modern NumPy 2.x environments without re-exporting the artifact.
-
 ## Multi-fly YOLO inference
 
 The pipeline now exports up to four concurrent flies (class-2 eyes paired with
