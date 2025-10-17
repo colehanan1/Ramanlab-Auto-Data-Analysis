@@ -30,15 +30,7 @@ def _normalise_mt19937_state(state: Any, target_name: str) -> Any:
 
 
 def _install_numpy_joblib_shims() -> None:
-    """Register MT19937 compatibility hooks when NumPy 2.x is active."""
-    try:
-        np_major = int(np.__version__.split(".")[0])
-    except Exception:
-        np_major = 0
-    if np_major < 2:
-        # NumPy 1.x already deserialises legacy MT19937 payloads correctly.
-        return
-
+    """Register MT19937 compatibility hooks for joblib artifacts."""
     try:
         np_pickle = importlib.import_module("numpy.random._pickle")
     except ModuleNotFoundError:
@@ -58,8 +50,11 @@ def _install_numpy_joblib_shims() -> None:
 
     def _compat_ctor(bit_generator: Any = "MT19937") -> Any:  # noqa: ANN401 - NumPy shim
         if bit_generator in {"MT19937", np.random.MT19937, _CompatMT19937}:
-            return original_ctor("MT19937")
-        return original_ctor(bit_generator)
+            coerced = "MT19937"
+        else:
+            name = getattr(bit_generator, "__name__", None)
+            coerced = "MT19937" if name == "MT19937" else bit_generator
+        return original_ctor(coerced)
 
     np_pickle.__bit_generator_ctor = _compat_ctor
 
