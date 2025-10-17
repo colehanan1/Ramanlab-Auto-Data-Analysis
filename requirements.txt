@@ -19,4 +19,7 @@ ultralytics>=8.3.0,<9
 moviepy>=1.0.3
 Pillow>=10.0
 
+pandas-stubs==2.2.3.250308
+types-pytz>=2022.1.1
+
 flybehavior-response @ git+https://github.com/colehanan1/FlyBehaviorScoring.git

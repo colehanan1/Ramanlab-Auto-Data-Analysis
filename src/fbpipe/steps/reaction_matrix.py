@@ -10,7 +10,7 @@ from ..config import Settings
 
 
 def _script_path() -> Path:
-    return Path(__file__).resolve().parents[2] / "scripts" / "reaction_matrix_from_spreadsheet.py"
+    return Path("/home/ramanlab/PycharmProjects/Ramanlab-Auto-Data-Analysis/scripts/reaction_matrix_from_spreadsheet.py")
 
 
 def main(cfg: Settings) -> None:

@@ -1,14 +1,14 @@
 
 # Project configuration
 model_path: "/home/ramanlab/Documents/cole/sam2/notebooks/YOLOProjectProboscisLegs/runs/obb/train5/weights/best.pt"
-main_directory: "/home/ramanlab/Documents/cole/Data/flys/opto_hex/"
+main_directory: "/home/ramanlab/Documents/cole/Data/flys/opto_EB/"
 
 reaction_prediction:
   data_csv: "/home/ramanlab/Documents/cole/Data/Opto/Combined/all_envelope_rows_wide.csv"
-  model_path: "/home/ramanlab/PycharmProjects/FlyBehaviorScoring/artifacts/2025-10-15T22-14-16Z/model_mlp.joblib"
+  model_path: "/home/ramanlab/PycharmProjects/FlyBehaviorScoring/artifacts/2025-10-17T20-16-59Z/model_mlp.joblib"
   output_csv: "/home/ramanlab/Documents/cole/Data/Opto/Combined/model_predictions.csv"
   matrix:
-    out_dir: "/home/ramanlab/Documents/cole/Results/Opto/Reaction_Predictions"
+    out_dir: "/home/ramanlab/Documents/cole/Results/Opto/Combined/Reaction_Predictions"
     latency_sec: 2.15
     after_window_sec: 30.0
     row_gap: 0.6
@@ -113,7 +113,7 @@ analysis:
       overwrite: false
   combined:
     combine:
-      root: "/home/ramanlab/Documents/cole/Data/flys/opto_hex/"
+      root: "/home/ramanlab/Documents/cole/Data/flys/opto_EB/"
       fps_default: 40.0
       window_sec: 0.25
       odor_on: 30.0
@@ -121,8 +121,8 @@ analysis:
       odor_latency_s: 2.15
     wide:
       mirror:
-        - source: "/home/ramanlab/Documents/cole/Data/flys/opto_hex/"
-          destination: "/securedstorage/DATAsec/cole/Data-secured/opto_hex/"
+        - source: "/home/ramanlab/Documents/cole/Data/flys/opto_EB/"
+          destination: "/securedstorage/DATAsec/cole/Data-secured/opto_Eb/"
       roots:
         - "/securedstorage/DATAsec/cole/Data-secured/opto_EB/"
         - "/securedstorage/DATAsec/cole/Data-secured/opto_benz_1/"
