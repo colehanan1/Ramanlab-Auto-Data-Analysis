@@ -92,7 +92,7 @@ ODOR_ORDER = [
 
 TRAINED_FIRST_ORDER = (2, 4, 5, 1, 3, 6, 7, 8, 9)
 HEXANOL_LABEL = "Hexanol"
-NON_REACTIVE_SPAN_PX = 20.0
+NON_REACTIVE_SPAN_PX = 15.0
 
 
 # ---------------------------------------------------------------------------
