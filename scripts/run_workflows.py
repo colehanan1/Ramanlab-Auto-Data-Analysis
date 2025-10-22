@@ -294,9 +294,9 @@ def main(argv: Sequence[str] | None = None) -> None:
     _run_pipeline(config_path)
 
     analysis_cfg = data.get("analysis") or {}
+    _run_combined(analysis_cfg.get("combined"))
     _run_envelope_visuals(analysis_cfg.get("envelope_visuals"))
     _run_training(analysis_cfg.get("training"))
-    _run_combined(analysis_cfg.get("combined"))
     _run_reactions(config_path)
 
 

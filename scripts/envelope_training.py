@@ -49,10 +49,10 @@ DISPLAY_LABEL = {
     "opto_benz": "Benzaldehyde",
     "opto_benz_1": "Benzaldehyde",
     "opto_EB": "Ethyl Butyrate",
-    "opto_hex": "Optogenetics Hexanol",
+    "opto_hex": "Hexanol",
 }
 
-HEXANOL_LABEL = "Optogenetics Hexanol"
+HEXANOL_LABEL = "Hexanol"
 
 
 # ---------------------------------------------------------------------------
