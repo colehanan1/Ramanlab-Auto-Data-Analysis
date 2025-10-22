@@ -4,9 +4,81 @@ from __future__ import annotations
 
 import os
 import subprocess
+import tempfile
 from pathlib import Path
+from typing import Sequence, Set, Tuple
+
+import pandas as pd
 
 from ..config import Settings
+
+
+NON_REACTIVE_SPAN_PX = 20.0
+
+
+def _stringify(value: object, fallback: str = "UNKNOWN") -> str:
+    """Return a normalised string representation for fly identifiers."""
+
+    if isinstance(value, str):
+        text = value.strip()
+        return text or fallback
+    if value is None:
+        return fallback
+    try:
+        if pd.isna(value):
+            return fallback
+    except TypeError:
+        pass
+    text = str(value).strip()
+    return text or fallback
+
+
+def _string_series(df: pd.DataFrame, column: str, *, fallback: str = "UNKNOWN") -> pd.Series:
+    if column not in df.columns:
+        return pd.Series([fallback] * len(df), index=df.index, dtype=object)
+    series = df[column]
+    return series.apply(lambda value: _stringify(value, fallback))
+
+
+def _non_reactive_mask(
+    df: pd.DataFrame, *, threshold: float = NON_REACTIVE_SPAN_PX
+) -> pd.Series:
+    if "global_min" not in df.columns or "global_max" not in df.columns:
+        return pd.Series(False, index=df.index, dtype=bool)
+
+    gmin = pd.to_numeric(df["global_min"], errors="coerce")
+    gmax = pd.to_numeric(df["global_max"], errors="coerce")
+    span = (gmax - gmin).abs()
+    mask = gmin.notna() & gmax.notna() & span.le(float(threshold))
+    return mask.fillna(False)
+
+
+def _fly_keys(df: pd.DataFrame) -> pd.Series:
+    dataset = _string_series(df, "dataset")
+    fly = _string_series(df, "fly")
+    fly_number = _string_series(df, "fly_number")
+    return pd.Series(list(zip(dataset, fly, fly_number)), index=df.index, dtype=object)
+
+
+def _drop_flagged_flies(
+    df: pd.DataFrame, *, threshold: float = NON_REACTIVE_SPAN_PX
+) -> tuple[pd.DataFrame, Set[Tuple[str, str, str]]]:
+    mask = _non_reactive_mask(df, threshold=threshold)
+    keys = _fly_keys(df)
+    flagged_pairs = set(keys[mask])
+    if not flagged_pairs:
+        return df.copy(), set()
+
+    keep_mask = ~keys.isin(flagged_pairs)
+    filtered = df.loc[keep_mask].copy()
+    return filtered, flagged_pairs
+
+
+def _write_empty_predictions(output_csv: Path, columns: Sequence[str]) -> None:
+    cols = list(columns)
+    if "prediction" not in cols:
+        cols.append("prediction")
+    pd.DataFrame(columns=cols).to_csv(output_csv, index=False)
 
 
 def main(cfg: Settings) -> None:
@@ -28,11 +100,41 @@ def main(cfg: Settings) -> None:
     if not model_path.exists():
         raise FileNotFoundError(f"Model file not found: {model_path}")
 
+    df = pd.read_csv(data_csv)
+    filtered_df, flagged_pairs = _drop_flagged_flies(df)
+    if filtered_df.empty:
+        print(
+            "[REACTION] All candidate flies were flagged non-reactive; "
+            "skipping prediction model and writing empty spreadsheet."
+        )
+        _write_empty_predictions(output_csv, df.columns)
+        return
+
+    data_csv_for_cli = data_csv
+    temp_path: Path | None = None
+
+    if len(filtered_df) != len(df):
+        flagged_labels = ", ".join(
+            f"{dataset}::{fly}::{fly_number}" for dataset, fly, fly_number in sorted(flagged_pairs)
+        )
+        print(
+            f"[REACTION] Skipping non-reactive flies before prediction: {flagged_labels}"
+        )
+        tmp = tempfile.NamedTemporaryFile(
+            "w", suffix="_non_reactive_filtered.csv", delete=False
+        )
+        try:
+            filtered_df.to_csv(tmp.name, index=False)
+        finally:
+            tmp.close()
+        data_csv_for_cli = Path(tmp.name)
+        temp_path = data_csv_for_cli
+
     cmd = [
         "flybehavior-response",
         "predict",
         "--data-csv",
-        str(data_csv),
+        str(data_csv_for_cli),
         "--model-path",
         str(model_path),
         "--output-csv",
@@ -47,6 +149,14 @@ def main(cfg: Settings) -> None:
         extra_paths.append(pythonpath)
     env["PYTHONPATH"] = os.pathsep.join(extra_paths)
 
-    print("[REACTION] Running flybehavior-response →", " ".join(cmd))
-    subprocess.run(cmd, check=True, env=env)
+    try:
+        print("[REACTION] Running flybehavior-response →", " ".join(cmd))
+        subprocess.run(cmd, check=True, env=env)
+    finally:
+        if temp_path is not None:
+            try:
+                temp_path.unlink()
+            except OSError:
+                pass
+
     print(f"[REACTION] Wrote predictions to {output_csv}")

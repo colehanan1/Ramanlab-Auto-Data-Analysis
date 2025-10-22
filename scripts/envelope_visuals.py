@@ -36,7 +36,6 @@ import numpy as np
 import pandas as pd
 from matplotlib import gridspec
 from matplotlib.colors import BoundaryNorm, ListedColormap
-from matplotlib.patches import Patch
 
 
 # ---------------------------------------------------------------------------
@@ -555,15 +554,25 @@ def generate_reaction_matrices(cfg: MatrixPlotConfig) -> None:
     fly_number_vals = df["fly_number"].to_numpy(str)
     trial_vals = df["trial_label"].to_numpy(str)
     fps_vals = df["fps"].to_numpy(float)
+    non_reactive_vals = df["_non_reactive"].to_numpy(bool)
 
     scores = []
-    for env_row, dataset_val, fly_val, fly_number_val, trial_val, fps_val in zip(
+    for (
+        env_row,
+        dataset_val,
+        fly_val,
+        fly_number_val,
+        trial_val,
+        fps_val,
+        non_reactive_val,
+    ) in zip(
         env_data,
         dataset_vals,
         fly_vals,
         fly_number_vals,
         trial_vals,
         fps_vals,
+        non_reactive_vals,
         strict=False,
     ):
         env = _extract_env_row(env_row)
@@ -577,6 +586,7 @@ def generate_reaction_matrices(cfg: MatrixPlotConfig) -> None:
                 "trial_num": _trial_num(trial_val),
                 "during_hit": during_hit,
                 "after_hit": after_hit,
+                "_non_reactive": bool(non_reactive_val),
             }
         )
 
@@ -607,6 +617,15 @@ def generate_reaction_matrices(cfg: MatrixPlotConfig) -> None:
                 .drop_duplicates()
                 .itertuples(index=False)
             }
+            if flagged_pairs:
+                fly_pair_series = subset[["fly", "fly_number"]].apply(tuple, axis=1)
+                keep_mask = ~fly_pair_series.isin(flagged_pairs)
+                subset = subset.loc[keep_mask]
+                if subset.empty:
+                    print(
+                        "[INFO] reaction_matrices: skipping", odor, "because all flies were non-reactive."
+                    )
+                    continue
             fly_pairs = [
                 (row.fly, row.fly_number)
                 for row in subset[["fly", "fly_number"]].drop_duplicates().itertuples(index=False)
@@ -685,28 +704,6 @@ def generate_reaction_matrices(cfg: MatrixPlotConfig) -> None:
                     )
 
             _plot_category_counts(ax_dc, during_counts, n_flies, "During — Fly Reaction Categories")
-
-            red_patch = Patch(
-                facecolor="red",
-                edgecolor="red",
-                alpha=0.30,
-                label=f"Odor transit {cfg.latency_sec:.2f} s (pre-DURING)",
-            )
-            flagged_handle = plt.Line2D(
-                [0],
-                [0],
-                marker="*",
-                color="red",
-                linestyle="None",
-                markersize=10,
-                label=f"Non-reactive span ≤ {NON_REACTIVE_SPAN_PX:g}px",
-            )
-            ax_during.legend(
-                handles=[red_patch, flagged_handle],
-                loc="upper left",
-                frameon=True,
-                fontsize=9,
-            )
 
             shift_frac = cfg.bottom_shift_in / fig_h if fig_h else 0.0
             for axis in (ax_dc,):
@@ -810,6 +807,7 @@ def generate_envelope_plots(cfg: EnvelopePlotConfig) -> None:
 
     df["fps"] = df["fps"].replace([np.inf, -np.inf], np.nan).fillna(cfg.fps_default)
     df["dataset_canon"] = df["dataset"].map(_canon_dataset)
+    df["_non_reactive"] = compute_non_reactive_flags(df)
 
     env_data = df[env_cols].to_numpy(np.float32, copy=False)
     fps_values = df["fps"].to_numpy(float)

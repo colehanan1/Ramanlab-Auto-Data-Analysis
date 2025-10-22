@@ -130,6 +130,15 @@ def generate_reaction_matrices_from_csv(cfg: SpreadsheetMatrixConfig) -> None:
                 .drop_duplicates()
                 .itertuples(index=False)
             }
+            if flagged_pairs:
+                fly_pair_series = subset[["fly", "fly_number"]].apply(tuple, axis=1)
+                keep_mask = ~fly_pair_series.isin(flagged_pairs)
+                subset = subset.loc[keep_mask]
+                if subset.empty:
+                    print(
+                        "[INFO] reaction_matrix_csv: skipping", odor, "because all flies were non-reactive."
+                    )
+                    continue
             fly_pairs = [
                 (row.fly, row.fly_number)
                 for row in subset[["fly", "fly_number"]].drop_duplicates().itertuples(index=False)
