@@ -198,7 +198,7 @@ def test_build_wide_csv_adds_auc_columns(tmp_path):
     after = np.full(AFTER_FRAMES, 1.0)
     values = np.concatenate([before, during, after])
     pd.DataFrame({"envelope_of_rms": values}).to_csv(csv_path, index=False)
-    stats_path = fly_dir / "session_a_global_distance_stats_class_2.json"
+    stats_path = fly_dir / "fly1_global_distance_stats_class_2.json"
     stats_path.write_text(json.dumps({"global_min": 120.0, "global_max": 135.0}))
 
     out_csv = tmp_path / "all_envelope_rows_wide.csv"

@@ -581,36 +581,114 @@ def _index_testing(entries: Sequence[tuple[str, Path, str]]) -> tuple[dict[str, 
     return indexed, fallback
 
 
-def _load_global_distance_stats(fly_dir: Path) -> tuple[float, float]:
-    """Aggregate global min/max distance stats for a fly directory."""
+_STATS_SUFFIX = "_global_distance_stats_class_2.json"
+_FLY_STATS_PATTERN = re.compile(r"fly[_-]?(\d+)_global_distance_stats_class_2\.json$", re.IGNORECASE)
 
-    stats_files = sorted(fly_dir.glob("*_global_distance_stats_class_2.json"))
-    legacy = fly_dir / "global_distance_stats_class_2.json"
-    if legacy.exists():
-        stats_files.append(legacy)
 
-    mins: list[float] = []
-    maxs: list[float] = []
-    for stats_path in stats_files:
-        try:
-            payload = json.loads(stats_path.read_text(encoding="utf-8"))
-        except Exception as exc:
-            print(f"[WARN] build_wide_csv: failed to parse {stats_path.name}: {exc}")
+def _parse_distance_stats(stats_path: Path) -> tuple[float, float] | None:
+    try:
+        payload = json.loads(stats_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        print(f"[WARN] build_wide_csv: failed to parse {stats_path}: {exc}")
+        return None
+
+    try:
+        gmin = float(payload.get("global_min", float("nan")))
+        gmax = float(payload.get("global_max", float("nan")))
+    except (TypeError, ValueError):
+        print(
+            f"[WARN] build_wide_csv: non-numeric stats in {stats_path.name}: {payload}"
+        )
+        return None
+
+    if not (math.isfinite(gmin) and math.isfinite(gmax)):
+        print(
+            f"[WARN] build_wide_csv: invalid stats in {stats_path.name}: {payload}"
+        )
+        return None
+
+    return float(gmin), float(gmax)
+
+
+def _load_global_distance_stats(
+    fly_dir: Path,
+) -> tuple[dict[str, tuple[float, float]], tuple[float, float] | None]:
+    """Return indexed global stats for each fly plus any legacy aggregate."""
+
+    per_fly: dict[str, tuple[float, float]] = {}
+    legacy: tuple[float, float] | None = None
+    seen: set[Path] = set()
+
+    for stats_path in sorted(fly_dir.rglob(f"*{_STATS_SUFFIX}")):
+        if stats_path in seen or not stats_path.is_file():
             continue
-        try:
-            gmin = float(payload.get("global_min", float("nan")))
-            gmax = float(payload.get("global_max", float("nan")))
-        except (TypeError, ValueError):
+        seen.add(stats_path)
+
+        stats = _parse_distance_stats(stats_path)
+        if stats is None:
+            continue
+
+        name_lower = stats_path.name.lower()
+        if name_lower == "global_distance_stats_class_2.json":
+            legacy = stats
+            continue
+
+        match = _FLY_STATS_PATTERN.match(name_lower)
+        if match:
+            fly_key = str(int(match.group(1)))
+            if fly_key in per_fly and per_fly[fly_key] != stats:
+                print(
+                    f"[WARN] build_wide_csv: duplicate stats for fly{fly_key} in {fly_dir}"
+                )
+            per_fly[fly_key] = stats
+            continue
+
+        # Unknown naming convention – retain for diagnostics but do not map.
+        print(
+            f"[WARN] build_wide_csv: unrecognised stats filename {stats_path.name} in {fly_dir}"
+        )
+
+    return per_fly, legacy
+
+
+def _resolve_distance_stats(
+    per_fly: Mapping[str, tuple[float, float]],
+    legacy: tuple[float, float] | None,
+    fly_dir: Path,
+    fly_number: Optional[int],
+    csv_path: Path,
+) -> tuple[float, float]:
+    context = f"{fly_dir.name}/{csv_path.name}"
+    if fly_number is not None:
+        key = str(fly_number)
+        stats = per_fly.get(key)
+        if stats is not None:
+            return stats
+        if legacy is not None:
             print(
-                f"[WARN] build_wide_csv: non-numeric stats in {stats_path.name}: {payload}")
-            continue
-        if math.isfinite(gmin):
-            mins.append(gmin)
-        if math.isfinite(gmax):
-            maxs.append(gmax)
+                f"[WARN] build_wide_csv: {context} missing fly-specific stats; using legacy aggregate."
+            )
+            return legacy
+        print(
+            f"[WARN] build_wide_csv: {context} missing fly{key} stats; marking as NaN."
+        )
+        return (float("nan"), float("nan"))
 
-    if mins and maxs:
-        return (min(mins), max(maxs))
+    if legacy is not None:
+        return legacy
+
+    if len(per_fly) == 1:
+        key, stats = next(iter(per_fly.items()))
+        print(
+            f"[WARN] build_wide_csv: {context} lacks fly number; using stats from fly{key}."
+        )
+        return stats
+
+    if per_fly:
+        print(
+            f"[WARN] build_wide_csv: {context} lacks fly number and multiple stats are available; marking as NaN."
+        )
+
     return (float("nan"), float("nan"))
 
 
@@ -1109,8 +1187,7 @@ def build_wide_csv(
         for fly_dir in sorted(p for p in root.iterdir() if p.is_dir()):
             fly = fly_dir.name
             print(f"[DEBUG] build_wide_csv: scanning fly_dir={fly_dir}")
-            gmin, gmax = _load_global_distance_stats(fly_dir)
-            flagged = is_non_reactive_span(gmin, gmax)
+            per_fly_stats, legacy_stats = _load_global_distance_stats(fly_dir)
             for csv_path in _find_trial_csvs(fly_dir):
                 try:
                     header = pd.read_csv(csv_path, nrows=0)
@@ -1136,6 +1213,10 @@ def build_wide_csv(
                     print(
                         f"[DEBUG] build_wide_csv: {csv_path.name} fly_number={fly_number_label}"
                     )
+                gmin, gmax = _resolve_distance_stats(
+                    per_fly_stats, legacy_stats, fly_dir, fly_number, csv_path
+                )
+                flagged = is_non_reactive_span(gmin, gmax)
                 try:
                     n_rows = pd.read_csv(csv_path, usecols=[measure]).shape[0]
                 except Exception as exc:
