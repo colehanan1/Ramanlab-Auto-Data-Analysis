@@ -28,6 +28,7 @@ from matplotlib.patches import Patch
 from envelope_visuals import (
     DISPLAY_LABEL,
     ODOR_ORDER,
+    compute_non_reactive_flags,
     resolve_dataset_output_dir,
     should_write,
     _canon_dataset,
@@ -36,6 +37,7 @@ from envelope_visuals import (
     _fly_row_label,
     _fly_sort_key,
     _normalise_fly_columns,
+    NON_REACTIVE_SPAN_PX,
     _order_suffix,
     _plot_category_counts,
     _style_trained_xticks,
@@ -81,6 +83,7 @@ def _load_predictions(csv_path: Path) -> pd.DataFrame:
     df["trial_label"] = df["trial_label"].astype(str).str.strip()
     df["prediction"] = pd.to_numeric(df["prediction"], errors="coerce")
     df = _normalise_fly_columns(df)
+    df["_non_reactive"] = compute_non_reactive_flags(df)
 
     invalid = df["prediction"].dropna().unique()
     if not set(invalid).issubset({0, 1}):
@@ -119,6 +122,14 @@ def generate_reaction_matrices_from_csv(cfg: SpreadsheetMatrixConfig) -> None:
 
             subset = subset.copy()
             subset = _normalise_fly_columns(subset)
+            flagged_pairs = {
+                (row.fly, row.fly_number)
+                for row in subset[
+                    subset.get("_non_reactive", False).astype(bool)
+                ][["fly", "fly_number"]]
+                .drop_duplicates()
+                .itertuples(index=False)
+            }
             fly_pairs = [
                 (row.fly, row.fly_number)
                 for row in subset[["fly", "fly_number"]].drop_duplicates().itertuples(index=False)
@@ -175,6 +186,19 @@ def generate_reaction_matrices_from_csv(cfg: SpreadsheetMatrixConfig) -> None:
                 _style_trained_xticks(ax_during, pretty_labels, trained_display, xtick_fs)
                 ax_during.set_yticks([])
                 ax_during.set_ylabel(f"{n_flies} Flies", fontsize=11)
+                for idx, pair in enumerate(fly_pairs):
+                    if pair in flagged_pairs:
+                        ax_during.text(
+                            -0.35,
+                            idx,
+                            "*",
+                            ha="right",
+                            va="center",
+                            color="red",
+                            fontsize=12,
+                            fontweight="bold",
+                            clip_on=False,
+                        )
 
                 _plot_category_counts(ax_dc, during_counts, n_flies, "During — Fly Reaction Categories")
 
@@ -182,6 +206,16 @@ def generate_reaction_matrices_from_csv(cfg: SpreadsheetMatrixConfig) -> None:
                     Patch(facecolor="black", edgecolor="black", label="Prediction = 1"),
                     Patch(facecolor="white", edgecolor="black", label="Prediction = 0"),
                 ]
+                flagged_handle = plt.Line2D(
+                    [0],
+                    [0],
+                    marker="*",
+                    color="red",
+                    linestyle="None",
+                    markersize=10,
+                    label=f"Non-reactive span ≤ {NON_REACTIVE_SPAN_PX:g}px",
+                )
+                legend_handles.append(flagged_handle)
                 ax_during.legend(handles=legend_handles, loc="upper left", frameon=True, fontsize=9)
 
                 shift_frac = cfg.bottom_shift_in / fig_h if fig_h else 0.0
@@ -210,6 +244,8 @@ def generate_reaction_matrices_from_csv(cfg: SpreadsheetMatrixConfig) -> None:
                     with row_key_path.open("w", encoding="utf-8") as fh:
                         for idx, (fly, fly_number) in enumerate(fly_pairs):
                             label = _fly_row_label(fly, fly_number)
+                            if (fly, fly_number) in flagged_pairs:
+                                label = f"* {label}"
                             fh.write(f"Row {idx}: {label}\n")
 
                 if order == "trained-first":

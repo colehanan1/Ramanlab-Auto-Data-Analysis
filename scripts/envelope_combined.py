@@ -53,8 +53,10 @@ from scripts import envelope_visuals
 from scripts.envelope_visuals import (
     EnvelopePlotConfig,
     MatrixPlotConfig,
+    compute_non_reactive_flags,
     generate_envelope_plots,
     generate_reaction_matrices,
+    is_non_reactive_span,
     resolve_dataset_output_dir,
     should_write,
 )
@@ -579,6 +581,39 @@ def _index_testing(entries: Sequence[tuple[str, Path, str]]) -> tuple[dict[str, 
     return indexed, fallback
 
 
+def _load_global_distance_stats(fly_dir: Path) -> tuple[float, float]:
+    """Aggregate global min/max distance stats for a fly directory."""
+
+    stats_files = sorted(fly_dir.glob("*_global_distance_stats_class_2.json"))
+    legacy = fly_dir / "global_distance_stats_class_2.json"
+    if legacy.exists():
+        stats_files.append(legacy)
+
+    mins: list[float] = []
+    maxs: list[float] = []
+    for stats_path in stats_files:
+        try:
+            payload = json.loads(stats_path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            print(f"[WARN] build_wide_csv: failed to parse {stats_path.name}: {exc}")
+            continue
+        try:
+            gmin = float(payload.get("global_min", float("nan")))
+            gmax = float(payload.get("global_max", float("nan")))
+        except (TypeError, ValueError):
+            print(
+                f"[WARN] build_wide_csv: non-numeric stats in {stats_path.name}: {payload}")
+            continue
+        if math.isfinite(gmin):
+            mins.append(gmin)
+        if math.isfinite(gmax):
+            maxs.append(gmax)
+
+    if mins and maxs:
+        return (min(mins), max(maxs))
+    return (float("nan"), float("nan"))
+
+
 def _find_trial_csvs(fly_dir: Path) -> Iterator[Path]:
     base = fly_dir / "angle_distance_rms_envelope"
     if not base.is_dir():
@@ -1060,6 +1095,7 @@ def build_wide_csv(
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
     items: list[dict[str, object]] = []
+    flagged_summary: dict[tuple[str, str, str], tuple[float, float]] = {}
     max_len = 0
     exclude = {
         Path(root).expanduser().resolve() for root in (exclude_roots or ())
@@ -1073,6 +1109,8 @@ def build_wide_csv(
         for fly_dir in sorted(p for p in root.iterdir() if p.is_dir()):
             fly = fly_dir.name
             print(f"[DEBUG] build_wide_csv: scanning fly_dir={fly_dir}")
+            gmin, gmax = _load_global_distance_stats(fly_dir)
+            flagged = is_non_reactive_span(gmin, gmax)
             for csv_path in _find_trial_csvs(fly_dir):
                 try:
                     header = pd.read_csv(csv_path, nrows=0)
@@ -1109,10 +1147,15 @@ def build_wide_csv(
                         "fly": fly,
                         "fly_key": f"{dataset}::{fly}",
                         "fly_number": fly_number_label,
+                        "global_min": float(gmin),
+                        "global_max": float(gmax),
+                        "non_reactive_flag": 1.0 if flagged else 0.0,
                         "csv_path": csv_path,
                         "measure_col": measure,
                     }
                 )
+                if flagged:
+                    flagged_summary[(dataset, fly, fly_number_label)] = (float(gmin), float(gmax))
                 max_len = max(max_len, n_rows)
 
     if not items:
@@ -1146,7 +1189,10 @@ def build_wide_csv(
         for key, (total, count) in fly_before_totals.items()
     }
 
-    metadata = ["dataset", "fly", "fly_number", "trial_type", "trial_label", "fps"]
+    meta_prefix = ["dataset", "fly", "fly_number"]
+    stat_columns = ["global_min", "global_max", "non_reactive_flag"]
+    meta_suffix = ["trial_type", "trial_label", "fps"]
+    metadata = meta_prefix + stat_columns + meta_suffix
     value_cols = [f"dir_val_{idx}" for idx in range(max_len)]
     header_df = pd.DataFrame(columns=metadata + list(AUC_COLUMNS) + value_cols)
     header_df.to_csv(out_path, index=False)
@@ -1196,10 +1242,16 @@ def build_wide_csv(
             fly_before_mean=fly_before_means.get(item["fly_key"], float("nan")),
         )
 
+        gmin = float(item.get("global_min", float("nan")))
+        gmax = float(item.get("global_max", float("nan")))
+        non_reactive = float(item.get("non_reactive_flag", 0.0))
         row = [
             item["dataset"],
             item["fly"],
             fly_number_label,
+            gmin,
+            gmax,
+            non_reactive,
             trial_type,
             label,
             float(fps),
@@ -1221,6 +1273,22 @@ def build_wide_csv(
             out_path, index=False, mode="a", header=False
         )
 
+    flagged_path = out_path.with_name(out_path.stem + "_flagged_flies.txt")
+    with flagged_path.open("w", encoding="utf-8") as fh:
+        fh.write(
+            f"# Flies flagged as non-reactive (global span ≤ {envelope_visuals.NON_REACTIVE_SPAN_PX:g} px)\n"
+        )
+        fh.write("# dataset,fly,fly_number,global_min,global_max\n")
+        if flagged_summary:
+            for key in sorted(flagged_summary):
+                dataset, fly, fly_number = key
+                gmin, gmax = flagged_summary[key]
+                gmin_txt = f"{gmin:.3f}" if math.isfinite(gmin) else "nan"
+                gmax_txt = f"{gmax:.3f}" if math.isfinite(gmax) else "nan"
+                fh.write(f"{dataset},{fly},{fly_number},{gmin_txt},{gmax_txt}\n")
+        else:
+            fh.write("# None detected\n")
+    print(f"[OK] Wrote flagged fly summary: {flagged_path}")
     print(f"[OK] Wrote combined direction-value table: {out_path}")
 
 
@@ -1245,6 +1313,12 @@ def wide_to_matrix(input_csv: str, output_dir: str) -> None:
         )
 
     metric_cols = [col for col in AUC_COLUMNS if col in df.columns]
+    extra_metrics = [
+        col
+        for col in ("global_min", "global_max", "non_reactive_flag")
+        if col in df.columns
+    ]
+    metric_cols.extend(extra_metrics)
     env_cols = [
         column
         for column in df.columns
@@ -1356,6 +1430,7 @@ def overlay_sources(
         raise RuntimeError("No sources available for overlay plotting.")
 
     combined = pd.concat(frames, ignore_index=True)
+    combined["_non_reactive"] = compute_non_reactive_flags(combined)
     out_dir = Path(output_dir).expanduser().resolve()
 
     odor_latency = max(odor_latency_s, 0.0)
@@ -1513,11 +1588,13 @@ def overlay_sources(
             title=f"Threshold: k = {threshold_mult}",
             title_fontsize=9,
         )
+        fly_flagged = bool(df_fly.get("_non_reactive", pd.Series(False)).any())
         fig.suptitle(
             f"{fly} — Envelope overlay by testing trial (global μ per source, σ per trial)",
             y=0.995,
             fontsize=14,
             weight="bold",
+            color="tab:red" if fly_flagged else "black",
         )
         fig.tight_layout(rect=[0, 0, 1, 0.97])
 

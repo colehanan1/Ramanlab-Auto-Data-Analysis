@@ -92,6 +92,7 @@ ODOR_ORDER = [
 
 TRAINED_FIRST_ORDER = (2, 4, 5, 1, 3, 6, 7, 8, 9)
 HEXANOL_LABEL = "Hexanol"
+NON_REACTIVE_SPAN_PX = 20.0
 
 
 # ---------------------------------------------------------------------------
@@ -267,6 +268,38 @@ def _extract_env_row(env_row: np.ndarray) -> np.ndarray:
     if not np.any(mask):
         return np.empty(0, dtype=float)
     return env[mask]
+
+
+def is_non_reactive_span(global_min: object, global_max: object, *, threshold: float = NON_REACTIVE_SPAN_PX) -> bool:
+    """Return ``True`` when the provided span suggests no training reaction."""
+
+    try:
+        gmin = float(global_min)
+    except (TypeError, ValueError):
+        return False
+    try:
+        gmax = float(global_max)
+    except (TypeError, ValueError):
+        return False
+
+    if not (math.isfinite(gmin) and math.isfinite(gmax)):
+        return False
+    return abs(gmax - gmin) <= float(threshold)
+
+
+def compute_non_reactive_flags(
+    df: pd.DataFrame, *, threshold: float = NON_REACTIVE_SPAN_PX
+) -> pd.Series:
+    """Return a boolean mask flagging flies whose global span ≤ threshold."""
+
+    if "global_min" not in df.columns or "global_max" not in df.columns:
+        return pd.Series(False, index=df.index)
+
+    gmin = pd.to_numeric(df["global_min"], errors="coerce")
+    gmax = pd.to_numeric(df["global_max"], errors="coerce")
+    span = (gmax - gmin).abs()
+    flags = gmin.notna() & gmax.notna() & span.le(float(threshold))
+    return flags.fillna(False)
 
 
 def _compute_theta(
@@ -498,6 +531,7 @@ def generate_reaction_matrices(cfg: MatrixPlotConfig) -> None:
     df["fps"] = df["fps"].replace([np.inf, -np.inf], np.nan).fillna(cfg.fps_default)
     df["dataset_canon"] = df["dataset"].map(_canon_dataset)
     df = _normalise_fly_columns(df)
+    df["_non_reactive"] = compute_non_reactive_flags(df)
 
     env_data = df[env_cols].to_numpy(np.float32, copy=False)
     dataset_vals = df["dataset_canon"].to_numpy(str)
@@ -550,6 +584,14 @@ def generate_reaction_matrices(cfg: MatrixPlotConfig) -> None:
 
             subset = subset.copy()
             subset = _normalise_fly_columns(subset)
+            flagged_pairs = {
+                (row.fly, row.fly_number)
+                for row in subset[
+                    subset.get("_non_reactive", False).astype(bool)
+                ][["fly", "fly_number"]]
+                .drop_duplicates()
+                .itertuples(index=False)
+            }
             fly_pairs = [
                 (row.fly, row.fly_number)
                 for row in subset[["fly", "fly_number"]].drop_duplicates().itertuples(index=False)
@@ -613,6 +655,19 @@ def generate_reaction_matrices(cfg: MatrixPlotConfig) -> None:
             _style_trained_xticks(ax_during, pretty_labels, trained_display, xtick_fs)
             ax_during.set_yticks([])
             ax_during.set_ylabel(f"{n_flies} Flies", fontsize=11)
+            for idx, pair in enumerate(fly_pairs):
+                if pair in flagged_pairs:
+                    ax_during.text(
+                        -0.35,
+                        idx,
+                        "*",
+                        ha="right",
+                        va="center",
+                        color="red",
+                        fontsize=12,
+                        fontweight="bold",
+                        clip_on=False,
+                    )
 
             _plot_category_counts(ax_dc, during_counts, n_flies, "During — Fly Reaction Categories")
 
@@ -622,7 +677,21 @@ def generate_reaction_matrices(cfg: MatrixPlotConfig) -> None:
                 alpha=0.30,
                 label=f"Odor transit {cfg.latency_sec:.2f} s (pre-DURING)",
             )
-            ax_during.legend(handles=[red_patch], loc="upper left", frameon=True, fontsize=9)
+            flagged_handle = plt.Line2D(
+                [0],
+                [0],
+                marker="*",
+                color="red",
+                linestyle="None",
+                markersize=10,
+                label=f"Non-reactive span ≤ {NON_REACTIVE_SPAN_PX:g}px",
+            )
+            ax_during.legend(
+                handles=[red_patch, flagged_handle],
+                loc="upper left",
+                frameon=True,
+                fontsize=9,
+            )
 
             shift_frac = cfg.bottom_shift_in / fig_h if fig_h else 0.0
             for axis in (ax_dc,):
@@ -650,6 +719,8 @@ def generate_reaction_matrices(cfg: MatrixPlotConfig) -> None:
                 with row_key_path.open("w", encoding="utf-8") as fh:
                     for idx, (fly, fly_number) in enumerate(fly_pairs):
                         label = _fly_row_label(fly, fly_number)
+                        if (fly, fly_number) in flagged_pairs:
+                            label = f"* {label}"
                         fh.write(f"Row {idx}: {label}\n")
 
             if order == "trained-first":
@@ -863,11 +934,13 @@ def generate_envelope_plots(cfg: EnvelopePlotConfig) -> None:
         fly_caption = fly
         if fly_number_label.upper() != "UNKNOWN":
             fly_caption = f"{fly} — Fly {fly_number_label}"
+        fly_flagged = bool(fly_df.get("_non_reactive", pd.Series(False)).any())
         fig.suptitle(
             f"{fly_caption} {trial_type.title()} Trials — RMS of Proboscis vs Eye Distance",
             y=0.995,
             fontsize=14,
             weight="bold",
+            color="tab:red" if fly_flagged else "black",
         )
         fig.tight_layout(rect=[0, 0, 1, 0.97])
 

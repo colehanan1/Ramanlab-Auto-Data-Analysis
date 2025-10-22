@@ -1,4 +1,5 @@
 import json
+import math
 import sys
 from pathlib import Path
 
@@ -197,6 +198,8 @@ def test_build_wide_csv_adds_auc_columns(tmp_path):
     after = np.full(AFTER_FRAMES, 1.0)
     values = np.concatenate([before, during, after])
     pd.DataFrame({"envelope_of_rms": values}).to_csv(csv_path, index=False)
+    stats_path = fly_dir / "session_a_global_distance_stats_class_2.json"
+    stats_path.write_text(json.dumps({"global_min": 120.0, "global_max": 135.0}))
 
     out_csv = tmp_path / "all_envelope_rows_wide.csv"
     build_wide_csv([str(dataset_root)], str(out_csv), measure_cols=["envelope_of_rms"], fps_fallback=40.0)
@@ -206,3 +209,14 @@ def test_build_wide_csv_adds_auc_columns(tmp_path):
         assert column in df.columns
     assert np.isfinite(df.loc[0, "AUC-During"])
     assert abs(df.loc[0, "Peak-Value"] - 5.0) < 1e-6
+    assert "global_min" in df.columns
+    assert "global_max" in df.columns
+    assert "non_reactive_flag" in df.columns
+    assert math.isclose(df.loc[0, "global_min"], 120.0)
+    assert math.isclose(df.loc[0, "global_max"], 135.0)
+    assert df.loc[0, "non_reactive_flag"] == 1.0
+
+    flagged_file = out_csv.with_name(out_csv.stem + "_flagged_flies.txt")
+    assert flagged_file.exists()
+    flagged_lines = [line for line in flagged_file.read_text().splitlines() if line and not line.startswith("#")]
+    assert any("session_a" in line and "135.000" in line for line in flagged_lines)
