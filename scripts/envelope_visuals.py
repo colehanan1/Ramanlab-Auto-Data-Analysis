@@ -302,6 +302,22 @@ def compute_non_reactive_flags(
     return flags.fillna(False)
 
 
+def non_reactive_mask(df: pd.DataFrame) -> pd.Series:
+    """Return a boolean Series for the ``_non_reactive`` column, if present."""
+
+    series = df.get("_non_reactive")
+    if series is None:
+        return pd.Series(False, index=df.index, dtype=bool)
+
+    if not isinstance(series, pd.Series):
+        series = pd.Series(series, index=df.index)
+
+    mask = series.astype(bool)
+    if not mask.index.equals(df.index):
+        mask = mask.reindex(df.index, fill_value=False)
+    return mask.fillna(False)
+
+
 def _compute_theta(
     env: np.ndarray, fps: float, baseline_until_s: float, std_mult: float
 ) -> float:
@@ -584,11 +600,10 @@ def generate_reaction_matrices(cfg: MatrixPlotConfig) -> None:
 
             subset = subset.copy()
             subset = _normalise_fly_columns(subset)
+            flagged_mask = non_reactive_mask(subset)
             flagged_pairs = {
                 (row.fly, row.fly_number)
-                for row in subset[
-                    subset.get("_non_reactive", False).astype(bool)
-                ][["fly", "fly_number"]]
+                for row in subset[flagged_mask][["fly", "fly_number"]]
                 .drop_duplicates()
                 .itertuples(index=False)
             }
@@ -934,7 +949,7 @@ def generate_envelope_plots(cfg: EnvelopePlotConfig) -> None:
         fly_caption = fly
         if fly_number_label.upper() != "UNKNOWN":
             fly_caption = f"{fly} — Fly {fly_number_label}"
-        fly_flagged = bool(fly_df.get("_non_reactive", pd.Series(False)).any())
+        fly_flagged = bool(non_reactive_mask(fly_df).any())
         fig.suptitle(
             f"{fly_caption} {trial_type.title()} Trials — RMS of Proboscis vs Eye Distance",
             y=0.995,

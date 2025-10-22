@@ -29,6 +29,7 @@ from envelope_visuals import (
     DISPLAY_LABEL,
     ODOR_ORDER,
     compute_non_reactive_flags,
+    non_reactive_mask,
     resolve_dataset_output_dir,
     should_write,
     _canon_dataset,
@@ -122,11 +123,10 @@ def generate_reaction_matrices_from_csv(cfg: SpreadsheetMatrixConfig) -> None:
 
             subset = subset.copy()
             subset = _normalise_fly_columns(subset)
+            flagged_mask = non_reactive_mask(subset)
             flagged_pairs = {
                 (row.fly, row.fly_number)
-                for row in subset[
-                    subset.get("_non_reactive", False).astype(bool)
-                ][["fly", "fly_number"]]
+                for row in subset[flagged_mask][["fly", "fly_number"]]
                 .drop_duplicates()
                 .itertuples(index=False)
             }
