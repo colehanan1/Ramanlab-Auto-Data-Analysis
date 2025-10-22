@@ -75,7 +75,7 @@ DISPLAY_LABEL = {
     "opto_benz": "Benzaldehyde",
     "opto_EB": "Ethyl Butyrate",
     "opto_benz_1": "Benzaldehyde",
-    "opto_hex": "Optogenetics Hexanol",
+    "opto_hex": "Hexanol",
 }
 
 ODOR_ORDER = [
@@ -91,7 +91,7 @@ ODOR_ORDER = [
 ]
 
 TRAINED_FIRST_ORDER = (2, 4, 5, 1, 3, 6, 7, 8, 9)
-HEXANOL_LABEL = "Optogenetics Hexanol"
+HEXANOL_LABEL = "Hexanol"
 
 
 # ---------------------------------------------------------------------------
@@ -904,7 +904,7 @@ def _parse_matrices_args(subparser: argparse.ArgumentParser) -> None:
     subparser.add_argument(
         "--exclude-hexanol",
         action="store_true",
-        help="Exclude Optogenetics Hexanol from 'other' reaction counts.",
+        help="Exclude Hexanol from 'other' reaction counts.",
     )
     subparser.add_argument("--overwrite", action="store_true", help="Rebuild plots even if the target files exist.")
 

@@ -268,7 +268,7 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--exclude-hexanol",
         action="store_true",
-        help="Exclude Optogenetics Hexanol from 'other' reaction counts.",
+        help="Exclude Hexanol from 'other' reaction counts.",
     )
     parser.add_argument("--overwrite", action="store_true", help="Rebuild plots even if the target files exist.")
     return parser.parse_args(argv)
