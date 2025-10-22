@@ -91,7 +91,7 @@ ODOR_ORDER = [
 
 TRAINED_FIRST_ORDER = (2, 4, 5, 1, 3, 6, 7, 8, 9)
 HEXANOL_LABEL = "Hexanol"
-NON_REACTIVE_SPAN_PX = 20.0
+NON_REACTIVE_SPAN_PX = 15.0
 
 
 # ---------------------------------------------------------------------------
@@ -689,6 +689,19 @@ def generate_reaction_matrices(cfg: MatrixPlotConfig) -> None:
             _style_trained_xticks(ax_during, pretty_labels, trained_display, xtick_fs)
             ax_during.set_yticks([])
             ax_during.set_ylabel(f"{n_flies} Flies", fontsize=11)
+            for idx, pair in enumerate(fly_pairs):
+                if pair in flagged_pairs:
+                    ax_during.text(
+                        -0.35,
+                        idx,
+                        "*",
+                        ha="right",
+                        va="center",
+                        color="red",
+                        fontsize=12,
+                        fontweight="bold",
+                        clip_on=False,
+                    )
 
             _plot_category_counts(ax_dc, during_counts, n_flies, "During — Fly Reaction Categories")
 

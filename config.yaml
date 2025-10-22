@@ -1,7 +1,7 @@
 
 # Project configuration
 model_path: "/home/ramanlab/Documents/cole/sam2/notebooks/YOLOProjectProboscisLegs/runs/obb/train5/weights/best.pt"
-main_directory: "/home/ramanlab/Documents/cole/Data/flys/opto_EB/"
+main_directory: "/home/ramanlab/Documents/cole/Data/flys/opto_benz_1/"
 
 reaction_prediction:
   data_csv: "/home/ramanlab/Documents/cole/Data/Opto/Combined/all_envelope_rows_wide.csv"
@@ -113,7 +113,7 @@ analysis:
       overwrite: false
   combined:
     combine:
-      root: "/home/ramanlab/Documents/cole/Data/flys/opto_EB/"
+      root: "/home/ramanlab/Documents/cole/Data/flys/opto_benz_1/"
       fps_default: 40.0
       window_sec: 0.25
       odor_on: 30.0
@@ -121,8 +121,8 @@ analysis:
       odor_latency_s: 2.15
     wide:
       mirror:
-        - source: "/home/ramanlab/Documents/cole/Data/flys/opto_EB/"
-          destination: "/securedstorage/DATAsec/cole/Data-secured/opto_Eb/"
+        - source: "/home/ramanlab/Documents/cole/Data/flys/opto_benz_1/"
+          destination: "/securedstorage/DATAsec/cole/Data-secured/opto_benz_1/"
       roots:
         - "/securedstorage/DATAsec/cole/Data-secured/opto_EB/"
         - "/securedstorage/DATAsec/cole/Data-secured/opto_benz_1/"
