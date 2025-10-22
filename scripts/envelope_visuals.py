@@ -554,15 +554,25 @@ def generate_reaction_matrices(cfg: MatrixPlotConfig) -> None:
     fly_number_vals = df["fly_number"].to_numpy(str)
     trial_vals = df["trial_label"].to_numpy(str)
     fps_vals = df["fps"].to_numpy(float)
+    non_reactive_vals = df["_non_reactive"].to_numpy(bool)
 
     scores = []
-    for env_row, dataset_val, fly_val, fly_number_val, trial_val, fps_val in zip(
+    for (
+        env_row,
+        dataset_val,
+        fly_val,
+        fly_number_val,
+        trial_val,
+        fps_val,
+        non_reactive_val,
+    ) in zip(
         env_data,
         dataset_vals,
         fly_vals,
         fly_number_vals,
         trial_vals,
         fps_vals,
+        non_reactive_vals,
         strict=False,
     ):
         env = _extract_env_row(env_row)
@@ -576,6 +586,7 @@ def generate_reaction_matrices(cfg: MatrixPlotConfig) -> None:
                 "trial_num": _trial_num(trial_val),
                 "during_hit": during_hit,
                 "after_hit": after_hit,
+                "_non_reactive": bool(non_reactive_val),
             }
         )
 
@@ -607,7 +618,8 @@ def generate_reaction_matrices(cfg: MatrixPlotConfig) -> None:
                 .itertuples(index=False)
             }
             if flagged_pairs:
-                keep_mask = ~pd.MultiIndex.from_frame(subset[["fly", "fly_number"]]).isin(flagged_pairs)
+                fly_pair_series = subset[["fly", "fly_number"]].apply(tuple, axis=1)
+                keep_mask = ~fly_pair_series.isin(flagged_pairs)
                 subset = subset.loc[keep_mask]
                 if subset.empty:
                     print(

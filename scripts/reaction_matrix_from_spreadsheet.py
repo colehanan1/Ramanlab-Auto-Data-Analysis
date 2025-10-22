@@ -130,7 +130,8 @@ def generate_reaction_matrices_from_csv(cfg: SpreadsheetMatrixConfig) -> None:
                 .itertuples(index=False)
             }
             if flagged_pairs:
-                keep_mask = ~pd.MultiIndex.from_frame(subset[["fly", "fly_number"]]).isin(flagged_pairs)
+                fly_pair_series = subset[["fly", "fly_number"]].apply(tuple, axis=1)
+                keep_mask = ~fly_pair_series.isin(flagged_pairs)
                 subset = subset.loc[keep_mask]
                 if subset.empty:
                     print(
