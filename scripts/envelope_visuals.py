@@ -36,8 +36,6 @@ import numpy as np
 import pandas as pd
 from matplotlib import gridspec
 from matplotlib.colors import BoundaryNorm, ListedColormap
-from matplotlib.patches import Patch
-from matplotlib import transforms
 
 
 # ---------------------------------------------------------------------------
@@ -608,6 +606,14 @@ def generate_reaction_matrices(cfg: MatrixPlotConfig) -> None:
                 .drop_duplicates()
                 .itertuples(index=False)
             }
+            if flagged_pairs:
+                keep_mask = ~pd.MultiIndex.from_frame(subset[["fly", "fly_number"]]).isin(flagged_pairs)
+                subset = subset.loc[keep_mask]
+                if subset.empty:
+                    print(
+                        "[INFO] reaction_matrices: skipping", odor, "because all flies were non-reactive."
+                    )
+                    continue
             fly_pairs = [
                 (row.fly, row.fly_number)
                 for row in subset[["fly", "fly_number"]].drop_duplicates().itertuples(index=False)
@@ -662,15 +668,6 @@ def generate_reaction_matrices(cfg: MatrixPlotConfig) -> None:
             ax_dc = fig.add_subplot(gs[1, 0])
 
             ax_during.imshow(during_matrix, cmap=cmap, norm=norm, aspect="auto", interpolation="nearest")
-            flagged_rows = sorted(fly_map[pair] for pair in flagged_pairs if pair in fly_map)
-            for row_idx in flagged_rows:
-                ax_during.axhspan(
-                    row_idx - 0.5,
-                    row_idx + 0.5,
-                    color="tab:red",
-                    alpha=0.12,
-                    zorder=1.5,
-                )
             ax_during.set_title(
                 f"{odor_label} — During\n(DURING shifted by +{cfg.latency_sec:.2f} s)",
                 fontsize=14,
@@ -680,47 +677,8 @@ def generate_reaction_matrices(cfg: MatrixPlotConfig) -> None:
             _style_trained_xticks(ax_during, pretty_labels, trained_display, xtick_fs)
             ax_during.set_yticks([])
             ax_during.set_ylabel(f"{n_flies} Flies", fontsize=11)
-            star_transform = transforms.blended_transform_factory(
-                ax_during.transAxes, ax_during.transData
-            )
-            for row_idx in flagged_rows:
-                ax_during.text(
-                    -0.02,
-                    row_idx,
-                    "*",
-                    transform=star_transform,
-                    ha="right",
-                    va="center",
-                    color="red",
-                    fontsize=12,
-                    fontweight="bold",
-                    clip_on=False,
-                    zorder=2.0,
-                )
 
             _plot_category_counts(ax_dc, during_counts, n_flies, "During — Fly Reaction Categories")
-
-            red_patch = Patch(
-                facecolor="red",
-                edgecolor="red",
-                alpha=0.30,
-                label=f"Odor transit {cfg.latency_sec:.2f} s (pre-DURING)",
-            )
-            flagged_handle = plt.Line2D(
-                [0],
-                [0],
-                marker="*",
-                color="red",
-                linestyle="None",
-                markersize=10,
-                label=f"Non-reactive span ≤ {NON_REACTIVE_SPAN_PX:g}px",
-            )
-            ax_during.legend(
-                handles=[red_patch, flagged_handle],
-                loc="upper left",
-                frameon=True,
-                fontsize=9,
-            )
 
             shift_frac = cfg.bottom_shift_in / fig_h if fig_h else 0.0
             for axis in (ax_dc,):
