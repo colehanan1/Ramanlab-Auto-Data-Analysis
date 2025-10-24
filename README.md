@@ -131,6 +131,21 @@ write a spreadsheet of binary responses. The second command feeds that
 spreadsheet into `scripts/reaction_matrix_from_spreadsheet.py`, reproducing the
 figure layout without manual intervention.
 
+## Multi-fly trial post-processing
+
+After the core pipeline produces the per-trial `flyN_distances.csv` files, run
+the consolidation CLI to normalise every fly's trials and build combined
+tables:
+
+```bash
+python scripts/multi_fly_processing.py /path/to/opto_benz_1 /path/to/opto_benz_2
+```
+
+By default the command writes augmented per-trial CSVs under each fly directory
+and emits a global `all_flies_combined.csv` under `multi_fly_outputs/`. See
+[`docs/multi_fly_processing.md`](docs/multi_fly_processing.md) for detailed
+usage notes and tunable flags.【F:scripts/multi_fly_processing.py†L443-L515】【F:scripts/multi_fly_processing.py†L516-L641】
+
 ## Multi-fly YOLO inference
 
 The pipeline now exports up to four concurrent flies (class-2 eyes paired with
