@@ -131,6 +131,42 @@ write a spreadsheet of binary responses. The second command feeds that
 spreadsheet into `scripts/reaction_matrix_from_spreadsheet.py`, reproducing the
 figure layout without manual intervention.
 
+## Geometric feature extraction CLI
+
+The repository ships with `geom_features.py`, a standalone tool for deriving
+per-frame and per-trial geometry from the eye/proboscis coordinate exports. Run
+it after the YOLO step has written the post-processed CSVs:
+
+```bash
+# Basic invocation: scan one or more dataset roots and write outputs under outdir
+python geom_features.py --roots /data/opto_EB /data/opto_PB --outdir /data/geom
+
+# Preview the work without writing files
+python geom_features.py --roots /data/opto_EB --outdir /tmp/geom --dry-run
+
+# Smoke-test a subset of flies/trials
+python geom_features.py --roots /data/opto_EB --outdir /tmp/geom --limit-flies 1 --limit-trials 2
+```
+
+Key behaviours:
+
+* The tool recursively discovers trial CSVs inside `training_*` / `testing_*`
+  directories beneath each fly folder (for example,
+  `.../september_9_fly_1/september_9_fly_1_training_6/*.csv`).
+* Each trial produces an enriched `<trial>_geom.csv` alongside the source file
+  unless `--outdir` is specified, in which case the enriched CSVs are written to
+  the mirrored folder structure under that directory.
+* A consolidated `geom_features_all_flies.csv` is always written inside
+  `--outdir` with one summary row per trial, including per-fly scaling metrics
+  and per-trial statistics.
+* Coordinate schemas in either long or wide format are handled automatically;
+  if the initial trial CSV lacks coordinates, the CLI searches for the
+  corresponding `*_coords*.csv` helper in the same or parent directory.
+
+The command depends on `pandas` and `numpy`, which are already pinned in
+`requirements.txt`. Activate the same environment you use for the main pipeline
+before invoking the CLI.
+
 ## Multi-fly YOLO inference
 
 The pipeline now exports up to four concurrent flies (class-2 eyes paired with
