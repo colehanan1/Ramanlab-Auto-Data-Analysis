@@ -150,9 +150,9 @@ python geom_features.py --roots /data/opto_EB --outdir /tmp/geom --limit-flies 1
 
 Key behaviours:
 
-* The tool recursively discovers trial CSVs inside `training_*` / `testing_*`
-  directories beneath each fly folder (for example,
-  `.../september_9_fly_1/september_9_fly_1_training_6/*.csv`).
+* The tool recursively discovers trial CSVs in directories whose names contain
+  `training` or `testing` tokens beneath each fly folder (for example,
+  `.../september_10_fly_2/september_10_fly_2_testing_1/september_10_fly_2_testing_1_fly1_distances.csv`).
 * Each trial produces an enriched `<trial>_geom.csv` alongside the source file
   unless `--outdir` is specified, in which case the enriched CSVs are written to
   the mirrored folder structure under that directory.

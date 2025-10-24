@@ -24,7 +24,9 @@ import pandas as pd
 LOGGER = logging.getLogger(__name__)
 
 
-TRIAL_DIR_PATTERN = re.compile(r"^(training|testing)_[^/\\]+$")
+TRIAL_TYPE_PATTERN = re.compile(r"(training|testing)", re.IGNORECASE)
+TRIAL_LABEL_PATTERN = re.compile(r"(training|testing)_[^/\\]+", re.IGNORECASE)
+YOLO_CSV_PATTERN = re.compile(r"_distances\.csv$", re.IGNORECASE)
 FLY_SLOT_PATTERN = re.compile(r"(fly\d+)", re.IGNORECASE)
 WIDE_COL_PATTERN = re.compile(r"(?P<prefix>eye_x|eye_y|prob_x|prob_y)_f(?P<frame>\d+)", re.IGNORECASE)
 
@@ -84,9 +86,19 @@ def discover_trials(roots: Sequence[str]) -> List[TrialInfo]:
         LOGGER.info("Scanning dataset root: %s", root_path)
         for fly_dir in sorted(p for p in root_path.iterdir() if p.is_dir()):
             fly_directory = fly_dir.name
-            for trial_dir in sorted(p for p in fly_dir.iterdir() if p.is_dir() and TRIAL_DIR_PATTERN.match(p.name)):
-                trial_type = "training" if trial_dir.name.lower().startswith("training") else "testing"
-                trial_label = trial_dir.name
+            for trial_dir in sorted(p for p in fly_dir.iterdir() if p.is_dir()):
+                type_matches = TRIAL_TYPE_PATTERN.findall(trial_dir.name)
+                if not type_matches:
+                    continue
+
+                trial_type = type_matches[-1].lower()
+                trial_name_lower = trial_dir.name.lower()
+                label_match = TRIAL_LABEL_PATTERN.search(trial_dir.name)
+                if label_match:
+                    # Normalise label casing for consistent downstream grouping
+                    trial_label = label_match.group(0).lower()
+                else:
+                    trial_label = trial_dir.name
                 csv_candidates = sorted(
                     p
                     for p in trial_dir.glob("*.csv")
@@ -98,7 +110,16 @@ def discover_trials(roots: Sequence[str]) -> List[TrialInfo]:
                 if not csv_candidates:
                     LOGGER.debug("No CSV files in trial directory: %s", trial_dir)
                     continue
-                csv_path_in = csv_candidates[0]
+                preferred = [p for p in csv_candidates if YOLO_CSV_PATTERN.search(p.name)]
+                if preferred:
+                    csv_path_in = preferred[0]
+                else:
+                    csv_path_in = csv_candidates[0]
+                    LOGGER.debug(
+                        "Defaulting to first CSV in %s (no *_distances.csv found): %s",
+                        trial_dir,
+                        csv_path_in,
+                    )
                 fly_slot_match = FLY_SLOT_PATTERN.search(csv_path_in.stem)
                 fly_slot = fly_slot_match.group(1).lower() if fly_slot_match else "fly1"
                 trials.append(
