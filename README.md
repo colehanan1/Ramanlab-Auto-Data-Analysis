@@ -131,6 +131,58 @@ write a spreadsheet of binary responses. The second command feeds that
 spreadsheet into `scripts/reaction_matrix_from_spreadsheet.py`, reproducing the
 figure layout without manual intervention.
 
+## Geometric feature extraction CLI
+
+The repository ships with `geom_features.py`, a standalone tool for deriving
+per-frame and per-trial geometry from the eye/proboscis coordinate exports. Run
+it after the YOLO step has written the post-processed CSVs:
+
+```bash
+# Basic invocation: scan one or more dataset roots and write outputs under outdir
+python geom_features.py --roots /data/opto_EB /data/opto_PB --outdir /data/geom
+
+# Preview the work without writing files
+python geom_features.py --roots /data/opto_EB --outdir /tmp/geom --dry-run
+
+# Smoke-test a subset of flies/trials
+python geom_features.py --roots /data/opto_EB --outdir /tmp/geom --limit-flies 1 --limit-trials 2
+```
+
+> **Note:** `geom_features.py` creates directories under `--outdir`. Pick a
+> location that already exists or that you have permission to create (for
+> example, somewhere under your home directory or within the dataset roots).
+> Using protected locations such as `/data` without elevated privileges will
+> now raise a clear permission error before any processing begins.
+
+Key behaviours:
+
+* The tool recursively discovers trial CSVs in directories whose names contain
+  `training` or `testing` tokens beneath each fly folder (for example,
+  `.../september_10_fly_2/september_10_fly_2_testing_1/september_10_fly_2_testing_1_fly1_distances.csv`).
+* Each trial produces an enriched `<trial>_geom.csv` alongside the source file
+  unless `--outdir` is specified, in which case the enriched CSVs are written to
+  the mirrored folder structure under that directory.
+* A consolidated `geom_features_all_flies.csv` is always written inside
+  `--outdir` with one summary row per trial, including per-fly scaling metrics
+  and per-trial statistics.
+* All enriched frames from *testing* trials are streamed into
+  `geom_features_testing_all_frames.csv` within `--outdir`. Each row begins with
+  the fly identifiers (`dataset`, `fly_directory`, `fly_slot`, `trial_type`,
+  `trial_label`, `csv_path_in`, `csv_path_out`), followed by the per-fly scale
+  metrics, the per-trial summaries, and finally the per-frame geometry (raw
+  coordinates plus derived features). A companion
+  `geom_features_testing_all_frames.schema.json` lists the column groups,
+  ordering, and dtypes so you can load the massive table predictably with
+  `pandas`/`polars`/Spark. Expect this file to grow large (tens of millions of
+  rows) when processing entire cohorts.
+* Coordinate schemas in either long or wide format are handled automatically;
+  if the initial trial CSV lacks coordinates, the CLI searches for the
+  corresponding `*_coords*.csv` helper in the same or parent directory.
+
+The command depends on `pandas` and `numpy`, which are already pinned in
+`requirements.txt`. Activate the same environment you use for the main pipeline
+before invoking the CLI.
+
 ## Multi-fly YOLO inference
 
 The pipeline now exports up to four concurrent flies (class-2 eyes paired with
