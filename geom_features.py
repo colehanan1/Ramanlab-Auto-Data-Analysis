@@ -3,7 +3,8 @@
 This script recursively searches for trial CSV files containing eye and
 proboscis coordinates, computes per-frame geometric features and per-fly
 normalisation statistics, and emits enriched per-trial CSVs alongside a
-consolidated summary CSV.
+consolidated summary CSV. Testing trials are additionally streamed into a
+single aggregated CSV for downstream batch analysis.
 """
 
 from __future__ import annotations
@@ -443,10 +444,61 @@ def ensure_parent(path: Path, dry_run: bool) -> None:
     ensure_directory(path.parent)
 
 
+class TestingAggregator:
+    """Stream enriched testing-trial frames into a single CSV."""
+
+    def __init__(self, outdir: Path, dry_run: bool) -> None:
+        self.dry_run = dry_run
+        self.path = outdir / "geom_features_testing_all_frames.csv"
+        self._header_written = False
+
+        if self.dry_run:
+            LOGGER.info(
+                "[DRY RUN] Would create aggregated testing file at %s",
+                self.path,
+            )
+            return
+
+        ensure_directory(self.path.parent)
+        if self.path.exists():
+            self.path.unlink()
+            LOGGER.info("Overwriting existing testing aggregate: %s", self.path)
+
+    def append(self, trial: TrialInfo, df: pd.DataFrame, csv_path_out: Path) -> None:
+        if self.dry_run:
+            LOGGER.info(
+                "[DRY RUN] Would append %d rows from %s to %s",
+                len(df),
+                trial.csv_path_in,
+                self.path,
+            )
+            return
+
+        augmented = df.assign(
+            csv_path_in=str(trial.csv_path_in),
+            csv_path_out=str(csv_path_out),
+        )
+        mode = "w" if not self._header_written else "a"
+        augmented.to_csv(
+            self.path,
+            index=False,
+            mode=mode,
+            header=not self._header_written,
+            quoting=csv.QUOTE_MINIMAL,
+        )
+        self._header_written = True
+        LOGGER.info(
+            "Appended %d testing frames to %s",
+            len(df),
+            self.path,
+        )
+
+
 def process_trials(
     trials: Sequence[TrialInfo],
     outdir: Path,
     dry_run: bool,
+    testing_aggregator: Optional[TestingAggregator],
 ) -> List[Dict[str, object]]:
     consolidated_rows: List[Dict[str, object]] = []
     trials_by_fly: Dict[Tuple[str, str], List[TrialInfo]] = {}
@@ -498,6 +550,9 @@ def process_trials(
             enriched_df.to_csv(output_path, index=False, quoting=csv.QUOTE_MINIMAL)
             LOGGER.info("Wrote enriched trial CSV: %s", output_path)
 
+            if testing_aggregator is not None and trial.trial_type == "testing":
+                testing_aggregator.append(trial, enriched_df, output_path)
+
     return consolidated_rows
 
 
@@ -532,12 +587,17 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         LOGGER.warning("No trials to process.")
         return
 
-    consolidated_rows = process_trials(trials, outdir, args.dry_run)
+    testing_aggregator = TestingAggregator(outdir, args.dry_run)
+
+    consolidated_rows = process_trials(trials, outdir, args.dry_run, testing_aggregator)
 
     if consolidated_rows:
         write_consolidated(consolidated_rows, outdir, args.dry_run)
     else:
         LOGGER.warning("No consolidated rows generated.")
+
+    if not args.dry_run and not testing_aggregator.dry_run and not testing_aggregator.path.exists():
+        LOGGER.info("No testing trials found; skipping aggregated testing CSV.")
 
 
 if __name__ == "__main__":

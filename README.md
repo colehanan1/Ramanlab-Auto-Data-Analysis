@@ -165,6 +165,11 @@ Key behaviours:
 * A consolidated `geom_features_all_flies.csv` is always written inside
   `--outdir` with one summary row per trial, including per-fly scaling metrics
   and per-trial statistics.
+* All enriched frames from *testing* trials are streamed into
+  `geom_features_testing_all_frames.csv` within `--outdir`, providing a single
+  analysis-ready table that also records the source `csv_path_in` and
+  `csv_path_out` for each frame. Expect this file to grow large (tens of
+  millions of rows) when processing entire cohorts.
 * Coordinate schemas in either long or wide format are handled automatically;
   if the initial trial CSV lacks coordinates, the CLI searches for the
   corresponding `*_coords*.csv` helper in the same or parent directory.
