@@ -423,10 +423,24 @@ def determine_output_path(trial: TrialInfo, outdir: Path) -> Path:
     return outdir.joinpath(*relative_parts, filename)
 
 
+def ensure_directory(path: Path) -> None:
+    """Ensure that ``path`` exists, raising with guidance on permission failures."""
+
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+    except PermissionError as exc:  # pragma: no cover - depends on environment permissions
+        raise PermissionError(
+            f"Cannot create directory {path}: {exc}. "
+            "Ensure --outdir points to a writable location or pre-create the directory with correct permissions."
+        ) from exc
+    except OSError as exc:  # pragma: no cover - unexpected filesystem errors
+        raise OSError(f"Failed to create directory {path}: {exc}") from exc
+
+
 def ensure_parent(path: Path, dry_run: bool) -> None:
     if dry_run:
         return
-    path.parent.mkdir(parents=True, exist_ok=True)
+    ensure_directory(path.parent)
 
 
 def process_trials(
@@ -492,7 +506,7 @@ def write_consolidated(consolidated_rows: Sequence[Dict[str, object]], outdir: P
         LOGGER.info("[DRY RUN] Would write consolidated CSV with %d rows", len(consolidated_rows))
         return
 
-    outdir.mkdir(parents=True, exist_ok=True)
+    ensure_directory(outdir)
     consolidated_path = outdir / "geom_features_all_flies.csv"
     df = pd.DataFrame(consolidated_rows)
     if df.empty:
@@ -507,6 +521,9 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
 
     outdir = Path(args.outdir).resolve()
     LOGGER.info("Output directory: %s", outdir)
+
+    if not args.dry_run:
+        ensure_directory(outdir)
 
     trials = discover_trials(args.roots)
     trials = apply_limits(trials, args.limit_flies, args.limit_trials)

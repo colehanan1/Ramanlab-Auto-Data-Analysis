@@ -148,6 +148,12 @@ python geom_features.py --roots /data/opto_EB --outdir /tmp/geom --dry-run
 python geom_features.py --roots /data/opto_EB --outdir /tmp/geom --limit-flies 1 --limit-trials 2
 ```
 
+> **Note:** `geom_features.py` creates directories under `--outdir`. Pick a
+> location that already exists or that you have permission to create (for
+> example, somewhere under your home directory or within the dataset roots).
+> Using protected locations such as `/data` without elevated privileges will
+> now raise a clear permission error before any processing begins.
+
 Key behaviours:
 
 * The tool recursively discovers trial CSVs in directories whose names contain
