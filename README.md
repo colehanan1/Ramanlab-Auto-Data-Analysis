@@ -166,10 +166,15 @@ Key behaviours:
   `--outdir` with one summary row per trial, including per-fly scaling metrics
   and per-trial statistics.
 * All enriched frames from *testing* trials are streamed into
-  `geom_features_testing_all_frames.csv` within `--outdir`, providing a single
-  analysis-ready table that also records the source `csv_path_in` and
-  `csv_path_out` for each frame. Expect this file to grow large (tens of
-  millions of rows) when processing entire cohorts.
+  `geom_features_testing_all_frames.csv` within `--outdir`. Each row begins with
+  the fly identifiers (`dataset`, `fly_directory`, `fly_slot`, `trial_type`,
+  `trial_label`, `csv_path_in`, `csv_path_out`), followed by the per-fly scale
+  metrics, the per-trial summaries, and finally the per-frame geometry (raw
+  coordinates plus derived features). A companion
+  `geom_features_testing_all_frames.schema.json` lists the column groups,
+  ordering, and dtypes so you can load the massive table predictably with
+  `pandas`/`polars`/Spark. Expect this file to grow large (tens of millions of
+  rows) when processing entire cohorts.
 * Coordinate schemas in either long or wide format are handled automatically;
   if the initial trial CSV lacks coordinates, the CLI searches for the
   corresponding `*_coords*.csv` helper in the same or parent directory.

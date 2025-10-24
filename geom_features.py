@@ -4,17 +4,19 @@ This script recursively searches for trial CSV files containing eye and
 proboscis coordinates, computes per-frame geometric features and per-fly
 normalisation statistics, and emits enriched per-trial CSVs alongside a
 consolidated summary CSV. Testing trials are additionally streamed into a
-single aggregated CSV for downstream batch analysis.
+single aggregated CSV for downstream batch analysis with a companion schema
+manifest so large cohorts remain easy to load.
 """
 
 from __future__ import annotations
 
 import argparse
 import csv
+import json
 import logging
 import math
 import re
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
 
@@ -30,6 +32,60 @@ TRIAL_LABEL_PATTERN = re.compile(r"(training|testing)_[^/\\]+", re.IGNORECASE)
 YOLO_CSV_PATTERN = re.compile(r"_distances\.csv$", re.IGNORECASE)
 FLY_SLOT_PATTERN = re.compile(r"(fly\d+)", re.IGNORECASE)
 WIDE_COL_PATTERN = re.compile(r"(?P<prefix>eye_x|eye_y|prob_x|prob_y)_f(?P<frame>\d+)", re.IGNORECASE)
+
+
+METADATA_COLUMNS = [
+    "dataset",
+    "fly_directory",
+    "fly_slot",
+    "trial_type",
+    "trial_label",
+]
+
+PATH_COLUMNS = ["csv_path_in", "csv_path_out"]
+
+FLY_STATS_COLUMNS = [
+    "W_est_fly",
+    "H_est_fly",
+    "diag_est_fly",
+    "r_min_fly",
+    "r_max_fly",
+    "r_p01_fly",
+    "r_p99_fly",
+    "r_mean_fly",
+    "r_std_fly",
+]
+
+SUMMARY_COLUMNS = [
+    "n_frames",
+    "r_mean_trial",
+    "r_std_trial",
+    "r_max_trial",
+    "r95_trial",
+    "dx_mean_abs",
+    "dy_mean_abs",
+    "r_pct_robust_fly_max",
+    "r_pct_robust_fly_mean",
+]
+
+PER_FRAME_COLUMNS = [
+    "frame",
+    "eye_x",
+    "eye_y",
+    "prob_x",
+    "prob_y",
+    "dx",
+    "dy",
+    "r",
+    "cos_theta",
+    "sin_theta",
+    "dx_over_W_fly",
+    "dy_over_H_fly",
+    "r_over_diag_fly",
+    "r_pct_minmax_fly",
+    "r_pct_robust_fly",
+    "r_z_fly",
+]
 
 
 @dataclass(frozen=True)
@@ -341,7 +397,7 @@ def enrich_trial(
     trial: TrialInfo,
     df: pd.DataFrame,
     stats: FlyStats,
-) -> Tuple[pd.DataFrame, Dict[str, float]]:
+) -> Tuple[pd.DataFrame, Dict[str, float | int]]:
     df = df.copy()
     df = df.astype({col: float for col in ["frame", "eye_x", "eye_y", "prob_x", "prob_y"]}, errors="ignore")
 
@@ -361,7 +417,7 @@ def enrich_trial(
     r_pct_robust = r_pct_robust.clip(lower=0.0, upper=100.0)
     r_z = (r - stats.r_mean_fly) / (stats.r_std_fly + 1e-6)
 
-    summary = {
+    summary: Dict[str, float | int] = {
         "n_frames": int(len(df)),
         "r_mean_trial": float(np.nanmean(r)),
         "r_std_trial": float(np.nanstd(r)),
@@ -445,12 +501,16 @@ def ensure_parent(path: Path, dry_run: bool) -> None:
 
 
 class TestingAggregator:
-    """Stream enriched testing-trial frames into a single CSV."""
+    """Stream enriched testing-trial frames into a single CSV with schema metadata."""
 
     def __init__(self, outdir: Path, dry_run: bool) -> None:
         self.dry_run = dry_run
         self.path = outdir / "geom_features_testing_all_frames.csv"
+        self.schema_path = outdir / "geom_features_testing_all_frames.schema.json"
         self._header_written = False
+        self._column_order: Optional[List[str]] = None
+        self._column_groups: Optional[Dict[str, List[str]]] = None
+        self.rows_written = 0
 
         if self.dry_run:
             LOGGER.info(
@@ -460,11 +520,19 @@ class TestingAggregator:
             return
 
         ensure_directory(self.path.parent)
-        if self.path.exists():
-            self.path.unlink()
-            LOGGER.info("Overwriting existing testing aggregate: %s", self.path)
+        for existing in (self.path, self.schema_path):
+            if existing.exists():
+                existing.unlink()
+                LOGGER.info("Overwriting existing testing artefact: %s", existing)
 
-    def append(self, trial: TrialInfo, df: pd.DataFrame, csv_path_out: Path) -> None:
+    def append(
+        self,
+        trial: TrialInfo,
+        df: pd.DataFrame,
+        summary: Dict[str, float | int],
+        stats: FlyStats,
+        csv_path_out: Path,
+    ) -> None:
         if self.dry_run:
             LOGGER.info(
                 "[DRY RUN] Would append %d rows from %s to %s",
@@ -474,10 +542,23 @@ class TestingAggregator:
             )
             return
 
-        augmented = df.assign(
-            csv_path_in=str(trial.csv_path_in),
-            csv_path_out=str(csv_path_out),
-        )
+        metadata = {
+            "dataset": trial.dataset,
+            "fly_directory": trial.fly_directory,
+            "fly_slot": trial.fly_slot,
+            "trial_type": trial.trial_type,
+            "trial_label": trial.trial_label,
+        }
+        path_info = {
+            "csv_path_in": str(trial.csv_path_in),
+            "csv_path_out": str(csv_path_out),
+        }
+        fly_metrics = asdict(stats)
+
+        augmented = df.assign(**metadata, **fly_metrics, **summary, **path_info)
+        column_order = self._ensure_column_order(augmented)
+
+        augmented = augmented.reindex(columns=column_order)
         mode = "w" if not self._header_written else "a"
         augmented.to_csv(
             self.path,
@@ -487,11 +568,67 @@ class TestingAggregator:
             quoting=csv.QUOTE_MINIMAL,
         )
         self._header_written = True
+        self.rows_written += len(augmented)
         LOGGER.info(
-            "Appended %d testing frames to %s",
+            "Appended %d testing frames to %s (total rows: %d)",
             len(df),
             self.path,
+            self.rows_written,
         )
+
+    def finalize(self) -> None:
+        if self.dry_run:
+            return
+        if self.rows_written == 0:
+            if self.path.exists():
+                self.path.unlink()
+            if self.schema_path.exists():
+                self.schema_path.unlink()
+            LOGGER.info("No testing trials found; skipping aggregated testing CSV.")
+        else:
+            LOGGER.info(
+                "Finalised testing aggregate with %d rows and schema %s",
+                self.rows_written,
+                self.schema_path,
+            )
+
+    def _ensure_column_order(self, df: pd.DataFrame) -> List[str]:
+        if self._column_order is not None:
+            return self._column_order
+
+        metadata_cols = METADATA_COLUMNS + PATH_COLUMNS
+        fly_cols = [col for col in FLY_STATS_COLUMNS if col in df.columns]
+        summary_cols = [col for col in SUMMARY_COLUMNS if col in df.columns]
+
+        base_per_frame = [col for col in PER_FRAME_COLUMNS if col in df.columns]
+        excluded = set(metadata_cols + fly_cols + summary_cols + base_per_frame)
+        additional_per_frame = [
+            col for col in df.columns if col not in excluded
+        ]
+        per_frame_cols = base_per_frame + additional_per_frame
+
+        self._column_order = metadata_cols + fly_cols + summary_cols + per_frame_cols
+        self._column_groups = {
+            "metadata": metadata_cols,
+            "fly_metrics": fly_cols,
+            "trial_summary": summary_cols,
+            "per_frame": per_frame_cols,
+        }
+        self._write_schema(df)
+        return self._column_order
+
+    def _write_schema(self, df: pd.DataFrame) -> None:
+        if self.dry_run or self._column_order is None or self._column_groups is None:
+            return
+
+        schema = {
+            "column_order": self._column_order,
+            "column_groups": self._column_groups,
+            "dtypes": {col: str(df[col].dtype) for col in self._column_order},
+        }
+        with self.schema_path.open("w", encoding="utf-8") as handle:
+            json.dump(schema, handle, indent=2, sort_keys=True)
+        LOGGER.info("Wrote testing aggregate schema: %s", self.schema_path)
 
 
 def process_trials(
@@ -551,7 +688,7 @@ def process_trials(
             LOGGER.info("Wrote enriched trial CSV: %s", output_path)
 
             if testing_aggregator is not None and trial.trial_type == "testing":
-                testing_aggregator.append(trial, enriched_df, output_path)
+                testing_aggregator.append(trial, enriched_df, summary, stats, output_path)
 
     return consolidated_rows
 
@@ -596,8 +733,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     else:
         LOGGER.warning("No consolidated rows generated.")
 
-    if not args.dry_run and not testing_aggregator.dry_run and not testing_aggregator.path.exists():
-        LOGGER.info("No testing trials found; skipping aggregated testing CSV.")
+    testing_aggregator.finalize()
 
 
 if __name__ == "__main__":
