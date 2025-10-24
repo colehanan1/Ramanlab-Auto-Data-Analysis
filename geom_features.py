@@ -185,6 +185,29 @@ def extract_coordinates(df: pd.DataFrame) -> Optional[pd.DataFrame]:
         selected.columns = long_columns
         return selected
 
+    # YOLO post-processing schema where eye is class2 and proboscis is class8
+    yolo_eye_candidates = ["x_class2", "x_class_2", "class2_x"]
+    yolo_eye_y_candidates = ["y_class2", "y_class_2", "class2_y"]
+    yolo_prob_x_candidates = ["x_class8", "x_class_8", "class8_x"]
+    yolo_prob_y_candidates = ["y_class8", "y_class_8", "class8_y"]
+
+    def _resolve(candidates: Sequence[str]) -> Optional[str]:
+        for candidate in candidates:
+            if candidate in columns_lower:
+                return columns_lower[candidate]
+        return None
+
+    frame_col = columns_lower.get("frame")
+    eye_x_col = _resolve(yolo_eye_candidates)
+    eye_y_col = _resolve(yolo_eye_y_candidates)
+    prob_x_col = _resolve(yolo_prob_x_candidates)
+    prob_y_col = _resolve(yolo_prob_y_candidates)
+
+    if frame_col and eye_x_col and eye_y_col and prob_x_col and prob_y_col:
+        selected = df[[frame_col, eye_x_col, eye_y_col, prob_x_col, prob_y_col]].copy()
+        selected.columns = long_columns
+        return selected
+
     # Attempt to parse wide schema
     matches = [WIDE_COL_PATTERN.match(col) for col in df.columns]
     if any(matches):
