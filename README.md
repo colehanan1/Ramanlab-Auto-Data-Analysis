@@ -146,6 +146,9 @@ python geom_features.py --roots /data/opto_EB --outdir /tmp/geom --dry-run
 
 # Smoke-test a subset of flies/trials
 python geom_features.py --roots /data/opto_EB --outdir /tmp/geom --limit-flies 1 --limit-trials 2
+
+# Append behaviour windows to a single enriched CSV
+python geom_features.py --input /data/opto_EB/.../testing_6_fly1_distances_geom.csv
 ```
 
 > **Note:** `geom_features.py` creates directories under `--outdir`. Pick a
@@ -161,20 +164,36 @@ Key behaviours:
   `.../september_10_fly_2/september_10_fly_2_testing_1/september_10_fly_2_testing_1_fly1_distances.csv`).
 * Each trial produces an enriched `<trial>_geom.csv` alongside the source file
   unless `--outdir` is specified, in which case the enriched CSVs are written to
-  the mirrored folder structure under that directory.
+  the mirrored folder structure under that directory. Every enriched dataframe
+  now also gains a behavioural companion `<trial>_with_behavior.csv` saved right
+  next to the raw YOLO output containing the same per-frame geometry plus the
+  new window masks and summary scalars described below. The `_geom` export
+  retains the full legacy schema for backwards compatibility.
 * A consolidated `geom_features_all_flies.csv` is always written inside
   `--outdir` with one summary row per trial, including per-fly scaling metrics
   and per-trial statistics.
 * All enriched frames from *testing* trials are streamed into
   `geom_features_testing_all_frames.csv` within `--outdir`. Each row begins with
-  the fly identifiers (`dataset`, `fly_directory`, `fly_slot`, `trial_type`,
-  `trial_label`, `csv_path_in`, `csv_path_out`), followed by the per-fly scale
-  metrics, the per-trial summaries, and finally the per-frame geometry (raw
-  coordinates plus derived features). A companion
+  the fly identifiers (`dataset`, `fly`, `fly_number`, `trial_type`,
+  `trial_label`)—for example, `opto_EB,september_09_fly_1,1,testing,testing_10`—
+  followed by the per-fly scale metrics, the per-trial summaries (including the
+  new baseline/during/early behavioural scalars), and finally the per-frame
+  geometry. The geometry block now includes three mask columns
+  (`is_before`, `is_during`, `is_after`) so you can slice specific windows
+  without recomputing logic downstream. Only frames whose `frame` index falls
+  between 0 and 3600 (inclusive) are written so that the combined CSV remains
+  tractable while still covering the first minute of a 60 fps recording. A
+  companion
   `geom_features_testing_all_frames.schema.json` lists the column groups,
   ordering, and dtypes so you can load the massive table predictably with
   `pandas`/`polars`/Spark. Expect this file to grow large (tens of millions of
   rows) when processing entire cohorts.
+* You can enrich a previously generated CSV in isolation with the new window
+  metrics via `python geom_features.py --input path/to/trial_geom.csv`. This
+  mode writes `path/to/trial_with_behavior.csv` (or prints the intended action
+  when combined with `--dry-run`) and logs the key diagnostics: frame counts per
+  window, baseline/during means, fraction of high extensions during odor, rise
+  speed, and directional consistency.
 * Coordinate schemas in either long or wide format are handled automatically;
   if the initial trial CSV lacks coordinates, the CLI searches for the
   corresponding `*_coords*.csv` helper in the same or parent directory.
@@ -182,6 +201,33 @@ Key behaviours:
 The command depends on `pandas` and `numpy`, which are already pinned in
 `requirements.txt`. Activate the same environment you use for the main pipeline
 before invoking the CLI.
+
+### Behavioural window columns
+
+The per-frame block now ends with three integer mask columns:
+
+| Column | Meaning |
+| --- | --- |
+| `is_before` | 1 when `frame < 1260` (baseline), otherwise 0 |
+| `is_during` | 1 when `1260 ≤ frame < 2460` (odor presentation), otherwise 0 |
+| `is_after` | 1 when `frame ≥ 2460` (post-odor), otherwise 0 |
+
+Every row also includes the behavioural scalars computed from those windows and
+anchored to each trial:
+
+| Column | Description |
+| --- | --- |
+| `r_before_mean`, `r_before_std` | Mean and standard deviation of `r_pct_robust_fly` during the baseline window |
+| `r_during_mean`, `r_during_std` | Mean and standard deviation of `r_pct_robust_fly` during odor |
+| `r_during_minus_before_mean` | Difference between odor and baseline means |
+| `cos_theta_during_mean`, `sin_theta_during_mean` | Mean pointing direction components during odor |
+| `direction_consistency` | Magnitude of the mean direction vector (`√(cos²+sin²)`) |
+| `frac_high_ext_during` | Fraction of odor frames where `r_pct_robust_fly ≥ 75%` |
+| `rise_speed` | Percent-extension per second across the first 1 s after odor onset |
+
+These scalars propagate to the consolidated trial summary and the aggregated
+testing CSV so downstream ML jobs can leverage both frame-level and trial-level
+behaviour without recomputing window logic.
 
 ## Multi-fly YOLO inference
 
