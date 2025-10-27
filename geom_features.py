@@ -560,6 +560,14 @@ class TestingAggregator:
             )
             return
 
+        trimmed_df = self._trim_frames(df, trial)
+        if trimmed_df.empty:
+            LOGGER.warning(
+                "Skipping testing aggregate append for %s because no frames remain within 0-3600",
+                trial.csv_path_in,
+            )
+            return
+
         metadata = {
             "dataset": trial.dataset,
             "fly": trial.fly_directory,
@@ -569,7 +577,7 @@ class TestingAggregator:
         }
         fly_metrics = asdict(stats)
 
-        augmented = df.assign(**metadata, **fly_metrics, **summary)
+        augmented = trimmed_df.assign(**metadata, **fly_metrics, **summary)
         column_order = self._ensure_column_order(augmented)
 
         augmented = augmented.reindex(columns=column_order)
@@ -585,7 +593,7 @@ class TestingAggregator:
         self.rows_written += len(augmented)
         LOGGER.info(
             "Appended %d testing frames to %s (total rows: %d)",
-            len(df),
+            len(augmented),
             self.path,
             self.rows_written,
         )
@@ -643,6 +651,28 @@ class TestingAggregator:
         with self.schema_path.open("w", encoding="utf-8") as handle:
             json.dump(schema, handle, indent=2, sort_keys=True)
         LOGGER.info("Wrote testing aggregate schema: %s", self.schema_path)
+
+    def _trim_frames(self, df: pd.DataFrame, trial: TrialInfo) -> pd.DataFrame:
+        """Keep only frames with indices between 0 and 3600 inclusive."""
+
+        if "frame" not in df.columns:
+            LOGGER.warning(
+                "Trial %s lacks a frame column; writing only the first 3601 rows to testing aggregate",
+                trial.csv_path_in,
+            )
+            return df.head(3601).copy()
+
+        mask = df["frame"].between(0, 3600, inclusive="both")
+        trimmed = df.loc[mask]
+        if trimmed.empty:
+            # Fallback to first 3601 rows to avoid dropping the trial entirely if
+            # frame numbering is unexpected.
+            LOGGER.warning(
+                "Trial %s has no frames in [0, 3600]; defaulting to first 3601 rows",
+                trial.csv_path_in,
+            )
+            return df.head(3601).copy()
+        return trimmed.copy()
 
 
 def process_trials(

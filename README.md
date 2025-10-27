@@ -170,7 +170,10 @@ Key behaviours:
   the fly identifiers (`dataset`, `fly`, `fly_number`, `trial_type`,
   `trial_label`)—for example, `opto_EB,september_09_fly_1,1,testing,testing_10`—
   followed by the per-fly scale metrics, the per-trial summaries, and finally
-  the per-frame geometry (raw coordinates plus derived features). A companion
+  the per-frame geometry (raw coordinates plus derived features). Only frames
+  whose `frame` index falls between 0 and 3600 (inclusive) are written so that
+  the combined CSV remains tractable while still covering the first minute of a
+  60 fps recording. A companion
   `geom_features_testing_all_frames.schema.json` lists the column groups,
   ordering, and dtypes so you can load the massive table predictably with
   `pandas`/`polars`/Spark. Expect this file to grow large (tens of millions of
