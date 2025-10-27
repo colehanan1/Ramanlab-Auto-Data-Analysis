@@ -35,6 +35,14 @@ FLY_NUMBER_PATTERN = re.compile(r"fly[^0-9]*(\d+)", re.IGNORECASE)
 WIDE_COL_PATTERN = re.compile(r"(?P<prefix>eye_x|eye_y|prob_x|prob_y)_f(?P<frame>\d+)", re.IGNORECASE)
 
 
+BASELINE_END = 1260  # first ~30 seconds at 40 fps
+STIM_END = 2460  # subsequent ~30 seconds during odor presentation
+FPS = 40.0
+EARLY_WIN_SEC = 1.0
+EARLY_WIN = int(EARLY_WIN_SEC * FPS)
+HIGH_EXT_THRESH = 75.0
+
+
 METADATA_COLUMNS = [
     "dataset",
     "fly",
@@ -65,6 +73,16 @@ SUMMARY_COLUMNS = [
     "dy_mean_abs",
     "r_pct_robust_fly_max",
     "r_pct_robust_fly_mean",
+    "r_before_mean",
+    "r_before_std",
+    "r_during_mean",
+    "r_during_std",
+    "r_during_minus_before_mean",
+    "cos_theta_during_mean",
+    "sin_theta_during_mean",
+    "direction_consistency",
+    "frac_high_ext_during",
+    "rise_speed",
 ]
 
 PER_FRAME_COLUMNS = [
@@ -84,6 +102,9 @@ PER_FRAME_COLUMNS = [
     "r_pct_minmax_fly",
     "r_pct_robust_fly",
     "r_z_fly",
+    "is_before",
+    "is_during",
+    "is_after",
 ]
 
 
@@ -119,8 +140,20 @@ class FlyStats:
 
 def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Compute geometric features for fly trials.")
-    parser.add_argument("--roots", nargs="+", required=True, help="Root directories to scan for trial CSV files.")
-    parser.add_argument("--outdir", required=True, help="Directory for consolidated output and optional per-trial outputs.")
+    mode_group = parser.add_mutually_exclusive_group(required=True)
+    mode_group.add_argument(
+        "--input",
+        help="Process a single CSV to append behavioural window metrics and write *_with_behavior.csv.",
+    )
+    mode_group.add_argument(
+        "--roots",
+        nargs="+",
+        help="Root directories to scan for trial CSV files.",
+    )
+    parser.add_argument(
+        "--outdir",
+        help="Directory for consolidated output and optional per-trial outputs (required with --roots).",
+    )
     parser.add_argument("--dry-run", action="store_true", help="List processing actions without writing outputs.")
     parser.add_argument("--limit-flies", type=int, default=None, help="Process at most N flies per dataset root.")
     parser.add_argument("--limit-trials", type=int, default=None, help="Process at most N trials per fly.")
@@ -412,6 +445,120 @@ def compute_fly_stats(trial_data: Dict[TrialInfo, pd.DataFrame]) -> FlyStats:
     return fly_stats
 
 
+def _safe_stat(series: pd.Series, mask: np.ndarray, func) -> float:
+    """Apply ``func`` to ``series`` filtered by ``mask`` returning NaN when empty."""
+
+    if series.empty:
+        return float("nan")
+    filtered = series[mask]
+    if filtered.empty:
+        return float("nan")
+    value = func(filtered)
+    if isinstance(value, np.ndarray):
+        value = value.item()
+    return float(value)
+
+
+def _apply_behavioural_windows(
+    df: pd.DataFrame,
+) -> Tuple[pd.DataFrame, Dict[str, float], Dict[str, int]]:
+    """Append behavioural window masks and summary statistics to an enriched dataframe."""
+
+    if "frame" not in df.columns:
+        LOGGER.warning("Dataframe lacks frame column; behavioural windows will be empty.")
+        frame_values = pd.Series(np.arange(len(df)), index=df.index, dtype=float)
+    else:
+        frame_values = pd.to_numeric(df["frame"], errors="coerce")
+
+    if "r_pct_robust_fly" not in df.columns:
+        raise KeyError("r_pct_robust_fly column required to compute behavioural metrics.")
+
+    is_valid = frame_values.notna().to_numpy()
+    frames = frame_values.to_numpy()
+
+    before_mask = (frames < BASELINE_END) & is_valid
+    during_mask = (frames >= BASELINE_END) & (frames < STIM_END) & is_valid
+    after_mask = (frames >= STIM_END) & is_valid
+    early_mask = (frames >= BASELINE_END) & (frames < BASELINE_END + EARLY_WIN) & is_valid
+
+    df = df.copy()
+    before_mask = before_mask.astype(bool)
+    during_mask = during_mask.astype(bool)
+    after_mask = after_mask.astype(bool)
+    early_mask = early_mask.astype(bool)
+
+    df["is_before"] = before_mask.astype(np.int8)
+    df["is_during"] = during_mask.astype(np.int8)
+    df["is_after"] = after_mask.astype(np.int8)
+
+    r_pct = pd.to_numeric(df["r_pct_robust_fly"], errors="coerce") if "r_pct_robust_fly" in df else pd.Series(np.nan, index=df.index)
+    cos_theta = pd.to_numeric(df.get("cos_theta", pd.Series(np.nan, index=df.index)), errors="coerce")
+    sin_theta = pd.to_numeric(df.get("sin_theta", pd.Series(np.nan, index=df.index)), errors="coerce")
+
+    r_before_mean = _safe_stat(r_pct, before_mask, np.nanmean)
+    r_before_std = _safe_stat(r_pct, before_mask, np.nanstd)
+    r_during_mean = _safe_stat(r_pct, during_mask, np.nanmean)
+    r_during_std = _safe_stat(r_pct, during_mask, np.nanstd)
+    r_during_minus_before_mean = (
+        float(r_during_mean - r_before_mean)
+        if not math.isnan(r_during_mean) and not math.isnan(r_before_mean)
+        else float("nan")
+    )
+
+    cos_theta_during_mean = _safe_stat(cos_theta, during_mask, np.nanmean)
+    sin_theta_during_mean = _safe_stat(sin_theta, during_mask, np.nanmean)
+    if math.isnan(cos_theta_during_mean) or math.isnan(sin_theta_during_mean):
+        direction_consistency = float("nan")
+    else:
+        direction_consistency = float(np.sqrt(cos_theta_during_mean ** 2 + sin_theta_during_mean ** 2))
+
+    high_ext_mask = during_mask & (r_pct.to_numpy() >= HIGH_EXT_THRESH)
+    during_frames = int(during_mask.sum())
+    if during_frames == 0:
+        frac_high_ext_during = float("nan")
+    else:
+        frac_high_ext_during = float(np.clip(high_ext_mask.sum() / (during_frames + 1e-6), 0.0, 1.0))
+
+    r_early_mean = _safe_stat(r_pct, early_mask, np.nanmean)
+    if math.isnan(r_early_mean) or math.isnan(r_before_mean):
+        rise_speed = float("nan")
+    else:
+        rise_speed = float((r_early_mean - r_before_mean) / (EARLY_WIN_SEC + 1e-6))
+
+    summary_updates: Dict[str, float] = {
+        "r_before_mean": r_before_mean,
+        "r_before_std": r_before_std,
+        "r_during_mean": r_during_mean,
+        "r_during_std": r_during_std,
+        "r_during_minus_before_mean": r_during_minus_before_mean,
+        "cos_theta_during_mean": cos_theta_during_mean,
+        "sin_theta_during_mean": sin_theta_during_mean,
+        "direction_consistency": direction_consistency,
+        "frac_high_ext_during": frac_high_ext_during,
+        "rise_speed": rise_speed,
+    }
+
+    for column, value in summary_updates.items():
+        df[column] = value
+
+    counts = {
+        "frames_before": int(before_mask.sum()),
+        "frames_during": int(during_mask.sum()),
+        "frames_after": int(after_mask.sum()),
+        "frames_early": int(early_mask.sum()),
+    }
+
+    LOGGER.debug(
+        "Window diagnostics -> before: %d, during: %d, after: %d, early: %d",  # type: ignore[str-format]
+        counts["frames_before"],
+        counts["frames_during"],
+        counts["frames_after"],
+        counts["frames_early"],
+    )
+
+    return df, summary_updates, counts
+
+
 def enrich_trial(
     trial: TrialInfo,
     df: pd.DataFrame,
@@ -483,6 +630,18 @@ def enrich_trial(
         series = enriched[column].dropna()
         if not series.empty and (series.lt(0).any() or series.gt(100).any()):
             raise AssertionError(f"{column} not clipped to [0, 100] for {trial.csv_path_in}")
+
+    enriched, behaviour_summary, window_counts = _apply_behavioural_windows(enriched)
+
+    summary.update(behaviour_summary)
+    LOGGER.debug(
+        "Trial %s window counts -> before=%d during=%d after=%d early=%d",
+        trial.csv_path_in,
+        window_counts["frames_before"],
+        window_counts["frames_during"],
+        window_counts["frames_after"],
+        window_counts["frames_early"],
+    )
 
     enriched["dataset"] = trial.dataset
     enriched["fly"] = trial.fly_directory
@@ -675,6 +834,20 @@ class TestingAggregator:
         return trimmed.copy()
 
 
+def process_single_trial(
+    input_csv_path: str,
+) -> Tuple[pd.DataFrame, Dict[str, float], Dict[str, int]]:
+    """Load a CSV, append behavioural windows, and return the enriched dataframe."""
+
+    path = Path(input_csv_path).resolve()
+    if not path.exists():
+        raise FileNotFoundError(f"Input CSV does not exist: {path}")
+
+    df = pd.read_csv(path)
+    enriched, summary_updates, counts = _apply_behavioural_windows(df)
+    return enriched, summary_updates, counts
+
+
 def process_trials(
     trials: Sequence[TrialInfo],
     outdir: Path,
@@ -721,13 +894,19 @@ def process_trials(
             consolidated_row.update(summary)
             consolidated_rows.append(consolidated_row)
 
+            behaviour_path = trial.csv_path_in.with_name(trial.csv_path_in.stem + "_with_behavior.csv")
+
             if dry_run:
                 LOGGER.info("[DRY RUN] Would write per-trial CSV: %s", output_path)
+                LOGGER.info("[DRY RUN] Would write behavioural CSV: %s", behaviour_path)
                 continue
 
             ensure_parent(output_path, dry_run=False)
             enriched_df.to_csv(output_path, index=False, quoting=csv.QUOTE_MINIMAL)
             LOGGER.info("Wrote enriched trial CSV: %s", output_path)
+
+            enriched_df.to_csv(behaviour_path, index=False, quoting=csv.QUOTE_MINIMAL)
+            LOGGER.info("Wrote behavioural trial CSV: %s", behaviour_path)
 
             if testing_aggregator is not None and trial.trial_type == "testing":
                 testing_aggregator.append(trial, enriched_df, summary, stats)
@@ -753,11 +932,50 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     args = parse_args(argv)
     configure_logging(args.log_level)
 
+    if args.input:
+        if args.limit_flies is not None or args.limit_trials is not None:
+            LOGGER.warning("--limit-flies/--limit-trials are ignored when --input is provided.")
+        if args.outdir:
+            LOGGER.info("--outdir is ignored in --input mode; outputs are written beside the source CSV.")
+
+        enriched_df, behaviour_summary, counts = process_single_trial(args.input)
+        behaviour_path = Path(args.input).with_name(Path(args.input).stem + "_with_behavior.csv")
+
+        if args.dry_run:
+            LOGGER.info("[DRY RUN] Would write behavioural CSV: %s", behaviour_path)
+        else:
+            enriched_df.to_csv(behaviour_path, index=False, quoting=csv.QUOTE_MINIMAL)
+            LOGGER.info("Wrote behavioural trial CSV: %s", behaviour_path)
+
+        LOGGER.info(
+            "Window counts -> before=%d during=%d after=%d early=%d",
+            counts["frames_before"],
+            counts["frames_during"],
+            counts["frames_after"],
+            counts["frames_early"],
+        )
+        LOGGER.info(
+            "Behaviour metrics -> r_before_mean=%.3f r_during_mean=%.3f frac_high_ext_during=%.3f rise_speed=%.3f direction_consistency=%.3f",
+            behaviour_summary["r_before_mean"],
+            behaviour_summary["r_during_mean"],
+            behaviour_summary["frac_high_ext_during"],
+            behaviour_summary["rise_speed"],
+            behaviour_summary["direction_consistency"],
+        )
+        return
+
+    if not args.outdir:
+        raise ValueError("--outdir is required when processing dataset roots.")
+
     outdir = Path(args.outdir).resolve()
     LOGGER.info("Output directory: %s", outdir)
 
     if not args.dry_run:
         ensure_directory(outdir)
+
+    if args.roots is None:
+        LOGGER.warning("No dataset roots provided.")
+        return
 
     trials = discover_trials(args.roots)
     trials = apply_limits(trials, args.limit_flies, args.limit_trials)
