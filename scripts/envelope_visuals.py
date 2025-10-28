@@ -55,6 +55,8 @@ ODOR_CANON: Mapping[str, str] = {
     "benz-ald": "Benz",
     "benzadhyde": "Benz",
     "ethyl butyrate": "EB",
+    "eb_control": "EB_control",
+    "eb control": "EB_control",
     "optogenetics benzaldehyde": "opto_benz",
     "optogenetics benzaldehyde 1": "opto_benz_1",
     "optogenetics ethyl butyrate": "opto_EB",
@@ -71,6 +73,7 @@ DISPLAY_LABEL = {
     "Benz": "Benzaldehyde",
     "10s_Odor_Benz": "Benzaldehyde",
     "EB": "Ethyl Butyrate",
+    "EB_control": "EB Control",
     "opto_benz": "Benzaldehyde",
     "opto_EB": "Ethyl Butyrate",
     "opto_benz_1": "Benzaldehyde",
@@ -85,13 +88,14 @@ ODOR_ORDER = [
     "10s_Odor_Benz",
     "opto_benz",
     "opto_EB",
+    "EB_control",
     "opto_benz_1",
     "opto_hex",
 ]
 
 TRAINED_FIRST_ORDER = (2, 4, 5, 1, 3, 6, 7, 8, 9)
 HEXANOL_LABEL = "Hexanol"
-NON_REACTIVE_SPAN_PX = 15.0
+NON_REACTIVE_SPAN_PX = 1.0
 
 
 # ---------------------------------------------------------------------------
@@ -175,6 +179,13 @@ def _display_odor(dataset_canon: str, trial_label: str) -> str:
         "3-octonol": {6: "Benzaldehyde", 7: "Citral", 8: "Linalool"},
         "Benz": {6: "Citral", 7: "Linalool"},
         "EB": {
+            6: "Apple Cider Vinegar",
+            7: "3-Octonol",
+            8: "Benzaldehyde",
+            9: "Citral",
+            10: "Linalool",
+        },
+        "EB_control": {
             6: "Apple Cider Vinegar",
             7: "3-Octonol",
             8: "Benzaldehyde",

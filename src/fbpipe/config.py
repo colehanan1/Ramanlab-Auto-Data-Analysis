@@ -33,6 +33,7 @@ class Settings:
     main_directory: str
     allow_cpu: bool = False
     cuda_allow_tf32: bool = True
+    non_reactive_span_px: float = 20.0
     anchor_x: float = 1079.0
     anchor_y: float = 540.0
     fps_default: float = 40.0
@@ -144,11 +145,16 @@ def load_settings(config_path: str | Path) -> Settings:
         matrix=matrix,
     )
 
+    non_reactive_span_px = float(
+        os.getenv("NON_REACTIVE_SPAN_PX", _get(data, "non_reactive_span_px", 20.0))
+    )
+
     return Settings(
         model_path=model_path,
         main_directory=main_directory,
         allow_cpu=allow_cpu,
         cuda_allow_tf32=cuda_allow_tf32,
+        non_reactive_span_px=non_reactive_span_px,
         anchor_x=float(os.getenv("ANCHOR_X", _get(data, "anchor_x", 1079.0))),
         anchor_y=float(os.getenv("ANCHOR_Y", _get(data, "anchor_y", 540.0))),
         fps_default=float(os.getenv("FPS_DEFAULT", _get(data, "fps_default", 40.0))),
