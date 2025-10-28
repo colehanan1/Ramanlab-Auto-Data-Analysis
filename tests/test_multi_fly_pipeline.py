@@ -211,9 +211,13 @@ def test_build_wide_csv_adds_auc_columns(tmp_path):
     assert abs(df.loc[0, "Peak-Value"] - 5.0) < 1e-6
     assert "global_min" in df.columns
     assert "global_max" in df.columns
+    assert "local_min" in df.columns
+    assert "local_max" in df.columns
     assert "non_reactive_flag" in df.columns
     assert math.isclose(df.loc[0, "global_min"], 120.0)
     assert math.isclose(df.loc[0, "global_max"], 135.0)
+    assert math.isclose(df.loc[0, "local_min"], 1.0)
+    assert math.isclose(df.loc[0, "local_max"], 5.0)
     assert df.loc[0, "non_reactive_flag"] == 1.0
 
     flagged_file = out_csv.with_name(out_csv.stem + "_flagged_flies.txt")

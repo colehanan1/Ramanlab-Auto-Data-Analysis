@@ -115,6 +115,8 @@ ODOR_CANON = {
     "benz-ald": "Benz",
     "benzadhyde": "Benz",
     "ethyl butyrate": "EB",
+    "eb_control": "EB_control",
+    "eb control": "EB_control",
     "optogenetics benzaldehyde": "opto_benz",
     "optogenetics benzaldehyde 1": "opto_benz_1",
     "optogenetics ethyl butyrate": "opto_EB",
@@ -131,6 +133,7 @@ DISPLAY_LABEL = {
     "Benz": "Benzaldehyde",
     "10s_Odor_Benz": "Benzaldehyde",
     "EB": "Ethyl Butyrate",
+    "EB_control": "EB Control",
     "opto_benz": "Benzaldehyde",
     "opto_benz_1": "Benzaldehyde",
     "opto_EB": "Ethyl Butyrate",
@@ -189,6 +192,13 @@ def _display_odor(dataset_canon: str, trial_label: str) -> str:
         "3-octonol": {6: "Benzaldehyde", 7: "Citral", 8: "Linalool"},
         "Benz": {6: "Citral", 7: "Linalool"},
         "EB": {6: "Apple Cider Vinegar", 7: "3-Octonol", 8: "Benzaldehyde", 9: "Citral", 10: "Linalool"},
+        "EB_control": {
+            6: "Apple Cider Vinegar",
+            7: "3-Octonol",
+            8: "Benzaldehyde",
+            9: "Citral",
+            10: "Linalool",
+        },
         "10s_Odor_Benz": {6: "Benzaldehyde", 7: "Benzaldehyde"},
         "opto_EB": {6: "Apple Cider Vinegar", 7: "3-Octonol", 8: "Benzaldehyde", 9: "Citral", 10: "Linalool"},
         "opto_benz": {6: "3-Octonol", 7: "Benzaldehyde", 8: "Citral", 9: "Linalool"},
@@ -260,7 +270,9 @@ def _angle_multiplier(angle_pct: np.ndarray) -> np.ndarray:
         (pct > 40) & (pct <= 60),
         (pct > 60) & (pct <= 100),
     ]
-    multipliers = [0.25, 0.50, 0.75, 1.00, 1.25, 1.50, 1.75, 2.00]
+    # Angle bins that previously suppressed the distance percentage (multipliers < 1)
+    # now default to a neutral weight of 1.0 so `dir_val` never penalises low angles.
+    multipliers = [1.00, 1.00, 1.00, 1.00, 1.25, 1.50, 1.75, 2.00]
     return np.select(conditions, multipliers, default=np.nan)
 
 
@@ -1271,7 +1283,13 @@ def build_wide_csv(
     }
 
     meta_prefix = ["dataset", "fly", "fly_number"]
-    stat_columns = ["global_min", "global_max", "non_reactive_flag"]
+    stat_columns = [
+        "global_min",
+        "global_max",
+        "local_min",
+        "local_max",
+        "non_reactive_flag",
+    ]
     meta_suffix = ["trial_type", "trial_label", "fps"]
     metadata = meta_prefix + stat_columns + meta_suffix
     value_cols = [f"dir_val_{idx}" for idx in range(max_len)]
@@ -1325,6 +1343,9 @@ def build_wide_csv(
 
         gmin = float(item.get("global_min", float("nan")))
         gmax = float(item.get("global_max", float("nan")))
+        finite_values = values[np.isfinite(values)]
+        local_min = float(np.nanmin(finite_values)) if finite_values.size else float("nan")
+        local_max = float(np.nanmax(finite_values)) if finite_values.size else float("nan")
         non_reactive = float(item.get("non_reactive_flag", 0.0))
         row = [
             item["dataset"],
@@ -1332,6 +1353,8 @@ def build_wide_csv(
             fly_number_label,
             gmin,
             gmax,
+            local_min,
+            local_max,
             non_reactive,
             trial_type,
             label,
@@ -1396,7 +1419,13 @@ def wide_to_matrix(input_csv: str, output_dir: str) -> None:
     metric_cols = [col for col in AUC_COLUMNS if col in df.columns]
     extra_metrics = [
         col
-        for col in ("global_min", "global_max", "non_reactive_flag")
+        for col in (
+            "global_min",
+            "global_max",
+            "local_min",
+            "local_max",
+            "non_reactive_flag",
+        )
         if col in df.columns
     ]
     metric_cols.extend(extra_metrics)
