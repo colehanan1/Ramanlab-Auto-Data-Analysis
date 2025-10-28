@@ -260,7 +260,9 @@ def _angle_multiplier(angle_pct: np.ndarray) -> np.ndarray:
         (pct > 40) & (pct <= 60),
         (pct > 60) & (pct <= 100),
     ]
-    multipliers = [0.25, 0.50, 0.75, 1.00, 1.25, 1.50, 1.75, 2.00]
+    # Angle bins that previously suppressed the distance percentage (multipliers < 1)
+    # now default to a neutral weight of 1.0 so `dir_val` never penalises low angles.
+    multipliers = [1.00, 1.00, 1.00, 1.00, 1.25, 1.50, 1.75, 2.00]
     return np.select(conditions, multipliers, default=np.nan)
 
 
