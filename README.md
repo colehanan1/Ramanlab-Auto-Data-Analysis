@@ -131,6 +131,11 @@ write a spreadsheet of binary responses. The second command feeds that
 spreadsheet into `scripts/reaction_matrix_from_spreadsheet.py`, reproducing the
 figure layout without manual intervention.
 
+The reaction scorer now honours a dedicated `non_reactive_span_px` setting in
+`config.yaml`. Increase the pixel span to keep more marginal flies in the
+prediction CSV, or tighten it to skip flies whose global min/max distance span
+never exceeds your reaction threshold.
+
 ## Geometric feature extraction CLI
 
 The repository ships with `geom_features.py`, a standalone tool for deriving
