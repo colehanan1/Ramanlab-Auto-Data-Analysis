@@ -22,6 +22,7 @@ import math
 import os
 import re
 import shutil
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Iterator, Mapping, MutableMapping, Optional, Sequence
@@ -33,6 +34,13 @@ from matplotlib import gridspec
 from matplotlib.colors import ListedColormap
 from matplotlib.patches import Patch
 from scipy.signal import hilbert
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+SRC_ROOT = PROJECT_ROOT / "src"
+if str(SRC_ROOT) not in sys.path:
+    sys.path.insert(0, str(SRC_ROOT))
+
+from fbpipe.config import load_settings
 
 
 AUC_COLUMNS = (
@@ -97,6 +105,29 @@ FLY_NUMBER_REGEX = re.compile(r"fly\s*[_-]?\s*(\d+)", re.IGNORECASE)
 
 ANCHOR_X = 1080.0
 ANCHOR_Y = 540.0
+
+DEFAULT_CONFIG_PATH = PROJECT_ROOT / "config.yaml"
+DEFAULT_DISTANCE_LIMITS = (70.0, 250.0)
+
+
+def _resolve_distance_limits(
+    distance_limits: tuple[float, float] | None,
+    config_path: str | Path | None,
+) -> tuple[float, float]:
+    if distance_limits is not None:
+        lower, upper = distance_limits
+        return float(lower), float(upper)
+
+    cfg_path = Path(config_path).expanduser().resolve() if config_path else DEFAULT_CONFIG_PATH
+    try:
+        settings = load_settings(cfg_path)
+        return float(settings.class2_min), float(settings.class2_max)
+    except Exception as exc:  # pragma: no cover - defensive logging
+        print(
+            "[WARN] build_wide_csv: failed to load distance limits from "
+            f"{cfg_path} ({exc}); falling back to defaults"
+        )
+        return float(DEFAULT_DISTANCE_LIMITS[0]), float(DEFAULT_DISTANCE_LIMITS[1])
 
 MANDATORY_WIDE_EXCLUDES = {
     Path("/securedstorage/DATAsec/cole/Data-secured/opto_benz/").expanduser().resolve()
@@ -1177,12 +1208,19 @@ def build_wide_csv(
     measure_cols: Sequence[str],
     fps_fallback: float = 40.0,
     exclude_roots: Sequence[str] | None = None,
+    distance_limits: tuple[float, float] | None = None,
+    config_path: str | Path | None = None,
 ) -> None:
     print(
         f"[DEBUG] build_wide_csv → roots={list(roots)} output={output_csv} measure_cols={list(measure_cols)}"
     )
     out_path = Path(output_csv).expanduser().resolve()
     out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    class2_min, class2_max = _resolve_distance_limits(distance_limits, config_path)
+    print(
+        f"[DEBUG] build_wide_csv: applying distance limits [{class2_min:.3f}, {class2_max:.3f}] for local extrema"
+    )
 
     items: list[dict[str, object]] = []
     flagged_summary: dict[tuple[str, str, str], tuple[float, float]] = {}
@@ -1343,9 +1381,19 @@ def build_wide_csv(
 
         gmin = float(item.get("global_min", float("nan")))
         gmax = float(item.get("global_max", float("nan")))
-        finite_values = values[np.isfinite(values)]
-        local_min = float(np.nanmin(finite_values)) if finite_values.size else float("nan")
-        local_max = float(np.nanmax(finite_values)) if finite_values.size else float("nan")
+        in_range_mask = np.isfinite(values) & (values >= class2_min) & (values <= class2_max)
+        in_range_values = values[in_range_mask]
+        if in_range_values.size:
+            local_min = float(np.min(in_range_values))
+            local_max = float(np.max(in_range_values))
+        else:
+            local_min = float("nan")
+            local_max = float("nan")
+            print(
+                "[WARN] build_wide_csv: "
+                f"no values within [{class2_min:.3f}, {class2_max:.3f}] for {csv_path.name};"
+                " local extrema set to NaN."
+            )
         non_reactive = float(item.get("non_reactive_flag", 0.0))
         row = [
             item["dataset"],
@@ -1767,6 +1815,15 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Root directory to exclude from aggregation (repeatable).",
     )
+    wide_parser.add_argument(
+        "--config",
+        type=Path,
+        default=None,
+        help=(
+            "Path to pipeline configuration YAML supplying distance_limits. "
+            "Defaults to config.yaml beside this script."
+        ),
+    )
 
     matrix_parser = subparsers.add_parser("matrix", help="Convert wide CSV → float16 matrix + metadata.")
     matrix_parser.add_argument("--input-csv", required=True)
@@ -1842,6 +1899,7 @@ def main(argv: Sequence[str] | None = None) -> None:
             measure_cols=measure_cols,
             fps_fallback=args.fps_fallback,
             exclude_roots=args.exclude_root,
+            config_path=args.config,
         )
         return
 

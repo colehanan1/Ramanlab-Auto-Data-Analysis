@@ -308,14 +308,21 @@ python scripts/plot_dirval_heatmaps.py \
   --log-level INFO
 ```
 
-Every row in `all_envelope_rows_wide.csv` now exposes `local_min` and `local_max` beside the global span pulled from the per-fly stats JSON. These trial-level extrema capture the smallest and largest class-2↔class-8 distances observed within the specific testing run, making it trivial to sanity-check outliers after rebuilding the export with:
+Every row in `all_envelope_rows_wide.csv` now exposes `local_min` and `local_max` beside the global span pulled from the per-fly stats JSON. These trial-level extrema capture the smallest and largest class-2↔class-8 distances observed within the specific testing run. Both values now honour the `distance_limits` configured in `config.yaml`, mirroring the filtering used while generating the per-fly JSON stats—any sample falling outside `[class2_min, class2_max]` is excluded from the trial extrema before the CSV row is written. Rebuild the export with:
 
 ```bash
 python scripts/envelope_combined.py \
   wide \
   --root /path/to/dataset/root \
   --output-csv /tmp/all_envelope_rows_wide.csv \
-  --measure-cols envelope_of_rms
+  --measure-cols envelope_of_rms \
+  --config /path/to/config.yaml
+```
+
+Validate the distance-limit filtering with the regression coverage in `tests/test_multi_fly_pipeline.py::test_local_extrema_respect_distance_limits`:
+
+```bash
+PYTHONPATH=. pytest tests/test_multi_fly_pipeline.py::test_local_extrema_respect_distance_limits
 ```
 
 ### Colour scaling and normalisation

@@ -14,7 +14,7 @@ import yaml
 # Add project root to sys.path for imports to work
 sys.path.insert(0, str(Path(__file__).parent.parent.resolve()))
 
-from fbpipe.config import load_settings
+from fbpipe.config import Settings, load_settings
 from fbpipe.steps import predict_reactions, reaction_matrix
 
 from scripts.envelope_visuals import (
@@ -110,7 +110,7 @@ def _run_training(cfg: Mapping[str, Any] | None) -> None:
         )
 
 
-def _run_combined(cfg: Mapping[str, Any] | None) -> None:
+def _run_combined(cfg: Mapping[str, Any] | None, settings: Settings | None) -> None:
     if not cfg:
         return
 
@@ -154,12 +154,16 @@ def _run_combined(cfg: Mapping[str, Any] | None) -> None:
             for path in wide_cfg.get("exclude_roots", [])
         ]
         print(f"[analysis] combined.wide → {output_csv}")
+        limits = None
+        if settings is not None:
+            limits = (settings.class2_min, settings.class2_max)
         build_wide_csv(
             roots,
             str(output_csv),
             measure_cols=measure_cols,
             fps_fallback=fps_fallback,
             exclude_roots=exclude_cfg,
+            distance_limits=limits,
         )
 
     matrix_cfg = cfg.get("matrix")
@@ -235,8 +239,7 @@ def _run_combined(cfg: Mapping[str, Any] | None) -> None:
         )
 
 
-def _run_reactions(config_path: Path) -> None:
-    settings = load_settings(config_path)
+def _run_reactions(settings: Settings) -> None:
     reaction_cfg = settings.reaction_prediction
 
     missing = [
@@ -291,13 +294,15 @@ def main(argv: Sequence[str] | None = None) -> None:
     with config_path.open("r", encoding="utf-8") as fh:
         data = yaml.safe_load(fh) or {}
 
+    settings = load_settings(config_path)
+
     _run_pipeline(config_path)
 
     analysis_cfg = data.get("analysis") or {}
-    _run_combined(analysis_cfg.get("combined"))
+    _run_combined(analysis_cfg.get("combined"), settings)
     _run_envelope_visuals(analysis_cfg.get("envelope_visuals"))
     _run_training(analysis_cfg.get("training"))
-    _run_reactions(config_path)
+    _run_reactions(settings)
 
 
 if __name__ == "__main__":  # pragma: no cover

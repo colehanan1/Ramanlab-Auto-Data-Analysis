@@ -202,7 +202,13 @@ def test_build_wide_csv_adds_auc_columns(tmp_path):
     stats_path.write_text(json.dumps({"global_min": 120.0, "global_max": 135.0}))
 
     out_csv = tmp_path / "all_envelope_rows_wide.csv"
-    build_wide_csv([str(dataset_root)], str(out_csv), measure_cols=["envelope_of_rms"], fps_fallback=40.0)
+    build_wide_csv(
+        [str(dataset_root)],
+        str(out_csv),
+        measure_cols=["envelope_of_rms"],
+        fps_fallback=40.0,
+        distance_limits=(0.0, 300.0),
+    )
 
     df = pd.read_csv(out_csv)
     for column in AUC_COLUMNS:
@@ -224,3 +230,29 @@ def test_build_wide_csv_adds_auc_columns(tmp_path):
     assert flagged_file.exists()
     flagged_lines = [line for line in flagged_file.read_text().splitlines() if line and not line.startswith("#")]
     assert any("session_a" in line and "135.000" in line for line in flagged_lines)
+
+
+def test_local_extrema_respect_distance_limits(tmp_path):
+    dataset_root = tmp_path / "secured_dataset"
+    fly_dir = dataset_root / "session_a"
+    csv_dir = fly_dir / "angle_distance_rms_envelope"
+    csv_dir.mkdir(parents=True, exist_ok=True)
+
+    csv_path = csv_dir / "session_a_testing_1_fly1_distances.csv"
+    values = np.array([5.0, 12.0, 16.0, 300.0], dtype=float)
+    pd.DataFrame({"envelope_of_rms": values}).to_csv(csv_path, index=False)
+    stats_path = fly_dir / "fly1_global_distance_stats_class_2.json"
+    stats_path.write_text(json.dumps({"global_min": 120.0, "global_max": 135.0}))
+
+    out_csv = tmp_path / "all_envelope_rows_wide.csv"
+    build_wide_csv(
+        [str(dataset_root)],
+        str(out_csv),
+        measure_cols=["envelope_of_rms"],
+        fps_fallback=40.0,
+        distance_limits=(10.0, 250.0),
+    )
+
+    df = pd.read_csv(out_csv)
+    assert math.isclose(df.loc[0, "local_min"], 12.0)
+    assert math.isclose(df.loc[0, "local_max"], 16.0)
