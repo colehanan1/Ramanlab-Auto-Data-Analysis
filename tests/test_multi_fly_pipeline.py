@@ -217,13 +217,19 @@ def test_build_wide_csv_adds_auc_columns(tmp_path):
     assert "global_max" in df.columns
     assert "local_min" in df.columns
     assert "local_max" in df.columns
+    assert "local_min_during" in df.columns
+    assert "local_max_during" in df.columns
     assert "local_max_over_global_min" in df.columns
+    assert "local_max_during_over_global_min" in df.columns
     assert "non_reactive_flag" in df.columns
     assert math.isclose(df.loc[0, "global_min"], 1.0)
     assert math.isclose(df.loc[0, "global_max"], 5.0)
     assert math.isclose(df.loc[0, "local_min"], 1.0)
     assert math.isclose(df.loc[0, "local_max"], 5.0)
+    assert math.isclose(df.loc[0, "local_min_during"], 1.0)
+    assert math.isclose(df.loc[0, "local_max_during"], 5.0)
     assert math.isclose(df.loc[0, "local_max_over_global_min"], 5.0)
+    assert math.isclose(df.loc[0, "local_max_during_over_global_min"], 5.0)
     assert df.loc[0, "non_reactive_flag"] == 1.0
 
     flagged_file = out_csv.with_name(out_csv.stem + "_flagged_flies.txt")
@@ -257,6 +263,9 @@ def test_local_extrema_respect_distance_limits(tmp_path):
     assert math.isclose(df.loc[0, "local_min"], 12.0)
     assert math.isclose(df.loc[0, "local_max"], 16.0)
     assert math.isclose(df.loc[0, "local_max_over_global_min"], 16.0 / 12.0)
+    assert np.isnan(df.loc[0, "local_min_during"])
+    assert np.isnan(df.loc[0, "local_max_during"])
+    assert np.isnan(df.loc[0, "local_max_during_over_global_min"])
 
 
 def test_global_extrema_aggregate_across_trials(tmp_path):
@@ -289,9 +298,27 @@ def test_global_extrema_aggregate_across_trials(tmp_path):
         df.loc[df["trial_label"] == "testing_1"].iloc[0]["local_max_over_global_min"],
         20.0 / 8.0,
     )
+    assert np.isnan(
+        df.loc[df["trial_label"] == "testing_1"].iloc[0]["local_min_during"]
+    )
+    assert np.isnan(
+        df.loc[df["trial_label"] == "testing_1"].iloc[0]["local_max_during"]
+    )
+    assert np.isnan(
+        df.loc[df["trial_label"] == "testing_1"].iloc[0]["local_max_during_over_global_min"]
+    )
     assert math.isclose(df.loc[df["trial_label"] == "testing_2"].iloc[0]["local_min"], 8.0)
     assert math.isclose(df.loc[df["trial_label"] == "testing_2"].iloc[0]["local_max"], 30.0)
     assert math.isclose(
         df.loc[df["trial_label"] == "testing_2"].iloc[0]["local_max_over_global_min"],
         30.0 / 8.0,
+    )
+    assert np.isnan(
+        df.loc[df["trial_label"] == "testing_2"].iloc[0]["local_min_during"]
+    )
+    assert np.isnan(
+        df.loc[df["trial_label"] == "testing_2"].iloc[0]["local_max_during"]
+    )
+    assert np.isnan(
+        df.loc[df["trial_label"] == "testing_2"].iloc[0]["local_max_during_over_global_min"]
     )

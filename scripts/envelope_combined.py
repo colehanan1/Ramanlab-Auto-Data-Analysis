@@ -57,6 +57,8 @@ AUC_COLUMNS = (
 BEFORE_FRAMES = 1260
 DURING_FRAMES = 1200
 AFTER_FRAMES = 1200
+DURING_START_FRAME = BEFORE_FRAMES
+DURING_END_FRAME = BEFORE_FRAMES + DURING_FRAMES
 
 from scripts import envelope_visuals
 from scripts.envelope_visuals import (
@@ -1206,7 +1208,10 @@ def build_wide_csv(
         "global_max",
         "local_min",
         "local_max",
+        "local_min_during",
+        "local_max_during",
         "local_max_over_global_min",
+        "local_max_during_over_global_min",
         "non_reactive_flag",
     ]
     meta_suffix = ["trial_type", "trial_label", "fps"]
@@ -1301,6 +1306,24 @@ def build_wide_csv(
                     "local extrema set to NaN."
                 )
 
+            during_slice = values[DURING_START_FRAME:DURING_END_FRAME]
+            if during_slice.size:
+                during_mask = (
+                    np.isfinite(during_slice)
+                    & (during_slice >= class2_min)
+                    & (during_slice <= class2_max)
+                )
+                during_in_range_values = during_slice[during_mask]
+            else:
+                during_in_range_values = np.empty(0, dtype=float)
+
+            if during_in_range_values.size:
+                local_min_during = float(np.min(during_in_range_values))
+                local_max_during = float(np.max(during_in_range_values))
+            else:
+                local_min_during = float("nan")
+                local_max_during = float("nan")
+
             trial_results.append(
                 {
                     "trial_type": trial_type,
@@ -1310,6 +1333,8 @@ def build_wide_csv(
                     "values": values,
                     "local_min": local_min,
                     "local_max": local_max,
+                    "local_min_during": local_min_during,
+                    "local_max_during": local_max_during,
                 }
             )
 
@@ -1341,6 +1366,16 @@ def build_wide_csv(
             ):
                 local_max_over_global_min = float(local_max_val) / float(gmin)
 
+            local_max_during_over_global_min = float("nan")
+            local_max_during_val = result["local_max_during"]
+            if (
+                isinstance(local_max_during_val, (float, int))
+                and math.isfinite(local_max_during_val)
+                and math.isfinite(gmin)
+                and gmin != 0.0
+            ):
+                local_max_during_over_global_min = float(local_max_during_val) / float(gmin)
+
             row = [
                 dataset,
                 fly,
@@ -1349,7 +1384,10 @@ def build_wide_csv(
                 gmax,
                 result["local_min"],
                 result["local_max"],
+                result["local_min_during"],
+                result["local_max_during"],
                 local_max_over_global_min,
+                local_max_during_over_global_min,
                 non_reactive,
                 result["trial_type"],
                 result["label"],
@@ -1419,7 +1457,10 @@ def wide_to_matrix(input_csv: str, output_dir: str) -> None:
             "global_max",
             "local_min",
             "local_max",
+            "local_min_during",
+            "local_max_during",
             "local_max_over_global_min",
+            "local_max_during_over_global_min",
             "non_reactive_flag",
         )
         if col in df.columns
