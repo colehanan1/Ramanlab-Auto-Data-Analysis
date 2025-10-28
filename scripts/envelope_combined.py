@@ -1206,6 +1206,7 @@ def build_wide_csv(
         "global_max",
         "local_min",
         "local_max",
+        "local_max_over_global_min",
         "non_reactive_flag",
     ]
     meta_suffix = ["trial_type", "trial_label", "fps"]
@@ -1330,6 +1331,16 @@ def build_wide_csv(
 
         for result in trial_results:
             values = result["values"]
+            local_max_over_global_min = float("nan")
+            local_max_val = result["local_max"]
+            if (
+                isinstance(local_max_val, (float, int))
+                and math.isfinite(local_max_val)
+                and math.isfinite(gmin)
+                and gmin != 0.0
+            ):
+                local_max_over_global_min = float(local_max_val) / float(gmin)
+
             row = [
                 dataset,
                 fly,
@@ -1338,6 +1349,7 @@ def build_wide_csv(
                 gmax,
                 result["local_min"],
                 result["local_max"],
+                local_max_over_global_min,
                 non_reactive,
                 result["trial_type"],
                 result["label"],
@@ -1407,6 +1419,7 @@ def wide_to_matrix(input_csv: str, output_dir: str) -> None:
             "global_max",
             "local_min",
             "local_max",
+            "local_max_over_global_min",
             "non_reactive_flag",
         )
         if col in df.columns
