@@ -198,8 +198,6 @@ def test_build_wide_csv_adds_auc_columns(tmp_path):
     after = np.full(AFTER_FRAMES, 1.0)
     values = np.concatenate([before, during, after])
     pd.DataFrame({"envelope_of_rms": values}).to_csv(csv_path, index=False)
-    stats_path = fly_dir / "fly1_global_distance_stats_class_2.json"
-    stats_path.write_text(json.dumps({"global_min": 120.0, "global_max": 135.0}))
 
     out_csv = tmp_path / "all_envelope_rows_wide.csv"
     build_wide_csv(
@@ -220,8 +218,8 @@ def test_build_wide_csv_adds_auc_columns(tmp_path):
     assert "local_min" in df.columns
     assert "local_max" in df.columns
     assert "non_reactive_flag" in df.columns
-    assert math.isclose(df.loc[0, "global_min"], 120.0)
-    assert math.isclose(df.loc[0, "global_max"], 135.0)
+    assert math.isclose(df.loc[0, "global_min"], 1.0)
+    assert math.isclose(df.loc[0, "global_max"], 5.0)
     assert math.isclose(df.loc[0, "local_min"], 1.0)
     assert math.isclose(df.loc[0, "local_max"], 5.0)
     assert df.loc[0, "non_reactive_flag"] == 1.0
@@ -229,7 +227,7 @@ def test_build_wide_csv_adds_auc_columns(tmp_path):
     flagged_file = out_csv.with_name(out_csv.stem + "_flagged_flies.txt")
     assert flagged_file.exists()
     flagged_lines = [line for line in flagged_file.read_text().splitlines() if line and not line.startswith("#")]
-    assert any("session_a" in line and "135.000" in line for line in flagged_lines)
+    assert any("session_a" in line and "5.000" in line for line in flagged_lines)
 
 
 def test_local_extrema_respect_distance_limits(tmp_path):
@@ -241,8 +239,6 @@ def test_local_extrema_respect_distance_limits(tmp_path):
     csv_path = csv_dir / "session_a_testing_1_fly1_distances.csv"
     values = np.array([5.0, 12.0, 16.0, 300.0], dtype=float)
     pd.DataFrame({"envelope_of_rms": values}).to_csv(csv_path, index=False)
-    stats_path = fly_dir / "fly1_global_distance_stats_class_2.json"
-    stats_path.write_text(json.dumps({"global_min": 120.0, "global_max": 135.0}))
 
     out_csv = tmp_path / "all_envelope_rows_wide.csv"
     build_wide_csv(
@@ -254,5 +250,37 @@ def test_local_extrema_respect_distance_limits(tmp_path):
     )
 
     df = pd.read_csv(out_csv)
+    assert math.isclose(df.loc[0, "global_min"], 12.0)
+    assert math.isclose(df.loc[0, "global_max"], 16.0)
     assert math.isclose(df.loc[0, "local_min"], 12.0)
     assert math.isclose(df.loc[0, "local_max"], 16.0)
+
+
+def test_global_extrema_aggregate_across_trials(tmp_path):
+    dataset_root = tmp_path / "secured_dataset"
+    fly_dir = dataset_root / "session_b"
+    csv_dir = fly_dir / "angle_distance_rms_envelope"
+    csv_dir.mkdir(parents=True, exist_ok=True)
+
+    csv_one = csv_dir / "session_b_testing_1_fly2_distances.csv"
+    csv_two = csv_dir / "session_b_testing_2_fly2_distances.csv"
+    pd.DataFrame({"envelope_of_rms": [15.0, 20.0]}).to_csv(csv_one, index=False)
+    pd.DataFrame({"envelope_of_rms": [8.0, 30.0]}).to_csv(csv_two, index=False)
+
+    out_csv = tmp_path / "all_envelope_rows_wide.csv"
+    build_wide_csv(
+        [str(dataset_root)],
+        str(out_csv),
+        measure_cols=["envelope_of_rms"],
+        fps_fallback=40.0,
+        distance_limits=(0.0, 40.0),
+    )
+
+    df = pd.read_csv(out_csv)
+    assert len(df) == 2
+    assert np.allclose(df["global_min"], [8.0, 8.0])
+    assert np.allclose(df["global_max"], [30.0, 30.0])
+    assert math.isclose(df.loc[df["trial_label"] == "testing_1"].iloc[0]["local_min"], 15.0)
+    assert math.isclose(df.loc[df["trial_label"] == "testing_1"].iloc[0]["local_max"], 20.0)
+    assert math.isclose(df.loc[df["trial_label"] == "testing_2"].iloc[0]["local_min"], 8.0)
+    assert math.isclose(df.loc[df["trial_label"] == "testing_2"].iloc[0]["local_max"], 30.0)

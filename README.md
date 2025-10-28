@@ -308,7 +308,7 @@ python scripts/plot_dirval_heatmaps.py \
   --log-level INFO
 ```
 
-Every row in `all_envelope_rows_wide.csv` now exposes `local_min` and `local_max` beside the global span pulled from the per-fly stats JSON. These trial-level extrema capture the smallest and largest class-2↔class-8 distances observed within the specific testing run. Both values now honour the `distance_limits` configured in `config.yaml`, mirroring the filtering used while generating the per-fly JSON stats—any sample falling outside `[class2_min, class2_max]` is excluded from the trial extrema before the CSV row is written. Rebuild the export with:
+Every row in `all_envelope_rows_wide.csv` now exposes `local_min` and `local_max` beside `global_min` and `global_max`, all of which are computed directly from the pixel-distance traces in each trial. The builder streams every distance CSV for a given fly, filters samples against the configured `[class2_min, class2_max]` span, and aggregates the in-range values to derive a per-fly global span before writing any rows. That means the global extrema now match the same source data as the trial-level minima/maxima instead of relying on the legacy JSON stats. Rebuild the export with:
 
 ```bash
 python scripts/envelope_combined.py \
@@ -319,10 +319,12 @@ python scripts/envelope_combined.py \
   --config /path/to/config.yaml
 ```
 
-Validate the distance-limit filtering with the regression coverage in `tests/test_multi_fly_pipeline.py::test_local_extrema_respect_distance_limits`:
+Validate the distance-limit filtering and the per-fly aggregation with the regression coverage in `tests/test_multi_fly_pipeline.py::test_local_extrema_respect_distance_limits` and `tests/test_multi_fly_pipeline.py::test_global_extrema_aggregate_across_trials`:
 
 ```bash
-PYTHONPATH=. pytest tests/test_multi_fly_pipeline.py::test_local_extrema_respect_distance_limits
+PYTHONPATH=. pytest \
+  tests/test_multi_fly_pipeline.py::test_local_extrema_respect_distance_limits \
+  tests/test_multi_fly_pipeline.py::test_global_extrema_aggregate_across_trials
 ```
 
 ### Colour scaling and normalisation
