@@ -31,3 +31,20 @@ def test_angle_multiplier_handles_scalars():
 
     assert ec._angle_multiplier(np.array([-100.0])).item() == 1.0
     assert ec._angle_multiplier(np.array([5.0])).item() == 1.0
+
+
+def test_eb_control_matches_opto_ordering():
+    """EB_control should mirror opto_EB odor labels for late trials."""
+
+    expected = {
+        6: "Apple Cider Vinegar",
+        7: "3-Octonol",
+        8: "Benzaldehyde",
+        9: "Citral",
+        10: "Linalool",
+    }
+
+    for trial, odor in expected.items():
+        label = f"testing_{trial}"
+        assert ec._display_odor("opto_EB", label) == odor
+        assert ec._display_odor("EB_control", label) == odor

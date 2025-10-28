@@ -307,6 +307,14 @@ python scripts/plot_dirval_heatmaps.py \
 
 Historically the plots relied on z-score normalisation and percentile clipping to highlight relative structure within each trial. With the latest update every heatmap defaults to the physical `dir_val` scale: the colour bar spans `0` (dark purple) to `200` (bright yellow) whenever `--normalize none` is active, ensuring consistent interpretation across flies and datasets. Opt into `--normalize zscore` when you explicitly want per-trial standardisation; in that mode the code falls back to the robust percentile-driven limits so the colour bar reflects standard deviations rather than raw millimetre values. Direction values now apply a unity floor to the angle-derived multiplier so low-angle periods no longer attenuate the distance percentage—`dir_val` only scales up from the base distance trace.
 
+### Ethyl butyrate control ordering
+
+The combined-envelope tooling (`scripts/envelope_combined.py`, `scripts/envelope_visuals.py`, and `scripts/envelope_training.py`) now canonically maps the `EB_control` dataset to the same late-trial odor ordering as `opto_EB`. Testing trials `testing_6`–`testing_10` therefore render as Apple Cider Vinegar, 3-Octonol, Benzaldehyde, Citral, and Linalool for both datasets. Validate the behaviour with:
+
+```bash
+pytest tests/test_envelope_combined.py
+```
+
 ## Standalone analysis scripts
 
 ### Reaction matrices from spreadsheet predictions
