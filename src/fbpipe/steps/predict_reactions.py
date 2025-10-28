@@ -101,7 +101,8 @@ def main(cfg: Settings) -> None:
         raise FileNotFoundError(f"Model file not found: {model_path}")
 
     df = pd.read_csv(data_csv)
-    filtered_df, flagged_pairs = _drop_flagged_flies(df)
+    span_threshold = float(getattr(cfg, "non_reactive_span_px", NON_REACTIVE_SPAN_PX))
+    filtered_df, flagged_pairs = _drop_flagged_flies(df, threshold=span_threshold)
     if filtered_df.empty:
         print(
             "[REACTION] All candidate flies were flagged non-reactive; "
