@@ -44,6 +44,9 @@ distance_limits:
   class2_min: 10.0
   class2_max: 250.0
 
+# Reaction filtering
+non_reactive_span_px: 20.0  # flag flies when global span ≤ this threshold (pixels)
+
 # Envelope / RMS
 fps_default: 40.0
 window_sec: 0.25
