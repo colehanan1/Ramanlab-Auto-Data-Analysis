@@ -22,6 +22,8 @@ import math
 import os
 import re
 import shutil
+import sys
+from itertools import groupby
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Iterator, Mapping, MutableMapping, Optional, Sequence
@@ -33,6 +35,13 @@ from matplotlib import gridspec
 from matplotlib.colors import ListedColormap
 from matplotlib.patches import Patch
 from scipy.signal import hilbert
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+SRC_ROOT = PROJECT_ROOT / "src"
+if str(SRC_ROOT) not in sys.path:
+    sys.path.insert(0, str(SRC_ROOT))
+
+from fbpipe.config import load_settings
 
 
 AUC_COLUMNS = (
@@ -48,6 +57,8 @@ AUC_COLUMNS = (
 BEFORE_FRAMES = 1260
 DURING_FRAMES = 1200
 AFTER_FRAMES = 1200
+DURING_START_FRAME = BEFORE_FRAMES
+DURING_END_FRAME = BEFORE_FRAMES + DURING_FRAMES
 
 from scripts import envelope_visuals
 from scripts.envelope_visuals import (
@@ -98,6 +109,29 @@ FLY_NUMBER_REGEX = re.compile(r"fly\s*[_-]?\s*(\d+)", re.IGNORECASE)
 ANCHOR_X = 1080.0
 ANCHOR_Y = 540.0
 
+DEFAULT_CONFIG_PATH = PROJECT_ROOT / "config.yaml"
+DEFAULT_DISTANCE_LIMITS = (70.0, 250.0)
+
+
+def _resolve_distance_limits(
+    distance_limits: tuple[float, float] | None,
+    config_path: str | Path | None,
+) -> tuple[float, float]:
+    if distance_limits is not None:
+        lower, upper = distance_limits
+        return float(lower), float(upper)
+
+    cfg_path = Path(config_path).expanduser().resolve() if config_path else DEFAULT_CONFIG_PATH
+    try:
+        settings = load_settings(cfg_path)
+        return float(settings.class2_min), float(settings.class2_max)
+    except Exception as exc:  # pragma: no cover - defensive logging
+        print(
+            "[WARN] build_wide_csv: failed to load distance limits from "
+            f"{cfg_path} ({exc}); falling back to defaults"
+        )
+        return float(DEFAULT_DISTANCE_LIMITS[0]), float(DEFAULT_DISTANCE_LIMITS[1])
+
 MANDATORY_WIDE_EXCLUDES = {
     Path("/securedstorage/DATAsec/cole/Data-secured/opto_benz/").expanduser().resolve()
 }
@@ -115,6 +149,8 @@ ODOR_CANON = {
     "benz-ald": "Benz",
     "benzadhyde": "Benz",
     "ethyl butyrate": "EB",
+    "eb_control": "EB_control",
+    "eb control": "EB_control",
     "optogenetics benzaldehyde": "opto_benz",
     "optogenetics benzaldehyde 1": "opto_benz_1",
     "optogenetics ethyl butyrate": "opto_EB",
@@ -131,6 +167,7 @@ DISPLAY_LABEL = {
     "Benz": "Benzaldehyde",
     "10s_Odor_Benz": "Benzaldehyde",
     "EB": "Ethyl Butyrate",
+    "EB_control": "EB Control",
     "opto_benz": "Benzaldehyde",
     "opto_benz_1": "Benzaldehyde",
     "opto_EB": "Ethyl Butyrate",
@@ -189,6 +226,13 @@ def _display_odor(dataset_canon: str, trial_label: str) -> str:
         "3-octonol": {6: "Benzaldehyde", 7: "Citral", 8: "Linalool"},
         "Benz": {6: "Citral", 7: "Linalool"},
         "EB": {6: "Apple Cider Vinegar", 7: "3-Octonol", 8: "Benzaldehyde", 9: "Citral", 10: "Linalool"},
+        "EB_control": {
+            6: "Apple Cider Vinegar",
+            7: "3-Octonol",
+            8: "Benzaldehyde",
+            9: "Citral",
+            10: "Linalool",
+        },
         "10s_Odor_Benz": {6: "Benzaldehyde", 7: "Benzaldehyde"},
         "opto_EB": {6: "Apple Cider Vinegar", 7: "3-Octonol", 8: "Benzaldehyde", 9: "Citral", 10: "Linalool"},
         "opto_benz": {6: "3-Octonol", 7: "Benzaldehyde", 8: "Citral", 9: "Linalool"},
@@ -260,7 +304,9 @@ def _angle_multiplier(angle_pct: np.ndarray) -> np.ndarray:
         (pct > 40) & (pct <= 60),
         (pct > 60) & (pct <= 100),
     ]
-    multipliers = [0.25, 0.50, 0.75, 1.00, 1.25, 1.50, 1.75, 2.00]
+    # Angle bins that previously suppressed the distance percentage (multipliers < 1)
+    # now default to a neutral weight of 1.0 so `dir_val` never penalises low angles.
+    multipliers = [1.00, 1.00, 1.00, 1.00, 1.25, 1.50, 1.75, 2.00]
     return np.select(conditions, multipliers, default=np.nan)
 
 
@@ -579,117 +625,6 @@ def _index_testing(entries: Sequence[tuple[str, Path, str]]) -> tuple[dict[str, 
                 indexed[f"{key}_{slot_label}"] = path
             fallback[key] = path
     return indexed, fallback
-
-
-_STATS_SUFFIX = "_global_distance_stats_class_2.json"
-_FLY_STATS_PATTERN = re.compile(r"fly[_-]?(\d+)_global_distance_stats_class_2\.json$", re.IGNORECASE)
-
-
-def _parse_distance_stats(stats_path: Path) -> tuple[float, float] | None:
-    try:
-        payload = json.loads(stats_path.read_text(encoding="utf-8"))
-    except Exception as exc:
-        print(f"[WARN] build_wide_csv: failed to parse {stats_path}: {exc}")
-        return None
-
-    try:
-        gmin = float(payload.get("global_min", float("nan")))
-        gmax = float(payload.get("global_max", float("nan")))
-    except (TypeError, ValueError):
-        print(
-            f"[WARN] build_wide_csv: non-numeric stats in {stats_path.name}: {payload}"
-        )
-        return None
-
-    if not (math.isfinite(gmin) and math.isfinite(gmax)):
-        print(
-            f"[WARN] build_wide_csv: invalid stats in {stats_path.name}: {payload}"
-        )
-        return None
-
-    return float(gmin), float(gmax)
-
-
-def _load_global_distance_stats(
-    fly_dir: Path,
-) -> tuple[dict[str, tuple[float, float]], tuple[float, float] | None]:
-    """Return indexed global stats for each fly plus any legacy aggregate."""
-
-    per_fly: dict[str, tuple[float, float]] = {}
-    legacy: tuple[float, float] | None = None
-    seen: set[Path] = set()
-
-    for stats_path in sorted(fly_dir.rglob(f"*{_STATS_SUFFIX}")):
-        if stats_path in seen or not stats_path.is_file():
-            continue
-        seen.add(stats_path)
-
-        stats = _parse_distance_stats(stats_path)
-        if stats is None:
-            continue
-
-        name_lower = stats_path.name.lower()
-        if name_lower == "global_distance_stats_class_2.json":
-            legacy = stats
-            continue
-
-        match = _FLY_STATS_PATTERN.match(name_lower)
-        if match:
-            fly_key = str(int(match.group(1)))
-            if fly_key in per_fly and per_fly[fly_key] != stats:
-                print(
-                    f"[WARN] build_wide_csv: duplicate stats for fly{fly_key} in {fly_dir}"
-                )
-            per_fly[fly_key] = stats
-            continue
-
-        # Unknown naming convention – retain for diagnostics but do not map.
-        print(
-            f"[WARN] build_wide_csv: unrecognised stats filename {stats_path.name} in {fly_dir}"
-        )
-
-    return per_fly, legacy
-
-
-def _resolve_distance_stats(
-    per_fly: Mapping[str, tuple[float, float]],
-    legacy: tuple[float, float] | None,
-    fly_dir: Path,
-    fly_number: Optional[int],
-    csv_path: Path,
-) -> tuple[float, float]:
-    context = f"{fly_dir.name}/{csv_path.name}"
-    if fly_number is not None:
-        key = str(fly_number)
-        stats = per_fly.get(key)
-        if stats is not None:
-            return stats
-        if legacy is not None:
-            print(
-                f"[WARN] build_wide_csv: {context} missing fly-specific stats; using legacy aggregate."
-            )
-            return legacy
-        print(
-            f"[WARN] build_wide_csv: {context} missing fly{key} stats; marking as NaN."
-        )
-        return (float("nan"), float("nan"))
-
-    if legacy is not None:
-        return legacy
-
-    if len(per_fly) == 1:
-        key, stats = next(iter(per_fly.items()))
-        print(
-            f"[WARN] build_wide_csv: {context} lacks fly number; using stats from fly{key}."
-        )
-        return stats
-
-    if per_fly:
-        print(
-            f"[WARN] build_wide_csv: {context} lacks fly number and multiple stats are available; marking as NaN."
-        )
-
-    return (float("nan"), float("nan"))
 
 
 def _find_trial_csvs(fly_dir: Path) -> Iterator[Path]:
@@ -1165,12 +1100,19 @@ def build_wide_csv(
     measure_cols: Sequence[str],
     fps_fallback: float = 40.0,
     exclude_roots: Sequence[str] | None = None,
+    distance_limits: tuple[float, float] | None = None,
+    config_path: str | Path | None = None,
 ) -> None:
     print(
         f"[DEBUG] build_wide_csv → roots={list(roots)} output={output_csv} measure_cols={list(measure_cols)}"
     )
     out_path = Path(output_csv).expanduser().resolve()
     out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    class2_min, class2_max = _resolve_distance_limits(distance_limits, config_path)
+    print(
+        f"[DEBUG] build_wide_csv: applying distance limits [{class2_min:.3f}, {class2_max:.3f}] for local extrema"
+    )
 
     items: list[dict[str, object]] = []
     flagged_summary: dict[tuple[str, str, str], tuple[float, float]] = {}
@@ -1187,7 +1129,6 @@ def build_wide_csv(
         for fly_dir in sorted(p for p in root.iterdir() if p.is_dir()):
             fly = fly_dir.name
             print(f"[DEBUG] build_wide_csv: scanning fly_dir={fly_dir}")
-            per_fly_stats, legacy_stats = _load_global_distance_stats(fly_dir)
             for csv_path in _find_trial_csvs(fly_dir):
                 try:
                     header = pd.read_csv(csv_path, nrows=0)
@@ -1213,10 +1154,6 @@ def build_wide_csv(
                     print(
                         f"[DEBUG] build_wide_csv: {csv_path.name} fly_number={fly_number_label}"
                     )
-                gmin, gmax = _resolve_distance_stats(
-                    per_fly_stats, legacy_stats, fly_dir, fly_number, csv_path
-                )
-                flagged = is_non_reactive_span(gmin, gmax)
                 try:
                     n_rows = pd.read_csv(csv_path, usecols=[measure]).shape[0]
                 except Exception as exc:
@@ -1228,15 +1165,10 @@ def build_wide_csv(
                         "fly": fly,
                         "fly_key": f"{dataset}::{fly}",
                         "fly_number": fly_number_label,
-                        "global_min": float(gmin),
-                        "global_max": float(gmax),
-                        "non_reactive_flag": 1.0 if flagged else 0.0,
                         "csv_path": csv_path,
                         "measure_col": measure,
                     }
                 )
-                if flagged:
-                    flagged_summary[(dataset, fly, fly_number_label)] = (float(gmin), float(gmax))
                 max_len = max(max_len, n_rows)
 
     if not items:
@@ -1271,88 +1203,212 @@ def build_wide_csv(
     }
 
     meta_prefix = ["dataset", "fly", "fly_number"]
-    stat_columns = ["global_min", "global_max", "non_reactive_flag"]
+    stat_columns = [
+        "global_min",
+        "global_max",
+        "local_min",
+        "local_max",
+        "local_min_during",
+        "local_max_during",
+        "local_max_over_global_min",
+        "local_max_during_over_global_min",
+        "non_reactive_flag",
+    ]
     meta_suffix = ["trial_type", "trial_label", "fps"]
     metadata = meta_prefix + stat_columns + meta_suffix
     value_cols = [f"dir_val_{idx}" for idx in range(max_len)]
     header_df = pd.DataFrame(columns=metadata + list(AUC_COLUMNS) + value_cols)
     header_df.to_csv(out_path, index=False)
 
-    for item in items:
-        csv_path = Path(item["csv_path"])
-        try:
-            header = pd.read_csv(csv_path, nrows=0)
-        except Exception:
-            header = pd.DataFrame()
+    items_sorted = sorted(
+        items,
+        key=lambda entry: (
+            entry["dataset"],
+            entry["fly"],
+            entry["fly_number"],
+            str(entry["csv_path"]),
+        ),
+    )
 
-        frame_col = _pick_frame(header) if not header.empty else None
-        ts_col = _pick_timestamp(header) if not header.empty else None
-        fps = math.nan
-        if frame_col and ts_col:
+    for (dataset, fly, fly_number_label), grouped in groupby(
+        items_sorted,
+        key=lambda entry: (
+            entry["dataset"],
+            entry["fly"],
+            entry["fly_number"],
+        ),
+    ):
+        group_items = list(grouped)
+        fly_span_min = math.inf
+        fly_span_max = -math.inf
+        in_range_samples = 0
+        trial_results: list[dict[str, object]] = []
+
+        for item in group_items:
+            csv_path = Path(item["csv_path"])
             try:
-                ts_df = pd.read_csv(csv_path, usecols=[frame_col, ts_col])
-                seconds = _seconds_from_timestamp(ts_df, ts_col)
-                fps_est = _estimate_fps(seconds)
-                if fps_est and np.isfinite(fps_est) and fps_est > 0:
-                    fps = float(fps_est)
+                header = pd.read_csv(csv_path, nrows=0)
+            except Exception:
+                header = pd.DataFrame()
+
+            frame_col = _pick_frame(header) if not header.empty else None
+            ts_col = _pick_timestamp(header) if not header.empty else None
+            fps = math.nan
+            if frame_col and ts_col:
+                try:
+                    ts_df = pd.read_csv(csv_path, usecols=[frame_col, ts_col])
+                    seconds = _seconds_from_timestamp(ts_df, ts_col)
+                    fps_est = _estimate_fps(seconds)
+                    if fps_est and np.isfinite(fps_est) and fps_est > 0:
+                        fps = float(fps_est)
+                except Exception as exc:
+                    print(f"[WARN] FPS inference failed for {csv_path.name}: {exc}")
+            if not np.isfinite(fps):
+                fps = float(fps_fallback)
+
+            try:
+                measure = str(item["measure_col"])
+                df = pd.read_csv(csv_path, usecols=[measure])
+                values = pd.to_numeric(df[measure], errors="coerce").astype(float).to_numpy()
             except Exception as exc:
-                print(f"[WARN] FPS inference failed for {csv_path.name}: {exc}")
-        if not np.isfinite(fps):
-            fps = float(fps_fallback)
+                print(f"[WARN] Read failed {csv_path}: {exc}")
+                continue
 
-        try:
-            measure = str(item["measure_col"])
-            df = pd.read_csv(csv_path, usecols=[measure])
-            values = pd.to_numeric(df[measure], errors="coerce").astype(float).to_numpy()
-        except Exception as exc:
-            print(f"[WARN] Read failed {csv_path}: {exc}")
-            continue
+            trial_type = _infer_category(csv_path)
+            label = _trial_label(csv_path)
+            print(
+                f"[DEBUG] build_wide_csv: writing dataset={dataset} fly={fly} "
+                f"fly_number={fly_number_label} fps={fps:.3f} frames={len(values)}"
+            )
 
-        trial_type = _infer_category(csv_path)
-        label = _trial_label(csv_path)
-        fly_number_label = str(item.get("fly_number", "UNKNOWN"))
-        print(
-            f"[DEBUG] build_wide_csv: writing dataset={item['dataset']} fly={item['fly']} fly_number={fly_number_label} fps={fps:.3f} frames={len(values)}"
-        )
+            metrics = _compute_trial_metrics(
+                values,
+                fps,
+                fallback_fps=fps_fallback,
+                default_fps=fps_fallback,
+                fly_before_mean=fly_before_means.get(item["fly_key"], float("nan")),
+            )
 
-        metrics = _compute_trial_metrics(
-            values,
-            fps,
-            fallback_fps=fps_fallback,
-            default_fps=fps_fallback,
-            fly_before_mean=fly_before_means.get(item["fly_key"], float("nan")),
-        )
+            in_range_mask = np.isfinite(values) & (values >= class2_min) & (values <= class2_max)
+            in_range_values = values[in_range_mask]
+            if in_range_values.size:
+                local_min = float(np.min(in_range_values))
+                local_max = float(np.max(in_range_values))
+                fly_span_min = min(fly_span_min, local_min)
+                fly_span_max = max(fly_span_max, local_max)
+                in_range_samples += int(in_range_values.size)
+            else:
+                local_min = float("nan")
+                local_max = float("nan")
+                print(
+                    "[WARN] build_wide_csv: "
+                    f"no values within [{class2_min:.3f}, {class2_max:.3f}] for {csv_path.name}; "
+                    "local extrema set to NaN."
+                )
 
-        gmin = float(item.get("global_min", float("nan")))
-        gmax = float(item.get("global_max", float("nan")))
-        non_reactive = float(item.get("non_reactive_flag", 0.0))
-        row = [
-            item["dataset"],
-            item["fly"],
-            fly_number_label,
-            gmin,
-            gmax,
-            non_reactive,
-            trial_type,
-            label,
-            float(fps),
-            metrics["AUC-Before"],
-            metrics["AUC-During"],
-            metrics["AUC-After"],
-            metrics["AUC-During-Before-Ratio"],
-            metrics["AUC-After-Before-Ratio"],
-            metrics["TimeToPeak-During"],
-            metrics["Peak-Value"],
-            *list(values),
-        ]
-        if len(values) < max_len:
-            row.extend([np.nan] * (max_len - len(values)))
-        elif len(values) > max_len:
-            row = row[: len(metadata) + len(AUC_COLUMNS) + max_len]
+            during_slice = values[DURING_START_FRAME:DURING_END_FRAME]
+            if during_slice.size:
+                during_mask = (
+                    np.isfinite(during_slice)
+                    & (during_slice >= class2_min)
+                    & (during_slice <= class2_max)
+                )
+                during_in_range_values = during_slice[during_mask]
+            else:
+                during_in_range_values = np.empty(0, dtype=float)
 
-        pd.DataFrame([row], columns=metadata + list(AUC_COLUMNS) + value_cols).to_csv(
-            out_path, index=False, mode="a", header=False
-        )
+            if during_in_range_values.size:
+                local_min_during = float(np.min(during_in_range_values))
+                local_max_during = float(np.max(during_in_range_values))
+            else:
+                local_min_during = float("nan")
+                local_max_during = float("nan")
+
+            trial_results.append(
+                {
+                    "trial_type": trial_type,
+                    "label": label,
+                    "fps": float(fps),
+                    "metrics": metrics,
+                    "values": values,
+                    "local_min": local_min,
+                    "local_max": local_max,
+                    "local_min_during": local_min_during,
+                    "local_max_during": local_max_during,
+                }
+            )
+
+        if in_range_samples:
+            gmin = float(fly_span_min)
+            gmax = float(fly_span_max)
+        else:
+            gmin = float("nan")
+            gmax = float("nan")
+            print(
+                "[WARN] build_wide_csv: "
+                f"no in-range samples found for dataset={dataset} fly={fly} "
+                f"fly_number={fly_number_label}; global extrema set to NaN."
+            )
+
+        non_reactive = 1.0 if is_non_reactive_span(gmin, gmax) else 0.0
+        if non_reactive:
+            flagged_summary[(dataset, fly, fly_number_label)] = (gmin, gmax)
+
+        for result in trial_results:
+            values = result["values"]
+            local_max_over_global_min = float("nan")
+            local_max_val = result["local_max"]
+            if (
+                isinstance(local_max_val, (float, int))
+                and math.isfinite(local_max_val)
+                and math.isfinite(gmin)
+                and gmin != 0.0
+            ):
+                local_max_over_global_min = float(local_max_val) / float(gmin)
+
+            local_max_during_over_global_min = float("nan")
+            local_max_during_val = result["local_max_during"]
+            if (
+                isinstance(local_max_during_val, (float, int))
+                and math.isfinite(local_max_during_val)
+                and math.isfinite(gmin)
+                and gmin != 0.0
+            ):
+                local_max_during_over_global_min = float(local_max_during_val) / float(gmin)
+
+            row = [
+                dataset,
+                fly,
+                fly_number_label,
+                gmin,
+                gmax,
+                result["local_min"],
+                result["local_max"],
+                result["local_min_during"],
+                result["local_max_during"],
+                local_max_over_global_min,
+                local_max_during_over_global_min,
+                non_reactive,
+                result["trial_type"],
+                result["label"],
+                float(result["fps"]),
+                result["metrics"]["AUC-Before"],
+                result["metrics"]["AUC-During"],
+                result["metrics"]["AUC-After"],
+                result["metrics"]["AUC-During-Before-Ratio"],
+                result["metrics"]["AUC-After-Before-Ratio"],
+                result["metrics"]["TimeToPeak-During"],
+                result["metrics"]["Peak-Value"],
+                *list(values),
+            ]
+            if len(values) < max_len:
+                row.extend([np.nan] * (max_len - len(values)))
+            elif len(values) > max_len:
+                row = row[: len(metadata) + len(AUC_COLUMNS) + max_len]
+
+            pd.DataFrame([row], columns=metadata + list(AUC_COLUMNS) + value_cols).to_csv(
+                out_path, index=False, mode="a", header=False
+            )
 
     flagged_path = out_path.with_name(out_path.stem + "_flagged_flies.txt")
     with flagged_path.open("w", encoding="utf-8") as fh:
@@ -1396,7 +1452,17 @@ def wide_to_matrix(input_csv: str, output_dir: str) -> None:
     metric_cols = [col for col in AUC_COLUMNS if col in df.columns]
     extra_metrics = [
         col
-        for col in ("global_min", "global_max", "non_reactive_flag")
+        for col in (
+            "global_min",
+            "global_max",
+            "local_min",
+            "local_max",
+            "local_min_during",
+            "local_max_during",
+            "local_max_over_global_min",
+            "local_max_during_over_global_min",
+            "non_reactive_flag",
+        )
         if col in df.columns
     ]
     metric_cols.extend(extra_metrics)
@@ -1738,6 +1804,15 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Root directory to exclude from aggregation (repeatable).",
     )
+    wide_parser.add_argument(
+        "--config",
+        type=Path,
+        default=None,
+        help=(
+            "Path to pipeline configuration YAML supplying distance_limits. "
+            "Defaults to config.yaml beside this script."
+        ),
+    )
 
     matrix_parser = subparsers.add_parser("matrix", help="Convert wide CSV → float16 matrix + metadata.")
     matrix_parser.add_argument("--input-csv", required=True)
@@ -1813,6 +1888,7 @@ def main(argv: Sequence[str] | None = None) -> None:
             measure_cols=measure_cols,
             fps_fallback=args.fps_fallback,
             exclude_roots=args.exclude_root,
+            config_path=args.config,
         )
         return
 

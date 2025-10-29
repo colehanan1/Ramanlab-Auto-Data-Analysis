@@ -131,6 +131,11 @@ write a spreadsheet of binary responses. The second command feeds that
 spreadsheet into `scripts/reaction_matrix_from_spreadsheet.py`, reproducing the
 figure layout without manual intervention.
 
+The reaction scorer now honours a dedicated `non_reactive_span_px` setting in
+`config.yaml`. Increase the pixel span to keep more marginal flies in the
+prediction CSV, or tighten it to skip flies whose global min/max distance span
+never exceeds your reaction threshold.
+
 ## Geometric feature extraction CLI
 
 The repository ships with `geom_features.py`, a standalone tool for deriving
@@ -303,9 +308,36 @@ python scripts/plot_dirval_heatmaps.py \
   --log-level INFO
 ```
 
+Every row in `all_envelope_rows_wide.csv` now exposes `local_min` and `local_max` beside `global_min` and `global_max`, all of which are computed directly from the pixel-distance traces in each trial. The export also records `local_min_during` and `local_max_during` for frames 1,260–2,460 (the odor window) alongside both peak ratios: `local_max_over_global_min` and `local_max_during_over_global_min`. Operators can immediately gauge how strongly each trial peaks relative to the fly-wide baseline both overall and during odor delivery. The builder streams every distance CSV for a given fly, filters samples against the configured `[class2_min, class2_max]` span, and aggregates the in-range values to derive a per-fly global span before writing any rows. That means the global extrema now match the same source data as the trial-level minima/maxima instead of relying on the legacy JSON stats. Rebuild the export with:
+
+```bash
+python scripts/envelope_combined.py \
+  wide \
+  --root /path/to/dataset/root \
+  --output-csv /tmp/all_envelope_rows_wide.csv \
+  --measure-cols envelope_of_rms \
+  --config /path/to/config.yaml
+```
+
+Validate the distance-limit filtering and the per-fly aggregation with the regression coverage in `tests/test_multi_fly_pipeline.py::test_local_extrema_respect_distance_limits` and `tests/test_multi_fly_pipeline.py::test_global_extrema_aggregate_across_trials`:
+
+```bash
+PYTHONPATH=. pytest \
+  tests/test_multi_fly_pipeline.py::test_local_extrema_respect_distance_limits \
+  tests/test_multi_fly_pipeline.py::test_global_extrema_aggregate_across_trials
+```
+
 ### Colour scaling and normalisation
 
-Historically the plots relied on z-score normalisation and percentile clipping to highlight relative structure within each trial. With the latest update every heatmap defaults to the physical `dir_val` scale: the colour bar spans `0` (dark purple) to `200` (bright yellow) whenever `--normalize none` is active, ensuring consistent interpretation across flies and datasets. Opt into `--normalize zscore` when you explicitly want per-trial standardisation; in that mode the code falls back to the robust percentile-driven limits so the colour bar reflects standard deviations rather than raw millimetre values.
+Historically the plots relied on z-score normalisation and percentile clipping to highlight relative structure within each trial. With the latest update every heatmap defaults to the physical `dir_val` scale: the colour bar spans `0` (dark purple) to `200` (bright yellow) whenever `--normalize none` is active, ensuring consistent interpretation across flies and datasets. Opt into `--normalize zscore` when you explicitly want per-trial standardisation; in that mode the code falls back to the robust percentile-driven limits so the colour bar reflects standard deviations rather than raw millimetre values. Direction values now apply a unity floor to the angle-derived multiplier so low-angle periods no longer attenuate the distance percentage—`dir_val` only scales up from the base distance trace.
+
+### Ethyl butyrate control ordering
+
+The combined-envelope tooling (`scripts/envelope_combined.py`, `scripts/envelope_visuals.py`, and `scripts/envelope_training.py`) now canonically maps the `EB_control` dataset to the same late-trial odor ordering as `opto_EB`. Testing trials `testing_6`–`testing_10` therefore render as Apple Cider Vinegar, 3-Octonol, Benzaldehyde, Citral, and Linalool for both datasets. Validate the behaviour with:
+
+```bash
+pytest tests/test_envelope_combined.py
+```
 
 ## Standalone analysis scripts
 
