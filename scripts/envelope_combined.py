@@ -103,6 +103,7 @@ TIMESTAMP_COLS = ["UTC_ISO", "Timestamp", "Number", "MonoNs"]
 FRAME_COLS = ["Frame", "FrameNumber", "Frame Number"]
 TRIAL_REGEX = re.compile(r"(testing|training)_(\d+)", re.IGNORECASE)
 TESTING_REGEX = re.compile(r"testing_(\d+)", re.IGNORECASE)
+TRAINING_REGEX = re.compile(r"training_(\d+)", re.IGNORECASE)
 FLY_SLOT_REGEX = re.compile(r"(fly\d+)_distances", re.IGNORECASE)
 FLY_NUMBER_REGEX = re.compile(r"fly\s*[_-]?\s*(\d+)", re.IGNORECASE)
 
@@ -151,6 +152,10 @@ ODOR_CANON = {
     "ethyl butyrate": "EB",
     "eb_control": "EB_control",
     "eb control": "EB_control",
+    "hex_control": "hex_control",
+    "hex control": "hex_control",
+    "benz_control": "benz_control",
+    "benz control": "benz_control",
     "optogenetics benzaldehyde": "opto_benz",
     "optogenetics benzaldehyde 1": "opto_benz_1",
     "optogenetics ethyl butyrate": "opto_EB",
@@ -168,6 +173,8 @@ DISPLAY_LABEL = {
     "10s_Odor_Benz": "Benzaldehyde",
     "EB": "Ethyl Butyrate",
     "EB_control": "EB Control",
+    "hex_control": "Hexanol Control",
+    "benz_control": "Benzaldehyde Control",
     "opto_benz": "Benzaldehyde",
     "opto_benz_1": "Benzaldehyde",
     "opto_EB": "Ethyl Butyrate",
@@ -175,6 +182,8 @@ DISPLAY_LABEL = {
 }
 
 HEXANOL = "Hexanol"
+
+CONTROL_DATASETS = {"eb_control", "hex_control", "benz_control"}
 
 
 # ---------------------------------------------------------------------------
@@ -605,13 +614,18 @@ def _ensure_angle_percentages(fly_dir: Path, suffix_globs: Iterable[str] | str) 
         print(f"[{fly_dir.name}] centered angle normalisation applied to {updates} file(s).")
 
 
-def _index_testing(entries: Sequence[tuple[str, Path, str]]) -> tuple[dict[str, Path], dict[str, Path]]:
+def _index_trials(
+    entries: Sequence[tuple[str, Path, str]],
+    regex: re.Pattern[str],
+    trial_type: str,
+) -> tuple[dict[str, Path], dict[str, Path]]:
     indexed: dict[str, Path] = {}
     fallback: dict[str, Path] = {}
+    target = trial_type.lower()
     for label, path, category in entries:
-        if category.lower() != "testing":
+        if category.lower() != target:
             continue
-        match = TESTING_REGEX.search(label)
+        match = regex.search(label)
         slot_match = FLY_SLOT_REGEX.search(path.stem)
         slot_label = slot_match.group(1).lower() if slot_match else None
         if match:
@@ -620,11 +634,36 @@ def _index_testing(entries: Sequence[tuple[str, Path, str]]) -> tuple[dict[str, 
                 indexed[f"{base_key}_{slot_label}"] = path
             indexed.setdefault(base_key, path)
         else:
-            key = label.lower()
+            base_key = label.lower()
             if slot_label:
-                indexed[f"{key}_{slot_label}"] = path
-            fallback[key] = path
+                indexed[f"{base_key}_{slot_label}"] = path
+            fallback.setdefault(base_key, path)
+            if slot_label:
+                fallback.setdefault(f"{base_key}_{slot_label}", path)
+        fallback.setdefault(path.stem.lower(), path)
     return indexed, fallback
+
+
+def _collect_distance_entries(
+    entries: Sequence[tuple[str, Path, str]],
+    regex: re.Pattern[str],
+    trial_type: str,
+) -> dict[str, tuple[Path, str, Optional[str]]]:
+    dist_idx: dict[str, tuple[Path, str, Optional[str]]] = {}
+    target = trial_type.lower()
+    for label, path, category in entries:
+        if category.lower() != target:
+            continue
+        match = regex.search(label)
+        base_key = match.group(0).lower() if match else label.lower()
+        slot_match = FLY_SLOT_REGEX.search(path.stem)
+        slot_label = slot_match.group(1).lower() if slot_match else None
+        key = f"{base_key}_{slot_label}" if slot_label else base_key
+        prefer_new = path.name.lower().startswith("updated_")
+        existing = dist_idx.get(key)
+        if existing is None or (prefer_new and not existing[0].name.lower().startswith("updated_")):
+            dist_idx[key] = (path, base_key, slot_label)
+    return dist_idx
 
 
 def _find_trial_csvs(fly_dir: Path) -> Iterator[Path]:
@@ -817,6 +856,8 @@ def combine_distance_angle(cfg: CombineConfig) -> None:
     odor_off_cmd = cfg.odor_off_s
     odor_on_effective = odor_on_cmd + odor_latency
     odor_off_effective = odor_off_cmd + odor_latency
+    dataset_canon = _canon_dataset(cfg.root.name)
+    include_training = dataset_canon.lower() in CONTROL_DATASETS
 
     for fly_dir in sorted(p for p in cfg.root.iterdir() if p.is_dir()):
         fly_name = fly_dir.name
@@ -826,160 +867,162 @@ def combine_distance_angle(cfg: CombineConfig) -> None:
         distance_entries = _locate_trials(fly_dir, cfg.distance_suffixes, DIST_COLS)
 
         if not distance_entries:
-            print(f"[{fly_name}] No testing distance trials found — skipping.")
+            print(f"[{fly_name}] No distance trials found — skipping.")
             continue
 
-        angle_idx, angle_fallback = _index_testing(angle_entries)
+        angle_idx_map: dict[str, dict[str, Path]] = {}
+        angle_fallback_map: dict[str, dict[str, Path]] = {}
+        for trial_type, regex in (("testing", TESTING_REGEX), ("training", TRAINING_REGEX)):
+            idx, fallback = _index_trials(angle_entries, regex, trial_type)
+            angle_idx_map[trial_type] = idx
+            angle_fallback_map[trial_type] = fallback
 
-        dist_idx: dict[str, tuple[Path, str, Optional[str]]] = {}
-        for label, path, category in distance_entries:
-            if category.lower() != "testing":
-                continue
-            match = TESTING_REGEX.search(label)
-            base_key = match.group(0).lower() if match else label.lower()
-            slot_match = FLY_SLOT_REGEX.search(path.stem)
-            slot_label = slot_match.group(1).lower() if slot_match else None
-            key = f"{base_key}_{slot_label}" if slot_label else base_key
-            prefer_new = path.name.lower().startswith("updated_")
-            existing = dist_idx.get(key)
-            if existing is None or (prefer_new and not existing[0].name.lower().startswith("updated_")):
-                dist_idx[key] = (path, base_key, slot_label)
+        trial_configs: list[tuple[str, re.Pattern[str]]] = [("testing", TESTING_REGEX)]
+        if include_training:
+            trial_configs.append(("training", TRAINING_REGEX))
 
         out_csv_dir = fly_dir / "angle_distance_rms_envelope"
         out_fig_dir = out_csv_dir / "plots"
         out_csv_dir.mkdir(parents=True, exist_ok=True)
         out_fig_dir.mkdir(parents=True, exist_ok=True)
 
-        completed = skipped = 0
-        for key, (dist_path, base_key, slot_label) in sorted(dist_idx.items()):
-            lookup_keys = [key, base_key]
-            angle_path: Optional[Path] = None
-            for candidate in lookup_keys:
-                angle_path = angle_idx.get(candidate)
-                if angle_path:
-                    break
-            if angle_path is None:
-                angle_path = angle_fallback.get(dist_path.stem.lower())
-            if angle_path is None:
-                print(f"[WARN] {fly_name} {key}: no matching angle file — skipped.")
-                skipped += 1
+        totals: dict[str, tuple[int, int]] = {}
+        for trial_type, regex in trial_configs:
+            dist_idx = _collect_distance_entries(distance_entries, regex, trial_type)
+            if not dist_idx:
+                if trial_type == "training" and include_training:
+                    print(f"[{fly_name}] No {trial_type} distance trials found.")
                 continue
 
-            fly_number = _extract_fly_number(slot_label, dist_path.stem, fly_dir.name)
-            fly_number_label = str(fly_number) if fly_number is not None else "UNKNOWN"
-            if fly_number is None:
-                print(
-                    f"[WARN] {fly_name} {dist_path.name}: unable to infer fly number token; defaulting to 'UNKNOWN'"
-                )
-            else:
-                print(
-                    f"[DEBUG] {fly_name}: parsed fly number {fly_number_label} from slot={slot_label} stem={dist_path.stem}"
-                )
-
-            print(
-                f"[DEBUG] {fly_name}: pairing distance={dist_path.name} with angle={angle_path.name}; slot_label={slot_label}"
-            )
-
-            try:
-                dist_df = pd.read_csv(dist_path)
-                dist_col = _pick_column(dist_df, DIST_COLS)
-                if not dist_col:
-                    raise ValueError("missing distance column")
-                print(
-                    f"[DEBUG] {fly_name}: distance columns={list(dist_df.columns)} selected={dist_col}"
-                )
-                dist_pct = (
-                    pd.to_numeric(dist_df[dist_col], errors="coerce")
-                    .fillna(0.0)
-                    .clip(lower=0.0, upper=100.0)
-                    .to_numpy()
-                )
-                time_dist = _time_axis(dist_df, cfg.fps_default)
-
-                angle_df = pd.read_csv(angle_path)
-                angle_col = _pick_column(angle_df, ANGLE_COLS)
-                if not angle_col:
-                    raise ValueError("missing angle column")
-                print(
-                    f"[DEBUG] {fly_name}: angle columns={list(angle_df.columns)} selected={angle_col}"
-                )
-                time_ang = _time_axis(angle_df, cfg.fps_default)
-                angle_vals = pd.to_numeric(angle_df[angle_col], errors="coerce").to_numpy()
-
-                order = np.argsort(time_ang)
-                time_ang = time_ang[order]
-                angle_vals = angle_vals[order]
-                mask = np.isfinite(time_ang) & np.isfinite(angle_vals)
-                if not np.any(mask):
-                    raise ValueError("angle series has no finite values")
-                time_ang = time_ang[mask]
-                angle_vals = angle_vals[mask]
-
-                interp_angle = np.interp(
-                    time_dist, time_ang, angle_vals, left=angle_vals[0], right=angle_vals[-1]
-                )
-                multiplier = _angle_multiplier(interp_angle)
-                combined = dist_pct * multiplier
-                combined_rms = _rolling_rms(combined, cfg.window_frames)
-                envelope = _hilbert_envelope(combined_rms, cfg.window_frames)
-
-                slot_suffix = f"_{slot_label}" if slot_label else ""
-                test_id = f"{base_key}{slot_suffix}".replace("__", "_")
-                out_df = pd.DataFrame(
-                    {
-                        "time_s": time_dist,
-                        "angle_centered_pct_interp": interp_angle,
-                        "distance_percentage": dist_pct,
-                        "multiplier": multiplier,
-                        "combined_base": combined,
-                        "rolling_rms": combined_rms,
-                        "envelope_of_rms": envelope,
-                        "fly_number": fly_number_label,
-                    }
-                )
-                out_csv = out_csv_dir / f"{test_id}_angle_distance_rms_envelope.csv"
-                out_df.to_csv(out_csv, index=False)
-                print(
-                    f"[DEBUG] {fly_name}: wrote {out_csv.name} rows={len(out_df)} fly_number={fly_number_label}"
-                )
-
-                plt.figure(figsize=(12, 4))
-                plt.plot(time_dist, envelope, linewidth=1.5)
-                plt.axvline(odor_on_effective, color="red", linewidth=2)
-                plt.axvline(odor_off_effective, color="red", linewidth=2)
-                if odor_latency > 0:
-                    plt.axvspan(
-                        odor_on_cmd,
-                        min(odor_on_effective, time_dist[-1]),
-                        alpha=0.25,
-                        color="red",
+            completed = skipped = 0
+            for key, (dist_path, base_key, slot_label) in sorted(dist_idx.items()):
+                lookup_keys = [key, base_key]
+                angle_path: Optional[Path] = None
+                for candidate in lookup_keys:
+                    angle_path = angle_idx_map[trial_type].get(candidate)
+                    if angle_path:
+                        break
+                if angle_path is None:
+                    angle_path = angle_fallback_map[trial_type].get(dist_path.stem.lower())
+                if angle_path is None:
+                    print(
+                        f"[WARN] {fly_name} {trial_type} {key}: no matching angle file — skipped."
                     )
-                    plt.axvspan(
-                        odor_off_cmd,
-                        min(odor_off_effective, time_dist[-1]),
-                        alpha=0.25,
-                        color="red",
+                    skipped += 1
+                    continue
+
+                fly_number = _extract_fly_number(slot_label, dist_path.stem, fly_dir.name)
+                fly_number_label = str(fly_number) if fly_number is not None else "UNKNOWN"
+                if fly_number is None:
+                    print(
+                        f"[WARN] {fly_name} {dist_path.name}: unable to infer fly number token; defaulting to 'UNKNOWN'"
                     )
-                plt.title(
-                    f"{fly_name} — {test_id}: Envelope(RMS(distance × angle-mult))"
-                )
-                plt.xlabel("Time (s)")
-                plt.ylabel("Envelope of RMS (arb.)")
-                plt.margins(x=0)
-                plt.grid(True, alpha=0.3)
-                out_png = out_fig_dir / f"{fly_name}_{test_id}_env_rms_angle_distance.png"
-                plt.savefig(out_png, dpi=300, bbox_inches="tight")
-                plt.close()
+                else:
+                    print(
+                        f"[DEBUG] {fly_name}: parsed fly number {fly_number_label} from slot={slot_label} stem={dist_path.stem}"
+                    )
 
                 print(
-                    f"[OK] {fly_name} {test_id} → CSV: {out_csv.name} | FIG: {out_png.name}"
+                    f"[DEBUG] {fly_name} {trial_type}: pairing distance={dist_path.name} with angle={angle_path.name}; slot_label={slot_label}"
                 )
-                completed += 1
-            except Exception as exc:
-                print(f"[WARN] {fly_name} {test_id} → {exc}")
-                skipped += 1
 
-        print(f"[{fly_name}] completed: {completed}, skipped: {skipped}")
+                try:
+                    dist_df = pd.read_csv(dist_path)
+                    dist_col = _pick_column(dist_df, DIST_COLS)
+                    if not dist_col:
+                        raise ValueError("missing distance column")
+                    print(
+                        f"[DEBUG] {fly_name}: distance columns={list(dist_df.columns)} selected={dist_col}"
+                    )
+                    dist_pct = (
+                        pd.to_numeric(dist_df[dist_col], errors="coerce")
+                        .fillna(0.0)
+                        .clip(lower=0.0, upper=100.0)
+                        .to_numpy()
+                    )
+                    time_dist = _time_axis(dist_df, cfg.fps_default)
+
+                    angle_df = pd.read_csv(angle_path)
+                    angle_col = _pick_column(angle_df, ANGLE_COLS)
+                    if not angle_col:
+                        raise ValueError("missing angle column")
+                    print(
+                        f"[DEBUG] {fly_name}: angle columns={list(angle_df.columns)} selected={angle_col}"
+                    )
+                    time_ang = _time_axis(angle_df, cfg.fps_default)
+                    angle_vals = pd.to_numeric(angle_df[angle_col], errors="coerce").to_numpy(dtype=float)
+
+                    order = np.argsort(time_ang)
+                    time_ang = time_ang[order]
+                    angle_vals = angle_vals[order]
+                    mask = np.isfinite(time_ang) & np.isfinite(angle_vals)
+                    if not np.any(mask):
+                        raise ValueError("angle series has no finite values")
+                    time_ang = time_ang[mask]
+                    angle_vals = angle_vals[mask]
+
+                    interp_angle = np.interp(
+                        time_dist, time_ang, angle_vals, left=angle_vals[0], right=angle_vals[-1]
+                    )
+                    multiplier = _angle_multiplier(interp_angle)
+                    combined = dist_pct * multiplier
+                    combined_rms = _rolling_rms(combined, cfg.window_frames)
+                    envelope = _hilbert_envelope(combined_rms, cfg.window_frames)
+
+                    slot_suffix = f"_{slot_label}" if slot_label else ""
+                    trial_id = f"{base_key}{slot_suffix}".replace("__", "_")
+                    out_df = pd.DataFrame(
+                        {
+                            "time_s": time_dist,
+                            "angle_centered_pct_interp": interp_angle,
+                            "distance_percentage": dist_pct,
+                            "multiplier": multiplier,
+                            "combined_base": combined,
+                            "rolling_rms": combined_rms,
+                            "envelope_of_rms": envelope,
+                            "fly_number": fly_number_label,
+                        }
+                    )
+                    out_csv = out_csv_dir / f"{trial_id}_angle_distance_rms_envelope.csv"
+                    out_df.to_csv(out_csv, index=False)
+                    print(
+                        f"[DEBUG] {fly_name}: wrote {out_csv.name} rows={len(out_df)} fly_number={fly_number_label}"
+                    )
+
+                    plt.figure(figsize=(12, 4))
+                    plt.plot(time_dist, envelope, linewidth=1.5)
+                    plt.axvline(odor_on_effective, color="black", linewidth=1.2, linestyle="--")
+                    plt.axvline(odor_off_effective, color="black", linewidth=1.2, linestyle="--")
+                    plt.title(
+                        f"{fly_name} — {trial_id}: Envelope(RMS(distance × angle-mult))"
+                    )
+                    plt.xlabel("Time (s)")
+                    plt.ylabel("Envelope of RMS (arb.)")
+                    plt.margins(x=0)
+                    plt.grid(True, alpha=0.3)
+                    out_png = out_fig_dir / f"{fly_name}_{trial_id}_env_rms_angle_distance.png"
+                    plt.savefig(out_png, dpi=300, bbox_inches="tight")
+                    plt.close()
+
+                    print(
+                        f"[OK] {fly_name} {trial_id} → CSV: {out_csv.name} | FIG: {out_png.name}"
+                    )
+                    completed += 1
+                except Exception as exc:
+                    print(f"[WARN] {fly_name} {trial_type} {base_key} → {exc}")
+                    skipped += 1
+
+            totals[trial_type] = (completed, skipped)
+
+        if include_training and totals:
+            for trial_type, (completed, skipped) in totals.items():
+                print(f"[{fly_name}] {trial_type} completed: {completed}, skipped: {skipped}")
+            total_completed = sum(done for done, _ in totals.values())
+            total_skipped = sum(missed for _, missed in totals.values())
+            print(f"[{fly_name}] combined completed: {total_completed}, skipped: {total_skipped}")
+        else:
+            completed, skipped = totals.get("testing", (0, 0))
+            print(f"[{fly_name}] completed: {completed}, skipped: {skipped}")
 
 
 # ---------------------------------------------------------------------------

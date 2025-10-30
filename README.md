@@ -380,6 +380,22 @@ python scripts/envelope_combined.py \
 Adjust the paths and latency to match your experiment; rerunning the commands
 will overwrite the PNGs when `--overwrite` is supplied.
 
+Control datasets (`EB_control`, `hex_control`, and `benz_control`) now export
+training CSV/PNG pairs that mirror the testing outputs whenever you run the
+distance × angle combiner. The figures share the same dashed black odor
+markers as the overlays, without any valve transit shading. Generate the
+artifacts for a control dataset with:
+
+```bash
+python scripts/envelope_combined.py combine \
+    --root /securedstorage/DATAsec/cole/Data-secured/EB_control \
+    --odor-on 30 --odor-off 60 --odor-latency 2.15
+```
+
+Replace the root path and timing parameters to match the dataset you are
+processing; the command writes both testing and training envelopes to the
+`angle_distance_rms_envelope/` directory for each fly.
+
 ## Nightly automation
 
 To run the full pipeline every night at midnight, use the bundled cron helpers:
