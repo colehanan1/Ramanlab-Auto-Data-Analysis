@@ -117,16 +117,31 @@ def _run_combined(cfg: Mapping[str, Any] | None, settings: Settings | None) -> N
     combine_cfg = cfg.get("combine")
     if combine_cfg:
         opts = dict(combine_cfg)
-        opts["root"] = _ensure_path(opts.get("root"), "root")
-        if "odor_on" in opts and "odor_on_s" not in opts:
-            opts["odor_on_s"] = float(opts.pop("odor_on"))
-        if "odor_off" in opts and "odor_off_s" not in opts:
-            opts["odor_off_s"] = float(opts.pop("odor_off"))
-        if "odor_latency" in opts and "odor_latency_s" not in opts:
-            opts["odor_latency_s"] = float(opts.pop("odor_latency"))
-        config = CombineConfig(**opts)  # type: ignore[arg-type]
-        print(f"[analysis] combined.combine → {config.root}")
-        combine_distance_angle(config)
+        roots_cfg = opts.pop("roots", None)
+        root_value = opts.pop("root", None)
+        if roots_cfg:
+            if not isinstance(roots_cfg, Sequence) or isinstance(roots_cfg, (str, bytes, Path)):
+                roots_iter = [roots_cfg]
+            else:
+                roots_iter = list(roots_cfg)
+        elif root_value is not None:
+            roots_iter = [root_value]
+        else:
+            raise ValueError("combined.combine requires 'root' or 'roots'.")
+
+        for entry in roots_iter:
+            entry_path = _ensure_path(entry, "combine.root")
+            run_opts = dict(opts)
+            run_opts["root"] = entry_path
+            if "odor_on" in run_opts and "odor_on_s" not in run_opts:
+                run_opts["odor_on_s"] = float(run_opts.pop("odor_on"))
+            if "odor_off" in run_opts and "odor_off_s" not in run_opts:
+                run_opts["odor_off_s"] = float(run_opts.pop("odor_off"))
+            if "odor_latency" in run_opts and "odor_latency_s" not in run_opts:
+                run_opts["odor_latency_s"] = float(run_opts.pop("odor_latency"))
+            config = CombineConfig(**run_opts)  # type: ignore[arg-type]
+            print(f"[analysis] combined.combine → {config.root}")
+            combine_distance_angle(config)
 
     wide_cfg = cfg.get("wide")
     if wide_cfg:
@@ -153,6 +168,27 @@ def _run_combined(cfg: Mapping[str, Any] | None, settings: Settings | None) -> N
             str(_ensure_path(path, "exclude_roots"))
             for path in wide_cfg.get("exclude_roots", [])
         ]
+        trial_type_filter = wide_cfg.get("trial_type_filter")
+        extra_exports_cfg = wide_cfg.get("trial_type_exports", [])
+        extra_exports: dict[str, str] = {}
+        if extra_exports_cfg:
+            entries = (
+                extra_exports_cfg
+                if isinstance(extra_exports_cfg, Sequence)
+                and not isinstance(extra_exports_cfg, (str, bytes))
+                else [extra_exports_cfg]
+            )
+            for entry in entries:
+                if not isinstance(entry, Mapping):
+                    raise ValueError("trial_type_exports entries must be mappings.")
+                trial_type = entry.get("trial_type")
+                export_csv = entry.get("output_csv")
+                if not trial_type or not export_csv:
+                    raise ValueError(
+                        "trial_type_exports entries require 'trial_type' and 'output_csv'."
+                    )
+                export_path = _ensure_path(export_csv, "trial_type_exports.output_csv")
+                extra_exports[str(trial_type).strip().lower()] = str(export_path)
         print(f"[analysis] combined.wide → {output_csv}")
         limits = None
         if settings is not None:
@@ -164,6 +200,8 @@ def _run_combined(cfg: Mapping[str, Any] | None, settings: Settings | None) -> N
             fps_fallback=fps_fallback,
             exclude_roots=exclude_cfg,
             distance_limits=limits,
+            trial_type_filter=trial_type_filter,
+            extra_trial_exports=extra_exports or None,
         )
 
     matrix_cfg = cfg.get("matrix")
@@ -181,9 +219,18 @@ def _run_combined(cfg: Mapping[str, Any] | None, settings: Settings | None) -> N
 
     envelopes_cfg = cfg.get("envelopes")
     if envelopes_cfg:
-        config = _envelope_plot_config(envelopes_cfg)
-        print(f"[analysis] combined.envelopes → {config.out_dir}")
-        generate_envelope_plots(config)
+        entries = (
+            envelopes_cfg
+            if isinstance(envelopes_cfg, Sequence)
+            and not isinstance(envelopes_cfg, (str, bytes))
+            else [envelopes_cfg]
+        )
+        for entry in entries:
+            if not isinstance(entry, Mapping):
+                raise ValueError("combined.envelopes entries must be mappings.")
+            config = _envelope_plot_config(entry)
+            print(f"[analysis] combined.envelopes → {config.out_dir}")
+            generate_envelope_plots(config)
 
     overlay_cfg = cfg.get("overlay")
     if overlay_cfg:

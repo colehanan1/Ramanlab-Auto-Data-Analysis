@@ -394,7 +394,10 @@ python scripts/envelope_combined.py combine \
 
 Replace the root path and timing parameters to match the dataset you are
 processing; the command writes both testing and training envelopes to the
-`angle_distance_rms_envelope/` directory for each fly.
+`angle_distance_rms_envelope/` directory for each fly. The `make run` target now
+iterates across every root listed under `analysis.combined.combine.roots`, so a
+single invocation regenerates the combined outputs for the optogenetic cohorts
+and all three control datasets without manual intervention.
 
 Once the combined matrix artifacts are available, rerun the envelope plots for
 the control training cohorts so they match the testing layout and naming
@@ -412,7 +415,12 @@ python scripts/envelope_combined.py envelopes \
 
 Adjust the paths, latency, and output directory to match your control dataset;
 the CLI preserves the testing naming scheme so the training plots drop beside
-the existing line traces for quick comparison.
+the existing line traces for quick comparison. The wide-table builder now also
+writes a training-only export when `analysis.combined.wide.trial_type_exports`
+lists the desired CSV. In the default configuration, `make run` emits both the
+complete `all_envelope_rows_wide.csv` (testing + training) and a
+`all_envelope_rows_wide_training.csv` subset that only contains training trials,
+which feeds the new training envelope plots.
 
 ## Nightly automation
 

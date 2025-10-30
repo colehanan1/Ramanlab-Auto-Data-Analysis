@@ -1145,6 +1145,8 @@ def build_wide_csv(
     exclude_roots: Sequence[str] | None = None,
     distance_limits: tuple[float, float] | None = None,
     config_path: str | Path | None = None,
+    trial_type_filter: str | Sequence[str] | None = None,
+    extra_trial_exports: Mapping[str, str] | None = None,
 ) -> None:
     print(
         f"[DEBUG] build_wide_csv → roots={list(roots)} output={output_csv} measure_cols={list(measure_cols)}"
@@ -1164,6 +1166,21 @@ def build_wide_csv(
         Path(root).expanduser().resolve() for root in (exclude_roots or ())
     }
     exclude |= MANDATORY_WIDE_EXCLUDES
+
+    if trial_type_filter is None:
+        trial_type_allow: set[str] | None = None
+    else:
+        if isinstance(trial_type_filter, (str, bytes)):
+            trial_type_allow = {str(trial_type_filter).strip().lower()}
+        else:
+            trial_type_allow = {
+                str(value).strip().lower()
+                for value in trial_type_filter
+                if str(value).strip()
+            }
+        if not trial_type_allow:
+            trial_type_allow = None
+
     for root in _normalise_roots(roots):
         if root in exclude:
             print(f"[SKIP] Excluding dataset root: {root}")
@@ -1173,6 +1190,9 @@ def build_wide_csv(
             fly = fly_dir.name
             print(f"[DEBUG] build_wide_csv: scanning fly_dir={fly_dir}")
             for csv_path in _find_trial_csvs(fly_dir):
+                trial_type = _infer_category(csv_path).lower()
+                if trial_type_allow is not None and trial_type not in trial_type_allow:
+                    continue
                 try:
                     header = pd.read_csv(csv_path, nrows=0)
                 except Exception as exc:
@@ -1210,6 +1230,7 @@ def build_wide_csv(
                         "fly_number": fly_number_label,
                         "csv_path": csv_path,
                         "measure_col": measure,
+                        "trial_type": trial_type,
                     }
                 )
                 max_len = max(max_len, n_rows)
@@ -1218,10 +1239,11 @@ def build_wide_csv(
         raise RuntimeError("No eligible testing/training CSVs found in provided roots.")
 
     fly_before_totals: dict[str, tuple[float, int]] = {}
+    baseline_types = trial_type_allow or {"testing"}
     for item in items:
         csv_path = Path(item["csv_path"])
         measure = str(item["measure_col"])
-        if _infer_category(csv_path).lower() != "testing":
+        if item.get("trial_type") not in baseline_types:
             continue
         try:
             df_before = pd.read_csv(csv_path, usecols=[measure], nrows=BEFORE_FRAMES)
@@ -1262,6 +1284,17 @@ def build_wide_csv(
     value_cols = [f"dir_val_{idx}" for idx in range(max_len)]
     header_df = pd.DataFrame(columns=metadata + list(AUC_COLUMNS) + value_cols)
     header_df.to_csv(out_path, index=False)
+
+    extra_paths: dict[str, Path] = {}
+    if extra_trial_exports:
+        for key, export_path in extra_trial_exports.items():
+            trial_key = str(key).strip().lower()
+            if not trial_key:
+                continue
+            target = Path(export_path).expanduser().resolve()
+            target.parent.mkdir(parents=True, exist_ok=True)
+            header_df.to_csv(target, index=False)
+            extra_paths[trial_key] = target
 
     items_sorted = sorted(
         items,
@@ -1453,6 +1486,13 @@ def build_wide_csv(
                 out_path, index=False, mode="a", header=False
             )
 
+            trial_key = str(result["trial_type"]).strip().lower()
+            extra_target = extra_paths.get(trial_key)
+            if extra_target is not None:
+                pd.DataFrame([row], columns=metadata + list(AUC_COLUMNS) + value_cols).to_csv(
+                    extra_target, index=False, mode="a", header=False
+                )
+
     flagged_path = out_path.with_name(out_path.stem + "_flagged_flies.txt")
     with flagged_path.open("w", encoding="utf-8") as fh:
         fh.write(
@@ -1470,6 +1510,8 @@ def build_wide_csv(
             fh.write("# None detected\n")
     print(f"[OK] Wrote flagged fly summary: {flagged_path}")
     print(f"[OK] Wrote combined direction-value table: {out_path}")
+    for trial_key, target in extra_paths.items():
+        print(f"[OK] Wrote {trial_key} subset: {target}")
 
 
 def wide_to_matrix(input_csv: str, output_dir: str) -> None:
