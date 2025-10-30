@@ -396,6 +396,24 @@ Replace the root path and timing parameters to match the dataset you are
 processing; the command writes both testing and training envelopes to the
 `angle_distance_rms_envelope/` directory for each fly.
 
+Once the combined matrix artifacts are available, rerun the envelope plots for
+the control training cohorts so they match the testing layout and naming
+(`..._training_envelope_trials_by_odor_30_shifted.png`) by supplying the
+`--trial-type training` flag:
+
+```bash
+python scripts/envelope_combined.py envelopes \
+    --matrix-npy path/to/combined_envelopes.npy \
+    --codes-json path/to/combined_envelopes_codes.json \
+    --out-dir artifacts/envelope_plots_combined \
+    --odor-latency-s 2.15 \
+    --trial-type training
+```
+
+Adjust the paths, latency, and output directory to match your control dataset;
+the CLI preserves the testing naming scheme so the training plots drop beside
+the existing line traces for quick comparison.
+
 ## Nightly automation
 
 To run the full pipeline every night at midnight, use the bundled cron helpers:

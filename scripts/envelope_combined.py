@@ -1968,6 +1968,7 @@ def main(argv: Sequence[str] | None = None) -> None:
             odor_latency_s=args.odor_latency_s,
             after_show_sec=args.after_show_sec,
             threshold_std_mult=args.threshold_std_mult,
+            trial_type=args.trial_type,
             overwrite=args.overwrite,
         )
         generate_envelope_plots(cfg)
