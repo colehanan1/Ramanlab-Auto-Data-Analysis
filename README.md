@@ -356,6 +356,30 @@ python scripts/reaction_matrix_from_spreadsheet.py \
 The command mirrors the original figure naming and will emit PNGs plus helper
 CSV/row-key exports under the chosen output directory.
 
+## Envelope plotting update
+
+Envelope overlays and per-trial envelope plots now rely solely on the dashed
+black odor-on/off markers. The semi-transparent red transit shading has been
+removed so the figures emphasise the odor-at-fly timing.
+
+To regenerate the revised plots once your matrix artifacts are ready, run:
+
+```bash
+python scripts/envelope_visuals.py envelopes \
+    --matrix-npy path/to/envelopes.npy \
+    --codes-json path/to/envelopes_codes.json \
+    --out-dir artifacts/envelope_plots \
+    --odor-latency-s 2.15
+
+python scripts/envelope_combined.py \
+    --matrix-npy path/to/envelopes.npy \
+    --codes-json path/to/envelopes_codes.json \
+    --out-dir artifacts/envelope_plots_combined
+```
+
+Adjust the paths and latency to match your experiment; rerunning the commands
+will overwrite the PNGs when `--overwrite` is supplied.
+
 ## Nightly automation
 
 To run the full pipeline every night at midnight, use the bundled cron helpers:

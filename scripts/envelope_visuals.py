@@ -915,11 +915,6 @@ def generate_envelope_plots(cfg: EnvelopePlotConfig) -> None:
             ax.axvline(odor_off_effective, linestyle="--", linewidth=1.0, color="black")
 
             transit_on_end = min(odor_on_effective, x_max_limit)
-            transit_off_end = min(odor_off_effective, x_max_limit)
-            if odor_latency > 0:
-                ax.axvspan(odor_on_cmd, transit_on_end, alpha=0.25, color="red")
-                ax.axvspan(odor_off_cmd, transit_off_end, alpha=0.25, color="red")
-
             effective_off_end = min(odor_off_effective + linger, x_max_limit)
             if effective_off_end > transit_on_end:
                 ax.axvspan(transit_on_end, effective_off_end, alpha=0.15, color="gray")
@@ -941,7 +936,6 @@ def generate_envelope_plots(cfg: EnvelopePlotConfig) -> None:
 
         legend_handles = [
             plt.Line2D([0], [0], linestyle="--", linewidth=1.0, color="black", label="Odor at fly"),
-            plt.Rectangle((0, 0), 1, 1, alpha=0.25, color="red", label=f"Valve→fly transit (~{odor_latency:.2f}s)"),
             plt.Rectangle((0, 0), 1, 1, alpha=0.15, color="gray", label="Odor present / linger"),
             plt.Line2D([0], [0], linestyle="-", linewidth=1.0, color="tab:red", label=r"$\theta = \mu_{before} + k\sigma_{before}$"),
         ]

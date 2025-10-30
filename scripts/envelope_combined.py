@@ -1685,11 +1685,6 @@ def overlay_sources(
             ax.axvline(odor_off_effective, linestyle="--", linewidth=1.0, color="black")
 
             transit_on_end = min(odor_on_effective, x_max)
-            transit_off_end = min(odor_off_effective, x_max)
-            if odor_latency > 0:
-                ax.axvspan(odor_on_cmd, transit_on_end, alpha=0.25, color="red")
-                ax.axvspan(odor_off_cmd, transit_off_end, alpha=0.25, color="red")
-
             steady_off_end = min(odor_off_effective, x_max)
             linger_off_end = min(odor_off_effective + linger, x_max)
             if steady_off_end > transit_on_end:
@@ -1718,7 +1713,6 @@ def overlay_sources(
 
         legend_handles = [
             plt.Line2D([0], [0], linestyle="--", linewidth=1.0, color="black", label="Odor at fly"),
-            plt.Rectangle((0, 0), 1, 1, alpha=0.25, color="red", label=f"Valve→fly transit (~{odor_latency:.2f}s)"),
             plt.Rectangle((0, 0), 1, 1, alpha=0.15, color="gray", label="Odor present"),
             plt.Line2D([0], [0], linestyle=":", linewidth=1.0, color="black", label=r"$\theta=\mu_{global}+k\sigma_{trial}$"),
         ]
