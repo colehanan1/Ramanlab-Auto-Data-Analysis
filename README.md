@@ -129,7 +129,11 @@ python -m fbpipe.steps.reaction_matrix --config config.yaml
 The first command invokes the packaged `flybehavior-response predict` CLI to
 write a spreadsheet of binary responses. The second command feeds that
 spreadsheet into `scripts/reaction_matrix_from_spreadsheet.py`, reproducing the
-figure layout without manual intervention.
+figure layout without manual intervention. Both stages now filter the source
+tables down to testing trials automatically, so training rows never inflate the
+model summary or the threshold heatmaps. If your spreadsheet only contains
+training rows the command exits early with a clear error, prompting you to
+regenerate the predictions against testing data.
 
 The reaction scorer now honours a dedicated `non_reactive_span_px` setting in
 `config.yaml`. Increase the pixel span to keep more marginal flies in the
