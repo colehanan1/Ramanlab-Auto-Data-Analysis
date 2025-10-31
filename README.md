@@ -129,7 +129,11 @@ python -m fbpipe.steps.reaction_matrix --config config.yaml
 The first command invokes the packaged `flybehavior-response predict` CLI to
 write a spreadsheet of binary responses. The second command feeds that
 spreadsheet into `scripts/reaction_matrix_from_spreadsheet.py`, reproducing the
-figure layout without manual intervention.
+figure layout without manual intervention. Both stages now filter the source
+tables down to testing trials automatically, so training rows never inflate the
+model summary or the threshold heatmaps. If your spreadsheet only contains
+training rows the command exits early with a clear error, prompting you to
+regenerate the predictions against testing data.
 
 The reaction scorer now honours a dedicated `non_reactive_span_px` setting in
 `config.yaml`. Increase the pixel span to keep more marginal flies in the
@@ -331,9 +335,13 @@ PYTHONPATH=. pytest \
 
 Historically the plots relied on z-score normalisation and percentile clipping to highlight relative structure within each trial. With the latest update every heatmap defaults to the physical `dir_val` scale: the colour bar spans `0` (dark purple) to `200` (bright yellow) whenever `--normalize none` is active, ensuring consistent interpretation across flies and datasets. Opt into `--normalize zscore` when you explicitly want per-trial standardisation; in that mode the code falls back to the robust percentile-driven limits so the colour bar reflects standard deviations rather than raw millimetre values. Direction values now apply a unity floor to the angle-derived multiplier so low-angle periods no longer attenuate the distance percentage—`dir_val` only scales up from the base distance trace.
 
-### Ethyl butyrate control ordering
+### Control odor ordering
 
-The combined-envelope tooling (`scripts/envelope_combined.py`, `scripts/envelope_visuals.py`, and `scripts/envelope_training.py`) now canonically maps the `EB_control` dataset to the same late-trial odor ordering as `opto_EB`. Testing trials `testing_6`–`testing_10` therefore render as Apple Cider Vinegar, 3-Octonol, Benzaldehyde, Citral, and Linalool for both datasets. Validate the behaviour with:
+The combined-envelope tooling (`scripts/envelope_combined.py`, `scripts/envelope_visuals.py`, and `scripts/envelope_training.py`) now aliases each optogenetic dataset to its control counterpart. Late testing trials therefore share the same odor schedule for pairs like `opto_EB`/`EB_control`, `opto_hex`/`hex_control`, and `opto_benz`/`benz_control` (including `opto_benz_1`). For example, `testing_6`–`testing_10` present Apple Cider Vinegar, 3-Octonol, Benzaldehyde, Citral, and Linalool regardless of whether the data originated from the control or opto cohort.
+
+Training exports follow a unified experimental script across every dataset root: trials `training_1`, `training_2`, `training_3`, `training_4`, `training_6`, and `training_8` are Benzaldehyde exposures, while `training_5` and `training_7` deliver Hexanol. This schedule applies equally to the opto cohorts so rerunning `make run` backfills legacy flies with the correct training overlays. Regression coverage in `tests/test_envelope_combined.py::test_testing_aliases_follow_control_ordering` and `tests/test_envelope_combined.py::test_training_schedule_matches_spec` locks the mapping in place.
+
+Validate the behaviour with:
 
 ```bash
 pytest tests/test_envelope_combined.py
@@ -355,6 +363,94 @@ python scripts/reaction_matrix_from_spreadsheet.py \
 
 The command mirrors the original figure naming and will emit PNGs plus helper
 CSV/row-key exports under the chosen output directory.
+
+## Envelope plotting update
+
+Envelope overlays and per-trial envelope plots now rely solely on the dashed
+black odor-on/off markers. The semi-transparent red transit shading has been
+removed so the figures emphasise the odor-at-fly timing.
+
+To regenerate the revised plots once your matrix artifacts are ready, run:
+
+```bash
+python scripts/envelope_visuals.py envelopes \
+    --matrix-npy path/to/envelopes.npy \
+    --codes-json path/to/envelopes_codes.json \
+    --out-dir artifacts/envelope_plots \
+    --odor-latency-s 2.15
+
+python scripts/envelope_combined.py \
+    --matrix-npy path/to/envelopes.npy \
+    --codes-json path/to/envelopes_codes.json \
+    --out-dir artifacts/envelope_plots_combined
+```
+
+Adjust the paths and latency to match your experiment; rerunning the commands
+will overwrite the PNGs when `--overwrite` is supplied.
+
+Control datasets (`EB_control`, `hex_control`, and `benz_control`) now export
+training CSV/PNG pairs that mirror the testing outputs whenever you run the
+distance × angle combiner. The figures share the same dashed black odor
+markers as the overlays, without any valve transit shading. Generate the
+artifacts for a control dataset with:
+
+```bash
+python scripts/envelope_combined.py combine \
+    --root /securedstorage/DATAsec/cole/Data-secured/EB_control \
+    --odor-on 30 --odor-off 60 --odor-latency 2.15
+```
+
+Replace the root path and timing parameters to match the dataset you are
+processing; the command writes both testing and training envelopes to the
+`angle_distance_rms_envelope/` directory for each fly. The `make run` target now
+iterates across every root listed under `analysis.combined.combine.roots`, so a
+single invocation regenerates the combined outputs for the optogenetic cohorts
+and all three control datasets without manual intervention. The training
+envelope task runs with `overwrite: true`, so rerunning `make run` backfills
+previously processed flies that predate the training-export logic—no manual
+cleanup is required.
+
+Once the combined matrix artifacts are available, rerun the envelope plots for
+the control training cohorts so they match the testing layout and naming
+(`..._training_envelope_trials_by_odor_30_shifted.png`) by supplying the
+`--trial-type training` flag:
+
+```bash
+python scripts/envelope_combined.py envelopes \
+    --matrix-npy path/to/combined_envelopes.npy \
+    --codes-json path/to/combined_envelopes_codes.json \
+    --out-dir artifacts/envelope_plots_combined \
+    --odor-latency-s 2.15 \
+    --trial-type training
+```
+
+Adjust the paths, latency, and output directory to match your control dataset;
+the CLI preserves the testing naming scheme so the training plots drop beside
+the existing line traces for quick comparison. The wide-table builder now also
+writes a training-only export when `analysis.combined.wide.trial_type_exports`
+lists the desired CSV. In the default configuration, `make run` emits both the
+complete `all_envelope_rows_wide.csv` (testing + training) and a
+`all_envelope_rows_wide_training.csv` subset that only contains training trials,
+which feeds the new training envelope plots. Provide a `matrix_out_dir`
+alongside the export path to have the workflow automatically convert that
+subset into a float16 matrix (`envelope_matrix_float16.npy` plus the matching
+JSON/key files) so the training envelope configs can reference a dedicated
+artifact without manual conversions.
+
+Before the wide step scans for CSVs it now mirrors any freshly generated
+`combine` outputs into matching secure roots automatically. As long as the
+dataset folder names align (for example, `EB_control` in both the working and
+secure trees), the workflow backfills the secure copy with the new training
+trials so the training-wide CSV captures every fly. Existing manual mirror
+pairs continue to run, and you can disable the behaviour by setting
+`analysis.combined.wide.auto_sync_roots` to `false` if you ever need to manage
+the copies yourself.
+
+During the angle-percentage normalisation pass the combiner now skips any
+per-trial CSV that contains no finite angle measurements before calling
+`np.nanmax`. Previously those empty exports triggered a crash (`ValueError:
+zero-size array to reduction operation fmax`); rerunning `make run` after this
+update quietly ignores the empty files and proceeds with the remaining trials.
 
 ## Nightly automation
 
