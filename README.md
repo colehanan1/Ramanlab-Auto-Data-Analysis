@@ -446,6 +446,12 @@ pairs continue to run, and you can disable the behaviour by setting
 `analysis.combined.wide.auto_sync_roots` to `false` if you ever need to manage
 the copies yourself.
 
+During the angle-percentage normalisation pass the combiner now skips any
+per-trial CSV that contains no finite angle measurements before calling
+`np.nanmax`. Previously those empty exports triggered a crash (`ValueError:
+zero-size array to reduction operation fmax`); rerunning `make run` after this
+update quietly ignores the empty files and proceeds with the remaining trials.
+
 ## Nightly automation
 
 To run the full pipeline every night at midnight, use the bundled cron helpers:

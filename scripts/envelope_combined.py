@@ -558,8 +558,18 @@ def _fly_max_centered(csv_paths: Sequence[Path], reference_angle: float) -> floa
             continue
 
         centered = angles - reference_angle
+        if centered.size == 0:
+            continue
+
         with np.errstate(invalid="ignore"):
-            local = np.nanmax(np.abs(centered))
+            abs_centered = np.abs(centered)
+
+        if not np.isfinite(abs_centered).any():
+            continue
+
+        with np.errstate(invalid="ignore"):
+            local = np.nanmax(abs_centered)
+
         if np.isfinite(local):
             max_abs = max(max_abs, float(local))
 

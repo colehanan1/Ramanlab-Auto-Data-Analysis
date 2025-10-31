@@ -138,6 +138,34 @@ def test_build_wide_csv_exports_training_subset(tmp_path):
     assert len(training_df) < len(wide_df)
 
 
+def test_fly_max_centered_skips_empty_csv(tmp_path):
+    """Empty per-trial CSVs should be ignored when computing the max angle delta."""
+
+    empty_csv = tmp_path / "empty.csv"
+    pd.DataFrame(columns=["x_class2", "y_class2", "x_class8", "y_class8"]).to_csv(
+        empty_csv, index=False
+    )
+
+    valid_csv = tmp_path / "valid.csv"
+    valid_df = pd.DataFrame(
+        {
+            "x_class2": [1000.0, 1000.0],
+            "y_class2": [500.0, 500.0],
+            "x_class8": [1100.0, 1120.0],
+            "y_class8": [500.0, 540.0],
+        }
+    )
+    valid_df.to_csv(valid_csv, index=False)
+
+    angles = ec._compute_angle_deg(valid_df).to_numpy(dtype=float)
+    reference = float(angles[0])
+    expected = np.nanmax(np.abs(angles - reference))
+
+    result = ec._fly_max_centered([empty_csv, valid_csv], reference)
+
+    assert np.isclose(result, expected, equal_nan=False)
+
+
 def test_run_combined_creates_training_matrix(tmp_path):
     """_run_combined should materialise matrices for training exports."""
 
