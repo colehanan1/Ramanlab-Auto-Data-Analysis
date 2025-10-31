@@ -189,14 +189,23 @@ PRIMARY_ODOR_LABEL = {
     "benz_control": "Benzaldehyde",
 }
 
-TRAINING_PRIMARY_TRIALS = {1, 2, 3, 4, 6, 8}
-
-TRAINING_SPECIAL_CASES = {
-    "EB_control": {5: HEXANOL, 7: HEXANOL},
-    "hex_control": {5: "Apple Cider Vinegar", 7: "Apple Cider Vinegar"},
+TRAINING_ODOR_SCHEDULE = {
+    1: "Benzaldehyde",
+    2: "Benzaldehyde",
+    3: "Benzaldehyde",
+    4: "Benzaldehyde",
+    5: HEXANOL,
+    6: "Benzaldehyde",
+    7: HEXANOL,
+    8: "Benzaldehyde",
 }
 
-CONTROL_DATASETS = {"eb_control", "hex_control", "benz_control"}
+TESTING_DATASET_ALIAS = {
+    "opto_hex": "hex_control",
+    "opto_EB": "EB_control",
+    "opto_benz": "benz_control",
+    "opto_benz_1": "benz_control",
+}
 
 
 # ---------------------------------------------------------------------------
@@ -238,28 +247,27 @@ def _trained_label(dataset_canon: str) -> str:
 def _display_odor(dataset_canon: str, trial_label: str) -> str:
     number = _trial_num(trial_label)
     label_lower = str(trial_label).lower()
-    if "training" in label_lower:
-        special = TRAINING_SPECIAL_CASES.get(dataset_canon, {})
-        if number in special:
-            return special[number]
-        if number in TRAINING_PRIMARY_TRIALS:
-            return _trained_label(dataset_canon)
 
-    if (
-        dataset_canon == "opto_hex"
-        and "testing" in label_lower
-        and number in (1, 3)
-    ):
-        return "Apple Cider Vinegar"
+    if "training" in label_lower:
+        odor_name = TRAINING_ODOR_SCHEDULE.get(number)
+        if odor_name:
+            return odor_name
+        return DISPLAY_LABEL.get(dataset_canon, dataset_canon)
+
+    dataset_for_testing = TESTING_DATASET_ALIAS.get(dataset_canon, dataset_canon)
+
     if number in (1, 3):
         return HEXANOL
     if number in (2, 4, 5):
-        return DISPLAY_LABEL.get(dataset_canon, dataset_canon)
+        return DISPLAY_LABEL.get(
+            dataset_for_testing, DISPLAY_LABEL.get(dataset_canon, dataset_canon)
+        )
 
     mapping = {
         "ACV": {6: "3-Octonol", 7: "Benzaldehyde", 8: "Citral", 9: "Linalool"},
         "3-octonol": {6: "Benzaldehyde", 7: "Citral", 8: "Linalool"},
         "Benz": {6: "Citral", 7: "Linalool"},
+        "benz_control": {6: "Apple Cider Vinegar", 7: "3-Octonol", 8: "Ethyl Butyrate", 9: "Citral", 10: "Linalool"},
         "EB": {6: "Apple Cider Vinegar", 7: "3-Octonol", 8: "Benzaldehyde", 9: "Citral", 10: "Linalool"},
         "EB_control": {
             6: "Apple Cider Vinegar",
@@ -268,18 +276,12 @@ def _display_odor(dataset_canon: str, trial_label: str) -> str:
             9: "Citral",
             10: "Linalool",
         },
+        "hex_control": {6: "Benzaldehyde", 7: "3-Octonol", 8: "Ethyl Butyrate", 9: "Citral", 10: "Linalool"},
         "10s_Odor_Benz": {6: "Benzaldehyde", 7: "Benzaldehyde"},
-        "opto_EB": {6: "Apple Cider Vinegar", 7: "3-Octonol", 8: "Benzaldehyde", 9: "Citral", 10: "Linalool"},
-        "opto_benz": {6: "3-Octonol", 7: "Benzaldehyde", 8: "Citral", 9: "Linalool"},
-        "opto_benz_1": {6: "Apple Cider Vinegar", 7: "3-Octonol", 8: "Ethyl Butyrate", 9: "Citral", 10: "Linalool"},
-        "opto_hex": {
-            6: "Benzaldehyde",
-            7: "3-Octonol",
-            8: "Ethyl Butyrate",
-            9: "Citral",
-            10: "Linalool",
-        },
     }
+
+    if dataset_for_testing in mapping:
+        return mapping[dataset_for_testing].get(number, trial_label)
     return mapping.get(dataset_canon, {}).get(number, trial_label)
 
 
@@ -692,6 +694,14 @@ def _collect_distance_entries(
     return dist_idx
 
 
+def _has_training_trials(*trial_groups: Sequence[tuple[str, Path, str]]) -> bool:
+    for group in trial_groups:
+        for _, _, category in group:
+            if str(category).strip().lower() == "training":
+                return True
+    return False
+
+
 def _find_trial_csvs(fly_dir: Path) -> Iterator[Path]:
     base = fly_dir / "angle_distance_rms_envelope"
     if not base.is_dir():
@@ -883,7 +893,6 @@ def combine_distance_angle(cfg: CombineConfig) -> None:
     odor_on_effective = odor_on_cmd + odor_latency
     odor_off_effective = odor_off_cmd + odor_latency
     dataset_canon = _canon_dataset(cfg.root.name)
-    include_training = dataset_canon.lower() in CONTROL_DATASETS
 
     for fly_dir in sorted(p for p in cfg.root.iterdir() if p.is_dir()):
         fly_name = fly_dir.name
@@ -891,6 +900,8 @@ def combine_distance_angle(cfg: CombineConfig) -> None:
         _ensure_angle_percentages(fly_dir, cfg.angle_suffixes)
         angle_entries = _locate_trials(fly_dir, cfg.angle_suffixes, ANGLE_COLS)
         distance_entries = _locate_trials(fly_dir, cfg.distance_suffixes, DIST_COLS)
+
+        include_training = _has_training_trials(angle_entries, distance_entries)
 
         if not distance_entries:
             print(f"[{fly_name}] No distance trials found — skipping.")

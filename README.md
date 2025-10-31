@@ -337,9 +337,9 @@ Historically the plots relied on z-score normalisation and percentile clipping t
 
 ### Control odor ordering
 
-The combined-envelope tooling (`scripts/envelope_combined.py`, `scripts/envelope_visuals.py`, and `scripts/envelope_training.py`) now canonically maps the `EB_control` dataset to the same late-trial odor ordering as `opto_EB`. Testing trials `testing_6`–`testing_10` therefore render as Apple Cider Vinegar, 3-Octonol, Benzaldehyde, Citral, and Linalool for both datasets.
+The combined-envelope tooling (`scripts/envelope_combined.py`, `scripts/envelope_visuals.py`, and `scripts/envelope_training.py`) now aliases each optogenetic dataset to its control counterpart. Late testing trials therefore share the same odor schedule for pairs like `opto_EB`/`EB_control`, `opto_hex`/`hex_control`, and `opto_benz`/`benz_control` (including `opto_benz_1`). For example, `testing_6`–`testing_10` present Apple Cider Vinegar, 3-Octonol, Benzaldehyde, Citral, and Linalool regardless of whether the data originated from the control or opto cohort.
 
-Training exports for the control cohorts also follow the experimental protocol: trials `training_1`, `training_2`, `training_3`, `training_4`, `training_6`, and `training_8` inherit their dataset's primary odor (Ethyl Butyrate for `EB_control`, Hexanol for `hex_control`, Benzaldehyde for `benz_control`). Trials `training_5` and `training_7` remain cross-odors—Hexanol for `EB_control` and Apple Cider Vinegar for `hex_control`—so the envelopes line up with the delivered stimuli. The new regression coverage in `tests/test_envelope_combined.py::test_control_training_odors_remap_correctly` locks the mapping in place.
+Training exports follow a unified experimental script across every dataset root: trials `training_1`, `training_2`, `training_3`, `training_4`, `training_6`, and `training_8` are Benzaldehyde exposures, while `training_5` and `training_7` deliver Hexanol. This schedule applies equally to the opto cohorts so rerunning `make run` backfills legacy flies with the correct training overlays. Regression coverage in `tests/test_envelope_combined.py::test_testing_aliases_follow_control_ordering` and `tests/test_envelope_combined.py::test_training_schedule_matches_spec` locks the mapping in place.
 
 Validate the behaviour with:
 

@@ -35,41 +35,76 @@ def test_angle_multiplier_handles_scalars():
     assert ec._angle_multiplier(np.array([5.0])).item() == 1.0
 
 
-def test_eb_control_matches_opto_ordering():
-    """EB_control should mirror opto_EB odor labels for late trials."""
+def test_has_training_trials_detects_training_entries(tmp_path):
+    """_has_training_trials should return True whenever any list includes training."""
 
-    expected = {
-        6: "Apple Cider Vinegar",
-        7: "3-Octonol",
-        8: "Benzaldehyde",
-        9: "Citral",
-        10: "Linalool",
+    testing_entry = [("testing_1", tmp_path / "a.csv", "testing")]
+    training_entry = [("training_1", tmp_path / "b.csv", "training")]
+
+    assert not ec._has_training_trials(testing_entry)
+    assert ec._has_training_trials(training_entry)
+    assert ec._has_training_trials(testing_entry, training_entry)
+
+
+def test_testing_aliases_follow_control_ordering():
+    """Opto datasets should share the same testing labels as their controls."""
+
+    schedules = {
+        "EB_control": {
+            6: "Apple Cider Vinegar",
+            7: "3-Octonol",
+            8: "Benzaldehyde",
+            9: "Citral",
+            10: "Linalool",
+        },
+        "hex_control": {
+            6: "Benzaldehyde",
+            7: "3-Octonol",
+            8: "Ethyl Butyrate",
+            9: "Citral",
+            10: "Linalool",
+        },
+        "benz_control": {
+            6: "Apple Cider Vinegar",
+            7: "3-Octonol",
+            8: "Ethyl Butyrate",
+            9: "Citral",
+            10: "Linalool",
+        },
     }
 
-    for trial, odor in expected.items():
-        label = f"testing_{trial}"
-        assert ec._display_odor("opto_EB", label) == odor
-        assert ec._display_odor("EB_control", label) == odor
+    aliases = {
+        "EB_control": ["opto_EB"],
+        "hex_control": ["opto_hex"],
+        "benz_control": ["opto_benz", "opto_benz_1"],
+    }
+
+    for control, mapping in schedules.items():
+        for trial, odor in mapping.items():
+            label = f"testing_{trial}"
+            assert ec._display_odor(control, label) == odor
+            for alias in aliases[control]:
+                assert ec._display_odor(alias, label) == odor
 
 
-def test_control_training_odors_remap_correctly():
-    """Training odor labels follow the dataset defaults with special cases."""
+def test_training_schedule_matches_spec():
+    """Training trials follow the benzaldehyde/hexanol schedule for every dataset."""
 
-    assert ec._display_odor("EB_control", "training_1") == "Ethyl Butyrate"
-    assert ec._display_odor("EB_control", "training_5") == "Hexanol"
-    assert ec._display_odor("EB_control", "training_7") == "Hexanol"
-    assert ec._display_odor("EB_control", "training_8") == "Ethyl Butyrate"
+    datasets = [
+        "EB_control",
+        "hex_control",
+        "benz_control",
+        "opto_EB",
+        "opto_hex",
+        "opto_benz",
+        "opto_benz_1",
+    ]
 
-    assert ec._display_odor("hex_control", "training_1") == "Hexanol"
-    assert ec._display_odor("hex_control", "training_5") == "Apple Cider Vinegar"
-    assert ec._display_odor("hex_control", "training_7") == "Apple Cider Vinegar"
-    assert ec._display_odor("hex_control", "training_8") == "Hexanol"
-
-    assert ec._display_odor("benz_control", "training_1") == "Benzaldehyde"
-
-    assert ec._is_trained("EB_control", "Ethyl Butyrate")
-    assert ec._is_trained("hex_control", "Hexanol")
-    assert ec._is_trained("benz_control", "Benzaldehyde")
+    for dataset in datasets:
+        for trial in (1, 2, 3, 4, 6, 8):
+            assert ec._display_odor(dataset, f"training_{trial}") == "Benzaldehyde"
+        for trial in (5, 7):
+            assert ec._display_odor(dataset, f"training_{trial}") == "Hexanol"
 
 
 def test_build_wide_csv_exports_training_subset(tmp_path):
