@@ -437,6 +437,15 @@ subset into a float16 matrix (`envelope_matrix_float16.npy` plus the matching
 JSON/key files) so the training envelope configs can reference a dedicated
 artifact without manual conversions.
 
+Before the wide step scans for CSVs it now mirrors any freshly generated
+`combine` outputs into matching secure roots automatically. As long as the
+dataset folder names align (for example, `EB_control` in both the working and
+secure trees), the workflow backfills the secure copy with the new training
+trials so the training-wide CSV captures every fly. Existing manual mirror
+pairs continue to run, and you can disable the behaviour by setting
+`analysis.combined.wide.auto_sync_roots` to `false` if you ever need to manage
+the copies yourself.
+
 ## Nightly automation
 
 To run the full pipeline every night at midnight, use the bundled cron helpers:

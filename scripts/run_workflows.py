@@ -110,10 +110,44 @@ def _run_training(cfg: Mapping[str, Any] | None) -> None:
         )
 
 
+def _auto_sync_wide_roots(
+    combine_roots: Mapping[str, Path],
+    wide_roots: Sequence[Path],
+    handled_datasets: Sequence[str] | None = None,
+) -> None:
+    """Mirror freshly generated combine outputs into their wide-root peers."""
+
+    if not combine_roots or not wide_roots:
+        return
+
+    handled = {entry.lower() for entry in (handled_datasets or ())}
+    dest_map = {path.name.lower(): path for path in wide_roots}
+
+    for dataset, source in combine_roots.items():
+        key = dataset.lower()
+        if key in handled:
+            continue
+        destination = dest_map.get(key)
+        if destination is None:
+            continue
+        if destination == source:
+            continue
+
+        print(f"[analysis] combined.wide.auto_mirror[{key}] → {destination}")
+        copied, bytes_copied = mirror_directory(str(source), str(destination))
+        size_mb = bytes_copied / (1024 * 1024) if bytes_copied else 0.0
+        print(
+            "[analysis] combined.wide.auto_mirror[{}] copied {} file(s) ({:.1f} MiB).".format(
+                key, copied, size_mb
+            )
+        )
+
+
 def _run_combined(cfg: Mapping[str, Any] | None, settings: Settings | None) -> None:
     if not cfg:
         return
 
+    combine_roots: dict[str, Path] = {}
     combine_cfg = cfg.get("combine")
     if combine_cfg:
         opts = dict(combine_cfg)
@@ -142,10 +176,22 @@ def _run_combined(cfg: Mapping[str, Any] | None, settings: Settings | None) -> N
             config = CombineConfig(**run_opts)  # type: ignore[arg-type]
             print(f"[analysis] combined.combine → {config.root}")
             combine_distance_angle(config)
+            combine_roots[config.root.name.lower()] = config.root
 
     wide_cfg = cfg.get("wide")
     if wide_cfg:
+        roots_cfg = wide_cfg.get("roots", [])
+        if not roots_cfg:
+            raise ValueError("combined.wide.roots must list at least one directory.")
+        roots_iter = (
+            roots_cfg
+            if isinstance(roots_cfg, Sequence) and not isinstance(roots_cfg, (str, bytes, Path))
+            else [roots_cfg]
+        )
+        wide_root_paths = [_ensure_path(root, "roots") for root in roots_iter]
+
         mirror_cfg = wide_cfg.get("mirror")
+        handled_datasets: list[str] = []
         if mirror_cfg:
             entries = mirror_cfg if isinstance(mirror_cfg, Sequence) else [mirror_cfg]
             for entry in entries:
@@ -158,9 +204,13 @@ def _run_combined(cfg: Mapping[str, Any] | None, settings: Settings | None) -> N
                     f"[analysis] combined.mirror copied {copied} file(s) "
                     f"({size_mb:.1f} MiB)."
                 )
-        roots = [str(_ensure_path(root, "roots")) for root in wide_cfg.get("roots", [])]
-        if not roots:
-            raise ValueError("combined.wide.roots must list at least one directory.")
+                handled_datasets.append(src.name.lower())
+
+        auto_sync = wide_cfg.get("auto_sync_roots", True)
+        if auto_sync:
+            _auto_sync_wide_roots(combine_roots, wide_root_paths, handled_datasets)
+
+        roots = [str(path) for path in wide_root_paths]
         output_csv = _ensure_path(wide_cfg.get("output_csv"), "output_csv")
         measure_cols = wide_cfg.get("measure_cols") or ["envelope_of_rms"]
         fps_fallback = float(wide_cfg.get("fps_fallback", 40.0))

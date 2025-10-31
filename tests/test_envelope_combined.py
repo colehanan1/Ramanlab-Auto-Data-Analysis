@@ -143,3 +143,21 @@ def test_run_combined_creates_training_matrix(tmp_path):
     assert matrix_path.exists()
     matrix = np.load(matrix_path)
     assert matrix.shape[0] == 1
+
+
+def test_auto_sync_wide_roots_copies_training_outputs(tmp_path):
+    """Auto-sync should mirror combine outputs into wide roots when needed."""
+
+    combine_root = tmp_path / "local" / "hex_control"
+    secure_root = tmp_path / "secure" / "hex_control"
+    combine_csv_dir = combine_root / "angle_distance_rms_envelope"
+    combine_csv_dir.mkdir(parents=True, exist_ok=True)
+    secure_root.mkdir(parents=True, exist_ok=True)
+
+    training_file = combine_csv_dir / "october_01_fly1_training_1_angle_distance_rms_envelope.csv"
+    pd.DataFrame({"envelope_of_rms": [1.0, 2.0, 3.0]}).to_csv(training_file, index=False)
+
+    rw._auto_sync_wide_roots({"hex_control": combine_root.resolve()}, [secure_root.resolve()])
+
+    mirrored = secure_root / "angle_distance_rms_envelope" / training_file.name
+    assert mirrored.exists()
