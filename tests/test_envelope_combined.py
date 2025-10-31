@@ -12,6 +12,7 @@ if root_str not in sys.path:
     sys.path.insert(0, root_str)
 
 from scripts import envelope_combined as ec  # noqa: E402
+from scripts import run_workflows as rw  # noqa: E402
 
 
 def test_angle_multiplier_never_below_unity():
@@ -80,3 +81,45 @@ def test_build_wide_csv_exports_training_subset(tmp_path):
     assert set(wide_df["trial_type"].str.lower()) == {"testing", "training"}
     assert set(training_df["trial_type"].str.lower()) == {"training"}
     assert len(training_df) < len(wide_df)
+
+
+def test_run_combined_creates_training_matrix(tmp_path):
+    """_run_combined should materialise matrices for training exports."""
+
+    dataset_root = tmp_path / "hex_control"
+    fly_dir = dataset_root / "october_01_fly1"
+    csv_dir = fly_dir / "angle_distance_rms_envelope"
+    csv_dir.mkdir(parents=True, exist_ok=True)
+
+    values = np.linspace(0, 100, 4000, dtype=float)
+    for trial_type in ("testing", "training"):
+        stem = f"october_01_fly1_{trial_type}_1_angle_distance_rms_envelope"
+        pd.DataFrame({"envelope_of_rms": values}).to_csv(
+            csv_dir / f"{stem}.csv", index=False
+        )
+
+    training_csv = tmp_path / "wide_training.csv"
+    matrix_dir = tmp_path / "training_matrix"
+
+    rw._run_combined(
+        {
+            "wide": {
+                "roots": [str(dataset_root)],
+                "output_csv": str(tmp_path / "wide.csv"),
+                "measure_cols": ["envelope_of_rms"],
+                "trial_type_exports": [
+                    {
+                        "trial_type": "training",
+                        "output_csv": str(training_csv),
+                        "matrix_out_dir": str(matrix_dir),
+                    }
+                ],
+            }
+        },
+        settings=None,
+    )
+
+    matrix_path = matrix_dir / "envelope_matrix_float16.npy"
+    assert matrix_path.exists()
+    matrix = np.load(matrix_path)
+    assert matrix.shape[0] == 1

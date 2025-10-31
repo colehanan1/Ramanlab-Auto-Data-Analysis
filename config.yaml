@@ -91,8 +91,8 @@ analysis:
       overwrite: false
   training:
     envelopes:
-      matrix_npy: "/home/ramanlab/Documents/cole/Data/single_matrix_opto/envelope_matrix_float16.npy"
-      codes_json: "/home/ramanlab/Documents/cole/Data/single_matrix_opto/code_maps.json"
+      matrix_npy: "/home/ramanlab/Documents/cole/Data/Opto/Combined/matrix/training/envelope_matrix_float16.npy"
+      codes_json: "/home/ramanlab/Documents/cole/Data/Opto/Combined/matrix/training/code_maps.json"
       out_dir: "/home/ramanlab/Documents/cole/Results/Opto/Training_Envelopes"
       latency_sec: 0.0
       fps_default: 40.0
@@ -143,6 +143,7 @@ analysis:
       trial_type_exports:
         - trial_type: training
           output_csv: "/home/ramanlab/Documents/cole/Data/Opto/Combined/all_envelope_rows_wide_training.csv"
+          matrix_out_dir: "/home/ramanlab/Documents/cole/Data/Opto/Combined/matrix/training"
     matrix:
       input_csv: "/home/ramanlab/Documents/cole/Data/Opto/Combined/all_envelope_rows_wide.csv"
       out_dir: "/home/ramanlab/Documents/cole/Data/Opto/Combined/matrix"
@@ -175,8 +176,8 @@ analysis:
         after_show_sec: 30.0
         threshold_std_mult: 4.0
         overwrite: false
-      - matrix_npy: "/home/ramanlab/Documents/cole/Data/Opto/Combined/matrix/envelope_matrix_float16.npy"
-        codes_json: "/home/ramanlab/Documents/cole/Data/Opto/Combined/matrix/code_maps.json"
+      - matrix_npy: "/home/ramanlab/Documents/cole/Data/Opto/Combined/matrix/training/envelope_matrix_float16.npy"
+        codes_json: "/home/ramanlab/Documents/cole/Data/Opto/Combined/matrix/training/code_maps.json"
         out_dir: "/home/ramanlab/Documents/cole/Results/Opto/Combined/Training_Envelopes"
         latency_sec: 0.0
         fps_default: 40.0

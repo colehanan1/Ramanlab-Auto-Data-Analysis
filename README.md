@@ -420,7 +420,11 @@ writes a training-only export when `analysis.combined.wide.trial_type_exports`
 lists the desired CSV. In the default configuration, `make run` emits both the
 complete `all_envelope_rows_wide.csv` (testing + training) and a
 `all_envelope_rows_wide_training.csv` subset that only contains training trials,
-which feeds the new training envelope plots.
+which feeds the new training envelope plots. Provide a `matrix_out_dir`
+alongside the export path to have the workflow automatically convert that
+subset into a float16 matrix (`envelope_matrix_float16.npy` plus the matching
+JSON/key files) so the training envelope configs can reference a dedicated
+artifact without manual conversions.
 
 ## Nightly automation
 

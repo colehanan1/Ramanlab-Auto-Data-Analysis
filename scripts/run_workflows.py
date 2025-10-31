@@ -171,6 +171,7 @@ def _run_combined(cfg: Mapping[str, Any] | None, settings: Settings | None) -> N
         trial_type_filter = wide_cfg.get("trial_type_filter")
         extra_exports_cfg = wide_cfg.get("trial_type_exports", [])
         extra_exports: dict[str, str] = {}
+        extra_matrix_dirs: dict[str, str] = {}
         if extra_exports_cfg:
             entries = (
                 extra_exports_cfg
@@ -188,7 +189,14 @@ def _run_combined(cfg: Mapping[str, Any] | None, settings: Settings | None) -> N
                         "trial_type_exports entries require 'trial_type' and 'output_csv'."
                     )
                 export_path = _ensure_path(export_csv, "trial_type_exports.output_csv")
-                extra_exports[str(trial_type).strip().lower()] = str(export_path)
+                trial_key = str(trial_type).strip().lower()
+                extra_exports[trial_key] = str(export_path)
+                matrix_dir = entry.get("matrix_out_dir")
+                if matrix_dir:
+                    matrix_path = _ensure_path(
+                        matrix_dir, "trial_type_exports.matrix_out_dir"
+                    )
+                    extra_matrix_dirs[trial_key] = str(matrix_path)
         print(f"[analysis] combined.wide → {output_csv}")
         limits = None
         if settings is not None:
@@ -203,6 +211,17 @@ def _run_combined(cfg: Mapping[str, Any] | None, settings: Settings | None) -> N
             trial_type_filter=trial_type_filter,
             extra_trial_exports=extra_exports or None,
         )
+
+        for trial_key, matrix_dir in extra_matrix_dirs.items():
+            export_csv = extra_exports.get(trial_key)
+            if not export_csv:
+                continue
+            print(
+                "[analysis] combined.wide.trial_type_matrix[{}] → {}".format(
+                    trial_key, matrix_dir
+                )
+            )
+            wide_to_matrix(export_csv, matrix_dir)
 
     matrix_cfg = cfg.get("matrix")
     if matrix_cfg:
