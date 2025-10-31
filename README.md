@@ -335,9 +335,13 @@ PYTHONPATH=. pytest \
 
 Historically the plots relied on z-score normalisation and percentile clipping to highlight relative structure within each trial. With the latest update every heatmap defaults to the physical `dir_val` scale: the colour bar spans `0` (dark purple) to `200` (bright yellow) whenever `--normalize none` is active, ensuring consistent interpretation across flies and datasets. Opt into `--normalize zscore` when you explicitly want per-trial standardisation; in that mode the code falls back to the robust percentile-driven limits so the colour bar reflects standard deviations rather than raw millimetre values. Direction values now apply a unity floor to the angle-derived multiplier so low-angle periods no longer attenuate the distance percentage—`dir_val` only scales up from the base distance trace.
 
-### Ethyl butyrate control ordering
+### Control odor ordering
 
-The combined-envelope tooling (`scripts/envelope_combined.py`, `scripts/envelope_visuals.py`, and `scripts/envelope_training.py`) now canonically maps the `EB_control` dataset to the same late-trial odor ordering as `opto_EB`. Testing trials `testing_6`–`testing_10` therefore render as Apple Cider Vinegar, 3-Octonol, Benzaldehyde, Citral, and Linalool for both datasets. Validate the behaviour with:
+The combined-envelope tooling (`scripts/envelope_combined.py`, `scripts/envelope_visuals.py`, and `scripts/envelope_training.py`) now canonically maps the `EB_control` dataset to the same late-trial odor ordering as `opto_EB`. Testing trials `testing_6`–`testing_10` therefore render as Apple Cider Vinegar, 3-Octonol, Benzaldehyde, Citral, and Linalool for both datasets.
+
+Training exports for the control cohorts also follow the experimental protocol: trials `training_1`, `training_2`, `training_3`, `training_4`, `training_6`, and `training_8` inherit their dataset's primary odor (Ethyl Butyrate for `EB_control`, Hexanol for `hex_control`, Benzaldehyde for `benz_control`). Trials `training_5` and `training_7` remain cross-odors—Hexanol for `EB_control` and Apple Cider Vinegar for `hex_control`—so the envelopes line up with the delivered stimuli. The new regression coverage in `tests/test_envelope_combined.py::test_control_training_odors_remap_correctly` locks the mapping in place.
+
+Validate the behaviour with:
 
 ```bash
 pytest tests/test_envelope_combined.py
@@ -401,7 +405,10 @@ processing; the command writes both testing and training envelopes to the
 `angle_distance_rms_envelope/` directory for each fly. The `make run` target now
 iterates across every root listed under `analysis.combined.combine.roots`, so a
 single invocation regenerates the combined outputs for the optogenetic cohorts
-and all three control datasets without manual intervention.
+and all three control datasets without manual intervention. The training
+envelope task runs with `overwrite: true`, so rerunning `make run` backfills
+previously processed flies that predate the training-export logic—no manual
+cleanup is required.
 
 Once the combined matrix artifacts are available, rerun the envelope plots for
 the control training cohorts so they match the testing layout and naming

@@ -187,7 +187,7 @@ analysis:
         after_show_sec: 30.0
         threshold_std_mult: 4.0
         trial_type: training
-        overwrite: false
+        overwrite: true
     overlay:
       combined_matrix: "/home/ramanlab/Documents/cole/Data/Opto/Combined/matrix/envelope_matrix_float16.npy"
       combined_codes: "/home/ramanlab/Documents/cole/Data/Opto/Combined/matrix/code_maps.json"

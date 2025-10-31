@@ -32,6 +32,10 @@ ODOR_CANON: Mapping[str, str] = {
     "ethyl butyrate": "EB",
     "eb_control": "EB_control",
     "eb control": "EB_control",
+    "hex_control": "hex_control",
+    "hex control": "hex_control",
+    "benz_control": "benz_control",
+    "benz control": "benz_control",
     "optogenetics benzaldehyde": "opto_benz",
     "optogenetics benzaldehyde 1": "opto_benz_1",
     "optogenetics ethyl butyrate": "opto_EB",
@@ -49,6 +53,8 @@ DISPLAY_LABEL = {
     "10s_Odor_Benz": "Benzaldehyde",
     "EB": "Ethyl Butyrate",
     "EB_control": "EB Control",
+    "hex_control": "Hexanol Control",
+    "benz_control": "Benzaldehyde Control",
     "opto_benz": "Benzaldehyde",
     "opto_benz_1": "Benzaldehyde",
     "opto_EB": "Ethyl Butyrate",
@@ -56,6 +62,19 @@ DISPLAY_LABEL = {
 }
 
 HEXANOL_LABEL = "Hexanol"
+
+PRIMARY_ODOR_LABEL = {
+    "EB_control": "Ethyl Butyrate",
+    "hex_control": HEXANOL_LABEL,
+    "benz_control": "Benzaldehyde",
+}
+
+TRAINING_PRIMARY_TRIALS = {1, 2, 3, 4, 6, 8}
+
+TRAINING_SPECIAL_CASES = {
+    "EB_control": {5: HEXANOL_LABEL, 7: HEXANOL_LABEL},
+    "hex_control": {5: "Apple Cider Vinegar", 7: "Apple Cider Vinegar"},
+}
 
 
 # ---------------------------------------------------------------------------
@@ -108,9 +127,22 @@ def _trial_num(label: str) -> int:
     return int(match.group(1)) if match else -1
 
 
+def _trained_label(dataset_canon: str) -> str:
+    return PRIMARY_ODOR_LABEL.get(
+        dataset_canon, DISPLAY_LABEL.get(dataset_canon, dataset_canon)
+    )
+
+
 def _display_odor(dataset_canon: str, trial_label: str) -> str:
     number = _trial_num(trial_label)
     label_lower = str(trial_label).lower()
+    if "training" in label_lower:
+        special = TRAINING_SPECIAL_CASES.get(dataset_canon, {})
+        if number in special:
+            return special[number]
+        if number in TRAINING_PRIMARY_TRIALS:
+            return _trained_label(dataset_canon)
+
     if (
         dataset_canon == "opto_hex"
         and "testing" in label_lower

@@ -183,6 +183,19 @@ DISPLAY_LABEL = {
 
 HEXANOL = "Hexanol"
 
+PRIMARY_ODOR_LABEL = {
+    "EB_control": "Ethyl Butyrate",
+    "hex_control": HEXANOL,
+    "benz_control": "Benzaldehyde",
+}
+
+TRAINING_PRIMARY_TRIALS = {1, 2, 3, 4, 6, 8}
+
+TRAINING_SPECIAL_CASES = {
+    "EB_control": {5: HEXANOL, 7: HEXANOL},
+    "hex_control": {5: "Apple Cider Vinegar", 7: "Apple Cider Vinegar"},
+}
+
 CONTROL_DATASETS = {"eb_control", "hex_control", "benz_control"}
 
 
@@ -216,9 +229,22 @@ def _trial_num(label: str) -> int:
     return int(match.group(1)) if match else -1
 
 
+def _trained_label(dataset_canon: str) -> str:
+    return PRIMARY_ODOR_LABEL.get(
+        dataset_canon, DISPLAY_LABEL.get(dataset_canon, dataset_canon)
+    )
+
+
 def _display_odor(dataset_canon: str, trial_label: str) -> str:
     number = _trial_num(trial_label)
     label_lower = str(trial_label).lower()
+    if "training" in label_lower:
+        special = TRAINING_SPECIAL_CASES.get(dataset_canon, {})
+        if number in special:
+            return special[number]
+        if number in TRAINING_PRIMARY_TRIALS:
+            return _trained_label(dataset_canon)
+
     if (
         dataset_canon == "opto_hex"
         and "testing" in label_lower
@@ -258,7 +284,7 @@ def _display_odor(dataset_canon: str, trial_label: str) -> str:
 
 
 def _is_trained(dataset_canon: str, odor_name: str) -> bool:
-    trained = DISPLAY_LABEL.get(dataset_canon, dataset_canon)
+    trained = _trained_label(dataset_canon)
     return odor_name.strip().lower() == trained.strip().lower()
 
 

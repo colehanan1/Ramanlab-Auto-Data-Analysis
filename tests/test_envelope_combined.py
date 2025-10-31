@@ -52,6 +52,26 @@ def test_eb_control_matches_opto_ordering():
         assert ec._display_odor("EB_control", label) == odor
 
 
+def test_control_training_odors_remap_correctly():
+    """Training odor labels follow the dataset defaults with special cases."""
+
+    assert ec._display_odor("EB_control", "training_1") == "Ethyl Butyrate"
+    assert ec._display_odor("EB_control", "training_5") == "Hexanol"
+    assert ec._display_odor("EB_control", "training_7") == "Hexanol"
+    assert ec._display_odor("EB_control", "training_8") == "Ethyl Butyrate"
+
+    assert ec._display_odor("hex_control", "training_1") == "Hexanol"
+    assert ec._display_odor("hex_control", "training_5") == "Apple Cider Vinegar"
+    assert ec._display_odor("hex_control", "training_7") == "Apple Cider Vinegar"
+    assert ec._display_odor("hex_control", "training_8") == "Hexanol"
+
+    assert ec._display_odor("benz_control", "training_1") == "Benzaldehyde"
+
+    assert ec._is_trained("EB_control", "Ethyl Butyrate")
+    assert ec._is_trained("hex_control", "Hexanol")
+    assert ec._is_trained("benz_control", "Benzaldehyde")
+
+
 def test_build_wide_csv_exports_training_subset(tmp_path):
     """The wide CSV builder should emit the training-only subset when requested."""
 
