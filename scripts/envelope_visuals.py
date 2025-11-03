@@ -95,6 +95,30 @@ ODOR_ORDER = [
 
 TRAINED_FIRST_ORDER = (2, 4, 5, 1, 3, 6, 7, 8, 9)
 HEXANOL_LABEL = "Hexanol"
+
+PRIMARY_ODOR_LABEL = {
+    "EB_control": "Ethyl Butyrate",
+    "hex_control": HEXANOL_LABEL,
+    "benz_control": "Benzaldehyde",
+}
+
+TRAINING_ODOR_SCHEDULE = {
+    1: "Benzaldehyde",
+    2: "Benzaldehyde",
+    3: "Benzaldehyde",
+    4: "Benzaldehyde",
+    5: HEXANOL_LABEL,
+    6: "Benzaldehyde",
+    7: HEXANOL_LABEL,
+    8: "Benzaldehyde",
+}
+
+TESTING_DATASET_ALIAS = {
+    "opto_hex": "hex_control",
+    "opto_EB": "EB_control",
+    "opto_benz": "benz_control",
+    "opto_benz_1": "benz_control",
+}
 NON_REACTIVE_SPAN_PX = 15.0
 
 
@@ -160,24 +184,42 @@ def _trial_num(label: str) -> int:
     return int(match.group(1)) if match else -1
 
 
+def _trained_label(dataset_canon: str) -> str:
+    return PRIMARY_ODOR_LABEL.get(
+        dataset_canon, DISPLAY_LABEL.get(dataset_canon, dataset_canon)
+    )
+
+
 def _display_odor(dataset_canon: str, trial_label: str) -> str:
     number = _trial_num(trial_label)
     label_lower = str(trial_label).lower()
-    if (
-        dataset_canon == "opto_hex"
-        and "testing" in label_lower
-        and number in (1, 3)
-    ):
-        return "Apple Cider Vinegar"
+
+    if "training" in label_lower:
+        odor_name = TRAINING_ODOR_SCHEDULE.get(number)
+        if odor_name:
+            return odor_name
+        return DISPLAY_LABEL.get(dataset_canon, dataset_canon)
+
+    dataset_for_testing = TESTING_DATASET_ALIAS.get(dataset_canon, dataset_canon)
+
     if number in (1, 3):
         return HEXANOL_LABEL
     if number in (2, 4, 5):
-        return DISPLAY_LABEL.get(dataset_canon, dataset_canon)
+        return DISPLAY_LABEL.get(
+            dataset_for_testing, DISPLAY_LABEL.get(dataset_canon, dataset_canon)
+        )
 
     mapping = {
         "ACV": {6: "3-Octonol", 7: "Benzaldehyde", 8: "Citral", 9: "Linalool"},
         "3-octonol": {6: "Benzaldehyde", 7: "Citral", 8: "Linalool"},
         "Benz": {6: "Citral", 7: "Linalool"},
+        "benz_control": {
+            6: "Apple Cider Vinegar",
+            7: "3-Octonol",
+            8: "Ethyl Butyrate",
+            9: "Citral",
+            10: "Linalool",
+        },
         "EB": {
             6: "Apple Cider Vinegar",
             7: "3-Octonol",
@@ -192,31 +234,18 @@ def _display_odor(dataset_canon: str, trial_label: str) -> str:
             9: "Citral",
             10: "Linalool",
         },
-        "10s_Odor_Benz": {6: "Benzaldehyde", 7: "Benzaldehyde"},
-        "opto_EB": {
-            6: "Apple Cider Vinegar",
-            7: "3-Octonol",
-            8: "Benzaldehyde",
-            9: "Citral",
-            10: "Linalool",
-        },
-        "opto_benz": {6: "3-Octonol", 7: "Benzaldehyde", 8: "Citral", 9: "Linalool"},
-        "opto_benz_1": {
-            6: "Apple Cider Vinegar",
-            7: "3-Octonol",
-            8: "Ethyl Butyrate",
-            9: "Citral",
-            10: "Linalool",
-        },
-        "opto_hex": {
+        "hex_control": {
             6: "Benzaldehyde",
             7: "3-Octonol",
             8: "Ethyl Butyrate",
             9: "Citral",
             10: "Linalool",
         },
+        "10s_Odor_Benz": {6: "Benzaldehyde", 7: "Benzaldehyde"},
     }
 
+    if dataset_for_testing in mapping:
+        return mapping[dataset_for_testing].get(number, trial_label)
     return mapping.get(dataset_canon, {}).get(number, trial_label)
 
 
@@ -268,7 +297,7 @@ def _fly_row_label(fly: str, fly_number: str) -> str:
 
 
 def _is_trained_odor(dataset_canon: str, odor_name: str) -> bool:
-    trained = DISPLAY_LABEL.get(dataset_canon, dataset_canon)
+    trained = _trained_label(dataset_canon)
     return str(odor_name).strip().lower() == str(trained).strip().lower()
 
 
@@ -915,11 +944,6 @@ def generate_envelope_plots(cfg: EnvelopePlotConfig) -> None:
             ax.axvline(odor_off_effective, linestyle="--", linewidth=1.0, color="black")
 
             transit_on_end = min(odor_on_effective, x_max_limit)
-            transit_off_end = min(odor_off_effective, x_max_limit)
-            if odor_latency > 0:
-                ax.axvspan(odor_on_cmd, transit_on_end, alpha=0.25, color="red")
-                ax.axvspan(odor_off_cmd, transit_off_end, alpha=0.25, color="red")
-
             effective_off_end = min(odor_off_effective + linger, x_max_limit)
             if effective_off_end > transit_on_end:
                 ax.axvspan(transit_on_end, effective_off_end, alpha=0.15, color="gray")
@@ -941,7 +965,6 @@ def generate_envelope_plots(cfg: EnvelopePlotConfig) -> None:
 
         legend_handles = [
             plt.Line2D([0], [0], linestyle="--", linewidth=1.0, color="black", label="Odor at fly"),
-            plt.Rectangle((0, 0), 1, 1, alpha=0.25, color="red", label=f"Valve→fly transit (~{odor_latency:.2f}s)"),
             plt.Rectangle((0, 0), 1, 1, alpha=0.15, color="gray", label="Odor present / linger"),
             plt.Line2D([0], [0], linestyle="-", linewidth=1.0, color="tab:red", label=r"$\theta = \mu_{before} + k\sigma_{before}$"),
         ]

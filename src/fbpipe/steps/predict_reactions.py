@@ -6,7 +6,7 @@ import os
 import subprocess
 import tempfile
 from pathlib import Path
-from typing import Sequence, Set, Tuple
+from typing import Iterable, Sequence, Set, Tuple
 
 import pandas as pd
 
@@ -74,6 +74,28 @@ def _drop_flagged_flies(
     return filtered, flagged_pairs
 
 
+def _filter_trial_types(
+    df: pd.DataFrame, allowed: Iterable[str] = ("testing",)
+) -> pd.DataFrame:
+    """Return only the rows whose ``trial_type`` matches ``allowed``."""
+
+    if "trial_type" not in df.columns:
+        return df.copy()
+
+    allowed_normalised = {str(value).strip().lower() for value in allowed}
+    if not allowed_normalised:
+        return df.copy()
+
+    mask = (
+        df["trial_type"]
+        .astype(str)
+        .str.strip()
+        .str.lower()
+        .isin(allowed_normalised)
+    )
+    return df.loc[mask].copy()
+
+
 def _write_empty_predictions(output_csv: Path, columns: Sequence[str]) -> None:
     cols = list(columns)
     if "prediction" not in cols:
@@ -101,6 +123,15 @@ def main(cfg: Settings) -> None:
         raise FileNotFoundError(f"Model file not found: {model_path}")
 
     df = pd.read_csv(data_csv)
+    df = _filter_trial_types(df, allowed=("testing",))
+    if df.empty:
+        print(
+            "[REACTION] No testing trials found in data_csv; "
+            "writing empty predictions spreadsheet."
+        )
+        _write_empty_predictions(output_csv, [])
+        return
+
     span_threshold = float(getattr(cfg, "non_reactive_span_px", NON_REACTIVE_SPAN_PX))
     filtered_df, flagged_pairs = _drop_flagged_flies(df, threshold=span_threshold)
     if filtered_df.empty:

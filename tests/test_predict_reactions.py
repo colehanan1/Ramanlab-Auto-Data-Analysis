@@ -1,6 +1,17 @@
+import sys
+from pathlib import Path
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT / "src") not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT / "src"))
+
 import pandas as pd
 
-from fbpipe.steps.predict_reactions import _drop_flagged_flies, NON_REACTIVE_SPAN_PX
+from fbpipe.steps.predict_reactions import (
+    NON_REACTIVE_SPAN_PX,
+    _drop_flagged_flies,
+    _filter_trial_types,
+)
 
 
 def test_drop_flagged_flies_removes_non_reactive_pairs():
@@ -22,3 +33,27 @@ def test_drop_flagged_flies_removes_non_reactive_pairs():
     assert len(filtered) == 2
     assert set(filtered["fly"].unique()) == {"flyB"}
     assert set(filtered["fly_number"].unique()) == {"2"}
+
+
+def test_filter_trial_types_keeps_only_testing_rows():
+    df = pd.DataFrame(
+        {
+            "dataset": ["set1", "set1", "set2"],
+            "trial_type": ["testing", "training", "Testing"],
+            "value": [1, 2, 3],
+        }
+    )
+
+    filtered = _filter_trial_types(df, allowed=("testing",))
+
+    assert len(filtered) == 2
+    assert all(filtered["trial_type"].str.lower() == "testing")
+
+
+def test_filter_trial_types_returns_copy_when_column_missing():
+    df = pd.DataFrame({"dataset": ["set1"], "value": [1]})
+
+    filtered = _filter_trial_types(df, allowed=("testing",))
+
+    assert filtered.equals(df)
+    assert filtered is not df

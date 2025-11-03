@@ -4,6 +4,7 @@ import sys
 from pathlib import Path
 
 import numpy as np
+import pandas as pd
 
 ROOT = Path(__file__).resolve().parents[1]
 root_str = str(ROOT)
@@ -11,6 +12,7 @@ if root_str not in sys.path:
     sys.path.insert(0, root_str)
 
 from scripts import envelope_combined as ec  # noqa: E402
+from scripts import run_workflows as rw  # noqa: E402
 
 
 def test_angle_multiplier_never_below_unity():
@@ -33,18 +35,192 @@ def test_angle_multiplier_handles_scalars():
     assert ec._angle_multiplier(np.array([5.0])).item() == 1.0
 
 
-def test_eb_control_matches_opto_ordering():
-    """EB_control should mirror opto_EB odor labels for late trials."""
+def test_has_training_trials_detects_training_entries(tmp_path):
+    """_has_training_trials should return True whenever any list includes training."""
 
-    expected = {
-        6: "Apple Cider Vinegar",
-        7: "3-Octonol",
-        8: "Benzaldehyde",
-        9: "Citral",
-        10: "Linalool",
+    testing_entry = [("testing_1", tmp_path / "a.csv", "testing")]
+    training_entry = [("training_1", tmp_path / "b.csv", "training")]
+
+    assert not ec._has_training_trials(testing_entry)
+    assert ec._has_training_trials(training_entry)
+    assert ec._has_training_trials(testing_entry, training_entry)
+
+
+def test_testing_aliases_follow_control_ordering():
+    """Opto datasets should share the same testing labels as their controls."""
+
+    schedules = {
+        "EB_control": {
+            6: "Apple Cider Vinegar",
+            7: "3-Octonol",
+            8: "Benzaldehyde",
+            9: "Citral",
+            10: "Linalool",
+        },
+        "hex_control": {
+            6: "Benzaldehyde",
+            7: "3-Octonol",
+            8: "Ethyl Butyrate",
+            9: "Citral",
+            10: "Linalool",
+        },
+        "benz_control": {
+            6: "Apple Cider Vinegar",
+            7: "3-Octonol",
+            8: "Ethyl Butyrate",
+            9: "Citral",
+            10: "Linalool",
+        },
     }
 
-    for trial, odor in expected.items():
-        label = f"testing_{trial}"
-        assert ec._display_odor("opto_EB", label) == odor
-        assert ec._display_odor("EB_control", label) == odor
+    aliases = {
+        "EB_control": ["opto_EB"],
+        "hex_control": ["opto_hex"],
+        "benz_control": ["opto_benz", "opto_benz_1"],
+    }
+
+    for control, mapping in schedules.items():
+        for trial, odor in mapping.items():
+            label = f"testing_{trial}"
+            assert ec._display_odor(control, label) == odor
+            for alias in aliases[control]:
+                assert ec._display_odor(alias, label) == odor
+
+
+def test_training_schedule_matches_spec():
+    """Training trials follow the benzaldehyde/hexanol schedule for every dataset."""
+
+    datasets = [
+        "EB_control",
+        "hex_control",
+        "benz_control",
+        "opto_EB",
+        "opto_hex",
+        "opto_benz",
+        "opto_benz_1",
+    ]
+
+    for dataset in datasets:
+        for trial in (1, 2, 3, 4, 6, 8):
+            assert ec._display_odor(dataset, f"training_{trial}") == "Benzaldehyde"
+        for trial in (5, 7):
+            assert ec._display_odor(dataset, f"training_{trial}") == "Hexanol"
+
+
+def test_build_wide_csv_exports_training_subset(tmp_path):
+    """The wide CSV builder should emit the training-only subset when requested."""
+
+    dataset_root = tmp_path / "hex_control"
+    fly_dir = dataset_root / "october_01_fly1"
+    out_dir = fly_dir / "angle_distance_rms_envelope"
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    for trial_type in ("testing", "training"):
+        values = np.linspace(0, 100, 10, dtype=float)
+        df = pd.DataFrame({"envelope_of_rms": values})
+        stem = f"october_01_fly1_{trial_type}_1_angle_distance_rms_envelope"
+        df.to_csv(out_dir / f"{stem}.csv", index=False)
+
+    output_csv = tmp_path / "wide.csv"
+    training_csv = tmp_path / "wide_training.csv"
+    ec.build_wide_csv(
+        [str(dataset_root)],
+        str(output_csv),
+        measure_cols=["envelope_of_rms"],
+        extra_trial_exports={"training": str(training_csv)},
+    )
+
+    wide_df = pd.read_csv(output_csv)
+    training_df = pd.read_csv(training_csv)
+
+    assert set(wide_df["trial_type"].str.lower()) == {"testing", "training"}
+    assert set(training_df["trial_type"].str.lower()) == {"training"}
+    assert len(training_df) < len(wide_df)
+
+
+def test_fly_max_centered_skips_empty_csv(tmp_path):
+    """Empty per-trial CSVs should be ignored when computing the max angle delta."""
+
+    empty_csv = tmp_path / "empty.csv"
+    pd.DataFrame(columns=["x_class2", "y_class2", "x_class8", "y_class8"]).to_csv(
+        empty_csv, index=False
+    )
+
+    valid_csv = tmp_path / "valid.csv"
+    valid_df = pd.DataFrame(
+        {
+            "x_class2": [1000.0, 1000.0],
+            "y_class2": [500.0, 500.0],
+            "x_class8": [1100.0, 1120.0],
+            "y_class8": [500.0, 540.0],
+        }
+    )
+    valid_df.to_csv(valid_csv, index=False)
+
+    angles = ec._compute_angle_deg(valid_df).to_numpy(dtype=float)
+    reference = float(angles[0])
+    expected = np.nanmax(np.abs(angles - reference))
+
+    result = ec._fly_max_centered([empty_csv, valid_csv], reference)
+
+    assert np.isclose(result, expected, equal_nan=False)
+
+
+def test_run_combined_creates_training_matrix(tmp_path):
+    """_run_combined should materialise matrices for training exports."""
+
+    dataset_root = tmp_path / "hex_control"
+    fly_dir = dataset_root / "october_01_fly1"
+    csv_dir = fly_dir / "angle_distance_rms_envelope"
+    csv_dir.mkdir(parents=True, exist_ok=True)
+
+    values = np.linspace(0, 100, 4000, dtype=float)
+    for trial_type in ("testing", "training"):
+        stem = f"october_01_fly1_{trial_type}_1_angle_distance_rms_envelope"
+        pd.DataFrame({"envelope_of_rms": values}).to_csv(
+            csv_dir / f"{stem}.csv", index=False
+        )
+
+    training_csv = tmp_path / "wide_training.csv"
+    matrix_dir = tmp_path / "training_matrix"
+
+    rw._run_combined(
+        {
+            "wide": {
+                "roots": [str(dataset_root)],
+                "output_csv": str(tmp_path / "wide.csv"),
+                "measure_cols": ["envelope_of_rms"],
+                "trial_type_exports": [
+                    {
+                        "trial_type": "training",
+                        "output_csv": str(training_csv),
+                        "matrix_out_dir": str(matrix_dir),
+                    }
+                ],
+            }
+        },
+        settings=None,
+    )
+
+    matrix_path = matrix_dir / "envelope_matrix_float16.npy"
+    assert matrix_path.exists()
+    matrix = np.load(matrix_path)
+    assert matrix.shape[0] == 1
+
+
+def test_auto_sync_wide_roots_copies_training_outputs(tmp_path):
+    """Auto-sync should mirror combine outputs into wide roots when needed."""
+
+    combine_root = tmp_path / "local" / "hex_control"
+    secure_root = tmp_path / "secure" / "hex_control"
+    combine_csv_dir = combine_root / "angle_distance_rms_envelope"
+    combine_csv_dir.mkdir(parents=True, exist_ok=True)
+    secure_root.mkdir(parents=True, exist_ok=True)
+
+    training_file = combine_csv_dir / "october_01_fly1_training_1_angle_distance_rms_envelope.csv"
+    pd.DataFrame({"envelope_of_rms": [1.0, 2.0, 3.0]}).to_csv(training_file, index=False)
+
+    rw._auto_sync_wide_roots({"hex_control": combine_root.resolve()}, [secure_root.resolve()])
+
+    mirrored = secure_root / "angle_distance_rms_envelope" / training_file.name
+    assert mirrored.exists()

@@ -16,7 +16,7 @@ from __future__ import annotations
 import argparse
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Sequence
+from typing import Iterable, Sequence
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -71,6 +71,26 @@ class SpreadsheetMatrixConfig:
     overwrite: bool = False
 
 
+def _filter_trial_types(
+    df: pd.DataFrame, allowed: Iterable[str] = ("testing",)
+) -> pd.DataFrame:
+    if "trial_type" not in df.columns:
+        return df
+
+    allowed_normalised = {str(value).strip().lower() for value in allowed}
+    if not allowed_normalised:
+        return df
+
+    mask = (
+        df["trial_type"]
+        .astype(str)
+        .str.strip()
+        .str.lower()
+        .isin(allowed_normalised)
+    )
+    return df.loc[mask].copy()
+
+
 def _load_predictions(csv_path: Path) -> pd.DataFrame:
     df = pd.read_csv(csv_path)
     required = {"dataset", "fly", "fly_number", "trial_label", "prediction"}
@@ -79,6 +99,10 @@ def _load_predictions(csv_path: Path) -> pd.DataFrame:
         raise ValueError(f"CSV is missing required columns: {', '.join(sorted(missing))}")
 
     df = df.copy()
+    df = _filter_trial_types(df, allowed=("testing",))
+    if df.empty:
+        raise RuntimeError("Predictions CSV did not contain any testing trials to plot.")
+
     df["dataset"] = df["dataset"].astype(str).str.strip()
     df["fly"] = df["fly"].astype(str).str.strip()
     df["trial_label"] = df["trial_label"].astype(str).str.strip()

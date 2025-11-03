@@ -1,11 +1,11 @@
 
 # Project configuration
 model_path: "/home/ramanlab/Documents/cole/sam2/notebooks/YOLOProjectProboscisLegs/runs/obb/train5/weights/best.pt"
-main_directory: "/home/ramanlab/Documents/cole/Data/flys/opto_benz_1/"
+main_directory: "/home/ramanlab/Documents/cole/Data/flys/hex_control/"
 
 reaction_prediction:
   data_csv: "/home/ramanlab/Documents/cole/Data/Opto/Combined/all_envelope_rows_wide.csv"
-  model_path: "/home/ramanlab/PycharmProjects/FlyBehaviorScoring/artifacts/2025-10-17T20-16-59Z/model_mlp.joblib"
+  model_path: "/home/ramanlab/PycharmProjects/FlyBehaviorScoring/artifacts/2025-10-29T23-59-43Z/model_logreg.joblib"
   output_csv: "/home/ramanlab/Documents/cole/Data/Opto/Combined/model_predictions.csv"
   matrix:
     out_dir: "/home/ramanlab/Documents/cole/Results/Opto/Combined/Reaction_Predictions"
@@ -45,7 +45,7 @@ distance_limits:
   class2_max: 250.0
 
 # Reaction filtering
-non_reactive_span_px: 20.0  # flag flies when global span ≤ this threshold (pixels)
+non_reactive_span_px: 15.0  # flag flies when global span ≤ this threshold (pixels)
 
 # Envelope / RMS
 fps_default: 40.0
@@ -91,8 +91,8 @@ analysis:
       overwrite: false
   training:
     envelopes:
-      matrix_npy: "/home/ramanlab/Documents/cole/Data/single_matrix_opto/envelope_matrix_float16.npy"
-      codes_json: "/home/ramanlab/Documents/cole/Data/single_matrix_opto/code_maps.json"
+      matrix_npy: "/home/ramanlab/Documents/cole/Data/Opto/Combined/matrix/training/envelope_matrix_float16.npy"
+      codes_json: "/home/ramanlab/Documents/cole/Data/Opto/Combined/matrix/training/code_maps.json"
       out_dir: "/home/ramanlab/Documents/cole/Results/Opto/Training_Envelopes"
       latency_sec: 0.0
       fps_default: 40.0
@@ -116,7 +116,13 @@ analysis:
       overwrite: false
   combined:
     combine:
-      root: "/home/ramanlab/Documents/cole/Data/flys/opto_benz_1/"
+      roots:
+        - "/home/ramanlab/Documents/cole/Data/flys/opto_benz_1/"
+        - "/home/ramanlab/Documents/cole/Data/flys/hex_control/"
+        - "/home/ramanlab/Documents/cole/Data/flys/EB_control/"
+        - "/home/ramanlab/Documents/cole/Data/flys/benz_control/"
+        - "/home/ramanlab/Documents/cole/Data/flys/opto_EB/"
+        - "/home/ramanlab/Documents/cole/Data/flys/opto_hex/"
       fps_default: 40.0
       window_sec: 0.25
       odor_on: 30.0
@@ -124,16 +130,22 @@ analysis:
       odor_latency_s: 2.15
     wide:
       mirror:
-        - source: "/home/ramanlab/Documents/cole/Data/flys/opto_benz_1/"
-          destination: "/securedstorage/DATAsec/cole/Data-secured/opto_benz_1/"
+        - source: "/home/ramanlab/Documents/cole/Data/flys/EB_control/"
+          destination: "/securedstorage/DATAsec/cole/Data-secured/EB_control/"
       roots:
         - "/securedstorage/DATAsec/cole/Data-secured/opto_EB/"
         - "/securedstorage/DATAsec/cole/Data-secured/opto_benz_1/"
         - "/securedstorage/DATAsec/cole/Data-secured/opto_hex/"
         - "/securedstorage/DATAsec/cole/Data-secured/hex_control/"
+        - "/securedstorage/DATAsec/cole/Data-secured/EB_control/"
+        - "/securedstorage/DATAsec/cole/Data-secured/benz_control/"
       output_csv: "/home/ramanlab/Documents/cole/Data/Opto/Combined/all_envelope_rows_wide.csv"
       measure_cols: ["envelope_of_rms"]
       fps_fallback: 40.0
+      trial_type_exports:
+        - trial_type: training
+          output_csv: "/home/ramanlab/Documents/cole/Data/Opto/Combined/all_envelope_rows_wide_training.csv"
+          matrix_out_dir: "/home/ramanlab/Documents/cole/Data/Opto/Combined/matrix/training"
     matrix:
       input_csv: "/home/ramanlab/Documents/cole/Data/Opto/Combined/all_envelope_rows_wide.csv"
       out_dir: "/home/ramanlab/Documents/cole/Data/Opto/Combined/matrix"
@@ -155,17 +167,29 @@ analysis:
       include_hexanol: true
       overwrite: false
     envelopes:
-      matrix_npy: "/home/ramanlab/Documents/cole/Data/Opto/Combined/matrix/envelope_matrix_float16.npy"
-      codes_json: "/home/ramanlab/Documents/cole/Data/Opto/Combined/matrix/code_maps.json"
-      out_dir: "/home/ramanlab/Documents/cole/Results/Opto/Combined/Envelopes"
-      latency_sec: 0.0
-      fps_default: 40.0
-      odor_on_s: 30.0
-      odor_off_s: 60.0
-      odor_latency_s: 2.15
-      after_show_sec: 30.0
-      threshold_std_mult: 4.0
-      overwrite: false
+      - matrix_npy: "/home/ramanlab/Documents/cole/Data/Opto/Combined/matrix/envelope_matrix_float16.npy"
+        codes_json: "/home/ramanlab/Documents/cole/Data/Opto/Combined/matrix/code_maps.json"
+        out_dir: "/home/ramanlab/Documents/cole/Results/Opto/Combined/Envelopes"
+        latency_sec: 0.0
+        fps_default: 40.0
+        odor_on_s: 30.0
+        odor_off_s: 60.0
+        odor_latency_s: 2.15
+        after_show_sec: 30.0
+        threshold_std_mult: 4.0
+        overwrite: false
+      - matrix_npy: "/home/ramanlab/Documents/cole/Data/Opto/Combined/matrix/training/envelope_matrix_float16.npy"
+        codes_json: "/home/ramanlab/Documents/cole/Data/Opto/Combined/matrix/training/code_maps.json"
+        out_dir: "/home/ramanlab/Documents/cole/Results/Opto/Combined/Training_Envelopes"
+        latency_sec: 0.0
+        fps_default: 40.0
+        odor_on_s: 30.0
+        odor_off_s: 60.0
+        odor_latency_s: 2.15
+        after_show_sec: 30.0
+        threshold_std_mult: 4.0
+        trial_type: training
+        overwrite: true
     overlay:
       combined_matrix: "/home/ramanlab/Documents/cole/Data/Opto/Combined/matrix/envelope_matrix_float16.npy"
       combined_codes: "/home/ramanlab/Documents/cole/Data/Opto/Combined/matrix/code_maps.json"
@@ -186,4 +210,6 @@ analysis:
         - "/home/ramanlab/Documents/cole/Data/flys/opto_benz_1/"
         - "/home/ramanlab/Documents/cole/Data/flys/opto_hex/"
         - "/home/ramanlab/Documents/cole/Data/flys/hex_control/"
+        - "/home/ramanlab/Documents/cole/Data/flys/EB_control/"
+        - "/home/ramanlab/Documents/cole/Data/flys/benz_control/"
 
