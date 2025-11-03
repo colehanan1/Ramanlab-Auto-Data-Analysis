@@ -73,7 +73,7 @@ DISPLAY_LABEL = {
     "Benz": "Benzaldehyde",
     "10s_Odor_Benz": "Benzaldehyde",
     "EB": "Ethyl Butyrate",
-    "EB_control": "EB Control",
+    "EB_control": "Ethyl Butyrate",
     "opto_benz": "Benzaldehyde",
     "opto_EB": "Ethyl Butyrate",
     "opto_benz_1": "Benzaldehyde",
