@@ -69,7 +69,7 @@ PRIMARY_ODOR_LABEL = {
     "benz_control": "Benzaldehyde",
 }
 
-TRAINING_ODOR_SCHEDULE = {
+TRAINING_ODOR_SCHEDULE_DEFAULT = {
     1: "Benzaldehyde",
     2: "Benzaldehyde",
     3: "Benzaldehyde",
@@ -78,6 +78,49 @@ TRAINING_ODOR_SCHEDULE = {
     6: "Benzaldehyde",
     7: HEXANOL_LABEL,
     8: "Benzaldehyde",
+}
+
+TRAINING_ODOR_SCHEDULE_OVERRIDES = {
+    "hex_control": {
+        1: HEXANOL_LABEL,
+        2: HEXANOL_LABEL,
+        3: HEXANOL_LABEL,
+        4: HEXANOL_LABEL,
+        5: "Apple Cider Vinegar",
+        6: HEXANOL_LABEL,
+        7: "Apple Cider Vinegar",
+        8: HEXANOL_LABEL,
+    },
+    "opto_hex": {
+        1: HEXANOL_LABEL,
+        2: HEXANOL_LABEL,
+        3: HEXANOL_LABEL,
+        4: HEXANOL_LABEL,
+        5: "Apple Cider Vinegar",
+        6: HEXANOL_LABEL,
+        7: "Apple Cider Vinegar",
+        8: HEXANOL_LABEL,
+    },
+    "EB_control": {
+        1: "Ethyl Butyrate",
+        2: "Ethyl Butyrate",
+        3: "Ethyl Butyrate",
+        4: "Ethyl Butyrate",
+        5: HEXANOL_LABEL,
+        6: "Ethyl Butyrate",
+        7: HEXANOL_LABEL,
+        8: "Ethyl Butyrate",
+    },
+    "opto_EB": {
+        1: "Ethyl Butyrate",
+        2: "Ethyl Butyrate",
+        3: "Ethyl Butyrate",
+        4: "Ethyl Butyrate",
+        5: HEXANOL_LABEL,
+        6: "Ethyl Butyrate",
+        7: HEXANOL_LABEL,
+        8: "Ethyl Butyrate",
+    },
 }
 
 TESTING_DATASET_ALIAS = {
@@ -109,20 +152,22 @@ def _dataset_label(dataset: str) -> str:
 
 
 def _target_dir(base: Path, datasets: Sequence[str] | str) -> Path:
+    values: set[str] = set()
     if isinstance(datasets, str):
-        values = {_canon_dataset(datasets)} if datasets else set()
+        if datasets:
+            values.add(_canon_dataset(datasets))
     else:
-        values = {_canon_dataset(val) for val in datasets if isinstance(val, str) and val}
+        for val in datasets:
+            if isinstance(val, str) and val:
+                values.add(_canon_dataset(val))
 
     values = {val for val in values if val}
     if not values:
         label = "UNKNOWN"
     elif len(values) == 1:
-        key = next(iter(values))
-        label = DISPLAY_LABEL.get(key, key)
+        label = next(iter(values))
     else:
-        pretty = [DISPLAY_LABEL.get(key, key) for key in sorted(values)]
-        label = f"Mixed ({'+'.join(pretty)})"
+        label = "+".join(sorted(values))
     return base / _safe_dirname(label)
 
 
@@ -144,12 +189,19 @@ def _trained_label(dataset_canon: str) -> str:
     )
 
 
+def _training_odor(dataset_canon: str, number: int) -> str | None:
+    schedule = TRAINING_ODOR_SCHEDULE_OVERRIDES.get(dataset_canon)
+    if schedule and number in schedule:
+        return schedule[number]
+    return TRAINING_ODOR_SCHEDULE_DEFAULT.get(number)
+
+
 def _display_odor(dataset_canon: str, trial_label: str) -> str:
     number = _trial_num(trial_label)
     label_lower = str(trial_label).lower()
 
     if "training" in label_lower:
-        odor_name = TRAINING_ODOR_SCHEDULE.get(number)
+        odor_name = _training_odor(dataset_canon, number)
         if odor_name:
             return odor_name
         return DISPLAY_LABEL.get(dataset_canon, dataset_canon)

@@ -24,6 +24,8 @@ class ReactionPredictionSettings:
     data_csv: str = ""
     model_path: str = ""
     output_csv: str = ""
+    python: str = ""
+    run_prediction: bool = True
     matrix: ReactionMatrixSettings = field(default_factory=ReactionMatrixSettings)
 
 
@@ -138,10 +140,21 @@ def load_settings(config_path: str | Path) -> Settings:
         overwrite=matrix_defaults.overwrite,
     )
 
+    reaction_python = str(os.getenv("REACTION_PREDICTION_PYTHON", reaction_cfg.get("python", "")))
+
+    run_prediction_cfg = reaction_cfg.get("run_prediction", True)
+    if isinstance(run_prediction_cfg, str):
+        run_prediction_cfg = run_prediction_cfg.lower() == "true"
+    run_prediction_env = os.getenv("REACTION_RUN_PREDICTION")
+    if run_prediction_env is not None:
+        run_prediction_cfg = run_prediction_env.lower() == "true"
+
     reaction_prediction = ReactionPredictionSettings(
         data_csv=str(os.getenv("REACTION_DATA_CSV", reaction_cfg.get("data_csv", ""))),
         model_path=str(os.getenv("REACTION_MODEL_PATH", reaction_cfg.get("model_path", ""))),
         output_csv=str(os.getenv("REACTION_OUTPUT_CSV", reaction_cfg.get("output_csv", ""))),
+        python=reaction_python,
+        run_prediction=bool(run_prediction_cfg),
         matrix=matrix,
     )
 

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -15,7 +16,7 @@ import yaml
 sys.path.insert(0, str(Path(__file__).parent.parent.resolve()))
 
 from fbpipe.config import Settings, load_settings
-from fbpipe.steps import predict_reactions, reaction_matrix
+from fbpipe.steps import predict_reactions
 
 from scripts.envelope_visuals import (
     EnvelopePlotConfig,
@@ -358,15 +359,17 @@ def _run_combined(cfg: Mapping[str, Any] | None, settings: Settings | None) -> N
 def _run_reactions(settings: Settings) -> None:
     reaction_cfg = settings.reaction_prediction
 
-    missing = [
-        name
-        for name, value in (
-            ("reaction_prediction.data_csv", reaction_cfg.data_csv),
-            ("reaction_prediction.model_path", reaction_cfg.model_path),
-            ("reaction_prediction.output_csv", reaction_cfg.output_csv),
+    required_pairs: list[tuple[str, str]] = []
+    if reaction_cfg.run_prediction:
+        required_pairs.extend(
+            [
+                ("reaction_prediction.data_csv", reaction_cfg.data_csv),
+                ("reaction_prediction.model_path", reaction_cfg.model_path),
+            ]
         )
-        if not value
-    ]
+    required_pairs.append(("reaction_prediction.output_csv", reaction_cfg.output_csv))
+
+    missing = [name for name, value in required_pairs if not value]
 
     if missing:
         print(
@@ -375,22 +378,71 @@ def _run_reactions(settings: Settings) -> None:
         )
         return
 
-    print("[analysis] reactions.predict → flybehavior-response predict")
-    predict_reactions.main(settings)
+    if reaction_cfg.run_prediction:
+        print("[analysis] reactions.predict → flybehavior-response predict")
+        predict_reactions.main(settings)
+    else:
+        print("[analysis] reactions.predict → skipped (run_prediction = False)")
 
     if not reaction_cfg.matrix.out_dir:
         print("[REACTION] Matrix generation skipped; reaction_prediction.matrix.out_dir is empty.")
         return
 
-    print("[analysis] reactions.matrix → reaction_matrix_from_spreadsheet.py")
-    reaction_matrix.main(settings)
+    python_exec = reaction_cfg.python or sys.executable
+    script_path = Path(__file__).resolve().parent / "reaction_matrix_from_spreadsheet.py"
+    csv_path = Path(reaction_cfg.output_csv).expanduser()
+    if not csv_path.exists():
+        raise FileNotFoundError(f"Reaction prediction CSV not found: {csv_path}")
+
+    matrix_cfg = reaction_cfg.matrix
+    out_dir = Path(matrix_cfg.out_dir).expanduser()
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    cmd = [
+        str(Path(python_exec).expanduser()),
+        str(script_path),
+        "--csv-path",
+        str(csv_path.resolve()),
+        "--out-dir",
+        str(out_dir.resolve()),
+        "--latency-sec",
+        str(matrix_cfg.latency_sec),
+        "--after-window-sec",
+        str(matrix_cfg.after_window_sec),
+        "--row-gap",
+        str(matrix_cfg.row_gap),
+        "--height-per-gap-in",
+        str(matrix_cfg.height_per_gap_in),
+        "--bottom-shift-in",
+        str(matrix_cfg.bottom_shift_in),
+    ]
+
+    for trial_order in matrix_cfg.trial_orders:
+        cmd.extend(["--trial-order", trial_order])
+
+    if not matrix_cfg.include_hexanol:
+        cmd.append("--exclude-hexanol")
+    if matrix_cfg.overwrite:
+        cmd.append("--overwrite")
+
+    print("[analysis] reactions.matrix →", " ".join(cmd))
+    env = os.environ.copy()
+    repo_root = Path(__file__).resolve().parent.parent
+    extra_path = str(repo_root / "src")
+    pythonpath = env.get("PYTHONPATH")
+    env["PYTHONPATH"] = os.pathsep.join(filter(None, [extra_path, pythonpath]))
+    subprocess.run(cmd, check=True, env=env)
 
 
-def _run_pipeline(config_path: Path) -> None:
+def _run_pipeline(config_path: Path, *, main_directory: str | None = None) -> None:
     cmd = [sys.executable, "-m", "fbpipe.pipeline", "--config", str(config_path), "all"]
-    print(f"[analysis] pipeline → {' '.join(cmd)}")
+    suffix = f" (MAIN_DIRECTORY={main_directory})" if main_directory else ""
+    print(f"[analysis] pipeline{suffix} → {' '.join(cmd)}")
+    env = os.environ.copy()
+    if main_directory:
+        env["MAIN_DIRECTORY"] = main_directory
     try:
-        subprocess.run(cmd, check=True)
+        subprocess.run(cmd, check=True, env=env)
     except subprocess.CalledProcessError as e:
         print(f"[ERROR] Pipeline failed with exit code {e.returncode}")
         if e.stderr:
@@ -412,7 +464,29 @@ def main(argv: Sequence[str] | None = None) -> None:
 
     settings = load_settings(config_path)
 
-    _run_pipeline(config_path)
+    dataset_cfg = data.get("main_directories")
+    dataset_roots: Sequence[str] | None = None
+    if isinstance(dataset_cfg, str):
+        dataset_roots = (str(Path(dataset_cfg).expanduser()),)
+    elif isinstance(dataset_cfg, Sequence):
+        dataset_roots = tuple(str(Path(root).expanduser()) for root in dataset_cfg)
+
+    if not dataset_roots:
+        combined_cfg = data.get("analysis", {}).get("combined")
+        combine_cfg: Mapping[str, Any] | None = None
+        if isinstance(combined_cfg, Mapping):
+            combine_cfg = combined_cfg.get("combine") if isinstance(combined_cfg.get("combine"), Mapping) else None
+        if combine_cfg and isinstance(combine_cfg.get("roots"), Sequence):
+            roots_seq = combine_cfg.get("roots")
+            if roots_seq:
+                dataset_roots = tuple(str(Path(root).expanduser()) for root in roots_seq)
+
+    if dataset_roots:
+        for root in dataset_roots:
+            resolved = str(Path(root).expanduser())
+            _run_pipeline(config_path, main_directory=resolved)
+    else:
+        _run_pipeline(config_path)
 
     analysis_cfg = data.get("analysis") or {}
     _run_combined(analysis_cfg.get("combined"), settings)

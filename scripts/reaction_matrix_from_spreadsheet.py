@@ -30,17 +30,17 @@ from envelope_visuals import (
     ODOR_ORDER,
     compute_non_reactive_flags,
     non_reactive_mask,
+    plot_reaction_rate_bars,
+    reaction_rate_stats_from_rows,
     resolve_dataset_output_dir,
     should_write,
     _canon_dataset,
-    _compute_category_counts,
     _display_odor,
     _fly_row_label,
     _fly_sort_key,
     _normalise_fly_columns,
     NON_REACTIVE_SPAN_PX,
     _order_suffix,
-    _plot_category_counts,
     _style_trained_xticks,
     _trial_num,
     _trial_order_for,
@@ -194,10 +194,6 @@ def generate_reaction_matrices_from_csv(cfg: SpreadsheetMatrixConfig) -> None:
 
             xtick_fs = 9 if n_trials <= 10 else (8 if n_trials <= 16 else 7)
 
-            during_counts = _compute_category_counts(
-                during_matrix, pretty_labels, trained_display, cfg.include_hexanol
-            )
-
             with plt.rc_context(_RC_CONTEXT):
                 fig = plt.figure(figsize=(fig_w, fig_h), constrained_layout=False)
                 gs = gridspec.GridSpec(
@@ -233,7 +229,32 @@ def generate_reaction_matrices_from_csv(cfg: SpreadsheetMatrixConfig) -> None:
                             clip_on=False,
                         )
 
-                _plot_category_counts(ax_dc, during_counts, n_flies, "During — Fly Reaction Categories")
+                try:
+                    rate_stats = reaction_rate_stats_from_rows(
+                        subset,
+                        odor,
+                        include_hexanol=cfg.include_hexanol,
+                        context=f"{odor_label} (spreadsheet/{order_suffix})",
+                        trial_col="trial",
+                        reaction_col="during_hit",
+                    )
+                except RuntimeError:
+                    ax_dc.text(
+                        0.5,
+                        0.5,
+                        "No odors available for rate summary",
+                        ha="center",
+                        va="center",
+                        fontsize=11,
+                        transform=ax_dc.transAxes,
+                    )
+                    ax_dc.set_axis_off()
+                else:
+                    plot_reaction_rate_bars(
+                        ax_dc,
+                        rate_stats,
+                        title="Reaction rate by odor — Reaction Prediction",
+                    )
 
                 legend_handles = [
                     Patch(facecolor="black", edgecolor="black", label="Prediction = 1"),

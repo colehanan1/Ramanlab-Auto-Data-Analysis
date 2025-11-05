@@ -58,6 +58,7 @@ TIMESTAMP_CANDIDATES = ("UTC_ISO", "Timestamp", "Number", "MonoNs")
 FRAME_CANDIDATES = ("Frame", "FrameNumber", "Frame Number")
 TRIAL_REGEX = re.compile(r"(testing|training)_(\d+)", re.IGNORECASE)
 FLY_SLOT_REGEX = re.compile(r"(fly\d+)_distances", re.IGNORECASE)
+FLY_NUMBER_REGEX = re.compile(r"fly\s*[_-]?\s*(\d+)", re.IGNORECASE)
 
 
 def _nanmin(values: np.ndarray) -> float:
@@ -744,3 +745,12 @@ def _fly_slot_from_name(name: str) -> Optional[str]:
         return match.group(1)
     return None
 
+
+def _fly_number_from_name(name: str) -> Optional[int]:
+    match = FLY_NUMBER_REGEX.search(name)
+    if not match:
+        return None
+    try:
+        return int(match.group(1))
+    except ValueError:
+        return None

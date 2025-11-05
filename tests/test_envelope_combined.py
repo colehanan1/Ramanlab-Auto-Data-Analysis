@@ -12,6 +12,7 @@ if root_str not in sys.path:
     sys.path.insert(0, root_str)
 
 from scripts import envelope_combined as ec  # noqa: E402
+from scripts import envelope_visuals as ev  # noqa: E402
 from scripts import run_workflows as rw  # noqa: E402
 
 
@@ -44,6 +45,69 @@ def test_has_training_trials_detects_training_entries(tmp_path):
     assert not ec._has_training_trials(testing_entry)
     assert ec._has_training_trials(training_entry)
     assert ec._has_training_trials(testing_entry, training_entry)
+
+
+def test_locate_trials_discovers_training_without_month_dirs(tmp_path):
+    """Legacy layouts without month folders should still surface training CSVs."""
+
+    fly_dir = tmp_path / "legacy_fly"
+    conditioning_dir = fly_dir / "legacy" / "conditioning_day"
+    conditioning_dir.mkdir(parents=True, exist_ok=True)
+
+    raw_csv = conditioning_dir / "fly1_conditioning_trial1_distances.csv"
+    pd.DataFrame({"distance_percentage": [0.0, 1.0]}).to_csv(raw_csv, index=False)
+
+    entries = ec._locate_trials(fly_dir, ("*fly*_distances.csv",), ec.DIST_COLS)
+
+    assert entries, "Expected to discover conditioning training trial CSV."
+    labels = {label for label, _, _ in entries}
+    categories = {category for _, _, category in entries}
+    assert "training_1" in labels
+    assert "training" in categories
+
+
+def test_locate_trials_skips_derived_envelope_outputs(tmp_path):
+    """Derived outputs inside angle_distance_rms_envelope should not be reprocessed."""
+
+    fly_dir = tmp_path / "october_01_fly1"
+    month_dir = fly_dir / "october"
+    month_dir.mkdir(parents=True, exist_ok=True)
+
+    raw_csv = month_dir / "october_fly1_testing_1_distances.csv"
+    pd.DataFrame({"distance_percentage": [5.0, 10.0]}).to_csv(raw_csv, index=False)
+
+    derived_dir = fly_dir / "angle_distance_rms_envelope"
+    derived_dir.mkdir(parents=True, exist_ok=True)
+    derived_csv = derived_dir / "fly1_testing_1_distances.csv"
+    pd.DataFrame({"distance_percentage": [1.0, 2.0]}).to_csv(derived_csv, index=False)
+
+    entries = ec._locate_trials(fly_dir, ("*fly*_distances.csv",), ec.DIST_COLS)
+    paths = {path for _, path, _ in entries}
+
+    assert raw_csv in paths
+    assert derived_csv not in paths
+
+
+def test_hex_control_testing_trials_map_to_acv():
+    """Hexanol datasets should label testing 1 and 3 as Apple Cider Vinegar."""
+
+    assert ec._display_odor("hex_control", "testing_1") == "Apple Cider Vinegar"
+    assert ec._display_odor("hex_control", "testing_3") == "Apple Cider Vinegar"
+    assert ec._display_odor("opto_hex", "testing_1") == "Apple Cider Vinegar"
+    assert ec._display_odor("opto_hex", "testing_2") == "Hexanol"
+
+
+def test_resolve_dataset_output_dir_separates_eb_variants(tmp_path):
+    """EB control and opto_EB datasets should land in distinct result folders."""
+
+    base = tmp_path
+    eb_control_dir = ev.resolve_dataset_output_dir(base, ["EB_control"])
+    opto_eb_dir = ev.resolve_dataset_output_dir(base, ["opto_EB"])
+
+    assert eb_control_dir != opto_eb_dir
+    assert eb_control_dir.name != opto_eb_dir.name
+    assert "EB_control" in eb_control_dir.name
+    assert "opto_EB" in opto_eb_dir.name
 
 
 def test_testing_aliases_follow_control_ordering():
@@ -88,23 +152,85 @@ def test_testing_aliases_follow_control_ordering():
 
 
 def test_training_schedule_matches_spec():
-    """Training trials follow the benzaldehyde/hexanol schedule for every dataset."""
+    """Training trials map to dataset-specific odors for every canonical dataset."""
 
-    datasets = [
-        "EB_control",
-        "hex_control",
-        "benz_control",
-        "opto_EB",
-        "opto_hex",
-        "opto_benz",
-        "opto_benz_1",
-    ]
+    expectations = {
+        "EB_control": {
+            1: "Ethyl Butyrate",
+            2: "Ethyl Butyrate",
+            3: "Ethyl Butyrate",
+            4: "Ethyl Butyrate",
+            5: "Hexanol",
+            6: "Ethyl Butyrate",
+            7: "Hexanol",
+            8: "Ethyl Butyrate",
+        },
+        "opto_EB": {
+            1: "Ethyl Butyrate",
+            2: "Ethyl Butyrate",
+            3: "Ethyl Butyrate",
+            4: "Ethyl Butyrate",
+            5: "Hexanol",
+            6: "Ethyl Butyrate",
+            7: "Hexanol",
+            8: "Ethyl Butyrate",
+        },
+        "hex_control": {
+            1: "Hexanol",
+            2: "Hexanol",
+            3: "Hexanol",
+            4: "Hexanol",
+            5: "Apple Cider Vinegar",
+            6: "Hexanol",
+            7: "Apple Cider Vinegar",
+            8: "Hexanol",
+        },
+        "opto_hex": {
+            1: "Hexanol",
+            2: "Hexanol",
+            3: "Hexanol",
+            4: "Hexanol",
+            5: "Apple Cider Vinegar",
+            6: "Hexanol",
+            7: "Apple Cider Vinegar",
+            8: "Hexanol",
+        },
+        "benz_control": {
+            1: "Benzaldehyde",
+            2: "Benzaldehyde",
+            3: "Benzaldehyde",
+            4: "Benzaldehyde",
+            5: "Hexanol",
+            6: "Benzaldehyde",
+            7: "Hexanol",
+            8: "Benzaldehyde",
+        },
+        "opto_benz": {
+            1: "Benzaldehyde",
+            2: "Benzaldehyde",
+            3: "Benzaldehyde",
+            4: "Benzaldehyde",
+            5: "Hexanol",
+            6: "Benzaldehyde",
+            7: "Hexanol",
+            8: "Benzaldehyde",
+        },
+        "opto_benz_1": {
+            1: "Benzaldehyde",
+            2: "Benzaldehyde",
+            3: "Benzaldehyde",
+            4: "Benzaldehyde",
+            5: "Hexanol",
+            6: "Benzaldehyde",
+            7: "Hexanol",
+            8: "Benzaldehyde",
+        },
+    }
 
-    for dataset in datasets:
-        for trial in (1, 2, 3, 4, 6, 8):
-            assert ec._display_odor(dataset, f"training_{trial}") == "Benzaldehyde"
-        for trial in (5, 7):
-            assert ec._display_odor(dataset, f"training_{trial}") == "Hexanol"
+    for dataset, mapping in expectations.items():
+        for trial_num, expected in mapping.items():
+            label = f"training_{trial_num}"
+            assert ec._display_odor(dataset, label) == expected
 
 
 def test_build_wide_csv_exports_training_subset(tmp_path):
@@ -133,9 +259,13 @@ def test_build_wide_csv_exports_training_subset(tmp_path):
     wide_df = pd.read_csv(output_csv)
     training_df = pd.read_csv(training_csv)
 
-    assert set(wide_df["trial_type"].str.lower()) == {"testing", "training"}
+    assert set(wide_df["trial_type"].str.lower()) == {"testing"}
+    assert wide_df["trial_type"].str.lower().tolist() == sorted(
+        wide_df["trial_type"].str.lower().tolist()
+    )
     assert set(training_df["trial_type"].str.lower()) == {"training"}
-    assert len(training_df) < len(wide_df)
+    assert len(wide_df) == 1
+    assert len(training_df) == 1
 
 
 def test_fly_max_centered_skips_empty_csv(tmp_path):

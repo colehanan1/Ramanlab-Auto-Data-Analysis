@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import math
 import re
 from dataclasses import dataclass, field
@@ -36,6 +37,8 @@ import numpy as np
 import pandas as pd
 from matplotlib import gridspec
 from matplotlib.colors import BoundaryNorm, ListedColormap
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -119,7 +122,7 @@ TESTING_DATASET_ALIAS = {
     "opto_benz": "benz_control",
     "opto_benz_1": "benz_control",
 }
-NON_REACTIVE_SPAN_PX = 15.0
+NON_REACTIVE_SPAN_PX = 20.0
 
 
 # ---------------------------------------------------------------------------
@@ -173,8 +176,18 @@ def resolve_dataset_output_dir(base: Path, values: Sequence[str] | str) -> Path:
 def should_write(path: Path, overwrite: bool) -> bool:
     """Return ``True`` if *path* should be written, honouring overwrite policy."""
 
-    if path.exists() and not overwrite:
-        return False
+    lower_path = str(path).lower()
+    reaction_artifact = "reaction_matrix" in lower_path or "reaction_prediction" in lower_path
+
+    if path.exists():
+        if reaction_artifact:
+            return True
+        if not overwrite:
+            return False
+    elif path.parent is not None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        return True
+
     path.parent.mkdir(parents=True, exist_ok=True)
     return True
 
@@ -202,8 +215,14 @@ def _display_odor(dataset_canon: str, trial_label: str) -> str:
 
     dataset_for_testing = TESTING_DATASET_ALIAS.get(dataset_canon, dataset_canon)
 
-    if number in (1, 3):
-        return HEXANOL_LABEL
+    if dataset_for_testing == "hex_control":
+        if number in (1, 3):
+            return "Apple Cider Vinegar"
+        if number in (2, 4):
+            return HEXANOL_LABEL
+    else:
+        if number in (1, 3):
+            return HEXANOL_LABEL
     if number in (2, 4, 5):
         return DISPLAY_LABEL.get(
             dataset_for_testing, DISPLAY_LABEL.get(dataset_canon, dataset_canon)
@@ -485,57 +504,116 @@ def _score_trial(env: np.ndarray, fps: float, cfg: MatrixPlotConfig) -> tuple[in
     return during_hit, after_hit
 
 
-def _compute_category_counts(
-    matrix: np.ndarray,
-    labels: Sequence[str],
-    trained_display: str,
-    include_hexanol: bool,
-) -> dict[str, int]:
-    if matrix.size == 0:
-        return {"Trained only": 0, "Trained + Others": 0, "Others only": 0}
+def _normalise_odor_label(value: object) -> str:
+    text = "UNKNOWN" if value is None else str(value).strip()
+    return text or "UNKNOWN"
 
-    trained_idx = [idx for idx, lab in enumerate(labels) if lab.strip().lower() == trained_display.lower()]
-    other_idx = [
-        idx
-        for idx, lab in enumerate(labels)
-        if lab.strip().lower() != trained_display.lower()
-        and (include_hexanol or lab.strip().lower() != HEXANOL_LABEL.lower())
+
+def reaction_rate_stats_from_rows(
+    df: pd.DataFrame,
+    dataset_canon: str,
+    *,
+    include_hexanol: bool,
+    context: str,
+    trial_col: str = "trial",
+    reaction_col: str = "during_hit",
+) -> pd.DataFrame:
+    """Aggregate per-odor reaction rates from row-wise trial data."""
+
+    if df.empty:
+        raise ValueError("No rows available to compute reaction-rate statistics.")
+
+    missing = [col for col in (trial_col, reaction_col) if col not in df.columns]
+    if missing:
+        raise KeyError(f"Missing required columns for reaction stats: {', '.join(missing)}")
+
+    working = df[[trial_col, reaction_col]].copy()
+    working["odor"] = working[trial_col].map(lambda trial: _display_odor(dataset_canon, trial))
+
+    if not include_hexanol:
+        mask = working["odor"].astype(str).str.strip().str.casefold() != HEXANOL_LABEL.casefold()
+        working = working.loc[mask].copy()
+        if working.empty:
+            raise RuntimeError("All odors were removed after excluding Hexanol.")
+
+    working["reaction_flag"] = pd.to_numeric(working[reaction_col], errors="coerce").fillna(0).astype(int)
+    stats_df = (
+        working.groupby("odor", dropna=False)["reaction_flag"]
+        .agg(num_reactions="sum", num_trials="size")
+        .reset_index()
+    )
+    stats_df["rate"] = np.where(
+        stats_df["num_trials"] > 0,
+        stats_df["num_reactions"] / stats_df["num_trials"],
+        0.0,
+    )
+
+    zero_trial_mask = stats_df["num_trials"] == 0
+    if zero_trial_mask.any():
+        missing_odors = stats_df.loc[zero_trial_mask, "odor"].tolist()
+        logger.warning("Odors with zero trials encountered in %s: %s", context, missing_odors)
+
+    highlight_label = DISPLAY_LABEL.get(dataset_canon, dataset_canon)
+    stats_df["is_trained"] = stats_df["odor"].astype(str).str.casefold() == highlight_label.casefold()
+
+    stats_df = stats_df.sort_values(["rate", "odor"], ascending=[False, True], kind="mergesort")
+    stats_df = stats_df.reset_index(drop=True)
+
+    logger.debug(
+        "Per-odor reaction stats for %s:\n%s",
+        context,
+        stats_df.to_string(index=False),
+    )
+    logger.info(
+        "Reaction-rate bar order for %s: %s",
+        context,
+        stats_df["odor"].astype(str).tolist(),
+    )
+    return stats_df
+
+
+def plot_reaction_rate_bars(
+    ax: plt.Axes,
+    stats_df: pd.DataFrame,
+    *,
+    title: str,
+) -> None:
+    """Plot a reaction-rate bar chart into the provided axis."""
+
+    if stats_df.empty:
+        ax.set_visible(False)
+        return
+
+    x = np.arange(len(stats_df))
+    colors = [
+        "tab:blue" if bool(is_trained) else "0.6" for is_trained in stats_df["is_trained"]
     ]
 
-    if not trained_idx:
-        return {"Trained only": 0, "Trained + Others": 0, "Others only": 0}
-
-    counts = {"Trained only": 0, "Trained + Others": 0, "Others only": 0}
-    hits = np.where(matrix < 0, 0, matrix)
-    for row in hits:
-        trained_hit = np.any(row[trained_idx] == 1)
-        other_hit = np.any(row[other_idx] == 1) if other_idx else False
-        if trained_hit and not other_hit:
-            counts["Trained only"] += 1
-        elif trained_hit and other_hit:
-            counts["Trained + Others"] += 1
-        elif other_hit:
-            counts["Others only"] += 1
-    return counts
-
-
-def _plot_category_counts(ax, counts: Mapping[str, int], total: int, title: str) -> None:
-    labels = ["Trained only", "Trained + Others", "Others only"]
-    values = np.array([counts.get(label, 0) for label in labels], dtype=float)
-    percentages = 100.0 * values / total if total > 0 else np.zeros_like(values)
-    x = np.arange(len(labels))
-    bars = ax.bar(x, percentages, width=0.75, edgecolor="black", linewidth=0.8)
+    bars = ax.bar(
+        x,
+        stats_df["rate"].to_numpy(float),
+        color=colors,
+        edgecolor="black",
+        linewidth=0.75,
+    )
     ax.set_xticks(x)
-    ax.set_xticklabels(labels, rotation=15, ha="right")
-    ax.set_ylim(0, 100)
-    ax.set_yticks([0, 25, 50, 75, 100])
-    ax.set_ylabel("% of flies")
+    ax.set_xticklabels(stats_df["odor"].astype(str), rotation=35, ha="right")
+    ax.set_ylim(0.0, 1.05)
+    ax.set_ylabel("Reaction rate (reactions ÷ total sent)")
+    ax.set_xlabel("Odor")
     ax.set_title(title, fontsize=12, weight="bold")
-    for bar, pct in zip(bars, percentages):
+    ax.grid(axis="y", linestyle="--", linewidth=0.6, alpha=0.35)
+    ax.margins(x=0.02)
+
+    for bar, (_, row) in zip(bars, stats_df.iterrows()):
+        rate = float(row["rate"])
+        trials = int(row["num_trials"])
+        text_y = min(rate + 0.05, 1.02)
+        annotation = f"{rate:.0%}\n(n={trials})"
         ax.text(
             bar.get_x() + bar.get_width() / 2,
-            bar.get_height() + 1.5,
-            f"{pct:.0f}%",
+            text_y,
+            annotation,
             ha="center",
             va="bottom",
             fontsize=9,
@@ -696,10 +774,6 @@ def generate_reaction_matrices(cfg: MatrixPlotConfig) -> None:
 
             xtick_fs = 9 if n_trials <= 10 else (8 if n_trials <= 16 else 7)
 
-            during_counts = _compute_category_counts(
-                during_matrix, pretty_labels, trained_display, cfg.include_hexanol
-            )
-
             plt.rcParams.update(
                 {
                     "figure.dpi": 300,
@@ -743,7 +817,33 @@ def generate_reaction_matrices(cfg: MatrixPlotConfig) -> None:
                         clip_on=False,
                     )
 
-            _plot_category_counts(ax_dc, during_counts, n_flies, "During — Fly Reaction Categories")
+            rate_context = f"{odor_label} ({order_suffix})"
+            try:
+                rate_stats = reaction_rate_stats_from_rows(
+                    subset,
+                    odor,
+                    include_hexanol=cfg.include_hexanol,
+                    context=rate_context,
+                    trial_col="trial",
+                    reaction_col="during_hit",
+                )
+            except RuntimeError:
+                ax_dc.text(
+                    0.5,
+                    0.5,
+                    "No odors available for rate summary",
+                    ha="center",
+                    va="center",
+                    fontsize=11,
+                    transform=ax_dc.transAxes,
+                )
+                ax_dc.set_axis_off()
+            else:
+                plot_reaction_rate_bars(
+                    ax_dc,
+                    rate_stats,
+                    title="Reaction rate by odor — Reaction Matrix",
+                )
 
             shift_frac = cfg.bottom_shift_in / fig_h if fig_h else 0.0
             for axis in (ax_dc,):
@@ -888,7 +988,7 @@ def generate_envelope_plots(cfg: EnvelopePlotConfig) -> None:
             f"trials={len(indices)}",
             f"output={out_path}",
         )
-        if out_path.exists() and not cfg.overwrite:
+        if out_path.exists():
             continue
 
         for idx in indices:
@@ -1117,4 +1217,3 @@ def main(argv: Sequence[str] | None = None) -> None:
 
 if __name__ == "__main__":  # pragma: no cover
     main()
-

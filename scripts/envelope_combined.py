@@ -23,6 +23,7 @@ import os
 import re
 import shutil
 import sys
+from collections import Counter
 from itertools import groupby
 from dataclasses import dataclass
 from pathlib import Path
@@ -86,6 +87,29 @@ MONTHS = (
     "october",
     "november",
     "december",
+)
+
+DISCOVERY_SKIP_PARTS = {
+    # Derived analysis products we never want to treat as raw trial input.
+    "angle_distance_rms_envelope",
+}
+
+# Heuristic tokens used to infer whether a trial belongs to the training or testing phase.
+TRAINING_HINT_PREFIXES = (
+    "training",
+    "train",
+    "condition",
+    "conditioning",
+    "paired",
+    "pretrain",
+)
+TESTING_HINT_PREFIXES = (
+    "testing",
+    "test",
+    "probe",
+    "pretest",
+    "posttest",
+    "extinction",
 )
 
 ANGLE_COLS = ["angle_centered_pct", "angle_centered_percentage", "angle_pct"]
@@ -189,7 +213,7 @@ PRIMARY_ODOR_LABEL = {
     "benz_control": "Benzaldehyde",
 }
 
-TRAINING_ODOR_SCHEDULE = {
+TRAINING_ODOR_SCHEDULE_DEFAULT = {
     1: "Benzaldehyde",
     2: "Benzaldehyde",
     3: "Benzaldehyde",
@@ -198,6 +222,49 @@ TRAINING_ODOR_SCHEDULE = {
     6: "Benzaldehyde",
     7: HEXANOL,
     8: "Benzaldehyde",
+}
+
+TRAINING_ODOR_SCHEDULE_OVERRIDES = {
+    "hex_control": {
+        1: HEXANOL,
+        2: HEXANOL,
+        3: HEXANOL,
+        4: HEXANOL,
+        5: "Apple Cider Vinegar",
+        6: HEXANOL,
+        7: "Apple Cider Vinegar",
+        8: HEXANOL,
+    },
+    "opto_hex": {
+        1: HEXANOL,
+        2: HEXANOL,
+        3: HEXANOL,
+        4: HEXANOL,
+        5: "Apple Cider Vinegar",
+        6: HEXANOL,
+        7: "Apple Cider Vinegar",
+        8: HEXANOL,
+    },
+    "EB_control": {
+        1: "Ethyl Butyrate",
+        2: "Ethyl Butyrate",
+        3: "Ethyl Butyrate",
+        4: "Ethyl Butyrate",
+        5: HEXANOL,
+        6: "Ethyl Butyrate",
+        7: HEXANOL,
+        8: "Ethyl Butyrate",
+    },
+    "opto_EB": {
+        1: "Ethyl Butyrate",
+        2: "Ethyl Butyrate",
+        3: "Ethyl Butyrate",
+        4: "Ethyl Butyrate",
+        5: HEXANOL,
+        6: "Ethyl Butyrate",
+        7: HEXANOL,
+        8: "Ethyl Butyrate",
+    },
 }
 
 TESTING_DATASET_ALIAS = {
@@ -244,20 +311,33 @@ def _trained_label(dataset_canon: str) -> str:
     )
 
 
+def _training_odor(dataset_canon: str, number: int) -> str | None:
+    schedule = TRAINING_ODOR_SCHEDULE_OVERRIDES.get(dataset_canon)
+    if schedule and number in schedule:
+        return schedule[number]
+    return TRAINING_ODOR_SCHEDULE_DEFAULT.get(number)
+
+
 def _display_odor(dataset_canon: str, trial_label: str) -> str:
     number = _trial_num(trial_label)
     label_lower = str(trial_label).lower()
 
     if "training" in label_lower:
-        odor_name = TRAINING_ODOR_SCHEDULE.get(number)
+        odor_name = _training_odor(dataset_canon, number)
         if odor_name:
             return odor_name
         return DISPLAY_LABEL.get(dataset_canon, dataset_canon)
 
     dataset_for_testing = TESTING_DATASET_ALIAS.get(dataset_canon, dataset_canon)
 
-    if number in (1, 3):
-        return HEXANOL
+    if dataset_for_testing == "hex_control":
+        if number in (1, 3):
+            return "Apple Cider Vinegar"
+        if number in (2, 4):
+            return HEXANOL
+    else:
+        if number in (1, 3):
+            return HEXANOL
     if number in (2, 4, 5):
         return DISPLAY_LABEL.get(
             dataset_for_testing, DISPLAY_LABEL.get(dataset_canon, dataset_canon)
@@ -361,16 +441,92 @@ def _extract_fly_number(*candidates: Optional[str]) -> Optional[int]:
     return None
 
 
+def _path_tokens(path: Path) -> set[str]:
+    """Break a path into normalised tokens used for heuristic matching."""
+
+    tokens: set[str] = set()
+    for part in path.parts:
+        lower = part.lower()
+        tokens.add(lower)
+        for token in re.split(r"[^a-z0-9]+", lower):
+            if token:
+                tokens.add(token)
+    return tokens
+
+
+def _hint_prefixes(base: Sequence[str], overrides: str | None) -> tuple[str, ...]:
+    """Merge default hint prefixes with optional overrides from the environment."""
+
+    dedup: dict[str, None] = {hint: None for hint in base}
+    if overrides:
+        for raw in re.split(r"[,\s;:|]+", overrides):
+            token = raw.strip().lower()
+            if token:
+                dedup.setdefault(token, None)
+    return tuple(dedup.keys())
+
+
+def _training_hints() -> tuple[str, ...]:
+    return _hint_prefixes(TRAINING_HINT_PREFIXES, os.environ.get("FBPIPE_TRAINING_HINTS"))
+
+
+def _testing_hints() -> tuple[str, ...]:
+    return _hint_prefixes(TESTING_HINT_PREFIXES, os.environ.get("FBPIPE_TESTING_HINTS"))
+
+
+def _match_hint(tokens: Iterable[str], hints: Sequence[str]) -> tuple[int, str] | None:
+    """Return the longest hint prefix that matches any token."""
+
+    best: tuple[int, str] | None = None
+    for hint in hints:
+        for token in tokens:
+            if token == hint or token.startswith(hint):
+                candidate = (len(hint), hint)
+                if best is None or candidate[0] > best[0]:
+                    best = candidate
+    return best
+
+
+def _skip_discovery_reason(path: Path, root: Path) -> str | None:
+    """Return a short reason for skipping this path, or None when it should be inspected."""
+
+    try:
+        rel_parts = path.relative_to(root).parts
+    except ValueError:
+        return "external"
+
+    lower_parts = [part.lower() for part in rel_parts]
+    if any(part.startswith(".") for part in lower_parts):
+        return "hidden"
+    if any(part in DISCOVERY_SKIP_PARTS for part in lower_parts):
+        return "derived"
+    return None
+
+
+def _within(path: Path, parent: Path) -> bool:
+    try:
+        path.relative_to(parent)
+        return True
+    except ValueError:
+        return False
+
+
 def _is_month_folder(path: Path) -> bool:
     return path.is_dir() and path.name.lower().startswith(MONTHS)
 
 
 def _infer_category(path: Path) -> str:
-    parts = [segment.lower() for segment in path.parts]
-    if "testing" in parts or "testing" in path.name.lower():
-        return "testing"
-    if "training" in parts or "training" in path.name.lower():
+    tokens = _path_tokens(path)
+    training_match = _match_hint(tokens, _training_hints())
+    testing_match = _match_hint(tokens, _testing_hints())
+    if training_match and not testing_match:
         return "training"
+    if testing_match and not training_match:
+        return "testing"
+    if training_match and testing_match:
+        if training_match[0] >= testing_match[0]:
+            return "training"
+        return "testing"
     return "testing"
 
 
@@ -381,7 +537,7 @@ def _trial_label(path: Path) -> str:
         match = TRIAL_REGEX.search(chain)
     if match:
         return f"{match.group(1).lower()}_{match.group(2)}"
-    trailing = re.search(r"(\d+)$", path.stem)
+    trailing = re.search(r"(\d+)(?:_[a-z]+)?$", path.stem, re.IGNORECASE)
     if trailing:
         return f"{_infer_category(path)}_{trailing.group(1)}"
     return path.stem
@@ -393,31 +549,99 @@ def _locate_trials(
     required_cols: Sequence[str],
 ) -> list[tuple[str, Path, str]]:
     patterns = [suffix_globs] if isinstance(suffix_globs, str) else list(suffix_globs)
-    month_dirs = [p for p in fly_dir.rglob("*") if _is_month_folder(p)]
-    found: set[Path] = set()
-    print(
-        f"[DEBUG] {fly_dir.name}: scanning {len(month_dirs)} month directories for patterns {patterns}"
+    root_resolved = fly_dir.resolve()
+    month_dirs = sorted(
+        {p.resolve() for p in fly_dir.rglob("*") if _is_month_folder(p)},
+        key=str,
     )
-    for month_dir in month_dirs:
-        for pattern in patterns:
-            found.update(Path(p) for p in month_dir.rglob(pattern))
+    if month_dirs:
+        print(
+            f"[DEBUG] {fly_dir.name}: discovered {len(month_dirs)} month directory(ies) for legacy layouts."
+        )
+    else:
+        print(f"[DEBUG] {fly_dir.name}: no month-named directories detected; using full recursive scan.")
+
+    candidates: dict[Path, tuple[str, Path]] = {}
+    skip_counts: Counter[str] = Counter()
+    total_matches = 0
+
+    for pattern in patterns:
+        matches = list(fly_dir.rglob(pattern))
+        print(
+            f"[DEBUG] {fly_dir.name}: pattern '{pattern}' yielded {len(matches)} match(es) before filtering."
+        )
+        for path in matches:
+            total_matches += 1
+            if not path.is_file():
+                skip_counts["non-file"] += 1
+                continue
+
+            real = path.resolve()
+            reason = _skip_discovery_reason(real, root_resolved)
+            if reason:
+                skip_counts[reason] += 1
+                continue
+
+            origin = "month" if any(_within(real, month_dir) for month_dir in month_dirs) else "recursive"
+            existing = candidates.get(real)
+            if existing:
+                prev_origin, _ = existing
+                if prev_origin == "month":
+                    continue
+                if origin == "month":
+                    candidates[real] = (origin, path)
+                continue
+            candidates[real] = (origin, path)
+
+    if skip_counts:
+        skipped_total = sum(skip_counts.values())
+        details = ", ".join(f"{key}={value}" for key, value in skip_counts.items())
+        print(
+            f"[DEBUG] {fly_dir.name}: skipped {skipped_total} candidate(s) during discovery ({details})."
+        )
+    print(
+        f"[DEBUG] {fly_dir.name}: considered {total_matches} raw match(es); {len(candidates)} unique candidate(s) remain after filtering."
+    )
+
+    if not candidates:
+        print(f"[WARN] {fly_dir.name}: no trial CSVs matched patterns {patterns}")
+        return []
 
     results: list[tuple[str, Path, str]] = []
-    for csv_path in sorted(found):
-        print(f"[DEBUG] {fly_dir.name}: evaluating {csv_path}")
+    for real_path, (origin, csv_path) in sorted(candidates.items(), key=lambda item: str(item[0])):
+        label = _trial_label(csv_path)
+        category_guess = _infer_category(csv_path)
+        print(
+            f"[DEBUG] {fly_dir.name}: evaluating {csv_path} (origin={origin}, label={label}, category~{category_guess})"
+        )
         try:
             header = pd.read_csv(csv_path, nrows=5)
-        except Exception:
-            print(f"[WARN] {fly_dir.name}: failed to read header from {csv_path}")
+        except Exception as exc:
+            print(f"[WARN] {fly_dir.name}: failed to read header from {csv_path} → {exc}")
             continue
-        if not _pick_column(header, required_cols):
+
+        column = _pick_column(header, required_cols)
+        if not column:
             print(
                 f"[SKIP] {csv_path.name}: required columns {required_cols} missing. Available={list(header.columns)}"
             )
             continue
-        results.append((csv_path.stem, csv_path, _infer_category(csv_path)))
+
+        category = _infer_category(csv_path)
+        results.append((label, csv_path, category))
         print(
-            f"[DEBUG] {fly_dir.name}: accepted {csv_path.name} as {_infer_category(csv_path)}"
+            f"[DEBUG] {fly_dir.name}: accepted {csv_path.name} → label={label}, category={category}, origin={origin}, column={column}"
+        )
+
+    if results:
+        by_category = Counter(cat for _, _, cat in results)
+        summary = ", ".join(f"{cat}={count}" for cat, count in by_category.items())
+        print(
+            f"[DEBUG] {fly_dir.name}: located {len(results)} valid trial CSV(s) ({summary})."
+        )
+    else:
+        print(
+            f"[WARN] {fly_dir.name}: no usable CSVs after validating required columns {required_cols}."
         )
     return results
 
@@ -1353,6 +1577,9 @@ def build_wide_csv(
         ),
     )
 
+    main_trial_allow = {"testing"}
+    main_rows_written = 0
+
     for (dataset, fly, fly_number_label), grouped in groupby(
         items_sorted,
         key=lambda entry: (
@@ -1477,6 +1704,13 @@ def build_wide_csv(
         if non_reactive:
             flagged_summary[(dataset, fly, fly_number_label)] = (gmin, gmax)
 
+        trial_results.sort(
+            key=lambda result: (
+                str(result["trial_type"]).strip().lower(),
+                _trial_num(result["label"]),
+                result["label"],
+            )
+        )
         for result in trial_results:
             values = result["values"]
             local_max_over_global_min = float("nan")
@@ -1529,11 +1763,12 @@ def build_wide_csv(
             elif len(values) > max_len:
                 row = row[: len(metadata) + len(AUC_COLUMNS) + max_len]
 
-            pd.DataFrame([row], columns=metadata + list(AUC_COLUMNS) + value_cols).to_csv(
-                out_path, index=False, mode="a", header=False
-            )
-
             trial_key = str(result["trial_type"]).strip().lower()
+            if trial_key in main_trial_allow:
+                pd.DataFrame([row], columns=metadata + list(AUC_COLUMNS) + value_cols).to_csv(
+                    out_path, index=False, mode="a", header=False
+                )
+                main_rows_written += 1
             extra_target = extra_paths.get(trial_key)
             if extra_target is not None:
                 pd.DataFrame([row], columns=metadata + list(AUC_COLUMNS) + value_cols).to_csv(
@@ -1556,7 +1791,13 @@ def build_wide_csv(
         else:
             fh.write("# None detected\n")
     print(f"[OK] Wrote flagged fly summary: {flagged_path}")
-    print(f"[OK] Wrote combined direction-value table: {out_path}")
+    if main_rows_written:
+        print(f"[OK] Wrote combined direction-value table: {out_path}")
+    else:
+        print(
+            "[WARN] build_wide_csv: no testing rows were written to the primary output; "
+            "check source data."
+        )
     for trial_key, target in extra_paths.items():
         print(f"[OK] Wrote {trial_key} subset: {target}")
 
