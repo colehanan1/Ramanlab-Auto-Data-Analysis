@@ -6,6 +6,17 @@ from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 from dotenv import load_dotenv
 
+
+def _as_bool(value, default: bool) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return bool(value)
+
+
 @dataclass
 class ReactionMatrixSettings:
     out_dir: str = ""
@@ -30,9 +41,19 @@ class ReactionPredictionSettings:
 
 
 @dataclass
+class ForceSettings:
+    pipeline: bool = True
+    yolo: bool = True
+    combined: bool = True
+    reaction_prediction: bool = True
+    reaction_matrix: bool = True
+
+
+@dataclass
 class Settings:
     model_path: str
     main_directory: str
+    cache_dir: str = ""
     allow_cpu: bool = False
     cuda_allow_tf32: bool = True
     non_reactive_span_px: float = 20.0
@@ -63,6 +84,7 @@ class Settings:
 
     # reaction prediction
     reaction_prediction: ReactionPredictionSettings = field(default_factory=ReactionPredictionSettings)
+    force: ForceSettings = field(default_factory=ForceSettings)
 
 def _get(d: Dict[str, Any], key: str, default: Any):
     return d.get(key, default)
@@ -81,6 +103,15 @@ def load_settings(config_path: str | Path) -> Settings:
 
     allow_cpu = os.getenv("ALLOW_CPU", str(_get(data, "allow_cpu", False))).lower() == "true"
     cuda_allow_tf32 = os.getenv("CUDA_ALLOW_TF32", str(_get(data, "cuda_allow_tf32", True))).lower() == "true"
+
+    cache_dir_cfg = _get(data, "cache_dir", "")
+    cache_dir_env = os.getenv("CACHE_DIR")
+    if cache_dir_env:
+        cache_dir = cache_dir_env
+    elif cache_dir_cfg:
+        cache_dir = str(cache_dir_cfg)
+    else:
+        cache_dir = str(Path.home() / ".cache" / "ramanlab_auto_data_analysis")
 
     # nested
     yolo = data.get("yolo", {})
@@ -158,6 +189,25 @@ def load_settings(config_path: str | Path) -> Settings:
         matrix=matrix,
     )
 
+    force_cfg_raw = data.get("force") if isinstance(data.get("force"), dict) else {}
+    force = ForceSettings(
+        pipeline=_as_bool(force_cfg_raw.get("pipeline"), True),
+        yolo=_as_bool(force_cfg_raw.get("yolo"), True),
+        combined=_as_bool(force_cfg_raw.get("combined"), True),
+        reaction_prediction=_as_bool(force_cfg_raw.get("reaction_prediction"), True),
+        reaction_matrix=_as_bool(force_cfg_raw.get("reaction_matrix"), True),
+    )
+
+    force.pipeline = _as_bool(os.getenv("FORCE_PIPELINE"), force.pipeline)
+    force.yolo = _as_bool(os.getenv("FORCE_YOLO"), force.yolo)
+    force.combined = _as_bool(os.getenv("FORCE_COMBINED"), force.combined)
+    force.reaction_prediction = _as_bool(
+        os.getenv("FORCE_REACTION_PREDICTION"), force.reaction_prediction
+    )
+    force.reaction_matrix = _as_bool(
+        os.getenv("FORCE_REACTION_MATRIX"), force.reaction_matrix
+    )
+
     non_reactive_span_px = float(
         os.getenv("NON_REACTIVE_SPAN_PX", _get(data, "non_reactive_span_px", 20.0))
     )
@@ -165,6 +215,7 @@ def load_settings(config_path: str | Path) -> Settings:
     return Settings(
         model_path=model_path,
         main_directory=main_directory,
+        cache_dir=str(Path(cache_dir).expanduser()),
         allow_cpu=allow_cpu,
         cuda_allow_tf32=cuda_allow_tf32,
         non_reactive_span_px=non_reactive_span_px,
@@ -191,4 +242,5 @@ def load_settings(config_path: str | Path) -> Settings:
         class2_min=float(os.getenv("CLASS2_MIN", dist_limits.get("class2_min", 70.0))),
         class2_max=float(os.getenv("CLASS2_MAX", dist_limits.get("class2_max", 250.0))),
         reaction_prediction=reaction_prediction,
+        force=force,
     )

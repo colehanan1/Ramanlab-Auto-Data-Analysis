@@ -215,6 +215,8 @@ def test_build_wide_csv_adds_auc_columns(tmp_path):
     assert abs(df.loc[0, "Peak-Value"] - 5.0) < 1e-6
     assert "global_min" in df.columns
     assert "global_max" in df.columns
+    assert "trimmed_global_min" in df.columns
+    assert "trimmed_global_max" in df.columns
     assert "local_min" in df.columns
     assert "local_max" in df.columns
     assert "local_min_during" in df.columns
@@ -222,8 +224,12 @@ def test_build_wide_csv_adds_auc_columns(tmp_path):
     assert "local_max_over_global_min" in df.columns
     assert "local_max_during_over_global_min" in df.columns
     assert "non_reactive_flag" in df.columns
+    expected_trimmed_min = float(np.nanpercentile(values, 2.5))
+    expected_trimmed_max = float(np.nanpercentile(values, 97.5))
     assert math.isclose(df.loc[0, "global_min"], 1.0)
     assert math.isclose(df.loc[0, "global_max"], 5.0)
+    assert math.isclose(df.loc[0, "trimmed_global_min"], expected_trimmed_min)
+    assert math.isclose(df.loc[0, "trimmed_global_max"], expected_trimmed_max)
     assert math.isclose(df.loc[0, "local_min"], 1.0)
     assert math.isclose(df.loc[0, "local_max"], 5.0)
     assert math.isclose(df.loc[0, "local_min_during"], 1.0)
@@ -235,7 +241,11 @@ def test_build_wide_csv_adds_auc_columns(tmp_path):
     flagged_file = out_csv.with_name(out_csv.stem + "_flagged_flies.txt")
     assert flagged_file.exists()
     flagged_lines = [line for line in flagged_file.read_text().splitlines() if line and not line.startswith("#")]
-    assert any("session_a" in line and "5.000" in line for line in flagged_lines)
+    assert flagged_lines, "expected at least one flagged entry"
+    dataset, fly, fly_number, trimmed_min, trimmed_max = flagged_lines[0].split(",")
+    assert dataset == "session_a"
+    assert math.isclose(float(trimmed_min), expected_trimmed_min, rel_tol=1e-6)
+    assert math.isclose(float(trimmed_max), expected_trimmed_max, rel_tol=1e-6)
 
 
 def test_local_extrema_respect_distance_limits(tmp_path):

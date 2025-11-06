@@ -345,17 +345,39 @@ def is_non_reactive_span(global_min: object, global_max: object, *, threshold: f
     return abs(gmax - gmin) <= float(threshold)
 
 
+def _span_columns(df: pd.DataFrame) -> tuple[pd.Series, pd.Series]:
+    """Return span-defining columns, preferring trimmed values when available."""
+
+    if {"trimmed_global_min", "trimmed_global_max"}.issubset(df.columns):
+        trimmed_min = pd.to_numeric(df["trimmed_global_min"], errors="coerce")
+        trimmed_max = pd.to_numeric(df["trimmed_global_max"], errors="coerce")
+        base_min = pd.to_numeric(df.get("global_min"), errors="coerce")
+        base_max = pd.to_numeric(df.get("global_max"), errors="coerce")
+        gmin = trimmed_min.where(trimmed_min.notna(), base_min)
+        gmax = trimmed_max.where(trimmed_max.notna(), base_max)
+    else:
+        gmin = pd.to_numeric(df.get("global_min"), errors="coerce")
+        gmax = pd.to_numeric(df.get("global_max"), errors="coerce")
+    if gmin is None:
+        gmin = pd.Series(np.nan, index=df.index, dtype=float)
+    if gmax is None:
+        gmax = pd.Series(np.nan, index=df.index, dtype=float)
+    if not isinstance(gmin, pd.Series):
+        gmin = pd.Series(gmin, index=df.index)
+    if not isinstance(gmax, pd.Series):
+        gmax = pd.Series(gmax, index=df.index)
+    return gmin, gmax
+
+
 def compute_non_reactive_flags(
     df: pd.DataFrame, *, threshold: float = NON_REACTIVE_SPAN_PX
 ) -> pd.Series:
     """Return a boolean mask flagging flies whose global span ≤ threshold."""
 
-    if "global_min" not in df.columns or "global_max" not in df.columns:
-        return pd.Series(False, index=df.index)
-
-    gmin = pd.to_numeric(df["global_min"], errors="coerce")
-    gmax = pd.to_numeric(df["global_max"], errors="coerce")
-    span = (gmax - gmin).abs()
+    gmin, gmax = _span_columns(df)
+    span = pd.Series(np.nan, index=df.index, dtype=float)
+    if isinstance(gmax, pd.Series) and isinstance(gmin, pd.Series):
+        span = (gmax - gmin).abs()
     flags = gmin.notna() & gmax.notna() & span.le(float(threshold))
     return flags.fillna(False)
 
@@ -665,6 +687,18 @@ def generate_reaction_matrices(cfg: MatrixPlotConfig) -> None:
     df["dataset_canon"] = df["dataset"].map(_canon_dataset)
     df = _normalise_fly_columns(df)
     df["_non_reactive"] = compute_non_reactive_flags(df)
+
+    flagged_mask = df["_non_reactive"].astype(bool)
+    if flagged_mask.any():
+        flagged = df.loc[flagged_mask, ["dataset_canon", "fly", "fly_number"]].drop_duplicates()
+        summaries = ", ".join(
+            f"{row.dataset_canon}::{row.fly}::{row.fly_number}"
+            for row in flagged.itertuples(index=False)
+        )
+        print(f"[analysis] reaction_matrices: excluding non-reactive flies: {summaries}")
+        df = df.loc[~flagged_mask].copy()
+        if df.empty:
+            raise RuntimeError("All flies were flagged non-reactive; nothing to plot.")
 
     env_data = df[env_cols].to_numpy(np.float32, copy=False)
     dataset_vals = df["dataset_canon"].to_numpy(str)

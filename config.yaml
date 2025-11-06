@@ -9,6 +9,14 @@ main_directory:
           - "/home/ramanlab/Documents/cole/Data/flys/EB_control/"
           - "/home/ramanlab/Documents/cole/Data/flys/Benz_control/"
 
+cache_dir: "/home/ramanlab/Documents/cole/cache"
+force:
+  pipeline: false
+  yolo: false
+  combined: true
+  reaction_prediction: true
+  reaction_matrix: true
+
 reaction_prediction:
   data_csv: "/home/ramanlab/Documents/cole/Data/Opto/Combined/all_envelope_rows_wide.csv"
   model_path: "/home/ramanlab/PycharmProjects/FlyBehaviorScoring/artifacts/2025-10-29T23-59-43Z/model_logreg.joblib"
@@ -218,4 +226,3 @@ analysis:
         - "/home/ramanlab/Documents/cole/Data/flys/hex_control/"
         - "/home/ramanlab/Documents/cole/Data/flys/EB_control/"
         - "/home/ramanlab/Documents/cole/Data/flys/Benz_control/"
-

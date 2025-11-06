@@ -1418,6 +1418,7 @@ def build_wide_csv(
     config_path: str | Path | None = None,
     trial_type_filter: str | Sequence[str] | None = None,
     extra_trial_exports: Mapping[str, str] | None = None,
+    non_reactive_threshold: float | None = None,
 ) -> None:
     print(
         f"[DEBUG] build_wide_csv → roots={list(roots)} output={output_csv} measure_cols={list(measure_cols)}"
@@ -1428,6 +1429,11 @@ def build_wide_csv(
     class2_min, class2_max = _resolve_distance_limits(distance_limits, config_path)
     print(
         f"[DEBUG] build_wide_csv: applying distance limits [{class2_min:.3f}, {class2_max:.3f}] for local extrema"
+    )
+    trimmed_threshold = (
+        float(non_reactive_threshold)
+        if non_reactive_threshold is not None
+        else float(NON_REACTIVE_SPAN_PX)
     )
 
     items: list[dict[str, object]] = []
@@ -1542,6 +1548,8 @@ def build_wide_csv(
     stat_columns = [
         "global_min",
         "global_max",
+        "trimmed_global_min",
+        "trimmed_global_max",
         "local_min",
         "local_max",
         "local_min_during",
@@ -1593,6 +1601,7 @@ def build_wide_csv(
         fly_span_max = -math.inf
         in_range_samples = 0
         trial_results: list[dict[str, object]] = []
+        testing_samples: list[np.ndarray] = []
 
         for item in group_items:
             csv_path = Path(item["csv_path"])
@@ -1687,6 +1696,10 @@ def build_wide_csv(
                     "local_max_during": local_max_during,
                 }
             )
+            if trial_type.strip().lower() == "testing":
+                finite_vals = values[np.isfinite(values)]
+                if finite_vals.size:
+                    testing_samples.append(finite_vals.astype(float, copy=False))
 
         if in_range_samples:
             gmin = float(fly_span_min)
@@ -1700,9 +1713,28 @@ def build_wide_csv(
                 f"fly_number={fly_number_label}; global extrema set to NaN."
             )
 
-        non_reactive = 1.0 if is_non_reactive_span(gmin, gmax) else 0.0
+        if testing_samples:
+            combined_testing = np.concatenate(testing_samples)
+            if combined_testing.size:
+                trimmed_min = float(np.nanpercentile(combined_testing, 2.5))
+                trimmed_max = float(np.nanpercentile(combined_testing, 97.5))
+            else:
+                trimmed_min = float("nan")
+                trimmed_max = float("nan")
+        else:
+            trimmed_min = float("nan")
+            trimmed_max = float("nan")
+
+        trimmed_min_effective = trimmed_min if math.isfinite(trimmed_min) else gmin
+        trimmed_max_effective = trimmed_max if math.isfinite(trimmed_max) else gmax
+
+        if math.isfinite(trimmed_min_effective) and math.isfinite(trimmed_max_effective):
+            non_reactive = 1.0 if is_non_reactive_span(trimmed_min_effective, trimmed_max_effective, threshold=trimmed_threshold) else 0.0
+        else:
+            non_reactive = 0.0
+
         if non_reactive:
-            flagged_summary[(dataset, fly, fly_number_label)] = (gmin, gmax)
+            flagged_summary[(dataset, fly, fly_number_label)] = (trimmed_min_effective, trimmed_max_effective)
 
         trial_results.sort(
             key=lambda result: (
@@ -1739,6 +1771,8 @@ def build_wide_csv(
                 fly_number_label,
                 gmin,
                 gmax,
+                trimmed_min_effective,
+                trimmed_max_effective,
                 result["local_min"],
                 result["local_max"],
                 result["local_min_during"],
@@ -1778,9 +1812,9 @@ def build_wide_csv(
     flagged_path = out_path.with_name(out_path.stem + "_flagged_flies.txt")
     with flagged_path.open("w", encoding="utf-8") as fh:
         fh.write(
-            f"# Flies flagged as non-reactive (global span ≤ {envelope_visuals.NON_REACTIVE_SPAN_PX:g} px)\n"
+            f"# Flies flagged as non-reactive after 2.5th–97.5th percentile trimming (span ≤ {trimmed_threshold:g} px)\n"
         )
-        fh.write("# dataset,fly,fly_number,global_min,global_max\n")
+        fh.write("# dataset,fly,fly_number,trimmed_global_min,trimmed_global_max\n")
         if flagged_summary:
             for key in sorted(flagged_summary):
                 dataset, fly, fly_number = key
@@ -1931,6 +1965,7 @@ def overlay_sources(
     odor_off_s: float = 60.0,
     odor_latency_s: float = 0.0,
     overwrite: bool = False,
+    non_reactive_threshold: float | None = None,
 ) -> None:
     frames = []
     env_cols_by_source: dict[str, list[str]] = {}
@@ -1950,7 +1985,20 @@ def overlay_sources(
         raise RuntimeError("No sources available for overlay plotting.")
 
     combined = pd.concat(frames, ignore_index=True)
-    combined["_non_reactive"] = compute_non_reactive_flags(combined)
+    trimmed_threshold = (
+        float(non_reactive_threshold)
+        if non_reactive_threshold is not None
+        else float(NON_REACTIVE_SPAN_PX)
+    )
+    if {"trimmed_global_min", "trimmed_global_max"}.issubset(combined.columns):
+        temp = combined.copy()
+        mask = np.isfinite(temp["trimmed_global_min"]) & np.isfinite(temp["trimmed_global_max"])
+        if mask.any():
+            temp.loc[mask, "global_min"] = temp.loc[mask, "trimmed_global_min"]
+            temp.loc[mask, "global_max"] = temp.loc[mask, "trimmed_global_max"]
+        combined["_non_reactive"] = compute_non_reactive_flags(temp, threshold=trimmed_threshold)
+    else:
+        combined["_non_reactive"] = compute_non_reactive_flags(combined, threshold=trimmed_threshold)
     out_dir = Path(output_dir).expanduser().resolve()
 
     odor_latency = max(odor_latency_s, 0.0)
@@ -2180,6 +2228,12 @@ def build_parser() -> argparse.ArgumentParser:
             "Defaults to config.yaml beside this script."
         ),
     )
+    wide_parser.add_argument(
+        "--non-reactive-threshold",
+        type=float,
+        default=None,
+        help="Override non-reactive span threshold (pixels) for trimmed span flagging.",
+    )
 
     matrix_parser = subparsers.add_parser("matrix", help="Convert wide CSV → float16 matrix + metadata.")
     matrix_parser.add_argument("--input-csv", required=True)
@@ -2216,6 +2270,8 @@ def build_parser() -> argparse.ArgumentParser:
     overlay_parser.add_argument("--latency-sec", type=float, default=0.0)
     overlay_parser.add_argument("--after-show-sec", type=float, default=30.0)
     overlay_parser.add_argument("--threshold-std-mult", type=float, default=4.0)
+    overlay_parser.add_argument("--odor-on-s", type=float, default=30.0)
+    overlay_parser.add_argument("--odor-off-s", type=float, default=60.0)
     overlay_parser.add_argument(
         "--odor-latency-s",
         type=float,
@@ -2223,6 +2279,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Transit delay between valve command and odor at the fly (seconds).",
     )
     overlay_parser.add_argument("--overwrite", action="store_true", help="Rebuild plots even if the target files exist.")
+    overlay_parser.add_argument(
+        "--non-reactive-threshold",
+        type=float,
+        default=None,
+        help="Override non-reactive span threshold (pixels) for overlay flagging.",
+    )
 
     return parser
 
@@ -2256,6 +2318,7 @@ def main(argv: Sequence[str] | None = None) -> None:
             fps_fallback=args.fps_fallback,
             exclude_roots=args.exclude_root,
             config_path=args.config,
+            non_reactive_threshold=args.non_reactive_threshold,
         )
         return
 
@@ -2320,8 +2383,11 @@ def main(argv: Sequence[str] | None = None) -> None:
             after_show_sec=args.after_show_sec,
             output_dir=args.out_dir,
             threshold_mult=args.threshold_std_mult,
+            odor_on_s=args.odor_on_s,
+            odor_off_s=args.odor_off_s,
             odor_latency_s=args.odor_latency_s,
             overwrite=args.overwrite,
+            non_reactive_threshold=args.non_reactive_threshold,
         )
         return
 

@@ -4,7 +4,9 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -12,10 +14,17 @@ from typing import Any, Mapping, Sequence
 
 import yaml
 
-# Add project root to sys.path for imports to work
-sys.path.insert(0, str(Path(__file__).parent.parent.resolve()))
+# Ensure local source tree takes precedence over any installed package.
+REPO_ROOT = Path(__file__).resolve().parents[1]
+SRC_ROOT = REPO_ROOT / "src"
+for path in (str(SRC_ROOT), str(REPO_ROOT)):
+    if path not in sys.path:
+        sys.path.insert(0, path)
+
+STATE_VERSION = 1
 
 from fbpipe.config import Settings, load_settings
+from fbpipe.pipeline import ORDERED_STEPS
 from fbpipe.steps import predict_reactions
 
 from scripts.envelope_visuals import (
@@ -47,6 +56,57 @@ def _ensure_path(value: str | Path, field: str) -> Path:
     if path is None:
         raise ValueError(f"Missing required path for '{field}'.")
     return path
+
+
+def _cache_root(settings: Settings) -> Path:
+    path = Path(settings.cache_dir or (REPO_ROOT / "cache"))
+    path = path.expanduser().resolve()
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _safe_key(value: str) -> str:
+    text = str(Path(value).expanduser()) if value else ""
+    cleaned = re.sub(r"[^A-Za-z0-9._-]+", "_", text)
+    return cleaned.strip("_") or "default"
+
+
+def _state_path(settings: Settings, category: str, key: str) -> Path:
+    return _cache_root(settings) / category / _safe_key(key) / "state.json"
+
+
+def _load_state(settings: Settings, category: str, key: str) -> dict[str, Any] | None:
+    state_path = _state_path(settings, category, key)
+    if not state_path.exists():
+        return None
+    try:
+        with state_path.open("r", encoding="utf-8") as fh:
+            return json.load(fh)
+    except (json.JSONDecodeError, OSError):
+        return None
+
+
+def _write_state(settings: Settings, category: str, key: str, payload: dict[str, Any]) -> None:
+    state_path = _state_path(settings, category, key)
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    data = dict(payload)
+    data.setdefault("version", STATE_VERSION)
+    with state_path.open("w", encoding="utf-8") as fh:
+        json.dump(data, fh, indent=2, sort_keys=True)
+
+
+def _should_skip(settings: Settings, category: str, key: str, expected: dict[str, Any], *, force_flag: bool) -> bool:
+    if force_flag:
+        return False
+    state = _load_state(settings, category, key)
+    if not state:
+        return False
+    if state.get("version") != STATE_VERSION:
+        return False
+    for field, value in expected.items():
+        if state.get(field) != value:
+            return False
+    return True
 
 
 def _matrix_plot_config(data: Mapping[str, Any]) -> MatrixPlotConfig:
@@ -261,6 +321,7 @@ def _run_combined(cfg: Mapping[str, Any] | None, settings: Settings | None) -> N
             distance_limits=limits,
             trial_type_filter=trial_type_filter,
             extra_trial_exports=extra_exports or None,
+            non_reactive_threshold=settings.non_reactive_span_px,
         )
 
         for trial_key, matrix_dir in extra_matrix_dirs.items():
@@ -336,6 +397,7 @@ def _run_combined(cfg: Mapping[str, Any] | None, settings: Settings | None) -> N
             odor_off_s=odor_off,
             odor_latency_s=odor_latency,
             overwrite=overwrite,
+            non_reactive_threshold=settings.non_reactive_span_px if settings is not None else None,
         )
 
     secure_cfg = cfg.get("secure_cleanup")
@@ -378,9 +440,43 @@ def _run_reactions(settings: Settings) -> None:
         )
         return
 
+    output_csv_path = Path(reaction_cfg.output_csv).expanduser()
+
     if reaction_cfg.run_prediction:
-        print("[analysis] reactions.predict → flybehavior-response predict")
-        predict_reactions.main(settings)
+        prediction_expected = {
+            "data_csv": str(Path(reaction_cfg.data_csv).expanduser()),
+            "model_path": str(Path(reaction_cfg.model_path).expanduser()),
+        }
+        data_path = Path(reaction_cfg.data_csv).expanduser()
+        model_path = Path(reaction_cfg.model_path).expanduser()
+        if data_path.exists():
+            prediction_expected["data_mtime"] = data_path.stat().st_mtime
+        if model_path.exists():
+            prediction_expected["model_mtime"] = model_path.stat().st_mtime
+        prediction_expected["output_exists"] = output_csv_path.exists()
+        if output_csv_path.exists():
+            prediction_expected["output_mtime"] = output_csv_path.stat().st_mtime
+
+        skip_prediction = output_csv_path.exists() and _should_skip(
+            settings,
+            category="reaction_prediction",
+            key="predict",
+            expected=prediction_expected,
+            force_flag=settings.force.reaction_prediction,
+        )
+
+        if skip_prediction:
+            print(
+                "[analysis] reactions.predict cached → skipping. Set force.reaction_prediction=true to recompute."
+            )
+        else:
+            print("[analysis] reactions.predict → flybehavior-response predict")
+            predict_reactions.main(settings)
+            prediction_expected["output_exists"] = output_csv_path.exists()
+            if output_csv_path.exists():
+                prediction_expected["output_mtime"] = output_csv_path.stat().st_mtime
+            prediction_expected["version"] = STATE_VERSION
+            _write_state(settings, "reaction_prediction", "predict", prediction_expected)
     else:
         print("[analysis] reactions.predict → skipped (run_prediction = False)")
 
@@ -390,13 +486,39 @@ def _run_reactions(settings: Settings) -> None:
 
     python_exec = reaction_cfg.python or sys.executable
     script_path = Path(__file__).resolve().parent / "reaction_matrix_from_spreadsheet.py"
-    csv_path = Path(reaction_cfg.output_csv).expanduser()
+    csv_path = output_csv_path
     if not csv_path.exists():
         raise FileNotFoundError(f"Reaction prediction CSV not found: {csv_path}")
 
     matrix_cfg = reaction_cfg.matrix
     out_dir = Path(matrix_cfg.out_dir).expanduser()
     out_dir.mkdir(parents=True, exist_ok=True)
+
+    matrix_expected = {
+        "non_reactive_span_px": settings.non_reactive_span_px,
+        "csv_mtime": csv_path.stat().st_mtime,
+        "latency_sec": matrix_cfg.latency_sec,
+        "after_window_sec": matrix_cfg.after_window_sec,
+        "row_gap": matrix_cfg.row_gap,
+        "height_per_gap_in": matrix_cfg.height_per_gap_in,
+        "bottom_shift_in": matrix_cfg.bottom_shift_in,
+        "trial_orders": list(matrix_cfg.trial_orders),
+        "include_hexanol": matrix_cfg.include_hexanol,
+    }
+
+    skip_matrix = _should_skip(
+        settings,
+        category="reaction_matrix",
+        key="reaction_prediction",
+        expected=matrix_expected,
+        force_flag=settings.force.reaction_matrix,
+    )
+
+    if skip_matrix:
+        print(
+            "[analysis] reactions.matrix cached → skipping. Set force.reaction_matrix=true to recompute."
+        )
+        return
 
     cmd = [
         str(Path(python_exec).expanduser()),
@@ -415,6 +537,8 @@ def _run_reactions(settings: Settings) -> None:
         str(matrix_cfg.height_per_gap_in),
         "--bottom-shift-in",
         str(matrix_cfg.bottom_shift_in),
+        "--non-reactive-threshold",
+        str(settings.non_reactive_span_px),
     ]
 
     for trial_order in matrix_cfg.trial_orders:
@@ -433,14 +557,31 @@ def _run_reactions(settings: Settings) -> None:
     env["PYTHONPATH"] = os.pathsep.join(filter(None, [extra_path, pythonpath]))
     subprocess.run(cmd, check=True, env=env)
 
+    matrix_expected["version"] = STATE_VERSION
+    _write_state(settings, "reaction_matrix", "reaction_prediction", matrix_expected)
 
-def _run_pipeline(config_path: Path, *, main_directory: str | None = None) -> None:
-    cmd = [sys.executable, "-m", "fbpipe.pipeline", "--config", str(config_path), "all"]
+
+def _run_pipeline(
+    config_path: Path,
+    *,
+    main_directory: str | None = None,
+    steps: Sequence[str] | None = None,
+) -> None:
+    cmd = [sys.executable, "-m", "fbpipe.pipeline", "--config", str(config_path)]
+    if steps:
+        cmd.extend(steps)
+    else:
+        cmd.append("all")
     suffix = f" (MAIN_DIRECTORY={main_directory})" if main_directory else ""
     print(f"[analysis] pipeline{suffix} → {' '.join(cmd)}")
     env = os.environ.copy()
     if main_directory:
         env["MAIN_DIRECTORY"] = main_directory
+    pythonpath = env.get("PYTHONPATH")
+    extra_paths = [str(SRC_ROOT)]
+    if pythonpath:
+        extra_paths.append(pythonpath)
+    env["PYTHONPATH"] = os.pathsep.join(extra_paths)
     try:
         subprocess.run(cmd, check=True, env=env)
     except subprocess.CalledProcessError as e:
@@ -481,15 +622,76 @@ def main(argv: Sequence[str] | None = None) -> None:
             if roots_seq:
                 dataset_roots = tuple(str(Path(root).expanduser()) for root in roots_seq)
 
+    dataset_roots = tuple(dataset_roots) if dataset_roots else None
+
     if dataset_roots:
+        remaining_steps = [step.name for step in ORDERED_STEPS if step.name != "yolo"]
+
+        pipeline_expectation = {"non_reactive_span_px": settings.non_reactive_span_px}
+
+        yolo_targets: list[str] = []
+        pipeline_targets: list[tuple[str, dict[str, Any]]] = []
+
         for root in dataset_roots:
             resolved = str(Path(root).expanduser())
-            _run_pipeline(config_path, main_directory=resolved)
+            skip_pipeline = _should_skip(
+                settings,
+                category="pipeline",
+                key=resolved,
+                expected=pipeline_expectation,
+                force_flag=settings.force.pipeline,
+            )
+            if skip_pipeline and not settings.force.yolo:
+                print(
+                    f"[analysis] pipeline cached → skipping full run for {resolved}. Set force.pipeline=true to recompute."
+                )
+            else:
+                yolo_targets.append(resolved)
+
+            if not skip_pipeline:
+                pipeline_targets.append((resolved, dict(pipeline_expectation)))
+
+        if yolo_targets:
+            for resolved in yolo_targets:
+                _run_pipeline(config_path, main_directory=resolved, steps=("yolo",))
+
+        if pipeline_targets:
+            for resolved, expected in pipeline_targets:
+                _run_pipeline(config_path, main_directory=resolved, steps=remaining_steps)
+                payload = dict(expected)
+                payload["version"] = STATE_VERSION
+                _write_state(settings, "pipeline", resolved, payload)
+        elif not yolo_targets:
+            print("[analysis] pipeline skipped for all datasets (cached).")
     else:
         _run_pipeline(config_path)
 
     analysis_cfg = data.get("analysis") or {}
-    _run_combined(analysis_cfg.get("combined"), settings)
+
+    combined_cfg_input = analysis_cfg.get("combined")
+    if combined_cfg_input:
+        combined_expected = {
+            "non_reactive_span_px": settings.non_reactive_span_px,
+            "dataset_roots": sorted(dataset_roots) if dataset_roots else [],
+        }
+        skip_combined = _should_skip(
+            settings,
+            category="combined",
+            key="analysis",
+            expected=combined_expected,
+            force_flag=settings.force.combined,
+        )
+        if skip_combined:
+            print(
+                "[analysis] combined analysis cached → skipping. Set force.combined=true to recompute."
+            )
+        else:
+            _run_combined(combined_cfg_input, settings)
+            payload = dict(combined_expected)
+            payload["version"] = STATE_VERSION
+            _write_state(settings, "combined", "analysis", payload)
+    else:
+        _run_combined(None, settings)
     _run_envelope_visuals(analysis_cfg.get("envelope_visuals"))
     _run_training(analysis_cfg.get("training"))
     _run_reactions(settings)

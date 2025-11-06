@@ -43,11 +43,18 @@ def _string_series(df: pd.DataFrame, column: str, *, fallback: str = "UNKNOWN") 
 def _non_reactive_mask(
     df: pd.DataFrame, *, threshold: float = NON_REACTIVE_SPAN_PX
 ) -> pd.Series:
-    if "global_min" not in df.columns or "global_max" not in df.columns:
+    if {"trimmed_global_min", "trimmed_global_max"}.issubset(df.columns):
+        gmin = pd.to_numeric(df["trimmed_global_min"], errors="coerce")
+        gmax = pd.to_numeric(df["trimmed_global_max"], errors="coerce")
+        base_min = pd.to_numeric(df.get("global_min"), errors="coerce")
+        base_max = pd.to_numeric(df.get("global_max"), errors="coerce")
+        gmin = gmin.where(gmin.notna(), base_min)
+        gmax = gmax.where(gmax.notna(), base_max)
+    else:
+        gmin = pd.to_numeric(df.get("global_min"), errors="coerce")
+        gmax = pd.to_numeric(df.get("global_max"), errors="coerce")
+    if gmin is None or gmax is None:
         return pd.Series(False, index=df.index, dtype=bool)
-
-    gmin = pd.to_numeric(df["global_min"], errors="coerce")
-    gmax = pd.to_numeric(df["global_max"], errors="coerce")
     span = (gmax - gmin).abs()
     mask = gmin.notna() & gmax.notna() & span.le(float(threshold))
     return mask.fillna(False)
