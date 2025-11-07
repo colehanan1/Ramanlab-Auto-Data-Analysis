@@ -1723,8 +1723,8 @@ def build_wide_csv(
                 # Changed from 2.5/97.5 to 0.5/99.5 for more sensitive non-reactive detection
                 # This trims only extreme outliers (top/bottom 0.5%) rather than 2.5%
                 # Now checks BOTH testing and training trials
-                trimmed_min = float(np.nanpercentile(combined_samples, 0.5))
-                trimmed_max = float(np.nanpercentile(combined_samples, 99.5))
+                trimmed_min = float(np.nanpercentile(combined_samples, 1))
+                trimmed_max = float(np.nanpercentile(combined_samples, 99))
             else:
                 trimmed_min = float("nan")
                 trimmed_max = float("nan")
