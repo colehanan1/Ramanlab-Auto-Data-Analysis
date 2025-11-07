@@ -57,6 +57,8 @@ ODOR_CANON: Mapping[str, str] = {
     "benzaldehyde": "Benz",
     "benz-ald": "Benz",
     "benzadhyde": "Benz",
+    "benz_control": "benz_control",
+    "benz control": "benz_control",
     "ethyl butyrate": "EB",
     "eb_control": "EB_control",
     "eb control": "EB_control",
@@ -77,6 +79,8 @@ DISPLAY_LABEL = {
     "10s_Odor_Benz": "Benzaldehyde",
     "EB": "Ethyl Butyrate",
     "EB_control": "Ethyl Butyrate",
+    "hex_control": "Hexanol",
+    "benz_control": "Benzaldehyde",
     "opto_benz": "Benzaldehyde",
     "opto_EB": "Ethyl Butyrate",
     "opto_benz_1": "Benzaldehyde",
@@ -218,7 +222,7 @@ def _display_odor(dataset_canon: str, trial_label: str) -> str:
     if dataset_for_testing == "hex_control":
         if number in (1, 3):
             return "Apple Cider Vinegar"
-        if number in (2, 4):
+        if number in (2, 4, 5):
             return HEXANOL_LABEL
     else:
         if number in (1, 3):

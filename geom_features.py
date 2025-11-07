@@ -12,11 +12,14 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import json
 import logging
 import math
+import os
 import re
 from dataclasses import asdict, dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
 
@@ -138,6 +141,166 @@ class FlyStats:
     r_std_fly: float
 
 
+# ============================================================================
+# Cache Management Functions
+# ============================================================================
+
+
+def _compute_trial_hash(csv_path: Path) -> str:
+    """
+    Compute a hash for a CSV file based on size, mtime, and first 1KB of content.
+
+    This provides a fast fingerprint for detecting changed files without reading
+    the entire CSV.
+    """
+    try:
+        stat = csv_path.stat()
+        hasher = hashlib.md5()
+
+        # Include file metadata
+        hasher.update(str(stat.st_size).encode())
+        hasher.update(str(stat.st_mtime).encode())
+
+        # Include first 1KB of content for content-based detection
+        with open(csv_path, "rb") as f:
+            hasher.update(f.read(1024))
+
+        return hasher.hexdigest()
+    except Exception as e:
+        LOGGER.warning("Failed to hash %s: %s", csv_path, e)
+        return ""
+
+
+def _get_fly_cache_key(dataset: str, fly_directory: str) -> str:
+    """Generate a unique cache key for a fly."""
+    return f"{dataset}__{fly_directory}"
+
+
+def _get_cache_dir(cache_root: Optional[str]) -> Optional[Path]:
+    """
+    Get the cache directory path, creating it if necessary.
+
+    Returns None if caching is disabled (cache_root is None).
+    """
+    if cache_root is None:
+        return None
+
+    cache_path = Path(cache_root).resolve()
+    cache_path.mkdir(parents=True, exist_ok=True)
+    return cache_path
+
+
+def _load_cache_manifest(cache_dir: Path) -> Dict:
+    """Load the cache manifest from disk, or return empty dict if it doesn't exist."""
+    manifest_path = cache_dir / "fly_stats_manifest.json"
+    if not manifest_path.exists():
+        return {"version": "1.0", "flies": {}}
+
+    try:
+        with open(manifest_path, "r") as f:
+            return json.load(f)
+    except Exception as e:
+        LOGGER.warning("Failed to load cache manifest: %s", e)
+        return {"version": "1.0", "flies": {}}
+
+
+def _save_cache_manifest(cache_dir: Path, manifest: Dict) -> None:
+    """Save the cache manifest to disk."""
+    manifest_path = cache_dir / "fly_stats_manifest.json"
+    try:
+        with open(manifest_path, "w") as f:
+            json.dump(manifest, f, indent=2)
+    except Exception as e:
+        LOGGER.error("Failed to save cache manifest: %s", e)
+
+
+def _load_fly_stats_from_cache(cache_dir: Path, cache_key: str) -> Optional[FlyStats]:
+    """
+    Load fly statistics from cache.
+
+    Returns None if the cache file doesn't exist or is corrupted.
+    """
+    stats_dir = cache_dir / "fly_stats"
+    stats_path = stats_dir / f"{cache_key}.json"
+
+    if not stats_path.exists():
+        return None
+
+    try:
+        with open(stats_path, "r") as f:
+            data = json.load(f)
+        return FlyStats(**data)
+    except Exception as e:
+        LOGGER.warning("Failed to load cached stats for %s: %s", cache_key, e)
+        return None
+
+
+def _save_fly_stats_to_cache(
+    cache_dir: Path,
+    cache_key: str,
+    stats: FlyStats,
+    trial_hashes: Dict[str, str]
+) -> None:
+    """
+    Save fly statistics to cache along with trial hashes for invalidation.
+    """
+    stats_dir = cache_dir / "fly_stats"
+    stats_dir.mkdir(parents=True, exist_ok=True)
+
+    stats_path = stats_dir / f"{cache_key}.json"
+
+    try:
+        with open(stats_path, "w") as f:
+            json.dump(asdict(stats), f, indent=2)
+
+        # Update manifest with trial hashes
+        manifest = _load_cache_manifest(cache_dir)
+        manifest["flies"][cache_key] = {
+            "last_updated": datetime.now().isoformat(),
+            "trial_hashes": trial_hashes
+        }
+        _save_cache_manifest(cache_dir, manifest)
+
+        LOGGER.info("Cached fly stats for %s", cache_key)
+    except Exception as e:
+        LOGGER.error("Failed to save cached stats for %s: %s", cache_key, e)
+
+
+def _is_fly_cache_valid(
+    cache_dir: Path,
+    cache_key: str,
+    trials: List[TrialInfo]
+) -> bool:
+    """
+    Check if cached fly statistics are still valid.
+
+    Returns True if all trials for this fly are unchanged since caching.
+    """
+    manifest = _load_cache_manifest(cache_dir)
+
+    if cache_key not in manifest["flies"]:
+        return False
+
+    cached_hashes = manifest["flies"][cache_key].get("trial_hashes", {})
+
+    # Check if all current trials match cached hashes
+    for trial in trials:
+        trial_key = f"{trial.trial_type}_{trial.trial_label}"
+        current_hash = _compute_trial_hash(trial.csv_path_in)
+
+        if trial_key not in cached_hashes or cached_hashes[trial_key] != current_hash:
+            LOGGER.debug(
+                "Cache miss for %s: trial %s changed (old=%s, new=%s)",
+                cache_key,
+                trial_key,
+                cached_hashes.get(trial_key, "N/A"),
+                current_hash
+            )
+            return False
+
+    return True
+
+
 def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Compute geometric features for fly trials.")
     mode_group = parser.add_mutually_exclusive_group(required=True)
@@ -158,6 +321,17 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--limit-flies", type=int, default=None, help="Process at most N flies per dataset root.")
     parser.add_argument("--limit-trials", type=int, default=None, help="Process at most N trials per fly.")
     parser.add_argument("--log-level", default="INFO", help="Logging level (default INFO).")
+    parser.add_argument(
+        "--cache-dir",
+        default=None,
+        help="Directory for caching fly statistics (enables incremental processing). "
+             "Use --no-cache to disable caching."
+    )
+    parser.add_argument(
+        "--no-cache",
+        action="store_true",
+        help="Disable fly statistics caching (forces full recomputation)."
+    )
     return parser.parse_args(argv)
 
 
@@ -853,23 +1027,61 @@ def process_trials(
     outdir: Path,
     dry_run: bool,
     testing_aggregator: Optional[TestingAggregator],
+    cache_dir: Optional[Path] = None,
 ) -> List[Dict[str, object]]:
     consolidated_rows: List[Dict[str, object]] = []
     trials_by_fly: Dict[Tuple[str, str], List[TrialInfo]] = {}
     for trial in trials:
         trials_by_fly.setdefault((trial.dataset, trial.fly_directory), []).append(trial)
 
+    # Track cache statistics for logging
+    cache_hits = 0
+    cache_misses = 0
+
     for (dataset, fly_directory), fly_trials in trials_by_fly.items():
         fly_trials = sorted(fly_trials, key=lambda t: (t.trial_type, t.trial_label, t.csv_path_in.name))
-        LOGGER.info("Processing fly %s/%s with %d trials", dataset, fly_directory, len(fly_trials))
-        trial_data: Dict[TrialInfo, pd.DataFrame] = {}
-        for trial in fly_trials:
-            df = load_coordinates(trial)
-            if df.empty:
-                raise ValueError(f"Empty coordinate dataframe for trial {trial.csv_path_in}")
-            trial_data[trial] = df
+        cache_key = _get_fly_cache_key(dataset, fly_directory)
 
-        stats = compute_fly_stats(trial_data)
+        # Try to load from cache if enabled
+        stats = None
+        if cache_dir is not None:
+            if _is_fly_cache_valid(cache_dir, cache_key, fly_trials):
+                stats = _load_fly_stats_from_cache(cache_dir, cache_key)
+                if stats is not None:
+                    cache_hits += 1
+                    LOGGER.info(
+                        "[CACHE HIT] Loaded fly stats from cache for %s/%s (skipping %d trials)",
+                        dataset, fly_directory, len(fly_trials)
+                    )
+
+        # Compute stats if not cached or cache miss
+        if stats is None:
+            cache_misses += 1
+            LOGGER.info("Processing fly %s/%s with %d trials", dataset, fly_directory, len(fly_trials))
+            trial_data: Dict[TrialInfo, pd.DataFrame] = {}
+            for trial in fly_trials:
+                df = load_coordinates(trial)
+                if df.empty:
+                    raise ValueError(f"Empty coordinate dataframe for trial {trial.csv_path_in}")
+                trial_data[trial] = df
+
+            stats = compute_fly_stats(trial_data)
+
+            # Save to cache if enabled and not in dry-run mode
+            if cache_dir is not None and not dry_run:
+                trial_hashes = {
+                    f"{trial.trial_type}_{trial.trial_label}": _compute_trial_hash(trial.csv_path_in)
+                    for trial in fly_trials
+                }
+                _save_fly_stats_to_cache(cache_dir, cache_key, stats, trial_hashes)
+        else:
+            # Still need to load trial data for enrichment even if stats are cached
+            trial_data: Dict[TrialInfo, pd.DataFrame] = {}
+            for trial in fly_trials:
+                df = load_coordinates(trial)
+                if df.empty:
+                    raise ValueError(f"Empty coordinate dataframe for trial {trial.csv_path_in}")
+                trial_data[trial] = df
 
         for trial in fly_trials:
             enriched_df, summary = enrich_trial(trial, trial_data[trial], stats)
@@ -910,6 +1122,17 @@ def process_trials(
 
             if testing_aggregator is not None and trial.trial_type == "testing":
                 testing_aggregator.append(trial, enriched_df, summary, stats)
+
+    # Log cache statistics
+    if cache_dir is not None:
+        total_flies = len(trials_by_fly)
+        LOGGER.info(
+            "Cache statistics: %d hits, %d misses (%.1f%% hit rate) out of %d flies",
+            cache_hits,
+            cache_misses,
+            100.0 * cache_hits / total_flies if total_flies > 0 else 0.0,
+            total_flies
+        )
 
     return consolidated_rows
 
@@ -984,9 +1207,20 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         LOGGER.warning("No trials to process.")
         return
 
+    # Determine cache directory
+    cache_dir = None
+    if not args.no_cache:
+        cache_dir = _get_cache_dir(args.cache_dir)
+        if cache_dir is not None:
+            LOGGER.info("Fly statistics caching enabled: %s", cache_dir)
+        else:
+            LOGGER.info("Fly statistics caching disabled (no --cache-dir provided)")
+    else:
+        LOGGER.info("Fly statistics caching disabled (--no-cache flag)")
+
     testing_aggregator = TestingAggregator(outdir, args.dry_run)
 
-    consolidated_rows = process_trials(trials, outdir, args.dry_run, testing_aggregator)
+    consolidated_rows = process_trials(trials, outdir, args.dry_run, testing_aggregator, cache_dir)
 
     if consolidated_rows:
         write_consolidated(consolidated_rows, outdir, args.dry_run)

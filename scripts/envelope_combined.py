@@ -1601,7 +1601,8 @@ def build_wide_csv(
         fly_span_max = -math.inf
         in_range_samples = 0
         trial_results: list[dict[str, object]] = []
-        testing_samples: list[np.ndarray] = []
+        # Collect samples from BOTH testing and training trials for non-reactive detection
+        all_trial_samples: list[np.ndarray] = []
 
         for item in group_items:
             csv_path = Path(item["csv_path"])
@@ -1696,10 +1697,12 @@ def build_wide_csv(
                     "local_max_during": local_max_during,
                 }
             )
-            if trial_type.strip().lower() == "testing":
+            # Collect samples from BOTH testing and training trials
+            trial_type_lower = trial_type.strip().lower()
+            if trial_type_lower in ("testing", "training"):
                 finite_vals = values[np.isfinite(values)]
                 if finite_vals.size:
-                    testing_samples.append(finite_vals.astype(float, copy=False))
+                    all_trial_samples.append(finite_vals.astype(float, copy=False))
 
         if in_range_samples:
             gmin = float(fly_span_min)
@@ -1713,11 +1716,15 @@ def build_wide_csv(
                 f"fly_number={fly_number_label}; global extrema set to NaN."
             )
 
-        if testing_samples:
-            combined_testing = np.concatenate(testing_samples)
-            if combined_testing.size:
-                trimmed_min = float(np.nanpercentile(combined_testing, 2.5))
-                trimmed_max = float(np.nanpercentile(combined_testing, 97.5))
+        if all_trial_samples:
+            # Combine all testing AND training samples for non-reactive detection
+            combined_samples = np.concatenate(all_trial_samples)
+            if combined_samples.size:
+                # Changed from 2.5/97.5 to 0.5/99.5 for more sensitive non-reactive detection
+                # This trims only extreme outliers (top/bottom 0.5%) rather than 2.5%
+                # Now checks BOTH testing and training trials
+                trimmed_min = float(np.nanpercentile(combined_samples, 0.5))
+                trimmed_max = float(np.nanpercentile(combined_samples, 99.5))
             else:
                 trimmed_min = float("nan")
                 trimmed_max = float("nan")
@@ -1728,13 +1735,32 @@ def build_wide_csv(
         trimmed_min_effective = trimmed_min if math.isfinite(trimmed_min) else gmin
         trimmed_max_effective = trimmed_max if math.isfinite(trimmed_max) else gmax
 
+        # Calculate span for debugging
+        span = trimmed_max_effective - trimmed_min_effective if (
+            math.isfinite(trimmed_min_effective) and math.isfinite(trimmed_max_effective)
+        ) else float("nan")
+
         if math.isfinite(trimmed_min_effective) and math.isfinite(trimmed_max_effective):
             non_reactive = 1.0 if is_non_reactive_span(trimmed_min_effective, trimmed_max_effective, threshold=trimmed_threshold) else 0.0
         else:
             non_reactive = 0.0
 
+        # Enhanced logging for non-reactive flag debugging
         if non_reactive:
             flagged_summary[(dataset, fly, fly_number_label)] = (trimmed_min_effective, trimmed_max_effective)
+            print(
+                f"[NON-REACTIVE] dataset={dataset} fly={fly} fly_number={fly_number_label} "
+                f"span={span:.2f}px (threshold={trimmed_threshold:.2f}px) "
+                f"range=[{trimmed_min_effective:.2f}, {trimmed_max_effective:.2f}] "
+                f"samples={combined_samples.size if all_trial_samples else 0} "
+                f"(testing+training)"
+            )
+        elif math.isfinite(span):
+            # Log reactive flies with their spans for comparison
+            print(
+                f"[REACTIVE] dataset={dataset} fly={fly} fly_number={fly_number_label} "
+                f"span={span:.2f}px (threshold={trimmed_threshold:.2f}px)"
+            )
 
         trial_results.sort(
             key=lambda result: (
