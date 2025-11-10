@@ -11,9 +11,9 @@ main_directory:
 
 cache_dir: "/home/ramanlab/Documents/cole/cache"
 force:
-  pipeline: true  # Set to true to force full reprocessing (bypasses cache)
-  yolo: true      # Set to true to rerun YOLO inference even if outputs exist
-  combined: true  # Set to true to force reprocessing of combined analysis
+  pipeline: false  # Set to true to force full reprocessing (bypasses cache)
+  yolo: false      # Set to true to rerun YOLO inference even if outputs exist
+  combined: false  # Set to true to force reprocessing of combined analysis
   reaction_prediction: true  # Set to true to force model re-prediction
   reaction_matrix: true      # Set to true to force matrix regeneration
 

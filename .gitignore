@@ -36,3 +36,12 @@ Thumbs.db
 *.csv~
 *.png~
 *.ipynb_checkpoints/
+
+# Claude AI generated documentation
+docs-claude-output/
+
+# Test outputs and fixtures
+tests/
+pytest_cache/
+.coverage
+htmlcov/
