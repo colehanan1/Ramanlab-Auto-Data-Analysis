@@ -13,7 +13,7 @@ import pandas as pd
 from ..config import Settings
 
 
-NON_REACTIVE_SPAN_PX = 20.0
+NON_REACTIVE_SPAN_PX = 9.0
 
 
 def _stringify(value: object, fallback: str = "UNKNOWN") -> str:

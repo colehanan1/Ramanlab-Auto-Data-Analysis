@@ -142,8 +142,9 @@ def _load_distance_stats(fly_dir: Path, slot_label: str | None) -> tuple[float, 
     """Return pixel min/max from the cached class-2 stats JSON for the slot."""
 
     candidates: list[Path] = []
-    if slot_label:
-        candidates.append(fly_dir / f"{slot_label}_global_distance_stats_class_2.json")
+    slot_token = (slot_label or "").strip().lower()
+    if slot_token:
+        candidates.append(fly_dir / f"{slot_token}_global_distance_stats_class_2.json")
     candidates.append(fly_dir / "global_distance_stats_class_2.json")
 
     for path in candidates:
@@ -172,7 +173,7 @@ def _iter_slot_distance_csvs(fly_dir: Path, slot_label: str | None) -> Iterator[
     rms_dir = fly_dir / "RMS_calculations"
     if not rms_dir.is_dir():
         return
-    slot_token = slot_label or ""
+    slot_token = (slot_label or "").strip().lower()
     pattern = f"*{slot_token}_distances.csv" if slot_token else "*_distances.csv"
     for path in sorted(rms_dir.glob(pattern)):
         if not path.is_file():
@@ -1582,10 +1583,14 @@ def build_wide_csv(
                 if measure is None:
                     print(f"[SKIP] {csv_path.name}: none of {measure_cols} present.")
                     continue
+                slot_label = None
                 slot_match = FLY_SLOT_REGEX.search(csv_path.stem)
-                slot_label = slot_match.group(1).lower() if slot_match else None
+                if slot_match:
+                    slot_label = slot_match.group(1).strip().lower()
                 fly_number = _extract_fly_number(slot_label, csv_path.stem, fly_dir.name)
                 fly_number_label = str(fly_number) if fly_number is not None else "UNKNOWN"
+                if fly_number is not None and not slot_label:
+                    slot_label = f"fly{fly_number}".strip().lower()
                 if fly_number is None:
                     print(
                         f"[WARN] build_wide_csv: {csv_path.name} lacks fly number token; using 'UNKNOWN'"
@@ -1703,20 +1708,31 @@ def build_wide_csv(
     ):
         group_items = list(grouped)
         fly_dir_path = Path(group_items[0]["fly_dir"]).expanduser().resolve()
-        slot_choices = [
-            str(item.get("slot_label")).strip().lower()
-            for item in group_items
-            if item.get("slot_label")
-        ]
+        slot_choices = sorted(
+            {
+                str(item.get("slot_label")).strip().lower()
+                for item in group_items
+                if item.get("slot_label")
+            }
+        )
         slot_label = slot_choices[0] if slot_choices else None
-        slot_cache_key = (str(fly_dir_path), slot_label or "")
+        if len(slot_choices) > 1:
+            print(
+                "[WARN] build_wide_csv: "
+                f"dataset={dataset} fly={fly} fly_number={fly_number_label} "
+                f"had multiple slot labels {slot_choices}; using {slot_label}."
+            )
+        if not slot_label and str(fly_number_label).isdigit():
+            slot_label = f"fly{fly_number_label}".strip().lower()
+        slot_token = (slot_label or "").strip().lower()
+        slot_cache_key = (str(fly_dir_path), slot_token)
         if slot_cache_key not in slot_stats_cache:
-            slot_stats_cache[slot_cache_key] = _load_distance_stats(fly_dir_path, slot_label)
+            slot_stats_cache[slot_cache_key] = _load_distance_stats(fly_dir_path, slot_token or None)
         slot_stats = slot_stats_cache[slot_cache_key]
         if slot_cache_key not in distance_trim_cache:
             distance_trim_cache[slot_cache_key] = _compute_distance_trimmed_span(
                 fly_dir_path,
-                slot_label,
+                slot_token or None,
                 class2_min=class2_min,
                 class2_max=class2_max,
             )
