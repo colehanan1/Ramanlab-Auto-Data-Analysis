@@ -138,6 +138,106 @@ DEFAULT_CONFIG_PATH = PROJECT_ROOT / "config.yaml"
 DEFAULT_DISTANCE_LIMITS = (70.0, 250.0)
 
 
+def _load_distance_stats(fly_dir: Path, slot_label: str | None) -> tuple[float, float] | None:
+    """Return pixel min/max from the cached class-2 stats JSON for the slot."""
+
+    candidates: list[Path] = []
+    if slot_label:
+        candidates.append(fly_dir / f"{slot_label}_global_distance_stats_class_2.json")
+    candidates.append(fly_dir / "global_distance_stats_class_2.json")
+
+    for path in candidates:
+        if not path.is_file():
+            continue
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            print(f"[WARN] Failed to read distance stats {path}: {exc}")
+            continue
+        try:
+            gmin = float(data["global_min"])
+            gmax = float(data["global_max"])
+        except (KeyError, TypeError, ValueError):
+            print(f"[WARN] Malformed distance stats {path}: {data}")
+            continue
+        if not (math.isfinite(gmin) and math.isfinite(gmax)):
+            continue
+        return gmin, gmax
+    return None
+
+
+def _iter_slot_distance_csvs(fly_dir: Path, slot_label: str | None) -> Iterator[Path]:
+    """Yield testing/training class-2 distance CSVs for the provided slot."""
+
+    rms_dir = fly_dir / "RMS_calculations"
+    if not rms_dir.is_dir():
+        return
+    slot_token = slot_label or ""
+    pattern = f"*{slot_token}_distances.csv" if slot_token else "*_distances.csv"
+    for path in sorted(rms_dir.glob(pattern)):
+        if not path.is_file():
+            continue
+        if TRIAL_REGEX.search(path.stem.lower()) is None:
+            continue
+        yield path
+
+
+def _class2_distances(csv_path: Path) -> np.ndarray:
+    """Compute pixel distances between class-2 and class-8 detections."""
+
+    required = ["x_class2", "y_class2", "x_class8", "y_class8"]
+    try:
+        df = pd.read_csv(csv_path, usecols=required)
+    except ValueError:
+        try:
+            df = pd.read_csv(csv_path)
+        except Exception as exc:
+            print(f"[WARN] Could not read raw distance columns from {csv_path.name}: {exc}")
+            return np.empty(0, dtype=float)
+    missing = [col for col in required if col not in df.columns]
+    if missing:
+        print(f"[WARN] {csv_path.name} missing class-2 columns: {missing}")
+        return np.empty(0, dtype=float)
+
+    x2 = pd.to_numeric(df["x_class2"], errors="coerce").to_numpy(dtype=float, copy=False)
+    y2 = pd.to_numeric(df["y_class2"], errors="coerce").to_numpy(dtype=float, copy=False)
+    x8 = pd.to_numeric(df["x_class8"], errors="coerce").to_numpy(dtype=float, copy=False)
+    y8 = pd.to_numeric(df["y_class8"], errors="coerce").to_numpy(dtype=float, copy=False)
+    distances = np.sqrt((x2 - x8) ** 2 + (y2 - y8) ** 2)
+    return distances.astype(float, copy=False)
+
+
+def _compute_distance_trimmed_span(
+    fly_dir: Path,
+    slot_label: str | None,
+    *,
+    class2_min: float,
+    class2_max: float,
+) -> tuple[float, float, int] | None:
+    """Return (trimmed_min, trimmed_max, sample_count) from raw class-2 traces."""
+
+    samples: list[np.ndarray] = []
+    for csv_path in _iter_slot_distance_csvs(fly_dir, slot_label):
+        distances = _class2_distances(csv_path)
+        if distances.size == 0:
+            continue
+        mask = np.isfinite(distances) & (distances >= class2_min) & (distances <= class2_max)
+        if not np.any(mask):
+            continue
+        samples.append(distances[mask])
+
+    if not samples:
+        return None
+
+    combined = np.concatenate(samples)
+    if combined.size == 0:
+        return None
+
+    trimmed_min = float(np.nanpercentile(combined, 1))
+    trimmed_max = float(np.nanpercentile(combined, 99))
+    return trimmed_min, trimmed_max, combined.size
+
+
 def _resolve_distance_limits(
     distance_limits: tuple[float, float] | None,
     config_path: str | Path | None,
@@ -1483,7 +1583,7 @@ def build_wide_csv(
                     print(f"[SKIP] {csv_path.name}: none of {measure_cols} present.")
                     continue
                 slot_match = FLY_SLOT_REGEX.search(csv_path.stem)
-                slot_label = slot_match.group(1) if slot_match else None
+                slot_label = slot_match.group(1).lower() if slot_match else None
                 fly_number = _extract_fly_number(slot_label, csv_path.stem, fly_dir.name)
                 fly_number_label = str(fly_number) if fly_number is not None else "UNKNOWN"
                 if fly_number is None:
@@ -1505,9 +1605,11 @@ def build_wide_csv(
                         "fly": fly,
                         "fly_key": f"{dataset}::{fly}",
                         "fly_number": fly_number_label,
+                        "fly_dir": str(fly_dir),
                         "csv_path": csv_path,
                         "measure_col": measure,
                         "trial_type": trial_type,
+                        "slot_label": slot_label,
                     }
                 )
                 max_len = max(max_len, n_rows)
@@ -1575,6 +1677,9 @@ def build_wide_csv(
             header_df.to_csv(target, index=False)
             extra_paths[trial_key] = target
 
+    slot_stats_cache: dict[tuple[str, str], tuple[float, float] | None] = {}
+    distance_trim_cache: dict[tuple[str, str], tuple[float, float, int] | None] = {}
+
     items_sorted = sorted(
         items,
         key=lambda entry: (
@@ -1597,6 +1702,25 @@ def build_wide_csv(
         ),
     ):
         group_items = list(grouped)
+        fly_dir_path = Path(group_items[0]["fly_dir"]).expanduser().resolve()
+        slot_choices = [
+            str(item.get("slot_label")).strip().lower()
+            for item in group_items
+            if item.get("slot_label")
+        ]
+        slot_label = slot_choices[0] if slot_choices else None
+        slot_cache_key = (str(fly_dir_path), slot_label or "")
+        if slot_cache_key not in slot_stats_cache:
+            slot_stats_cache[slot_cache_key] = _load_distance_stats(fly_dir_path, slot_label)
+        slot_stats = slot_stats_cache[slot_cache_key]
+        if slot_cache_key not in distance_trim_cache:
+            distance_trim_cache[slot_cache_key] = _compute_distance_trimmed_span(
+                fly_dir_path,
+                slot_label,
+                class2_min=class2_min,
+                class2_max=class2_max,
+            )
+        raw_trimmed = distance_trim_cache[slot_cache_key]
         fly_span_min = math.inf
         fly_span_max = -math.inf
         in_range_samples = 0
@@ -1716,15 +1840,19 @@ def build_wide_csv(
                 f"fly_number={fly_number_label}; global extrema set to NaN."
             )
 
-        if all_trial_samples:
-            # Combine all testing AND training samples for non-reactive detection
+        if slot_stats is not None:
+            gmin, gmax = slot_stats
+
+        raw_sample_count = 0
+        if raw_trimmed is not None:
+            trimmed_min, trimmed_max, raw_sample_count = raw_trimmed
+        elif all_trial_samples:
+            # Combine measure values as a fallback when raw traces are unavailable.
             combined_samples = np.concatenate(all_trial_samples)
             if combined_samples.size:
-                # Changed from 2.5/97.5 to 0.5/99.5 for more sensitive non-reactive detection
-                # This trims only extreme outliers (top/bottom 0.5%) rather than 2.5%
-                # Now checks BOTH testing and training trials
                 trimmed_min = float(np.nanpercentile(combined_samples, 1))
                 trimmed_max = float(np.nanpercentile(combined_samples, 99))
+                raw_sample_count = combined_samples.size
             else:
                 trimmed_min = float("nan")
                 trimmed_max = float("nan")
@@ -1752,7 +1880,7 @@ def build_wide_csv(
                 f"[NON-REACTIVE] dataset={dataset} fly={fly} fly_number={fly_number_label} "
                 f"span={span:.2f}px (threshold={trimmed_threshold:.2f}px) "
                 f"range=[{trimmed_min_effective:.2f}, {trimmed_max_effective:.2f}] "
-                f"samples={combined_samples.size if all_trial_samples else 0} "
+                f"samples={raw_sample_count} "
                 f"(testing+training)"
             )
         elif math.isfinite(span):
@@ -1838,7 +1966,7 @@ def build_wide_csv(
     flagged_path = out_path.with_name(out_path.stem + "_flagged_flies.txt")
     with flagged_path.open("w", encoding="utf-8") as fh:
         fh.write(
-            f"# Flies flagged as non-reactive after 2.5th–97.5th percentile trimming (span ≤ {trimmed_threshold:g} px)\n"
+            f"# Flies flagged as non-reactive after 1st–99th percentile pixel trimming (span ≤ {trimmed_threshold:g} px)\n"
         )
         fh.write("# dataset,fly,fly_number,trimmed_global_min,trimmed_global_max\n")
         if flagged_summary:
