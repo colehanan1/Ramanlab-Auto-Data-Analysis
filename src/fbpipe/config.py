@@ -56,7 +56,7 @@ class Settings:
     cache_dir: str = ""
     allow_cpu: bool = False
     cuda_allow_tf32: bool = True
-    non_reactive_span_px: float = 9.0
+    non_reactive_span_px: float = 5.0
     anchor_x: float = 1079.0
     anchor_y: float = 540.0
     fps_default: float = 40.0
@@ -209,7 +209,7 @@ def load_settings(config_path: str | Path) -> Settings:
     )
 
     non_reactive_span_px = float(
-        os.getenv("NON_REACTIVE_SPAN_PX", _get(data, "non_reactive_span_px", 9.0))
+        os.getenv("NON_REACTIVE_SPAN_PX", _get(data, "non_reactive_span_px", 5.0))
     )
 
     return Settings(

@@ -13,7 +13,7 @@ import pandas as pd
 from ..config import Settings
 
 
-NON_REACTIVE_SPAN_PX = 9.0
+NON_REACTIVE_SPAN_PX = 5.0
 
 
 def _stringify(value: object, fallback: str = "UNKNOWN") -> str:
@@ -110,6 +110,67 @@ def _write_empty_predictions(output_csv: Path, columns: Sequence[str]) -> None:
     pd.DataFrame(columns=cols).to_csv(output_csv, index=False)
 
 
+def _augment_prediction_csv(
+    output_csv: Path, source_df: pd.DataFrame, *, threshold: float
+) -> None:
+    """Append span metadata + flags so downstream plots can drop non-reactive flies."""
+
+    if not output_csv.exists() or source_df.empty:
+        return
+
+    try:
+        pred_df = pd.read_csv(output_csv)
+    except Exception as exc:  # pragma: no cover - defensive logging
+        print(f"[REACTION] Failed to read prediction CSV for augmentation: {exc}")
+        return
+
+    if pred_df.empty:
+        return
+
+    key_cols = ["dataset", "fly", "fly_number", "trial_label"]
+
+    def _normalise_keys(df: pd.DataFrame) -> pd.DataFrame:
+        for column in key_cols:
+            if column not in df.columns:
+                df[column] = ""
+            df[column] = df[column].astype(str).str.strip()
+        return df
+
+    pred_df = _normalise_keys(pred_df)
+    source_norm = _normalise_keys(source_df.copy())
+
+    info_cols = [
+        column
+        for column in (
+            "trial_type",
+            "global_min",
+            "global_max",
+            "trimmed_global_min",
+            "trimmed_global_max",
+        )
+        if column in source_norm.columns
+    ]
+    if info_cols:
+        source_info = (
+            source_norm[key_cols + [col for col in info_cols if col not in key_cols]]
+            .drop_duplicates(subset=key_cols)
+            .reset_index(drop=True)
+        )
+    else:
+        source_info = source_norm[key_cols].drop_duplicates(subset=key_cols).reset_index(drop=True)
+
+    merged = pred_df.merge(source_info, on=key_cols, how="left", suffixes=("", "_src"))
+    if "trial_type" not in merged.columns:
+        merged["trial_type"] = "testing"
+
+    span_mask = _non_reactive_mask(merged, threshold=threshold)
+    merged["_non_reactive"] = span_mask
+    merged["non_reactive_flag"] = span_mask.astype(float)
+
+    merged.to_csv(output_csv, index=False)
+    print(f"[REACTION] Annotated predictions with span metadata ({len(merged)} rows)")
+
+
 def main(cfg: Settings) -> None:
     settings = cfg.reaction_prediction
     if not settings.data_csv:
@@ -148,6 +209,7 @@ def main(cfg: Settings) -> None:
         )
         _write_empty_predictions(output_csv, df.columns)
         return
+    model_input_df = filtered_df.copy()
 
     data_csv_for_cli = data_csv
     temp_path: Path | None = None
@@ -198,4 +260,5 @@ def main(cfg: Settings) -> None:
             except OSError:
                 pass
 
+    _augment_prediction_csv(output_csv, model_input_df, threshold=span_threshold)
     print(f"[REACTION] Wrote predictions to {output_csv}")

@@ -59,7 +59,7 @@ distance_limits:
   class2_max: 250.0
 
 # Reaction filtering
-non_reactive_span_px: 9.0  # flag flies when global span ≤ this threshold (pixels)
+non_reactive_span_px: 5.0  # flag flies when global span ≤ this threshold (pixels)
 
 # Envelope / RMS
 fps_default: 40.0

@@ -1659,6 +1659,8 @@ def build_wide_csv(
         "trimmed_global_max",
         "local_min",
         "local_max",
+        "local_min_before",
+        "local_max_before",
         "local_min_during",
         "local_max_during",
         "local_max_over_global_min",
@@ -1824,6 +1826,19 @@ def build_wide_csv(
                 local_min_during = float("nan")
                 local_max_during = float("nan")
 
+            before_slice = values[:BEFORE_FRAMES]
+            if before_slice.size:
+                before_mask = np.isfinite(before_slice)
+                if before_mask.any():
+                    local_min_before = float(np.min(before_slice[before_mask]))
+                    local_max_before = float(np.max(before_slice[before_mask]))
+                else:
+                    local_min_before = float("nan")
+                    local_max_before = float("nan")
+            else:
+                local_min_before = float("nan")
+                local_max_before = float("nan")
+
             trial_results.append(
                 {
                     "trial_type": trial_type,
@@ -1833,6 +1848,8 @@ def build_wide_csv(
                     "values": values,
                     "local_min": local_min,
                     "local_max": local_max,
+                    "local_min_before": local_min_before,
+                    "local_max_before": local_max_before,
                     "local_min_during": local_min_during,
                     "local_max_during": local_max_during,
                 }
@@ -1945,6 +1962,8 @@ def build_wide_csv(
                 trimmed_max_effective,
                 result["local_min"],
                 result["local_max"],
+                result["local_min_before"],
+                result["local_max_before"],
                 result["local_min_during"],
                 result["local_max_during"],
                 local_max_over_global_min,
