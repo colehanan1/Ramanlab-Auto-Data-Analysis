@@ -272,22 +272,6 @@ def generate_reaction_matrices_from_csv(cfg: SpreadsheetMatrixConfig) -> None:
                         title="Reaction rate by odor — Reaction Prediction",
                     )
 
-                legend_handles = [
-                    Patch(facecolor="black", edgecolor="black", label="Prediction = 1"),
-                    Patch(facecolor="white", edgecolor="black", label="Prediction = 0"),
-                ]
-                flagged_handle = plt.Line2D(
-                    [0],
-                    [0],
-                    marker="*",
-                    color="red",
-                    linestyle="None",
-                    markersize=10,
-                    label=f"Non-reactive span ≤ {NON_REACTIVE_SPAN_PX:g}px",
-                )
-                legend_handles.append(flagged_handle)
-                ax_during.legend(handles=legend_handles, loc="upper left", frameon=True, fontsize=9)
-
                 shift_frac = cfg.bottom_shift_in / fig_h if fig_h else 0.0
                 for axis in (ax_dc,):
                     pos = axis.get_position()
@@ -330,6 +314,10 @@ def generate_reaction_matrices_from_csv(cfg: SpreadsheetMatrixConfig) -> None:
                         "trial_num",
                         "trial",
                     ])
+                    if "probability" in export.columns:
+                        export["prob_reaction"] = pd.to_numeric(export["probability"], errors="coerce")
+                    elif "prob_reaction" not in export.columns:
+                        export["prob_reaction"] = np.nan
                     export_cols = [
                         "dataset",
                         "fly",
@@ -338,6 +326,7 @@ def generate_reaction_matrices_from_csv(cfg: SpreadsheetMatrixConfig) -> None:
                         "odor_sent",
                         "during_hit",
                         "after_hit",
+                        "prob_reaction",
                     ]
                     export_path = odor_dir / f"binary_reactions_{odor.replace(' ', '_')}_{order_suffix}.csv"
                     if should_write(export_path, cfg.overwrite):

@@ -126,7 +126,7 @@ TESTING_DATASET_ALIAS = {
     "opto_benz": "benz_control",
     "opto_benz_1": "benz_control",
 }
-NON_REACTIVE_SPAN_PX = 5.0
+NON_REACTIVE_SPAN_PX = 7.5
 
 
 # ---------------------------------------------------------------------------

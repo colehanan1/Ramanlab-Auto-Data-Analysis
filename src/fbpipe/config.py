@@ -36,6 +36,7 @@ class ReactionPredictionSettings:
     model_path: str = ""
     output_csv: str = ""
     python: str = ""
+    threshold: float | None = None
     run_prediction: bool = True
     matrix: ReactionMatrixSettings = field(default_factory=ReactionMatrixSettings)
 
@@ -180,11 +181,19 @@ def load_settings(config_path: str | Path) -> Settings:
     if run_prediction_env is not None:
         run_prediction_cfg = run_prediction_env.lower() == "true"
 
+    threshold_value = reaction_cfg.get("threshold")
+    threshold_env = os.getenv("REACTION_THRESHOLD")
+    if threshold_env is not None:
+        threshold_value = float(threshold_env)
+    elif threshold_value is not None:
+        threshold_value = float(threshold_value)
+
     reaction_prediction = ReactionPredictionSettings(
         data_csv=str(os.getenv("REACTION_DATA_CSV", reaction_cfg.get("data_csv", ""))),
         model_path=str(os.getenv("REACTION_MODEL_PATH", reaction_cfg.get("model_path", ""))),
         output_csv=str(os.getenv("REACTION_OUTPUT_CSV", reaction_cfg.get("output_csv", ""))),
         python=reaction_python,
+        threshold=threshold_value,
         run_prediction=bool(run_prediction_cfg),
         matrix=matrix,
     )

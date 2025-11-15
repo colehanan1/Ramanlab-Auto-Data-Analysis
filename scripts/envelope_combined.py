@@ -234,8 +234,8 @@ def _compute_distance_trimmed_span(
     if combined.size == 0:
         return None
 
-    trimmed_min = float(np.nanpercentile(combined, 1))
-    trimmed_max = float(np.nanpercentile(combined, 99))
+    trimmed_min = float(np.nanpercentile(combined, 0.01))
+    trimmed_max = float(np.nanpercentile(combined, 99.99))
     return trimmed_min, trimmed_max, combined.size
 
 
@@ -1791,30 +1791,25 @@ def build_wide_csv(
                 fly_before_mean=fly_before_means.get(item["fly_key"], float("nan")),
             )
 
-            in_range_mask = np.isfinite(values) & (values >= class2_min) & (values <= class2_max)
-            in_range_values = values[in_range_mask]
-            if in_range_values.size:
-                local_min = float(np.min(in_range_values))
-                local_max = float(np.max(in_range_values))
+            finite_mask = np.isfinite(values)
+            finite_values = values[finite_mask]
+            if finite_values.size:
+                local_min = float(np.min(finite_values))
+                local_max = float(np.max(finite_values))
                 fly_span_min = min(fly_span_min, local_min)
                 fly_span_max = max(fly_span_max, local_max)
-                in_range_samples += int(in_range_values.size)
+                in_range_samples += int(finite_values.size)
             else:
                 local_min = float("nan")
                 local_max = float("nan")
                 print(
-                    "[WARN] build_wide_csv: "
-                    f"no values within [{class2_min:.3f}, {class2_max:.3f}] for {csv_path.name}; "
-                    "local extrema set to NaN."
+                    "[WARN] build_wide_csv: no finite values found for "
+                    f"dataset={dataset} fly={fly} fly_number={fly_number_label}; local extrema set to NaN."
                 )
 
             during_slice = values[DURING_START_FRAME:DURING_END_FRAME]
             if during_slice.size:
-                during_mask = (
-                    np.isfinite(during_slice)
-                    & (during_slice >= class2_min)
-                    & (during_slice <= class2_max)
-                )
+                during_mask = np.isfinite(during_slice)
                 during_in_range_values = during_slice[during_mask]
             else:
                 during_in_range_values = np.empty(0, dtype=float)
@@ -1930,6 +1925,7 @@ def build_wide_csv(
                 result["label"],
             )
         )
+        baseline_min = trimmed_min_effective if math.isfinite(trimmed_min_effective) else gmin
         for result in trial_results:
             values = result["values"]
             local_max_over_global_min = float("nan")
@@ -1937,20 +1933,20 @@ def build_wide_csv(
             if (
                 isinstance(local_max_val, (float, int))
                 and math.isfinite(local_max_val)
-                and math.isfinite(gmin)
-                and gmin != 0.0
+                and math.isfinite(baseline_min)
+                and baseline_min != 0.0
             ):
-                local_max_over_global_min = float(local_max_val) / float(gmin)
+                local_max_over_global_min = float(local_max_val) / float(baseline_min)
 
             local_max_during_over_global_min = float("nan")
             local_max_during_val = result["local_max_during"]
             if (
                 isinstance(local_max_during_val, (float, int))
                 and math.isfinite(local_max_during_val)
-                and math.isfinite(gmin)
-                and gmin != 0.0
+                and math.isfinite(baseline_min)
+                and baseline_min != 0.0
             ):
-                local_max_during_over_global_min = float(local_max_during_val) / float(gmin)
+                local_max_during_over_global_min = float(local_max_during_val) / float(baseline_min)
 
             row = [
                 dataset,

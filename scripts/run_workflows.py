@@ -750,6 +750,8 @@ def _run_reactions(settings: Settings) -> None:
         if model_path.exists():
             prediction_expected["model_mtime"] = model_path.stat().st_mtime
         prediction_expected["output_exists"] = output_csv_path.exists()
+        if reaction_cfg.threshold is not None:
+            prediction_expected["threshold"] = float(reaction_cfg.threshold)
         if output_csv_path.exists():
             prediction_expected["output_mtime"] = output_csv_path.stat().st_mtime
 

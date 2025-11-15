@@ -241,6 +241,8 @@ def main(cfg: Settings) -> None:
         "--output-csv",
         str(output_csv),
     ]
+    if settings.threshold is not None:
+        cmd.extend(["--threshold", str(settings.threshold)])
 
     repo_root = Path(__file__).resolve().parents[3]
     env = os.environ.copy()

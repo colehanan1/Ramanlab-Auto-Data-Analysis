@@ -19,8 +19,9 @@ force:
 
 reaction_prediction:
   data_csv: "/home/ramanlab/Documents/cole/Data/Opto/Combined/all_envelope_rows_wide.csv"
-  model_path: "/home/ramanlab/PycharmProjects/FlyBehaviorScoring/artifacts/2025-10-29T23-59-43Z/model_logreg.joblib"
+  model_path: "/home/ramanlab/Documents/cole/VSCode/FlyBehaviorScoring/artifacts/rf_corrected_labels_v1/2025-11-14T18-59-12Z/model_random_forest.joblib"
   output_csv: "/home/ramanlab/Documents/cole/Data/Opto/Combined/model_predictions.csv"
+  threshold: 0.50
   matrix:
     out_dir: "/home/ramanlab/Documents/cole/Results/Opto/Combined/Reaction_Predictions"
     latency_sec: 2.15
@@ -59,7 +60,7 @@ distance_limits:
   class2_max: 250.0
 
 # Reaction filtering
-non_reactive_span_px: 5.0  # flag flies when global span ≤ this threshold (pixels)
+non_reactive_span_px: 7.5  # flag flies when global span ≤ this threshold (pixels)
 
 # Envelope / RMS
 fps_default: 40.0
