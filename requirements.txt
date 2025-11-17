@@ -15,8 +15,8 @@ python-dotenv>=1.0.1
 opencv-python>=4.9
 ultralytics>=8.3.0,<9
 
-# Video composition
-moviepy>=1.0.3
+# Video composition (2.x removed moviepy.editor; keep 1.x for backwards compatibility)
+moviepy>=1.0.3,<2
 Pillow>=10.0
 
 pandas-stubs==2.2.3.250308

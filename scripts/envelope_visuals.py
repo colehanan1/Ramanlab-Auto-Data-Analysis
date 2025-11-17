@@ -497,7 +497,7 @@ class MatrixPlotConfig:
     bottom_shift_in: float = 0.5
     trial_orders: Sequence[str] = field(default_factory=lambda: ("observed", "trained-first"))
     include_hexanol: bool = True
-    overwrite: bool = False
+    overwrite: bool = True
 
 
 def _score_trial(env: np.ndarray, fps: float, cfg: MatrixPlotConfig) -> tuple[int, int]:

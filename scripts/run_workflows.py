@@ -409,6 +409,7 @@ def _matrix_plot_config(data: Mapping[str, Any]) -> MatrixPlotConfig:
     opts = dict(data)
     for key in ("matrix_npy", "codes_json", "out_dir"):
         opts[key] = _ensure_path(opts.get(key), key)
+    opts["overwrite"] = True
     if "trial_orders" in opts and opts["trial_orders"] is not None:
         opts["trial_orders"] = tuple(opts["trial_orders"])
     return MatrixPlotConfig(**opts)  # type: ignore[arg-type]

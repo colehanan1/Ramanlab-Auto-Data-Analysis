@@ -68,7 +68,7 @@ class SpreadsheetMatrixConfig:
     bottom_shift_in: float = 0.5
     trial_orders: Sequence[str] = field(default_factory=lambda: ("observed", "trained-first"))
     include_hexanol: bool = True
-    overwrite: bool = False
+    overwrite: bool = True
     non_reactive_threshold: float | None = None
 
 
@@ -372,6 +372,7 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         default=None,
         help="Override non-reactive span threshold in pixels.",
     )
+    parser.set_defaults(overwrite=True)
     return parser.parse_args(argv)
 
 

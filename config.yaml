@@ -8,6 +8,7 @@ main_directory:
           - "/home/ramanlab/Documents/cole/Data/flys/hex_control/"
           - "/home/ramanlab/Documents/cole/Data/flys/EB_control/"
           - "/home/ramanlab/Documents/cole/Data/flys/Benz_control/"
+          - "/home/ramanlab/Documents/cole/Data/flys/opto_AIR/"
 
 cache_dir: "/home/ramanlab/Documents/cole/cache"
 force:
@@ -19,7 +20,7 @@ force:
 
 reaction_prediction:
   data_csv: "/home/ramanlab/Documents/cole/Data/Opto/Combined/all_envelope_rows_wide.csv"
-  model_path: "/home/ramanlab/Documents/cole/VSCode/FlyBehaviorScoring/artifacts/rf_corrected_labels_v1/2025-11-14T18-59-12Z/model_random_forest.joblib"
+  model_path: "/home/ramanlab/Documents/cole/VSCode/FlyBehaviorScoring/artifacts/rf_corrected_labels_v1/2025-11-17T21-13-28Z/model_random_forest.joblib"
   output_csv: "/home/ramanlab/Documents/cole/Data/Opto/Combined/model_predictions.csv"
   threshold: 0.50
   matrix:
@@ -138,6 +139,8 @@ analysis:
         - "/home/ramanlab/Documents/cole/Data/flys/Benz_control/"
         - "/home/ramanlab/Documents/cole/Data/flys/opto_EB/"
         - "/home/ramanlab/Documents/cole/Data/flys/opto_hex/"
+        - "/home/ramanlab/Documents/cole/Data/flys/opto_AIR/"
+
       fps_default: 40.0
       window_sec: 0.25
       odor_on: 30.0
@@ -154,6 +157,7 @@ analysis:
         - "/securedstorage/DATAsec/cole/Data-secured/hex_control/"
         - "/securedstorage/DATAsec/cole/Data-secured/EB_control/"
         - "/securedstorage/DATAsec/cole/Data-secured/Benz_control/"
+        - "/securedstorage/DATAsec/cole/Data-secured/opto_AIR/"
       output_csv: "/home/ramanlab/Documents/cole/Data/Opto/Combined/all_envelope_rows_wide.csv"
       measure_cols: ["envelope_of_rms"]
       fps_fallback: 40.0
@@ -227,3 +231,4 @@ analysis:
         - "/home/ramanlab/Documents/cole/Data/flys/hex_control/"
         - "/home/ramanlab/Documents/cole/Data/flys/EB_control/"
         - "/home/ramanlab/Documents/cole/Data/flys/Benz_control/"
+        - "/home/ramanlab/Documents/cole/Data/flys/opto_AIR/"
