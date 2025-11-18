@@ -69,6 +69,8 @@ ODOR_CANON: Mapping[str, str] = {
     "optogenetics hex": "opto_hex",
     "hexanol": "opto_hex",
     "opto_hex": "opto_hex",
+    "optogenetics air": "opto_AIR",
+    "opto_air": "opto_AIR",
     "10s_odor_benz": "10s_Odor_Benz",
 }
 
@@ -85,6 +87,7 @@ DISPLAY_LABEL = {
     "opto_EB": "Ethyl Butyrate",
     "opto_benz_1": "Benzaldehyde",
     "opto_hex": "Hexanol",
+    "opto_AIR": "AIR",
 }
 
 ODOR_ORDER = [
@@ -98,6 +101,7 @@ ODOR_ORDER = [
     "EB_control",
     "opto_benz_1",
     "opto_hex",
+    "opto_AIR",
 ]
 
 TRAINED_FIRST_ORDER = (2, 4, 5, 1, 3, 6, 7, 8, 9)
@@ -118,6 +122,39 @@ TRAINING_ODOR_SCHEDULE = {
     6: "Benzaldehyde",
     7: HEXANOL_LABEL,
     8: "Benzaldehyde",
+}
+
+TRAINING_ODOR_SCHEDULE_AIR = {
+    1: "AIR",
+    2: "AIR",
+    3: "AIR",
+    4: "AIR",
+    5: HEXANOL_LABEL,
+    6: "AIR",
+    7: HEXANOL_LABEL,
+    8: "AIR",
+}
+
+TRAINING_ODOR_SCHEDULE_EB = {
+    1: "Ethyl Butyrate",
+    2: "Ethyl Butyrate",
+    3: "Ethyl Butyrate",
+    4: "Ethyl Butyrate",
+    5: HEXANOL_LABEL,
+    6: "Ethyl Butyrate",
+    7: HEXANOL_LABEL,
+    8: "Ethyl Butyrate",
+}
+
+TRAINING_ODOR_SCHEDULE_HEX = {
+    1: HEXANOL_LABEL,
+    2: HEXANOL_LABEL,
+    3: HEXANOL_LABEL,
+    4: HEXANOL_LABEL,
+    5: "Apple Cider Vinegar",
+    6: HEXANOL_LABEL,
+    7: "Apple Cider Vinegar",
+    8: HEXANOL_LABEL,
 }
 
 TESTING_DATASET_ALIAS = {
@@ -212,10 +249,41 @@ def _display_odor(dataset_canon: str, trial_label: str) -> str:
     label_lower = str(trial_label).lower()
 
     if "training" in label_lower:
-        odor_name = TRAINING_ODOR_SCHEDULE.get(number)
-        if odor_name:
-            return odor_name
+        # Select the appropriate training schedule based on dataset
+        if dataset_canon == "opto_AIR":
+            odor_name = TRAINING_ODOR_SCHEDULE_AIR.get(number)
+            if odor_name:
+                return odor_name
+        elif dataset_canon in ("opto_EB", "EB_control"):
+            odor_name = TRAINING_ODOR_SCHEDULE_EB.get(number)
+            if odor_name:
+                return odor_name
+        elif dataset_canon in ("opto_hex", "hex_control"):
+            odor_name = TRAINING_ODOR_SCHEDULE_HEX.get(number)
+            if odor_name:
+                return odor_name
+        else:
+            odor_name = TRAINING_ODOR_SCHEDULE.get(number)
+            if odor_name:
+                return odor_name
         return DISPLAY_LABEL.get(dataset_canon, dataset_canon)
+
+    # Handle opto_AIR testing trials
+    if dataset_canon == "opto_AIR":
+        if number in (1, 3):
+            return HEXANOL_LABEL
+        if number in (2, 4, 5):
+            return "AIR"
+        if number == 6:
+            return "Apple Cider Vinegar"
+        if number == 7:
+            return "Ethyl Butyrate"
+        if number == 8:
+            return "Benzaldehyde"
+        if number == 9:
+            return "Citral"
+        if number == 10:
+            return "3-Octonol"
 
     dataset_for_testing = TESTING_DATASET_ALIAS.get(dataset_canon, dataset_canon)
 
