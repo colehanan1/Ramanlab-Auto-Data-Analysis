@@ -71,6 +71,8 @@ ODOR_CANON: Mapping[str, str] = {
     "opto_hex": "opto_hex",
     "optogenetics air": "opto_AIR",
     "opto_air": "opto_AIR",
+    "optogenetics 3-octanol": "opto_3-oct",
+    "opto_3-oct": "opto_3-oct",
     "10s_odor_benz": "10s_Odor_Benz",
 }
 
@@ -88,6 +90,7 @@ DISPLAY_LABEL = {
     "opto_benz_1": "Benzaldehyde",
     "opto_hex": "Hexanol",
     "opto_AIR": "AIR",
+    "opto_3-oct": "3-Octonol",
 }
 
 ODOR_ORDER = [
@@ -102,6 +105,7 @@ ODOR_ORDER = [
     "opto_benz_1",
     "opto_hex",
     "opto_AIR",
+    "opto_3-oct",
 ]
 
 TRAINED_FIRST_ORDER = (2, 4, 5, 1, 3, 6, 7, 8, 9)
@@ -157,11 +161,23 @@ TRAINING_ODOR_SCHEDULE_HEX = {
     8: HEXANOL_LABEL,
 }
 
+TRAINING_ODOR_SCHEDULE_3OCT = {
+    1: "3-Octonol",
+    2: "3-Octonol",
+    3: "3-Octonol",
+    4: "3-Octonol",
+    5: HEXANOL_LABEL,
+    6: "3-Octonol",
+    7: HEXANOL_LABEL,
+    8: "3-Octonol",
+}
+
 TESTING_DATASET_ALIAS = {
     "opto_hex": "hex_control",
     "opto_EB": "EB_control",
     "opto_benz": "benz_control",
     "opto_benz_1": "benz_control",
+    "opto_3-oct": "opto_3-oct",
 }
 NON_REACTIVE_SPAN_PX = 7.5
 
@@ -254,6 +270,10 @@ def _display_odor(dataset_canon: str, trial_label: str) -> str:
             odor_name = TRAINING_ODOR_SCHEDULE_AIR.get(number)
             if odor_name:
                 return odor_name
+        elif dataset_canon == "opto_3-oct":
+            odor_name = TRAINING_ODOR_SCHEDULE_3OCT.get(number)
+            if odor_name:
+                return odor_name
         elif dataset_canon in ("opto_EB", "EB_control"):
             odor_name = TRAINING_ODOR_SCHEDULE_EB.get(number)
             if odor_name:
@@ -284,6 +304,23 @@ def _display_odor(dataset_canon: str, trial_label: str) -> str:
             return "Citral"
         if number == 10:
             return "3-Octonol"
+
+    # Handle opto_3-oct testing trials
+    if dataset_canon == "opto_3-oct":
+        if number in (1, 3):
+            return HEXANOL_LABEL
+        if number in (2, 4, 5):
+            return "3-Octonol"
+        if number == 6:
+            return "Apple Cider Vinegar"
+        if number == 7:
+            return "Ethyl Butyrate"
+        if number == 8:
+            return "Benzaldehyde"
+        if number == 9:
+            return "Citral"
+        if number == 10:
+            return "Linalool"
 
     dataset_for_testing = TESTING_DATASET_ALIAS.get(dataset_canon, dataset_canon)
 
