@@ -44,6 +44,8 @@ ODOR_CANON: Mapping[str, str] = {
     "optogenetics hex": "opto_hex",
     "hexanol": "opto_hex",
     "opto_hex": "opto_hex",
+    "optogenetics 3-octanol": "opto_3-oct",
+    "opto_3-oct": "opto_3-oct",
 }
 
 DISPLAY_LABEL = {
@@ -59,6 +61,7 @@ DISPLAY_LABEL = {
     "opto_benz_1": "Benzaldehyde",
     "opto_EB": "Ethyl Butyrate",
     "opto_hex": "Hexanol",
+    "opto_3-oct": "3-Octonol",
 }
 
 HEXANOL_LABEL = "Hexanol"
@@ -121,6 +124,16 @@ TRAINING_ODOR_SCHEDULE_OVERRIDES = {
         7: HEXANOL_LABEL,
         8: "Ethyl Butyrate",
     },
+    "opto_3-oct": {
+        1: "3-Octonol",
+        2: "3-Octonol",
+        3: "3-Octonol",
+        4: "3-Octonol",
+        5: HEXANOL_LABEL,
+        6: "3-Octonol",
+        7: HEXANOL_LABEL,
+        8: "3-Octonol",
+    },
 }
 
 TESTING_DATASET_ALIAS = {
@@ -128,6 +141,7 @@ TESTING_DATASET_ALIAS = {
     "opto_EB": "EB_control",
     "opto_benz": "benz_control",
     "opto_benz_1": "benz_control",
+    "opto_3-oct": "opto_3-oct",
 }
 
 
@@ -248,6 +262,13 @@ def _display_odor(dataset_canon: str, trial_label: str) -> str:
             10: "Linalool",
         },
         "10s_Odor_Benz": {6: "Benzaldehyde", 7: "Benzaldehyde"},
+        "opto_3-oct": {
+            6: "Apple Cider Vinegar",
+            7: "Ethyl Butyrate",
+            8: "Benzaldehyde",
+            9: "Citral",
+            10: "Linalool",
+        },
     }
 
     if dataset_for_testing in mapping:

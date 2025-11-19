@@ -290,6 +290,8 @@ ODOR_CANON = {
     "hexanol": "opto_hex",
     "opto_hex": "opto_hex",
     "opto_air": "opto_AIR",
+    "optogenetics 3-octanol": "opto_3-oct",
+    "opto_3-oct": "opto_3-oct",
 }
 
 DISPLAY_LABEL = {
@@ -306,6 +308,7 @@ DISPLAY_LABEL = {
     "opto_EB": "Ethyl Butyrate",
     "opto_hex": "Hexanol",
     "opto_AIR": "AIR",
+    "opto_3-oct": "3-Octonol",
 }
 
 HEXANOL = "Hexanol"
@@ -378,6 +381,16 @@ TRAINING_ODOR_SCHEDULE_OVERRIDES = {
         7: HEXANOL,
         8: "AIR",
     },
+    "opto_3-oct": {
+        1: "3-Octonol",
+        2: "3-Octonol",
+        3: "3-Octonol",
+        4: "3-Octonol",
+        5: HEXANOL,
+        6: "3-Octonol",
+        7: HEXANOL,
+        8: "3-Octonol",
+    },
 }
 
 TESTING_DATASET_ALIAS = {
@@ -386,6 +399,7 @@ TESTING_DATASET_ALIAS = {
     "opto_benz": "benz_control",
     "opto_benz_1": "benz_control",
     "opto_AIR": "opto_AIR",
+    "opto_3-oct": "opto_3-oct",
 }
 
 
@@ -483,6 +497,13 @@ def _display_odor(dataset_canon: str, trial_label: str) -> str:
             8: "Benzaldehyde",
             9: "Citral",
             10: "3-Octonol",
+        },
+        "opto_3-oct": {
+            6: "Apple Cider Vinegar",
+            7: "Ethyl Butyrate",
+            8: "Benzaldehyde",
+            9: "Citral",
+            10: "Linalool",
         },
     }
 
