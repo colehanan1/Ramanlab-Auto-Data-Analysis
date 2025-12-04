@@ -32,6 +32,7 @@ DEFAULT_SOURCES = [
     "/securedstorage/DATAsec/cole/Data-secured/opto_EB/",
     "/securedstorage/DATAsec/cole/Data-secured/opto_benz_1/",
     "/securedstorage/DATAsec/cole/Data-secured/opto_hex/",
+    "/securedstorage/DATAsec/cole/Data-secured/opto_ACV/",
     "/securedstorage/DATAsec/cole/Data-secured/hex_control/",
 ]
 DEFAULT_OUTPUT = "/home/ramanlab/Documents/cole/Data/Opto/all_eye_prob_coords_wide.csv"

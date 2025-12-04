@@ -5,6 +5,7 @@ main_directory:
           - "/home/ramanlab/Documents/cole/Data/flys/opto_EB/"
           - "/home/ramanlab/Documents/cole/Data/flys/opto_benz_1/"
           - "/home/ramanlab/Documents/cole/Data/flys/opto_hex/"
+          - "/home/ramanlab/Documents/cole/Data/flys/opto_ACV/"
           - "/home/ramanlab/Documents/cole/Data/flys/hex_control/"
           - "/home/ramanlab/Documents/cole/Data/flys/EB_control/"
           - "/home/ramanlab/Documents/cole/Data/flys/Benz_control/"
@@ -140,6 +141,7 @@ analysis:
         - "/home/ramanlab/Documents/cole/Data/flys/Benz_control/"
         - "/home/ramanlab/Documents/cole/Data/flys/opto_EB/"
         - "/home/ramanlab/Documents/cole/Data/flys/opto_hex/"
+        - "/home/ramanlab/Documents/cole/Data/flys/opto_ACV/"
         - "/home/ramanlab/Documents/cole/Data/flys/opto_AIR/"
         - "/home/ramanlab/Documents/cole/Data/flys/opto_3-oct/"
 
@@ -152,10 +154,13 @@ analysis:
       mirror:
         - source: "/home/ramanlab/Documents/cole/Data/flys/opto_hex/"
           destination: "/securedstorage/DATAsec/cole/Data-secured/opto_hex/"
+        - source: "/home/ramanlab/Documents/cole/Data/flys/opto_ACV/"
+          destination: "/securedstorage/DATAsec/cole/Data-secured/opto_ACV/"
       roots:
         - "/securedstorage/DATAsec/cole/Data-secured/opto_EB/"
         - "/securedstorage/DATAsec/cole/Data-secured/opto_benz_1/"
         - "/securedstorage/DATAsec/cole/Data-secured/opto_hex/"
+        - "/securedstorage/DATAsec/cole/Data-secured/opto_ACV/"
         - "/securedstorage/DATAsec/cole/Data-secured/hex_control/"
         - "/securedstorage/DATAsec/cole/Data-secured/EB_control/"
         - "/securedstorage/DATAsec/cole/Data-secured/Benz_control/"
@@ -231,6 +236,7 @@ analysis:
         - "/home/ramanlab/Documents/cole/Data/flys/opto_EB/"
         - "/home/ramanlab/Documents/cole/Data/flys/opto_benz_1/"
         - "/home/ramanlab/Documents/cole/Data/flys/opto_hex/"
+        - "/home/ramanlab/Documents/cole/Data/flys/opto_ACV/"
         - "/home/ramanlab/Documents/cole/Data/flys/hex_control/"
         - "/home/ramanlab/Documents/cole/Data/flys/EB_control/"
         - "/home/ramanlab/Documents/cole/Data/flys/Benz_control/"

@@ -40,16 +40,19 @@ ODOR_CANON: Mapping[str, str] = {
     "optogenetics benzaldehyde 1": "opto_benz_1",
     "optogenetics ethyl butyrate": "opto_EB",
     "10s_odor_benz": "10s_Odor_Benz",
+    "optogenetics apple cider vinegar": "opto_ACV",
+    "optogenetics acv": "opto_ACV",
     "optogenetics hexanol": "opto_hex",
     "optogenetics hex": "opto_hex",
     "hexanol": "opto_hex",
     "opto_hex": "opto_hex",
+    "opto_acv": "opto_ACV",
     "optogenetics 3-octanol": "opto_3-oct",
     "opto_3-oct": "opto_3-oct",
 }
 
 DISPLAY_LABEL = {
-    "ACV": "ACV",
+    "ACV": "Apple Cider Vinegar",
     "3-octonol": "3-Octonol",
     "Benz": "Benzaldehyde",
     "10s_Odor_Benz": "Benzaldehyde",
@@ -60,6 +63,7 @@ DISPLAY_LABEL = {
     "opto_benz": "Benzaldehyde",
     "opto_benz_1": "Benzaldehyde",
     "opto_EB": "Ethyl Butyrate",
+    "opto_ACV": "Apple Cider Vinegar",
     "opto_hex": "Hexanol",
     "opto_3-oct": "3-Octonol",
 }
@@ -134,6 +138,26 @@ TRAINING_ODOR_SCHEDULE_OVERRIDES = {
         7: HEXANOL_LABEL,
         8: "3-Octonol",
     },
+    "ACV": {
+        1: "Apple Cider Vinegar",
+        2: "Apple Cider Vinegar",
+        3: "Apple Cider Vinegar",
+        4: "Apple Cider Vinegar",
+        5: HEXANOL_LABEL,
+        6: "Apple Cider Vinegar",
+        7: HEXANOL_LABEL,
+        8: "Apple Cider Vinegar",
+    },
+    "opto_ACV": {
+        1: "Apple Cider Vinegar",
+        2: "Apple Cider Vinegar",
+        3: "Apple Cider Vinegar",
+        4: "Apple Cider Vinegar",
+        5: HEXANOL_LABEL,
+        6: "Apple Cider Vinegar",
+        7: HEXANOL_LABEL,
+        8: "Apple Cider Vinegar",
+    },
 }
 
 TESTING_DATASET_ALIAS = {
@@ -141,6 +165,7 @@ TESTING_DATASET_ALIAS = {
     "opto_EB": "EB_control",
     "opto_benz": "benz_control",
     "opto_benz_1": "benz_control",
+    "opto_ACV": "ACV",
     "opto_3-oct": "opto_3-oct",
 }
 
@@ -230,7 +255,13 @@ def _display_odor(dataset_canon: str, trial_label: str) -> str:
         )
 
     mapping = {
-        "ACV": {6: "3-Octonol", 7: "Benzaldehyde", 8: "Citral", 9: "Linalool"},
+        "ACV": {
+            6: "3-Octonol",
+            7: "Ethyl Butyrate",
+            8: "Benzaldehyde",
+            9: "Citral",
+            10: "Linalool",
+        },
         "3-octonol": {6: "Benzaldehyde", 7: "Citral", 8: "Linalool"},
         "Benz": {6: "Citral", 7: "Linalool"},
         "benz_control": {
@@ -258,6 +289,13 @@ def _display_odor(dataset_canon: str, trial_label: str) -> str:
             6: "Benzaldehyde",
             7: "3-Octonol",
             8: "Ethyl Butyrate",
+            9: "Citral",
+            10: "Linalool",
+        },
+        "opto_ACV": {
+            6: "3-Octonol",
+            7: "Ethyl Butyrate",
+            8: "Benzaldehyde",
             9: "Citral",
             10: "Linalool",
         },
