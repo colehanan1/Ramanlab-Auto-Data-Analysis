@@ -764,7 +764,7 @@ def plot_reaction_rate_bars(
     ax.set_xticks(x)
     ax.set_xticklabels(stats_df["odor"].astype(str), rotation=35, ha="right")
     ax.set_ylim(0.0, 1.05)
-    ax.set_ylabel("Reaction rate (reactions ÷ total sent)")
+    ax.set_ylabel("Reaction Rate")
     ax.set_xlabel("Odor")
     ax.set_title(title, fontsize=12, weight="bold")
     ax.grid(axis="y", linestyle="--", linewidth=0.6, alpha=0.35)
@@ -818,6 +818,14 @@ def _trial_order_for(dataset_trials: Sequence[str], order: str) -> list[str]:
 
 def _order_suffix(order: str) -> str:
     return "unordered" if order == "trained-first" else order.replace("_", "-")
+
+
+def _matrix_title(dataset_canon: str) -> str:
+    """Return plot title text based on dataset origin (opto vs control)."""
+
+    base = DISPLAY_LABEL.get(dataset_canon, dataset_canon)
+    suffix = "Conditioning Results" if str(dataset_canon).lower().startswith("opto_") else "Control Results"
+    return f"{base} {suffix}"
 
 
 def generate_reaction_matrices(cfg: MatrixPlotConfig) -> None:
@@ -972,7 +980,7 @@ def generate_reaction_matrices(cfg: MatrixPlotConfig) -> None:
 
             ax_during.imshow(during_matrix, cmap=cmap, norm=norm, aspect="auto", interpolation="nearest")
             ax_during.set_title(
-                f"{odor_label} — During\n(DURING shifted by +{cfg.latency_sec:.2f} s)",
+                f"{_matrix_title(odor)}\n(DURING shifted by +{cfg.latency_sec:.2f} s)",
                 fontsize=14,
                 weight="bold",
                 linespacing=1.1,
@@ -1019,7 +1027,7 @@ def generate_reaction_matrices(cfg: MatrixPlotConfig) -> None:
                 plot_reaction_rate_bars(
                     ax_dc,
                     rate_stats,
-                    title="Reaction rate by odor — Reaction Matrix",
+                    title="Reaction Rates by Odor",
                 )
 
             shift_frac = cfg.bottom_shift_in / fig_h if fig_h else 0.0
@@ -1257,16 +1265,28 @@ def generate_envelope_plots(cfg: EnvelopePlotConfig) -> None:
 
         fly_caption = fly
         if fly_number_label.upper() != "UNKNOWN":
-            fly_caption = f"{fly} — Fly {fly_number_label}"
+            fly_caption = f"{fly} - Fly {fly_number_label}"
         fly_flagged = bool(non_reactive_mask(fly_df).any())
+        title_y = 0.995
+        subtitle_y = title_y - 0.035
         fig.suptitle(
-            f"{fly_caption} {trial_type.title()} Trials — RMS of Proboscis vs Eye Distance",
-            y=0.995,
+            "Proboscis Distance Across Testing Trials",
+            y=title_y,
             fontsize=14,
+            weight="bold",
+            color="black",
+        )
+        fig.text(
+            0.5,
+            subtitle_y,
+            fly_caption,
+            ha="center",
+            va="center",
+            fontsize=12,
             weight="bold",
             color="tab:red" if fly_flagged else "black",
         )
-        fig.tight_layout(rect=[0, 0, 1, 0.97])
+        fig.tight_layout(rect=[0, 0, 1, 0.93])
 
         if should_write(out_path, cfg.overwrite):
             fig.savefig(out_path, dpi=300, bbox_inches="tight")
