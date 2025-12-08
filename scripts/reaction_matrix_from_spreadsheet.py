@@ -39,6 +39,7 @@ from envelope_visuals import (
     _fly_row_label,
     _fly_sort_key,
     _normalise_fly_columns,
+    _matrix_title,
     NON_REACTIVE_SPAN_PX,
     _order_suffix,
     _style_trained_xticks,
@@ -225,9 +226,7 @@ def generate_reaction_matrices_from_csv(cfg: SpreadsheetMatrixConfig) -> None:
                 ax_during.imshow(
                     during_matrix, cmap=cmap, norm=norm, aspect="auto", interpolation="nearest"
                 )
-                ax_during.set_title(
-                    f"{odor_label} — During (Spreadsheet)", fontsize=14, weight="bold"
-                )
+                ax_during.set_title(_matrix_title(odor), fontsize=14, weight="bold")
                 _style_trained_xticks(ax_during, pretty_labels, trained_display, xtick_fs)
                 ax_during.set_yticks([])
                 ax_during.set_ylabel(f"{n_flies} Flies", fontsize=11)
@@ -269,7 +268,7 @@ def generate_reaction_matrices_from_csv(cfg: SpreadsheetMatrixConfig) -> None:
                     plot_reaction_rate_bars(
                         ax_dc,
                         rate_stats,
-                        title="Reaction rate by odor — Reaction Prediction",
+                        title="Reaction Rates by Odor",
                     )
 
                 shift_frac = cfg.bottom_shift_in / fig_h if fig_h else 0.0

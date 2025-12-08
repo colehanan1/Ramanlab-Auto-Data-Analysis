@@ -1,12 +1,33 @@
 from __future__ import annotations
 
 from pathlib import Path
+import re
 
 import pandas as pd
 
 from ..config import Settings
 from ..utils.columns import find_proboscis_distance_column
 from ..utils.fly_files import iter_fly_distance_csvs
+
+
+def _consecutive_runs(values: list[int], min_len: int = 10) -> list[tuple[int, int]]:
+    """Return (start, end) spans for consecutive integer runs of at least *min_len*."""
+
+    runs: list[tuple[int, int]] = []
+    if not values:
+        return runs
+
+    start = prev = values[0]
+    for val in values[1:]:
+        if val == prev + 1:
+            prev = val
+            continue
+        if prev - start + 1 >= min_len:
+            runs.append((start, prev))
+        start = prev = val
+    if prev - start + 1 >= min_len:
+        runs.append((start, prev))
+    return runs
 
 
 def main(cfg: Settings) -> None:
@@ -51,6 +72,12 @@ def main(cfg: Settings) -> None:
                 )
 
             all_dropped = sorted(set(missing) | set(dropped))
+            flagged_runs = _consecutive_runs(all_dropped, min_len=10)
+            trial_label = ""
+            trial_match = re.search(r"(testing|training)_\d+", csv_path.stem, re.IGNORECASE)
+            if trial_match:
+                trial_label = trial_match.group(0)
+
             out_path = csv_path.with_suffix("").as_posix() + "_dropped_frames.txt"
             with open(out_path, "w", encoding="utf-8") as fp:
                 if not all_dropped:
@@ -60,6 +87,14 @@ def main(cfg: Settings) -> None:
                     for frame in all_dropped:
                         fp.write(f"{frame}\n")
                     fp.write(f"\nTotal dropped frames: {len(all_dropped)}\n")
+                    if flagged_runs:
+                        fp.write("\nFlagged consecutive drops (>=10 in a row):\n")
+                        for start, end in flagged_runs:
+                            fp.write(f"{start}-{end}\n")
             print(
                 f"[DROP] Wrote dropped frame report for {csv_path.name} → {out_path}"
             )
+            for start, end in flagged_runs:
+                print(
+                    f"[DROP][FLAG] {csv_path.name} ({trial_label or 'unknown trial'}) has >=10 consecutive dropped frames: {start}-{end}"
+                )
