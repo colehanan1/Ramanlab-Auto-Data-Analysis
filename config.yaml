@@ -1,6 +1,6 @@
 
 # Project configuration
-model_path: "/home/ramanlab/Documents/cole/model/YOLOProjectProboscisLegs/runs/obb/train6/weights/best.pt"
+model_path: "/home/ramanlab/Documents/cole/sam2/notebooks/YOLOProjectProboscisLegs/runs/obb/train5/weights/best.pt"
 main_directory:
           - "/home/ramanlab/Documents/cole/Data/flys/opto_EB/"
           - "/home/ramanlab/Documents/cole/Data/flys/opto_benz_1/"

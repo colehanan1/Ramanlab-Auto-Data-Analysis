@@ -17,6 +17,24 @@ def _as_bool(value, default: bool) -> bool:
     return bool(value)
 
 
+def get_main_directories(cfg: Settings) -> list[Path]:
+    """
+    Normalize main_directory to always return a list of Path objects.
+
+    Handles both single string and list of strings from config.
+
+    Args:
+        cfg: Settings object
+
+    Returns:
+        List of Path objects for all main directories
+    """
+    if isinstance(cfg.main_directory, list):
+        return [Path(d).expanduser().resolve() for d in cfg.main_directory]
+    else:
+        return [Path(cfg.main_directory).expanduser().resolve()]
+
+
 @dataclass
 class ReactionMatrixSettings:
     out_dir: str = ""
@@ -53,7 +71,7 @@ class ForceSettings:
 @dataclass
 class Settings:
     model_path: str
-    main_directory: str
+    main_directory: str | list[str]  # Can be single path or list of paths
     cache_dir: str = ""
     allow_cpu: bool = False
     cuda_allow_tf32: bool = True

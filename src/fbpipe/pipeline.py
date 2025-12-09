@@ -7,6 +7,7 @@ from typing import Callable, Iterable
 
 from .config import Settings, load_settings
 from .steps import (
+    calculate_acceleration,
     compose_videos_rms,
     detect_dropped_frames,
     distance_normalize,
@@ -30,6 +31,7 @@ class Step:
 # The order emphasises dependencies: normalization relies on the distance
 # stats, OFM state annotations require the RMS copies, and the video overlay
 # comes last so that all metadata is already embedded in the CSVs.
+# Modification #4: Added calculate_acceleration step after compose_videos_rms
 ORDERED_STEPS: tuple[Step, ...] = (
     Step("yolo", yolo_infer.main, "Run Ultralytics YOLO inference and export merged CSVs"),
     Step("distance_stats", distance_stats.main, "Derive global class-2 distance bounds per fly"),
@@ -39,6 +41,7 @@ ORDERED_STEPS: tuple[Step, ...] = (
     Step("update_ofm_state", update_ofm_state.main, "Annotate RMS tables with OFM state transitions"),
     Step("move_videos", move_videos.main, "Stage annotated videos into the delivery directory"),
     Step("compose_videos_rms", compose_videos_rms.main, "Render RMS overlays onto exported videos"),
+    Step("calculate_acceleration", calculate_acceleration.main, "Calculate frame-to-frame acceleration metrics"),
 )
 
 STEP_REGISTRY = {step.name: step for step in ORDERED_STEPS}

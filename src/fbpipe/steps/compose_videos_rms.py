@@ -11,7 +11,7 @@ import matplotlib.pyplot as plt
 from PIL import Image
 from moviepy.editor import CompositeVideoClip, VideoClip, VideoFileClip
 
-from ..config import Settings
+from ..config import Settings, get_main_directories
 from ..utils.columns import (
     find_proboscis_distance_percentage_column,
     find_proboscis_xy_columns,
@@ -45,7 +45,8 @@ THRESH_K = 4.0
 ANCHOR_X, ANCHOR_Y = 1080.0, 540.0
 PCT_COL_ROBUST = "distance_class1_class2_pct"
 DIST_COL_ROBUST = "distance_class1_class2"
-TRIM_FRAC = 0.05
+# Modification #2: Increased from 0.05 (5%) to 0.10 (10%) for more aggressive outlier filtering
+TRIM_FRAC = 0.10
 VIDEO_EXTS_CHECK = VIDEO_EXTS  # alias for clarity
 
 MONTHS = (
@@ -220,7 +221,91 @@ def compute_angle_deg_at_point2(df: pd.DataFrame) -> pd.Series:
     return pd.Series(angles, index=df.index, name="angle_ARB_deg")
 
 
-def find_fly_reference_angle(csvs_raw: List[Path]) -> float:
+def compute_angle_multiplier_continuous(angle_deg: float) -> float:
+    """
+    Convert angle in degrees to continuous multiplier for distance percentage.
+
+    Modification #3: Continuous exponential (piecewise linear) angle scaling
+    replaces bin-based approach for smooth transitions.
+
+    Mapping:
+        -100° → 0.5× (proboscis retracted toward body)
+        0° → 1.0× (neutral, baseline)
+        +100° → 2.0× (proboscis extended)
+
+    Uses piecewise linear interpolation for smooth transitions.
+
+    Args:
+        angle_deg: Angle in degrees (will be clamped to [-100, 100])
+
+    Returns:
+        Multiplier value in range [0.5, 2.0]
+
+    Examples:
+        >>> compute_angle_multiplier_continuous(-100)
+        0.5
+        >>> compute_angle_multiplier_continuous(-50)
+        0.75
+        >>> compute_angle_multiplier_continuous(0)
+        1.0
+        >>> compute_angle_multiplier_continuous(50)
+        1.5
+        >>> compute_angle_multiplier_continuous(100)
+        2.0
+    """
+    # Clamp angle to valid range
+    clamped = np.clip(angle_deg, -100.0, 100.0)
+
+    if clamped < 0:
+        # Linear interpolation: -100° → 0.5, 0° → 1.0
+        # Formula: 0.5 + 0.5 * (1.0 + normalized)
+        normalized = clamped / 100.0  # Range: -1.0 to 0.0
+        multiplier = 0.5 + 0.5 * (1.0 + normalized)
+    else:
+        # Linear interpolation: 0° → 1.0, +100° → 2.0
+        # Formula: 1.0 + normalized
+        normalized = clamped / 100.0  # Range: 0.0 to 1.0
+        multiplier = 1.0 + normalized
+
+    return float(multiplier)
+
+
+def compute_angle_multiplier_series(angle_series: pd.Series) -> pd.Series:
+    """
+    Vectorized version of compute_angle_multiplier_continuous for pandas Series.
+
+    Args:
+        angle_series: Series of angle values in degrees
+
+    Returns:
+        Series of multiplier values in range [0.5, 2.0]
+    """
+    angles = angle_series.to_numpy(dtype=float)
+    clamped = np.clip(angles, -100.0, 100.0)
+
+    multipliers = np.where(
+        clamped < 0,
+        0.5 + 0.5 * (1.0 + clamped / 100.0),  # Negative angles
+        1.0 + clamped / 100.0  # Positive angles
+    )
+
+    return pd.Series(multipliers, index=angle_series.index, name="angle_multiplier")
+
+
+def find_fly_reference_angle(csvs_raw: List[Path], trimmed_min: Optional[float] = None) -> float:
+    """
+    Find the fly's reference angle (0°) for baseline measurements.
+
+    Modification #5: When trimmed_min is provided, finds the angle at frames
+    nearest to trimmed_min (more stable than using global minimum which may be outliers).
+
+    Args:
+        csvs_raw: List of CSV file paths to analyze
+        trimmed_min: Optional trimmed minimum distance value (from _ead_compute_trim_min_max)
+
+    Returns:
+        Reference angle in degrees, or NaN if not found
+    """
     best: Optional[Tuple[int, float, float]] = None
     for path in csvs_raw:
         try:
@@ -243,19 +328,32 @@ def find_fly_reference_angle(csvs_raw: List[Path]) -> float:
         if dist_col is None:
             continue
         dist = pd.to_numeric(df[dist_col], errors="coerce").to_numpy()
-        exact = np.flatnonzero(dist == 0)
-        if exact.size > 0:
-            idx = int(exact[0])
-            angle_here = float(angle.iloc[idx]) if np.isfinite(angle.iloc[idx]) else np.nan
-            candidate = (0, 0.0, angle_here)
-        else:
-            with np.errstate(invalid="ignore"):
-                absd = np.abs(dist)
-            if not np.isfinite(absd).any():
+
+        # Modification #5: Use trimmed_min for more stable reference angle
+        if trimmed_min is not None:
+            # Find frame nearest to trimmed_min (more stable than global min)
+            distance_from_trim = np.abs(dist - trimmed_min)
+            if not np.isfinite(distance_from_trim).any():
                 continue
-            idx = int(np.nanargmin(absd))
+            idx = int(np.nanargmin(distance_from_trim))
             angle_here = float(angle.iloc[idx]) if np.isfinite(angle.iloc[idx]) else np.nan
-            candidate = (1, float(absd[idx]), angle_here)
+            candidate = (0, float(distance_from_trim[idx]), angle_here)
+        else:
+            # Fallback to old logic if trimmed_min not provided
+            exact = np.flatnonzero(dist == 0)
+            if exact.size > 0:
+                idx = int(exact[0])
+                angle_here = float(angle.iloc[idx]) if np.isfinite(angle.iloc[idx]) else np.nan
+                candidate = (0, 0.0, angle_here)
+            else:
+                with np.errstate(invalid="ignore"):
+                    absd = np.abs(dist)
+                if not np.isfinite(absd).any():
+                    continue
+                idx = int(np.nanargmin(absd))
+                angle_here = float(angle.iloc[idx]) if np.isfinite(angle.iloc[idx]) else np.nan
+                candidate = (1, float(absd[idx]), angle_here)
+
         if best is None or candidate < best:
             best = candidate
     return best[2] if best is not None else float("nan")
@@ -468,10 +566,76 @@ def _discover_month_folders(root: Path) -> List[Path]:
     return [path for path in root.iterdir() if path.is_dir() and any(path.name.lower().startswith(m) for m in MONTHS)]
 
 
+def _process_fly_angles(fly_dir: Path) -> None:
+    """
+    Process fly directory to add angle columns to RMS_calculations CSVs.
+
+    Modification #3: Adds angle_centered_deg and angle_multiplier columns.
+    Modification #5: Uses trimmed_min for stable reference angle calculation.
+
+    Args:
+        fly_dir: Path to fly directory containing RMS_calculations/
+    """
+    rms_dir = fly_dir / "RMS_calculations"
+    if not rms_dir.is_dir():
+        return
+
+    # Get trimmed min for stable reference angle (Modification #5)
+    trimmed_stats = _ead_compute_trim_min_max(fly_dir)
+    trimmed_min = trimmed_stats[0] if trimmed_stats else None
+
+    # Find all CSVs in RMS_calculations
+    csv_paths = list(rms_dir.glob("*.csv"))
+    if not csv_paths:
+        return
+
+    # Calculate reference angle using trimmed_min (Modification #5)
+    reference_angle = find_fly_reference_angle(csv_paths, trimmed_min=trimmed_min)
+    if not np.isfinite(reference_angle):
+        print(f"[ANGLES] {fly_dir.name}: Could not determine reference angle, using 0.0")
+        reference_angle = 0.0
+    else:
+        print(f"[ANGLES] {fly_dir.name}: Reference angle = {reference_angle:.2f}°")
+
+    # Process each CSV to add angle columns
+    for csv_path in csv_paths:
+        try:
+            df = pd.read_csv(csv_path)
+
+            # Skip if already processed
+            if "angle_multiplier" in df.columns:
+                continue
+
+            # Compute raw angles
+            try:
+                angles = compute_angle_deg_at_point2(df)
+            except Exception as e:
+                print(f"[ANGLES] {csv_path.name}: Could not compute angles: {e}")
+                continue
+
+            # Center angles relative to reference (Modification #5)
+            centered_angles = angles - reference_angle
+
+            # Compute continuous multipliers (Modification #3)
+            multipliers = compute_angle_multiplier_series(centered_angles)
+
+            # Add new columns
+            df["angle_ARB_deg"] = angles
+            df["angle_centered_deg"] = centered_angles
+            df["angle_multiplier"] = multipliers
+
+            # Save back to CSV
+            df.to_csv(csv_path, index=False)
+            print(f"[ANGLES] {csv_path.name}: Added angle columns (ref={reference_angle:.2f}°)")
+
+        except Exception as e:
+            print(f"[ANGLES] {csv_path.name}: Error processing: {e}")
+            continue
+
+
 def main(cfg: Settings) -> None:
-    root = Path(cfg.main_directory).expanduser().resolve()
-    if not root.is_dir():
-        raise FileNotFoundError(f"main_directory does not exist: {root}")
+    roots = get_main_directories(cfg)
+    print(f"[RMS] Starting RMS composition in {len(roots)} directories")
 
     pre_sec = float(cfg.odor_on_s)
     odor_duration = max(float(cfg.odor_off_s) - float(cfg.odor_on_s), 0.0)
@@ -480,156 +644,166 @@ def main(cfg: Settings) -> None:
 
     delete_source_after = bool(cfg.delete_source_after_render)
 
-    for fly_dir in sorted(_discover_month_folders(root)):
-        fly_name = fly_dir.name
-        print(f"\n=== Fly: {fly_name} ===")
-        for category in ("training", "testing"):
-            trial_map = _collect_trial_csvs(fly_dir, category)
-            if not trial_map:
-                print(f"  [{category}] No trials discovered.")
-                continue
+    for root in roots:
+        if not root.is_dir():
+            print(f"[RMS] Warning: Directory does not exist: {root}")
+            continue
 
-            out_root = fly_dir / VIDEO_INPUT_DIR / VIDEO_OUTPUT_SUBDIR
-            out_root.mkdir(parents=True, exist_ok=True)
+        print(f"[RMS] Processing root directory: {root}")
+        for fly_dir in sorted(_discover_month_folders(root)):
+            fly_name = fly_dir.name
+            print(f"\n=== Fly: {fly_name} ===")
 
-            for tri, slot_entries in sorted(trial_map.items()):
-                video_path = _find_video_for_trial(fly_dir, category, tri)
-                if not video_path:
-                    print(f"  [{category} {tri}] ⤫ No matching video in {VIDEO_INPUT_DIR}/{category}/")
+            # Modification #3: Process angles and add multiplier columns (uses Mod #5 for reference angle)
+            _process_fly_angles(fly_dir)
+
+            for category in ("training", "testing"):
+                trial_map = _collect_trial_csvs(fly_dir, category)
+                if not trial_map:
+                    print(f"  [{category}] No trials discovered.")
                     continue
 
-                slot_success = False
-                for token, _slot_idx, csv_path in slot_entries:
-                    slot_label = token.replace("_distances", "")
-                    series = _series_rms_from_rmscalc(
-                        csv_path,
-                        cfg.fps_default,
-                        pre_sec,
-                        odor_duration,
-                        post_sec,
-                        odor_latency,
-                    )
-                    if series is None:
-                        print(f"  [{category} {tri} {slot_label}] ⤫ No RMS series; skipping.")
+                out_root = fly_dir / VIDEO_INPUT_DIR / VIDEO_OUTPUT_SUBDIR
+                out_root.mkdir(parents=True, exist_ok=True)
+
+                for tri, slot_entries in sorted(trial_map.items()):
+                    video_path = _find_video_for_trial(fly_dir, category, tri)
+                    if not video_path:
+                        print(f"  [{category} {tri}] ⤫ No matching video in {VIDEO_INPUT_DIR}/{category}/")
                         continue
 
-                    t, rms, odor_on, odor_off, threshold = series
-                    xlim = (float(np.nanmin(t)), float(np.nanmax(t)))
+                    slot_success = False
+                    for token, _slot_idx, csv_path in slot_entries:
+                        slot_label = token.replace("_distances", "")
+                        series = _series_rms_from_rmscalc(
+                            csv_path,
+                            cfg.fps_default,
+                            pre_sec,
+                            odor_duration,
+                            post_sec,
+                            odor_latency,
+                        )
+                        if series is None:
+                            print(f"  [{category} {tri} {slot_label}] ⤫ No RMS series; skipping.")
+                            continue
 
-                    out_mp4 = out_root / f"{fly_name}_{slot_label}_{category}_{tri}_LINES_rms.mp4"
-                    if out_mp4.exists():
-                        print(f"  [{category} {tri} {slot_label}] ⤫ Exists, skipping: {out_mp4.name}")
-                        slot_success = True
-                        continue
+                        t, rms, odor_on, odor_off, threshold = series
+                        xlim = (float(np.nanmin(t)), float(np.nanmax(t)))
 
-                    print(
-                        f"  [{category} {tri} {slot_label}] ✓ Video: {video_path.name} → {out_mp4.name}"
-                    )
-                    ok = _compose_lineplot_video(
-                        video_path,
-                        [{"t": t, "y": rms, "label": "RMS", "color": "blue"}],
-                        xlim,
-                        odor_on,
-                        odor_off,
-                        out_mp4,
-                        panel_height_fraction=PANEL_HEIGHT_FRACTION,
-                        ylim=YLIM,
-                        threshold=threshold,
-                    )
+                        out_mp4 = out_root / f"{fly_name}_{slot_label}_{category}_{tri}_LINES_rms.mp4"
+                        if out_mp4.exists():
+                            print(f"  [{category} {tri} {slot_label}] ⤫ Exists, skipping: {out_mp4.name}")
+                            slot_success = True
+                            continue
 
-                    if ok:
-                        slot_success = True
-                        print(f"  [{category} {tri} {slot_label}] [SAVED] {out_mp4.name}")
-                    else:
-                        print(f"  [{category} {tri} {slot_label}] ⤫ Render failed; source retained.")
+                        print(
+                            f"  [{category} {tri} {slot_label}] ✓ Video: {video_path.name} → {out_mp4.name}"
+                        )
+                        ok = _compose_lineplot_video(
+                            video_path,
+                            [{"t": t, "y": rms, "label": "RMS", "color": "blue"}],
+                            xlim,
+                            odor_on,
+                            odor_off,
+                            out_mp4,
+                            panel_height_fraction=PANEL_HEIGHT_FRACTION,
+                            ylim=YLIM,
+                            threshold=threshold,
+                        )
 
-                if delete_source_after and slot_success:
-                    _safe_unlink(video_path)
+                        if ok:
+                            slot_success = True
+                            print(f"  [{category} {tri} {slot_label}] [SAVED] {out_mp4.name}")
+                        else:
+                            print(f"  [{category} {tri} {slot_label}] ⤫ Render failed; source retained.")
 
-            if delete_source_after:
-                category_dir = fly_dir / VIDEO_INPUT_DIR / category
-                if category_dir.exists():
-                    remaining = [p for p in category_dir.iterdir() if _is_video(p)]
-                    if not remaining:
-                        _maybe_rmdir_empty(category_dir)
+                    if delete_source_after and slot_success:
+                        _safe_unlink(video_path)
 
-    if delete_source_after:
-        for fly_dir in sorted(_discover_month_folders(root)):
-            cat_root = fly_dir / VIDEO_INPUT_DIR
-            if cat_root.exists() and not any(cat_root.iterdir()):
-                _maybe_rmdir_empty(cat_root)
+                if delete_source_after:
+                    category_dir = fly_dir / VIDEO_INPUT_DIR / category
+                    if category_dir.exists():
+                        remaining = [p for p in category_dir.iterdir() if _is_video(p)]
+                        if not remaining:
+                            _maybe_rmdir_empty(category_dir)
+
+        if delete_source_after:
+            for fly_dir in sorted(_discover_month_folders(root)):
+                cat_root = fly_dir / VIDEO_INPUT_DIR
+                if cat_root.exists() and not any(cat_root.iterdir()):
+                    _maybe_rmdir_empty(cat_root)
 
 
 _cached_series: Dict[Path, Tuple[np.ndarray, np.ndarray, float, float, float]] = {}
 
 
 def _series_rms_from_rmscalc(
-    csv_path: Path,
-    fps_default: float,
-    pre_sec: float,
-    odor_duration: float,
-    post_sec: float,
-    odor_latency: float,
+        csv_path: Path,
+        fps_default: float,
+        pre_sec: float,
+        odor_duration: float,
+        post_sec: float,
+        odor_latency: float,
 ) -> Optional[Tuple[np.ndarray, np.ndarray, float, float, float]]:
-    real_path = csv_path.resolve()
-    if real_path in _cached_series:
-        return _cached_series[real_path]
+        real_path = csv_path.resolve()
+        if real_path in _cached_series:
+            return _cached_series[real_path]
 
-    if not csv_path.exists():
-        return None
+        if not csv_path.exists():
+            return None
 
-    df = pd.read_csv(csv_path)
-    df.columns = df.columns.str.strip()
+        df = pd.read_csv(csv_path)
+        df.columns = df.columns.str.strip()
 
-    frame_col = find_col(df, ["frame", "Frame", "frame_num", "frame_index"])
-    ts_col = find_col(
-        df,
-        ["timestamp", "Timestamp", "time", "Time", "time_seconds", "relative_time", "time_s"],
-    )
-    ts, _meta = ensure_time_series(df, frame_col, ts_col, fps_default)
-    if ts.notna().sum() < 2:
-        return None
+        frame_col = find_col(df, ["frame", "Frame", "frame_num", "frame_index"])
+        ts_col = find_col(
+            df,
+            ["timestamp", "Timestamp", "time", "Time", "time_seconds", "relative_time", "time_s"],
+        )
+        ts, _meta = ensure_time_series(df, frame_col, ts_col, fps_default)
+        if ts.notna().sum() < 2:
+            return None
 
-    rel_time = pd.to_numeric(ts, errors="coerce")
-    rel_time = rel_time - rel_time.min()
-    df["relative_time"] = rel_time
+        rel_time = pd.to_numeric(ts, errors="coerce")
+        rel_time = rel_time - rel_time.min()
+        df["relative_time"] = rel_time
 
-    odor_window = odor_window_from_ofm(df, "relative_time")
-    if odor_window is None:
-        start = pre_sec + odor_latency
-        odor_window = (start, start + odor_duration)
-    else:
-        odor_window = (float(odor_window[0]) + odor_latency, float(odor_window[1]) + odor_latency)
+        odor_window = odor_window_from_ofm(df, "relative_time")
+        if odor_window is None:
+            start = pre_sec + odor_latency
+            odor_window = (start, start + odor_duration)
+        else:
+            odor_window = (float(odor_window[0]) + odor_latency, float(odor_window[1]) + odor_latency)
 
-    odor_on, odor_off = odor_window
-    total_duration = pre_sec + (odor_off - odor_on) + post_sec
+        odor_on, odor_off = odor_window
+        total_duration = pre_sec + (odor_off - odor_on) + post_sec
 
-    pct_col = find_proboscis_distance_percentage_column(df)
-    if pct_col is None:
-        pct_col = find_col(df, ["distance_class1_class2_pct"])
-    if pct_col is None:
-        return None
+        pct_col = find_proboscis_distance_percentage_column(df)
+        if pct_col is None:
+            pct_col = find_col(df, ["distance_class1_class2_pct"])
+        if pct_col is None:
+            return None
 
-    values = pd.to_numeric(df[pct_col], errors="coerce").to_numpy(dtype=float)
-    fps = derive_fps(df, fps_default)
-    window = max(1, int(round(fps * RMS_WINDOW_S)))
-    series = pd.Series(values)
-    rms = series.rolling(window, min_periods=max(1, window // 2), center=True).apply(
-        lambda x: float(np.sqrt(np.nanmean(np.square(x)))), raw=False
-    ).to_numpy()
+        values = pd.to_numeric(df[pct_col], errors="coerce").to_numpy(dtype=float)
+        fps = derive_fps(df, fps_default)
+        window = max(1, int(round(fps * RMS_WINDOW_S)))
+        series = pd.Series(values)
+        rms = series.rolling(window, min_periods=max(1, window // 2), center=True).apply(
+            lambda x: float(np.sqrt(np.nanmean(np.square(x)))), raw=False
+        ).to_numpy()
 
-    t_axis = np.linspace(0.0, total_duration, len(rms))
+        t_axis = np.linspace(0.0, total_duration, len(rms))
 
-    pre_mask = rel_time.to_numpy(dtype=float) < (odor_on if np.isfinite(odor_on) else pre_sec)
-    if pre_mask.size != rms.size:
-        approx_len = max(1, int(pre_sec * fps))
-        pre_vals = rms[:approx_len]
-    else:
-        pre_vals = rms[pre_mask]
-    mu = float(np.nanmean(pre_vals)) if np.isfinite(pre_vals).any() else float("nan")
-    sd = float(np.nanstd(pre_vals)) if np.isfinite(pre_vals).any() else float("nan")
-    threshold = mu + THRESH_K * sd if np.isfinite(mu) and np.isfinite(sd) else float("nan")
+        pre_mask = rel_time.to_numpy(dtype=float) < (odor_on if np.isfinite(odor_on) else pre_sec)
+        if pre_mask.size != rms.size:
+            approx_len = max(1, int(pre_sec * fps))
+            pre_vals = rms[:approx_len]
+        else:
+            pre_vals = rms[pre_mask]
+        mu = float(np.nanmean(pre_vals)) if np.isfinite(pre_vals).any() else float("nan")
+        sd = float(np.nanstd(pre_vals)) if np.isfinite(pre_vals).any() else float("nan")
+        threshold = mu + THRESH_K * sd if np.isfinite(mu) and np.isfinite(sd) else float("nan")
 
-    payload = (t_axis, rms.astype(float), float(odor_on), float(odor_off), threshold)
-    _cached_series[real_path] = payload
-    return payload
+        payload = (t_axis, rms.astype(float), float(odor_on), float(odor_off), threshold)
+        _cached_series[real_path] = payload
+        return payload
