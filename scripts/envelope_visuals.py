@@ -409,6 +409,20 @@ def _display_odor(dataset_canon: str, trial_label: str) -> str:
             9: "Citral",
             10: "Linalool",
         },
+        "Benz_control": {
+            6: "Apple Cider Vinegar",
+            7: "3-Octonol",
+            8: "Ethyl Butyrate",
+            9: "Citral",
+            10: "Linalool",
+        },
+        "opto_benz_1": {
+            6: "Apple Cider Vinegar",
+            7: "3-Octonol",
+            8: "Ethyl Butyrate",
+            9: "Citral",
+            10: "Linalool",
+        },
         "EB": {
             6: "Apple Cider Vinegar",
             7: "3-Octonol",

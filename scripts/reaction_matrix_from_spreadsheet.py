@@ -155,6 +155,9 @@ def generate_reaction_matrices_from_csv(cfg: SpreadsheetMatrixConfig) -> None:
     ordered_present = [odor for odor in ODOR_ORDER if odor in present]
     extras = sorted(odor for odor in present if odor not in ODOR_ORDER)
 
+    # Collect reaction rate statistics for CSV export
+    all_rate_stats = []
+
     for order in cfg.trial_orders:
         order_suffix = _order_suffix(order)
         for odor in ordered_present + extras:
@@ -270,6 +273,16 @@ def generate_reaction_matrices_from_csv(cfg: SpreadsheetMatrixConfig) -> None:
                         rate_stats,
                         title="Reaction Rates by Odor",
                     )
+                    # Collect rate stats for CSV export
+                    for _, row in rate_stats.iterrows():
+                        all_rate_stats.append({
+                            "dataset": odor,
+                            "trial_order": order,
+                            "odor_sent": str(row["odor"]),
+                            "reaction_rate": float(row["rate"]),
+                            "num_reactions": int(row["num_reactions"]),
+                            "num_trials": int(row["num_trials"]),
+                        })
 
                 shift_frac = cfg.bottom_shift_in / fig_h if fig_h else 0.0
                 for axis in (ax_dc,):
@@ -332,6 +345,46 @@ def generate_reaction_matrices_from_csv(cfg: SpreadsheetMatrixConfig) -> None:
                         export.to_csv(export_path, columns=export_cols, index=False)
 
                 plt.close(fig)
+
+    # Export aggregated reaction rate statistics to CSV
+    if all_rate_stats:
+        stats_df = pd.DataFrame(all_rate_stats)
+
+        # For each trial order, create a separate summary CSV
+        for order in cfg.trial_orders:
+            order_stats = stats_df[stats_df["trial_order"] == order].copy()
+            if order_stats.empty:
+                continue
+
+            # Create pivot table: rows = datasets, columns = odor_sent, values = reaction_rate
+            pivot = order_stats.pivot_table(
+                index="dataset",
+                columns="odor_sent",
+                values="reaction_rate",
+                aggfunc="first"  # Should only be one value per dataset-odor pair
+            )
+
+            # Sort datasets by ODOR_ORDER
+            ordered_datasets = [d for d in ODOR_ORDER if d in pivot.index]
+            extra_datasets = sorted(d for d in pivot.index if d not in ODOR_ORDER)
+            all_datasets = ordered_datasets + extra_datasets
+            if all_datasets:
+                pivot = pivot.loc[all_datasets]
+
+            # Reset index to make dataset a column
+            pivot = pivot.reset_index()
+
+            # Replace spaces with underscores in column names for CSV readability
+            pivot.columns = [col.replace(' ', '_') for col in pivot.columns]
+
+            # Save to CSV
+            order_suffix = _order_suffix(order)
+            csv_filename = f"reaction_rates_summary_{order_suffix}.csv"
+            csv_path = cfg.out_dir / csv_filename
+
+            if should_write(csv_path, cfg.overwrite):
+                pivot.to_csv(csv_path, index=False, float_format="%.4f")
+                print(f"[INFO] Exported reaction rate summary to {csv_path}")
 
 
 def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
