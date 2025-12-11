@@ -807,6 +807,28 @@ def _is_month_folder(path: Path) -> bool:
 
 
 def _infer_category(path: Path) -> str:
+    # Prioritize filename over parent folder names to handle cases like
+    # "opto_EB(6-training)/.../_testing_1_..." where parent has "training"
+    # but filename has "testing"
+
+    # First check just the filename
+    filename_tokens = set()
+    lower = path.stem.lower()
+    filename_tokens.add(lower)
+    for token in re.split(r"[^a-z0-9]+", lower):
+        if token:
+            filename_tokens.add(token)
+
+    filename_training = _match_hint(filename_tokens, _training_hints())
+    filename_testing = _match_hint(filename_tokens, _testing_hints())
+
+    # If filename clearly indicates one type, use that
+    if filename_training and not filename_testing:
+        return "training"
+    if filename_testing and not filename_training:
+        return "testing"
+
+    # If ambiguous or not found in filename, check full path
     tokens = _path_tokens(path)
     training_match = _match_hint(tokens, _training_hints())
     testing_match = _match_hint(tokens, _testing_hints())

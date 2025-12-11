@@ -63,6 +63,7 @@ DISPLAY_LABEL = {
     "opto_benz": "Benzaldehyde",
     "opto_benz_1": "Benzaldehyde",
     "opto_EB": "Ethyl Butyrate",
+    "opto_EB_6_training": "Ethyl Butyrate (6-Training)",
     "opto_ACV": "Apple Cider Vinegar",
     "opto_hex": "Hexanol",
     "opto_3-oct": "3-Octonol",
@@ -127,6 +128,14 @@ TRAINING_ODOR_SCHEDULE_OVERRIDES = {
         6: "Ethyl Butyrate",
         7: HEXANOL_LABEL,
         8: "Ethyl Butyrate",
+    },
+    "opto_EB_6_training": {
+        1: "Ethyl Butyrate",
+        2: "Ethyl Butyrate",
+        3: "Ethyl Butyrate",
+        4: "Ethyl Butyrate",
+        5: "Ethyl Butyrate",
+        6: "Ethyl Butyrate",
     },
     "opto_3-oct": {
         1: "3-Octonol",

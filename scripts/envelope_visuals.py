@@ -176,6 +176,15 @@ TRAINING_ODOR_SCHEDULE_EB = {
     8: "Ethyl Butyrate",
 }
 
+TRAINING_ODOR_SCHEDULE_EB_6TRAINING = {
+    1: "Ethyl Butyrate",
+    2: "Ethyl Butyrate",
+    3: "Ethyl Butyrate",
+    4: "Ethyl Butyrate",
+    5: "Ethyl Butyrate",
+    6: "Ethyl Butyrate",
+}
+
 TRAINING_ODOR_SCHEDULE_HEX = {
     1: HEXANOL_LABEL,
     2: HEXANOL_LABEL,
@@ -329,6 +338,10 @@ def _display_odor(dataset_canon: str, trial_label: str) -> str:
             odor_name = TRAINING_ODOR_SCHEDULE_EB.get(number)
             if odor_name:
                 return odor_name
+        elif dataset_canon == "opto_EB_6_training":
+            odor_name = TRAINING_ODOR_SCHEDULE_EB_6TRAINING.get(number)
+            if odor_name:
+                return odor_name
         elif dataset_canon in ("opto_hex", "hex_control"):
             odor_name = TRAINING_ODOR_SCHEDULE_HEX.get(number)
             if odor_name:
@@ -431,6 +444,14 @@ def _display_odor(dataset_canon: str, trial_label: str) -> str:
             10: "Linalool",
         },
         "EB_control": {
+            6: "Apple Cider Vinegar",
+            7: "3-Octonol",
+            8: "Benzaldehyde",
+            9: "Citral",
+            10: "Linalool",
+        },
+        "opto_EB_6_training": {
+            # Testing trials (6-10): same as opto_EB
             6: "Apple Cider Vinegar",
             7: "3-Octonol",
             8: "Benzaldehyde",

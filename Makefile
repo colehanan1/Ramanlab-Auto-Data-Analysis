@@ -11,7 +11,7 @@ setup:
 	pip install --upgrade pip && pip install -r requirements.txt
 
 run:
-	python scripts/run_workflows.py --config config.yaml
+	export MPLBACKEND=Agg && python scripts/run_workflows.py --config config.yaml
 
 all: run
 

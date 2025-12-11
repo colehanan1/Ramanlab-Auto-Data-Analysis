@@ -40,19 +40,37 @@ function show_status() {
     echo -e "${GREEN}Total size:${NC} $(du -sh "$CACHE_DIR" 2>/dev/null | cut -f1)"
     echo ""
 
-    # Pipeline caches
+    # Pipeline caches with manifest statistics
     if [ -d "$CACHE_DIR/pipeline" ]; then
         local count=$(find "$CACHE_DIR/pipeline" -name "state.json" | wc -l)
         echo -e "${GREEN}Pipeline caches:${NC} $count datasets"
+
+        # Show file manifest statistics
+        local total_tracked_files=0
+        for state_file in "$CACHE_DIR/pipeline"/*/state.json; do
+            if [ -f "$state_file" ] && command -v jq &> /dev/null; then
+                local file_count=$(jq '.file_manifest | length' "$state_file" 2>/dev/null || echo "0")
+                total_tracked_files=$((total_tracked_files + file_count))
+            fi
+        done
+
+        if [ "$total_tracked_files" -gt 0 ]; then
+            echo "  └─ Tracking $total_tracked_files CSV files across all datasets"
+        fi
     else
         echo -e "${YELLOW}Pipeline caches:${NC} None"
     fi
 
-    # Combined cache
+    # Combined cache with manifest statistics
     if [ -f "$CACHE_DIR/combined/analysis/state.json" ]; then
         echo -e "${GREEN}Combined analysis cache:${NC} Present"
-        local datasets=$(jq -r '.dataset_roots[]' "$CACHE_DIR/combined/analysis/state.json" 2>/dev/null | wc -l)
-        echo "  └─ Covers $datasets datasets"
+
+        if command -v jq &> /dev/null; then
+            local datasets=$(jq -r '.dataset_roots[]' "$CACHE_DIR/combined/analysis/state.json" 2>/dev/null | wc -l)
+            local combined_files=$(jq '.file_manifest | length' "$CACHE_DIR/combined/analysis/state.json" 2>/dev/null || echo "0")
+            echo "  ├─ Covers $datasets datasets"
+            echo "  └─ Tracking $combined_files CSV files"
+        fi
     else
         echo -e "${YELLOW}Combined analysis cache:${NC} None"
     fi

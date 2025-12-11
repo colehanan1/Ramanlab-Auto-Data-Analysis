@@ -2,7 +2,6 @@
 # Project configuration
 model_path: "/home/ramanlab/Documents/cole/sam2/notebooks/YOLOProjectProboscisLegs/runs/obb/train5/weights/best.pt"
 main_directory:
-          - "/home/ramanlab/Documents/cole/Data/flys/opto_EB/"
           - "/home/ramanlab/Documents/cole/Data/flys/opto_EB(6-training)/"
           - "/home/ramanlab/Documents/cole/Data/flys/opto_benz_1/"
           - "/home/ramanlab/Documents/cole/Data/flys/opto_hex/"
@@ -227,7 +226,7 @@ analysis:
         after_show_sec: 30.0
         threshold_std_mult: 4.0
         trial_type: training
-        overwrite: flase
+        overwrite: false
     overlay:
       combined_matrix: "/home/ramanlab/Documents/cole/Data/Opto/Combined/matrix/envelope_matrix_float16.npy"
       combined_codes: "/home/ramanlab/Documents/cole/Data/Opto/Combined/matrix/code_maps.json"
