@@ -60,6 +60,14 @@ class ReactionPredictionSettings:
 
 
 @dataclass
+class TrackingConfig:
+    """Tracking quality thresholds for filtering flies with poor proboscis detection."""
+    max_missing_frames_per_trial: int = 5000
+    max_missing_frames_pct_per_trial: float = 50.0  # Percent
+    apply_missing_frame_check: bool = True  # Allow disabling if not needed
+
+
+@dataclass
 class ForceSettings:
     pipeline: bool = True
     yolo: bool = True
@@ -104,6 +112,9 @@ class Settings:
     # reaction prediction
     reaction_prediction: ReactionPredictionSettings = field(default_factory=ReactionPredictionSettings)
     force: ForceSettings = field(default_factory=ForceSettings)
+
+    # tracking quality
+    tracking: TrackingConfig = field(default_factory=TrackingConfig)
 
 def _get(d: Dict[str, Any], key: str, default: Any):
     return d.get(key, default)
@@ -239,6 +250,20 @@ def load_settings(config_path: str | Path) -> Settings:
         os.getenv("NON_REACTIVE_SPAN_PX", _get(data, "non_reactive_span_px", 5.0))
     )
 
+    # tracking quality config
+    tracking_cfg = data.get("tracking", {})
+    tracking = TrackingConfig(
+        max_missing_frames_per_trial=int(
+            os.getenv("TRACKING_MAX_MISSING_FRAMES", tracking_cfg.get("max_missing_frames_per_trial", 5000))
+        ),
+        max_missing_frames_pct_per_trial=float(
+            os.getenv("TRACKING_MAX_MISSING_PCT", tracking_cfg.get("max_missing_frames_pct_per_trial", 50.0))
+        ),
+        apply_missing_frame_check=_as_bool(
+            os.getenv("TRACKING_APPLY_CHECK", tracking_cfg.get("apply_missing_frame_check", True)), True
+        ),
+    )
+
     return Settings(
         model_path=model_path,
         main_directory=main_directory,
@@ -270,4 +295,5 @@ def load_settings(config_path: str | Path) -> Settings:
         class2_max=float(os.getenv("CLASS2_MAX", dist_limits.get("class2_max", 250.0))),
         reaction_prediction=reaction_prediction,
         force=force,
+        tracking=tracking,
     )

@@ -11,6 +11,7 @@ import re
 import subprocess
 import sys
 import time
+from dataclasses import replace as dc_replace
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
@@ -501,11 +502,69 @@ def _auto_sync_wide_roots(
         )
 
 
+def _render_pair_visuals(
+    pair_name: str,
+    pair_matrix_dir: Path,
+    matrices_template: MatrixPlotConfig | None,
+    envelope_templates: Sequence[EnvelopePlotConfig],
+) -> None:
+    """Generate reaction matrices + envelopes for a pair using template configs."""
+
+    matrix_path = pair_matrix_dir / "envelope_matrix_float16.npy"
+    codes_path = pair_matrix_dir / "code_maps.json"
+
+    if matrices_template:
+        if matrix_path.exists() and codes_path.exists():
+            out_dir = pair_matrix_dir.parent / "results" / matrices_template.out_dir.name
+            cfg = dc_replace(
+                matrices_template,
+                matrix_npy=matrix_path,
+                codes_json=codes_path,
+                out_dir=out_dir,
+            )
+            print(f"[analysis] combined.pair_groups[{pair_name}].matrices → {cfg.out_dir}")
+            generate_reaction_matrices(cfg)
+        else:
+            print(
+                f"[WARN] Pair '{pair_name}' missing matrix artifacts for reaction matrices: {pair_matrix_dir}"
+            )
+
+    for env_template in envelope_templates:
+        trial_type = env_template.trial_type.strip().lower()
+        target_dir = pair_matrix_dir if trial_type != "training" else pair_matrix_dir / "training"
+        env_matrix = target_dir / "envelope_matrix_float16.npy"
+        env_codes = target_dir / "code_maps.json"
+        if not env_matrix.exists() or not env_codes.exists():
+            print(
+                f"[WARN] Pair '{pair_name}' missing {trial_type} matrix; skipping envelopes."
+            )
+            continue
+
+        out_dir = pair_matrix_dir.parent / "results" / env_template.out_dir.name
+        cfg = dc_replace(
+            env_template,
+            matrix_npy=env_matrix,
+            codes_json=env_codes,
+            out_dir=out_dir,
+        )
+        print(
+            f"[analysis] combined.pair_groups[{pair_name}].envelopes[{trial_type}] → {cfg.out_dir}"
+        )
+        generate_envelope_plots(cfg)
+
+
 def _run_combined(cfg: Mapping[str, Any] | None, settings: Settings | None) -> None:
     if not cfg:
         return
 
     combine_roots: dict[str, Path] = {}
+    wide_root_paths: list[Path] = []
+    wide_measure_cols: Sequence[str] = ["envelope_of_rms"]
+    wide_fps_fallback = 40.0
+    wide_exclude_cfg: list[str] = []
+    non_reactive_threshold = settings.non_reactive_span_px if settings is not None else None
+    limits = (settings.class2_min, settings.class2_max) if settings is not None else None
+
     combine_cfg = cfg.get("combine")
     if combine_cfg:
         opts = dict(combine_cfg)
@@ -570,9 +629,9 @@ def _run_combined(cfg: Mapping[str, Any] | None, settings: Settings | None) -> N
 
         roots = [str(path) for path in wide_root_paths]
         output_csv = _ensure_path(wide_cfg.get("output_csv"), "output_csv")
-        measure_cols = wide_cfg.get("measure_cols") or ["envelope_of_rms"]
-        fps_fallback = float(wide_cfg.get("fps_fallback", 40.0))
-        exclude_cfg = [
+        wide_measure_cols = wide_cfg.get("measure_cols") or ["envelope_of_rms"]
+        wide_fps_fallback = float(wide_cfg.get("fps_fallback", 40.0))
+        wide_exclude_cfg = [
             str(_ensure_path(path, "exclude_roots"))
             for path in wide_cfg.get("exclude_roots", [])
         ]
@@ -606,19 +665,16 @@ def _run_combined(cfg: Mapping[str, Any] | None, settings: Settings | None) -> N
                     )
                     extra_matrix_dirs[trial_key] = str(matrix_path)
         print(f"[analysis] combined.wide → {output_csv}")
-        limits = None
-        if settings is not None:
-            limits = (settings.class2_min, settings.class2_max)
         build_wide_csv(
             roots,
             str(output_csv),
-            measure_cols=measure_cols,
-            fps_fallback=fps_fallback,
-            exclude_roots=exclude_cfg,
+            measure_cols=wide_measure_cols,
+            fps_fallback=wide_fps_fallback,
+            exclude_roots=wide_exclude_cfg,
             distance_limits=limits,
             trial_type_filter=trial_type_filter,
             extra_trial_exports=extra_exports or None,
-            non_reactive_threshold=settings.non_reactive_span_px,
+            non_reactive_threshold=non_reactive_threshold,
         )
 
         for trial_key, matrix_dir in extra_matrix_dirs.items():
@@ -631,6 +687,101 @@ def _run_combined(cfg: Mapping[str, Any] | None, settings: Settings | None) -> N
                 )
             )
             wide_to_matrix(export_csv, matrix_dir)
+
+    pair_groups_cfg = cfg.get("pair_groups") or []
+    if pair_groups_cfg:
+        if not wide_root_paths:
+            raise ValueError("combined.pair_groups requires combined.wide.roots to be configured.")
+
+        dataset_lookup = {path.name: path for path in wide_root_paths}
+        dataset_lookup.update({path.name: path for path in combine_roots.values()})
+
+        matrices_cfg = cfg.get("matrices")
+        matrices_template = _matrix_plot_config(matrices_cfg) if matrices_cfg else None
+
+        envelopes_cfg = cfg.get("envelopes")
+        envelope_templates: list[EnvelopePlotConfig] = []
+        if envelopes_cfg:
+            entries = (
+                envelopes_cfg
+                if isinstance(envelopes_cfg, Sequence)
+                and not isinstance(envelopes_cfg, (str, bytes))
+                else [envelopes_cfg]
+            )
+            for entry in entries:
+                if not isinstance(entry, Mapping):
+                    raise ValueError("combined.envelopes entries must be mappings.")
+                envelope_templates.append(_envelope_plot_config(entry))
+
+        entries = (
+            pair_groups_cfg
+            if isinstance(pair_groups_cfg, Sequence) and not isinstance(pair_groups_cfg, (str, bytes))
+            else [pair_groups_cfg]
+        )
+        for entry in entries:
+            if not isinstance(entry, Mapping):
+                raise ValueError("combined.pair_groups entries must be mappings.")
+            pair_name = str(entry.get("name") or entry.get("label") or "").strip()
+            if not pair_name:
+                raise ValueError("combined.pair_groups entries require 'name'.")
+
+            datasets_cfg = entry.get("datasets")
+            if not datasets_cfg:
+                raise ValueError(f"combined.pair_groups[{pair_name}] requires 'datasets'.")
+            dataset_iter = (
+                datasets_cfg
+                if isinstance(datasets_cfg, Sequence) and not isinstance(datasets_cfg, (str, bytes, Path))
+                else [datasets_cfg]
+            )
+            resolved_roots: list[Path] = []
+            missing: list[str] = []
+            for ds in dataset_iter:
+                key = Path(str(ds)).name
+                path = dataset_lookup.get(key)
+                if path is None:
+                    missing.append(key)
+                else:
+                    resolved_roots.append(path)
+            if missing:
+                raise ValueError(
+                    f"combined.pair_groups[{pair_name}] datasets not found among combined.wide.roots: {missing}"
+                )
+
+            out_dir = _ensure_path(entry.get("out_dir"), f"pair_groups[{pair_name}].out_dir")
+            trial_type_filter = entry.get("trial_type_filter")
+
+            pair_combined_dir = out_dir / "combined"
+            pair_combined_dir.mkdir(parents=True, exist_ok=True)
+            pair_matrix_dir = out_dir / "matrix"
+            pair_wide_csv = pair_combined_dir / "all_envelope_rows_wide.csv"
+
+            extra_exports = {
+                "training": str(pair_combined_dir / "all_envelope_rows_wide_training.csv")
+            }
+            extra_matrix_dirs = {"training": str(pair_matrix_dir / "training")}
+
+            print(f"[analysis] combined.pair_groups[{pair_name}].wide → {pair_wide_csv}")
+            build_wide_csv(
+                [str(path) for path in resolved_roots],
+                str(pair_wide_csv),
+                measure_cols=wide_measure_cols,
+                fps_fallback=wide_fps_fallback,
+                exclude_roots=wide_exclude_cfg,
+                distance_limits=limits,
+                trial_type_filter=trial_type_filter,
+                extra_trial_exports=extra_exports,
+                non_reactive_threshold=non_reactive_threshold,
+            )
+
+            print(f"[analysis] combined.pair_groups[{pair_name}].matrix → {pair_matrix_dir}")
+            wide_to_matrix(str(pair_wide_csv), str(pair_matrix_dir))
+            for trial_key, matrix_dir in extra_matrix_dirs.items():
+                export_csv = extra_exports.get(trial_key)
+                if not export_csv:
+                    continue
+                wide_to_matrix(export_csv, matrix_dir)
+
+            _render_pair_visuals(pair_name, pair_matrix_dir, matrices_template, envelope_templates)
 
     matrix_cfg = cfg.get("matrix")
     if matrix_cfg:
@@ -974,6 +1125,27 @@ def main(argv: Sequence[str] | None = None) -> None:
             "non_reactive_span_px": settings.non_reactive_span_px,
             "dataset_roots": sorted(dataset_roots) if dataset_roots else [],
         }
+        pair_cfg_input = combined_cfg_input.get("pair_groups")
+        pair_expected: list[dict[str, Any]] = []
+        if isinstance(pair_cfg_input, Sequence) and not isinstance(pair_cfg_input, (str, bytes)):
+            for entry in pair_cfg_input:
+                if not isinstance(entry, Mapping):
+                    continue
+                datasets_raw = entry.get("datasets")
+                dataset_list: list[str] = []
+                if isinstance(datasets_raw, Sequence) and not isinstance(datasets_raw, (str, bytes)):
+                    dataset_list = [str(Path(ds).expanduser()) for ds in datasets_raw]
+                elif datasets_raw:
+                    dataset_list = [str(Path(str(datasets_raw)).expanduser())]
+                pair_expected.append(
+                    {
+                        "name": str(entry.get("name") or entry.get("label") or ""),
+                        "datasets": sorted(dataset_list),
+                        "out_dir": str(entry.get("out_dir") or ""),
+                        "trial_type_filter": entry.get("trial_type_filter"),
+                    }
+                )
+        combined_expected["pair_groups"] = pair_expected
         skip_combined = _should_skip_with_manifest(
             settings,
             category="combined",

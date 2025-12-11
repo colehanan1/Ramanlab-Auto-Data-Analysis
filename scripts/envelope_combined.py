@@ -138,6 +138,92 @@ DEFAULT_CONFIG_PATH = PROJECT_ROOT / "config.yaml"
 DEFAULT_DISTANCE_LIMITS = (70.0, 250.0)
 
 
+def compute_tracking_quality_per_trial(
+    trial_csv: Path,
+    max_missing_frames: int = 5000,
+    max_missing_pct: float = 50.0,
+) -> dict[str, object]:
+    """
+    Assess proboscis detection quality for a single trial.
+
+    This function loads the per-frame distance CSV and counts how many frames
+    have missing proboscis coordinates (NaN or invalid values). If the count
+    exceeds the threshold, the trial is flagged as having poor tracking quality.
+
+    Args:
+        trial_csv: Path to the trial distance CSV file
+        max_missing_frames: Absolute threshold for missing frames
+        max_missing_pct: Percentage threshold for missing frames (0-100)
+
+    Returns:
+        Dictionary with keys:
+        - total_frames: Total number of frames in trial
+        - missing_frames: Count of frames with missing proboscis detection
+        - pct_missing: Percentage of frames missing (0-100)
+        - flagged: Boolean, True if exceeds either threshold
+        - reason: String describing why flagged (if applicable)
+    """
+    try:
+        df = pd.read_csv(trial_csv)
+    except Exception as exc:
+        print(f"[WARN] compute_tracking_quality: Could not read {trial_csv}: {exc}")
+        return {
+            "total_frames": 0,
+            "missing_frames": 0,
+            "pct_missing": 0.0,
+            "flagged": False,
+            "reason": f"read_error: {exc}",
+        }
+
+    # Identify proboscis columns (class_8 or prob)
+    prob_cols = [
+        col for col in df.columns
+        if 'prob' in col.lower() or 'class_8' in col.lower() or 'class8' in col.lower()
+    ]
+
+    # Specifically look for coordinate columns
+    prob_coord_cols = [
+        col for col in prob_cols
+        if any(x in col.lower() for x in ['_x', '_y', 'x_', 'y_'])
+    ]
+
+    if not prob_coord_cols:
+        # No proboscis columns found; assume fully tracked
+        return {
+            "total_frames": len(df),
+            "missing_frames": 0,
+            "pct_missing": 0.0,
+            "flagged": False,
+            "reason": "no_prob_columns",
+        }
+
+    # Count frames where ANY proboscis coordinate is missing
+    is_missing = df[prob_coord_cols].isna().any(axis=1)
+    num_missing = int(is_missing.sum())
+    total = len(df)
+    pct_missing = 100.0 * num_missing / total if total > 0 else 0.0
+
+    # Apply thresholds
+    flagged_abs = num_missing > max_missing_frames
+    flagged_pct = pct_missing > max_missing_pct
+    flagged = flagged_abs or flagged_pct
+
+    reason = None
+    if flagged:
+        if flagged_abs:
+            reason = f"absolute_{num_missing}_frames"
+        elif flagged_pct:
+            reason = f"percentage_{pct_missing:.1f}%"
+
+    return {
+        "total_frames": total,
+        "missing_frames": num_missing,
+        "pct_missing": pct_missing,
+        "flagged": flagged,
+        "reason": reason,
+    }
+
+
 def _load_distance_stats(fly_dir: Path, slot_label: str | None) -> tuple[float, float] | None:
     """Return pixel min/max from the cached class-2 stats JSON for the slot."""
 
@@ -284,6 +370,7 @@ ODOR_CANON = {
     "optogenetics benzaldehyde": "opto_benz",
     "optogenetics benzaldehyde 1": "opto_benz_1",
     "optogenetics ethyl butyrate": "opto_EB",
+    "opto_eb(6-training)": "opto_EB_6_training",
     "10s_odor_benz": "10s_Odor_Benz",
     "optogenetics apple cider vinegar": "opto_ACV",
     "optogenetics acv": "opto_ACV",
@@ -309,6 +396,7 @@ DISPLAY_LABEL = {
     "opto_benz": "Benzaldehyde",
     "opto_benz_1": "Benzaldehyde",
     "opto_EB": "Ethyl Butyrate",
+    "opto_EB_6_training": "Ethyl Butyrate (6-Training)",
     "opto_ACV": "Apple Cider Vinegar",
     "opto_hex": "Hexanol",
     "opto_AIR": "AIR",
@@ -375,6 +463,16 @@ TRAINING_ODOR_SCHEDULE_OVERRIDES = {
         7: HEXANOL,
         8: "Ethyl Butyrate",
     },
+    "opto_EB_6_training": {
+        1: "Ethyl Butyrate",
+        2: "Ethyl Butyrate",
+        3: "Ethyl Butyrate",
+        4: "Ethyl Butyrate",
+        5: HEXANOL,
+        6: "Ethyl Butyrate",
+        7: HEXANOL,
+        8: "Ethyl Butyrate",
+    },
     "opto_AIR": {
         1: "AIR",
         2: "AIR",
@@ -420,6 +518,7 @@ TRAINING_ODOR_SCHEDULE_OVERRIDES = {
 TESTING_DATASET_ALIAS = {
     "opto_hex": "hex_control",
     "opto_EB": "EB_control",
+    "opto_EB_6_training": "EB_control",
     "opto_benz": "benz_control",
     "opto_benz_1": "benz_control",
     "opto_AIR": "opto_AIR",
@@ -594,22 +693,29 @@ def _hilbert_envelope(values: np.ndarray, window: int) -> np.ndarray:
 
 
 def _angle_multiplier(angle_pct: np.ndarray) -> np.ndarray:
+    """
+    Convert angle percentage (-100 to +100) to continuous multiplier (0.5 to 2.0).
+
+    Modification #3: Continuous exponential angle scaling replaces binned approach.
+    - Negative angles (-100 to 0): multiplier = 0.5 + 0.5 * (1.0 + angle/100)
+    - Positive angles (0 to +100): multiplier = 1.0 + angle/100
+
+    This provides smooth scaling where:
+    - -100° → 0.5×
+    - 0° → 1.0×
+    - +100° → 2.0×
+    """
     pct = np.asarray(angle_pct, dtype=float)
     pct = np.clip(pct, -100.0, 100.0)
-    conditions = [
-        pct < -40,
-        (pct >= -40) & (pct < -25),
-        (pct >= -25) & (pct < -10),
-        (pct >= -10) & (pct <= 10),
-        (pct > 10) & (pct <= 25),
-        (pct > 25) & (pct <= 40),
-        (pct > 40) & (pct <= 60),
-        (pct > 60) & (pct <= 100),
-    ]
-    # Angle bins that previously suppressed the distance percentage (multipliers < 1)
-    # now default to a neutral weight of 1.0 so `dir_val` never penalises low angles.
-    multipliers = [1.00, 1.00, 1.00, 1.00, 1.25, 1.50, 1.75, 2.00]
-    return np.select(conditions, multipliers, default=np.nan)
+
+    # Vectorized continuous multiplier calculation
+    multiplier = np.where(
+        pct < 0,
+        0.5 + 0.5 * (1.0 + pct / 100.0),  # Negative angles
+        1.0 + pct / 100.0  # Positive angles
+    )
+
+    return multiplier
 
 
 def _extract_fly_number(*candidates: Optional[str]) -> Optional[int]:
@@ -1611,6 +1717,10 @@ def build_wide_csv(
     out_path = Path(output_csv).expanduser().resolve()
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
+    # Load tracking config for proboscis detection quality checks
+    settings = load_settings(config_path or DEFAULT_CONFIG_PATH)
+    tracking_cfg = settings.tracking
+
     class2_min, class2_max = _resolve_distance_limits(distance_limits, config_path)
     print(
         f"[DEBUG] build_wide_csv: applying distance limits [{class2_min:.3f}, {class2_max:.3f}] for local extrema"
@@ -1750,6 +1860,9 @@ def build_wide_csv(
         "local_max_over_global_min",
         "local_max_during_over_global_min",
         "non_reactive_flag",
+        "tracking_missing_frames",
+        "tracking_pct_missing",
+        "tracking_flagged",
     ]
     meta_suffix = ["trial_type", "trial_label", "fps"]
     metadata = meta_prefix + stat_columns + meta_suffix
@@ -1918,6 +2031,29 @@ def build_wide_csv(
                 local_min_before = float("nan")
                 local_max_before = float("nan")
 
+            # Compute tracking quality from raw distance CSV (if available)
+            tracking_quality = {"missing_frames": 0, "pct_missing": 0.0, "flagged": False}
+            if tracking_cfg.apply_missing_frame_check:
+                # Try to find corresponding raw distance CSV in RMS_calculations directory
+                rms_dir = fly_dir_path / "RMS_calculations"
+                if rms_dir.is_dir():
+                    # Build pattern to match trial type and number from label
+                    trial_pattern = f"*{trial_type.lower()}*{label}*distances*.csv"
+                    distance_csvs = list(rms_dir.glob(trial_pattern))
+                    if not distance_csvs:
+                        # Try a broader search
+                        trial_num_str = str(label).replace(trial_type, "").replace("_", "").strip()
+                        trial_pattern = f"*{trial_type.lower()}*{trial_num_str}*distances*.csv"
+                        distance_csvs = list(rms_dir.glob(trial_pattern))
+
+                    if distance_csvs:
+                        raw_csv = distance_csvs[0]  # Take first match
+                        tracking_quality = compute_tracking_quality_per_trial(
+                            raw_csv,
+                            max_missing_frames=tracking_cfg.max_missing_frames_per_trial,
+                            max_missing_pct=tracking_cfg.max_missing_frames_pct_per_trial,
+                        )
+
             trial_results.append(
                 {
                     "trial_type": trial_type,
@@ -1931,6 +2067,9 @@ def build_wide_csv(
                     "local_max_before": local_max_before,
                     "local_min_during": local_min_during,
                     "local_max_during": local_max_during,
+                    "tracking_missing_frames": tracking_quality.get("missing_frames", 0),
+                    "tracking_pct_missing": tracking_quality.get("pct_missing", 0.0),
+                    "tracking_flagged": tracking_quality.get("flagged", False),
                 }
             )
             # Collect samples from BOTH testing and training trials
@@ -2049,6 +2188,9 @@ def build_wide_csv(
                 local_max_over_global_min,
                 local_max_during_over_global_min,
                 non_reactive,
+                result.get("tracking_missing_frames", 0),
+                result.get("tracking_pct_missing", 0.0),
+                result.get("tracking_flagged", False),
                 result["trial_type"],
                 result["label"],
                 float(result["fps"]),

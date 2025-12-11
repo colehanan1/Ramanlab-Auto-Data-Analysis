@@ -3,6 +3,7 @@
 model_path: "/home/ramanlab/Documents/cole/sam2/notebooks/YOLOProjectProboscisLegs/runs/obb/train5/weights/best.pt"
 main_directory:
           - "/home/ramanlab/Documents/cole/Data/flys/opto_EB/"
+          - "/home/ramanlab/Documents/cole/Data/flys/opto_EB(6-training)/"
           - "/home/ramanlab/Documents/cole/Data/flys/opto_benz_1/"
           - "/home/ramanlab/Documents/cole/Data/flys/opto_hex/"
           - "/home/ramanlab/Documents/cole/Data/flys/opto_ACV/"
@@ -22,11 +23,11 @@ force:
 
 reaction_prediction:
   data_csv: "/home/ramanlab/Documents/cole/Data/Opto/Combined/all_envelope_rows_wide.csv"
-  model_path: "/home/ramanlab/Documents/cole/VSCode/FlyBehaviorScoring/comprehensive_test/threshold-2/2025-12-08T20-53-32Z/model_logreg.joblib"
+  model_path: "/home/ramanlab/Documents/cole/VSCode/FlyBehaviorScoring/artifacts/2025-12-10T20-37-33Z/model_random_forest.joblib"
   output_csv: "/home/ramanlab/Documents/cole/Data/Opto/Combined/model_predictions.csv"
-  threshold: 0.50
+  threshold: 0.35
   matrix:
-    out_dir: "/home/ramanlab/Documents/cole/Results/Opto/Reaction_Predictions"
+    out_dir: "/home/ramanlab/Documents/cole/Results/Opto/Reaction_Predictions(Strictest)"
     latency_sec: 2.15
     after_window_sec: 30.0
     row_gap: 0.6
@@ -64,6 +65,12 @@ distance_limits:
 
 # Reaction filtering
 non_reactive_span_px: 7.5  # flag flies when global span ≤ this threshold (pixels)
+
+# Tracking quality filtering
+tracking:
+  max_missing_frames_per_trial: 5000  # Flag if any trial has >5000 frames without proboscis detection
+  max_missing_frames_pct_per_trial: 50.0  # Flag if >50% of trial frames lack detection
+  apply_missing_frame_check: true  # Enable/disable tracking quality check
 
 # Envelope / RMS
 fps_default: 40.0
@@ -140,6 +147,7 @@ analysis:
         - "/home/ramanlab/Documents/cole/Data/flys/EB_control/"
         - "/home/ramanlab/Documents/cole/Data/flys/Benz_control/"
         - "/home/ramanlab/Documents/cole/Data/flys/opto_EB/"
+        - "/home/ramanlab/Documents/cole/Data/flys/opto_EB(6-training)/"
         - "/home/ramanlab/Documents/cole/Data/flys/opto_hex/"
         - "/home/ramanlab/Documents/cole/Data/flys/opto_ACV/"
         - "/home/ramanlab/Documents/cole/Data/flys/opto_AIR/"
@@ -156,8 +164,11 @@ analysis:
           destination: "/securedstorage/DATAsec/cole/Data-secured/opto_hex/"
         - source: "/home/ramanlab/Documents/cole/Data/flys/opto_ACV/"
           destination: "/securedstorage/DATAsec/cole/Data-secured/opto_ACV/"
+        - source: "/home/ramanlab/Documents/cole/Data/flys/opto_EB(6-training)/"
+          destination: "/securedstorage/DATAsec/cole/Data-secured/opto_EB(6-training)/"
       roots:
         - "/securedstorage/DATAsec/cole/Data-secured/opto_EB/"
+        - "/securedstorage/DATAsec/cole/Data-secured/opto_EB(6-training)/"
         - "/securedstorage/DATAsec/cole/Data-secured/opto_benz_1/"
         - "/securedstorage/DATAsec/cole/Data-secured/opto_hex/"
         - "/securedstorage/DATAsec/cole/Data-secured/opto_ACV/"
@@ -234,6 +245,7 @@ analysis:
       destination: "/securedstorage/DATAsec/cole/Data-secured/"
       sources:
         - "/home/ramanlab/Documents/cole/Data/flys/opto_EB/"
+        - "/home/ramanlab/Documents/cole/Data/flys/opto_EB(6-training)/"
         - "/home/ramanlab/Documents/cole/Data/flys/opto_benz_1/"
         - "/home/ramanlab/Documents/cole/Data/flys/opto_hex/"
         - "/home/ramanlab/Documents/cole/Data/flys/opto_ACV/"

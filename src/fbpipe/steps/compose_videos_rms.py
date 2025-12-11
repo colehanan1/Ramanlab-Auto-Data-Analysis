@@ -316,15 +316,20 @@ def find_fly_reference_angle(csvs_raw: List[Path], trimmed_min: Optional[float] 
             angle = compute_angle_deg_at_point2(df)
         except Exception:
             continue
-        dist_col = find_col(
-            df,
-            [
-                "distance_percentage",
-                "distance_percent",
-                "distance_pct",
-                "distance_class1_class2_pct",
-            ],
-        )
+        # Use flexible column finder instead of hardcoded names
+        dist_col = find_proboscis_distance_percentage_column(df)
+        if dist_col is None:
+            # Fallback to find_col with common names
+            dist_col = find_col(
+                df,
+                [
+                    "distance_percentage_2_8",
+                    "distance_percentage",
+                    "distance_percent",
+                    "distance_pct",
+                    "distance_class1_class2_pct",
+                ],
+            )
         if dist_col is None:
             continue
         dist = pd.to_numeric(df[dist_col], errors="coerce").to_numpy()
@@ -542,10 +547,15 @@ def _ead_compute_trim_min_max(fly_dir: Path) -> Optional[Tuple[float, float]]:
     values: List[np.ndarray] = []
     for path, _, _ in iter_fly_distance_csvs(base, recursive=True):
         try:
-            arr = pd.to_numeric(
-                pd.read_csv(path, usecols=[DIST_COL_ROBUST])[DIST_COL_ROBUST],
-                errors="coerce",
-            ).to_numpy()
+            df = pd.read_csv(path)
+            # Use flexible column finder instead of hardcoded column name
+            dist_col = find_proboscis_distance_percentage_column(df)
+            if dist_col is None:
+                # Fallback to old column name
+                dist_col = find_col(df, [DIST_COL_ROBUST, PCT_COL_ROBUST, "distance_percentage"])
+            if dist_col is None:
+                continue
+            arr = pd.to_numeric(df[dist_col], errors="coerce").to_numpy()
         except Exception:
             continue
         values.append(arr)

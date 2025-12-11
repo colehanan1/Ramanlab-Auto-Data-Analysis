@@ -57,14 +57,18 @@ ODOR_CANON: Mapping[str, str] = {
     "benzaldehyde": "Benz",
     "benz-ald": "Benz",
     "benzadhyde": "Benz",
-    "benz_control": "benz_control",
-    "benz control": "benz_control",
+    "benz_control": "Benz_control",
+    "benz control": "Benz_control",
     "ethyl butyrate": "EB",
     "eb_control": "EB_control",
     "eb control": "EB_control",
+    "hex_control": "hex_control",
+    "hexanol control": "hex_control",
     "optogenetics benzaldehyde": "opto_benz",
     "optogenetics benzaldehyde 1": "opto_benz_1",
     "optogenetics ethyl butyrate": "opto_EB",
+    "opto_eb": "opto_EB",
+    "opto_eb(6-training)": "opto_EB_6_training",
     "optogenetics apple cider vinegar": "opto_ACV",
     "optogenetics acv": "opto_ACV",
     "optogenetics hexanol": "opto_hex",
@@ -87,9 +91,11 @@ DISPLAY_LABEL = {
     "EB": "Ethyl Butyrate",
     "EB_control": "Ethyl Butyrate",
     "hex_control": "Hexanol",
+    "Benz_control": "Benzaldehyde",
     "benz_control": "Benzaldehyde",
     "opto_benz": "Benzaldehyde",
     "opto_EB": "Ethyl Butyrate",
+    "opto_EB_6_training": "Ethyl Butyrate (6-Training)",
     "opto_benz_1": "Benzaldehyde",
     "opto_ACV": "Apple Cider Vinegar",
     "opto_hex": "Hexanol",
@@ -106,9 +112,12 @@ ODOR_ORDER = [
     "10s_Odor_Benz",
     "opto_benz",
     "opto_EB",
+    "opto_EB_6_training",
     "EB_control",
     "opto_benz_1",
+    "Benz_control",
     "opto_hex",
+    "hex_control",
     "opto_AIR",
     "opto_3-oct",
 ]
@@ -119,6 +128,7 @@ HEXANOL_LABEL = "Hexanol"
 PRIMARY_ODOR_LABEL = {
     "EB_control": "Ethyl Butyrate",
     "hex_control": HEXANOL_LABEL,
+    "Benz_control": "Benzaldehyde",
     "benz_control": "Benzaldehyde",
 }
 
@@ -191,8 +201,8 @@ TRAINING_ODOR_SCHEDULE_3OCT = {
 TESTING_DATASET_ALIAS = {
     "opto_hex": "hex_control",
     "opto_EB": "EB_control",
-    "opto_benz": "benz_control",
-    "opto_benz_1": "benz_control",
+    "opto_benz": "Benz_control",
+    "opto_benz_1": "Benz_control",
     "opto_ACV": "ACV",
     "opto_3-oct": "opto_3-oct",
 }
@@ -241,10 +251,34 @@ def resolve_dataset_label(values: Sequence[str] | str) -> str:
 
 
 def resolve_dataset_output_dir(base: Path, values: Sequence[str] | str) -> Path:
-    """Return the output directory for the provided dataset identifiers."""
+    """
+    Return the output directory for the provided dataset identifiers.
 
-    label = resolve_dataset_label(values)
-    return base / _safe_dirname(label)
+    Creates separate folders for each unique dataset to avoid mixing results:
+    - opto_hex → "opto_hex" folder
+    - hex_control → "hex_control" folder
+    - opto_EB → "opto_EB" folder
+    - EB_control → "EB_control" folder
+    - etc.
+    """
+    if isinstance(values, str):
+        candidates = {_canon_dataset(values)} if values else set()
+    else:
+        candidates = {_canon_dataset(val) for val in values if isinstance(val, str) and val}
+
+    candidates = {val for val in candidates if val}
+    if not candidates:
+        return base / "UNKNOWN"
+
+    if len(candidates) == 1:
+        # Single dataset: use the canonical name directly (preserves opto_hex, hex_control, etc.)
+        dataset_name = next(iter(candidates))
+        return base / _safe_dirname(dataset_name)
+
+    # Multiple datasets: create combined folder name
+    sorted_names = sorted(candidates)
+    combined_name = "_".join(sorted_names)
+    return base / _safe_dirname(combined_name)
 
 
 def should_write(path: Path, overwrite: bool) -> bool:
@@ -513,16 +547,57 @@ def _span_columns(df: pd.DataFrame) -> tuple[pd.Series, pd.Series]:
 
 
 def compute_non_reactive_flags(
-    df: pd.DataFrame, *, threshold: float = NON_REACTIVE_SPAN_PX
+    df: pd.DataFrame,
+    *,
+    threshold: float = NON_REACTIVE_SPAN_PX,
+    include_tracking: bool = True
 ) -> pd.Series:
-    """Return a boolean mask flagging flies whose global span ≤ threshold."""
+    """
+    Return a boolean mask flagging flies as non-reactive based on motion or tracking quality.
 
+    A fly is flagged as non-reactive if EITHER:
+    1. Motion span ≤ threshold (existing criterion)
+    2. Proboscis tracking is poor (NEW criterion, if include_tracking=True)
+
+    Args:
+        df: DataFrame with fly data
+        threshold: Motion span threshold (pixels)
+        include_tracking: If True, also flag flies with poor tracking quality
+
+    Returns:
+        Boolean Series where True = non-reactive fly
+    """
+    # Criterion 1: Low motion (existing)
     gmin, gmax = _span_columns(df)
     span = pd.Series(np.nan, index=df.index, dtype=float)
     if isinstance(gmax, pd.Series) and isinstance(gmin, pd.Series):
         span = (gmax - gmin).abs()
-    flags = gmin.notna() & gmax.notna() & span.le(float(threshold))
-    return flags.fillna(False)
+    non_reactive_motion = gmin.notna() & gmax.notna() & span.le(float(threshold))
+    non_reactive_motion = non_reactive_motion.fillna(False)
+
+    # Criterion 2: Poor tracking (NEW)
+    non_reactive_tracking = pd.Series(False, index=df.index)
+    if include_tracking and "tracking_flagged" in df.columns:
+        non_reactive_tracking = df["tracking_flagged"].fillna(False).astype(bool)
+
+    # Combined: flag if EITHER criterion met
+    combined = non_reactive_motion | non_reactive_tracking
+
+    # Logging for transparency
+    n_motion_only = (non_reactive_motion & ~non_reactive_tracking).sum()
+    n_tracking_only = (~non_reactive_motion & non_reactive_tracking).sum()
+    n_both = (non_reactive_motion & non_reactive_tracking).sum()
+    n_total = combined.sum()
+
+    if n_total > 0:
+        logger.info(
+            f"Flagged {n_total} flies as non-reactive: "
+            f"{n_motion_only} low motion only, "
+            f"{n_tracking_only} poor tracking only, "
+            f"{n_both} both criteria"
+        )
+
+    return combined
 
 
 def non_reactive_mask(df: pd.DataFrame) -> pd.Series:
@@ -555,6 +630,81 @@ def _compute_theta(
 
     window = env[:before_end]
     return float(np.nanmean(window) + std_mult * np.nanstd(window))
+
+
+def filter_and_validate_trial_type(
+    df: pd.DataFrame,
+    target_type: str = "testing",
+    fallback_to_all: bool = False
+) -> tuple[pd.DataFrame, bool, str]:
+    """
+    Robustly filter dataframe to specified trial type with diagnostics.
+
+    This function handles missing or malformed trial_type columns gracefully,
+    normalizes whitespace and casing, and provides clear diagnostic messages.
+
+    Args:
+        df: Input dataframe with potential trial_type column
+        target_type: Target trial type to filter for (e.g., "testing", "training")
+        fallback_to_all: If True, return all rows when target type not found
+
+    Returns:
+        Tuple of (filtered_df, success, reason):
+        - filtered_df: DataFrame filtered to target type (or empty if failed)
+        - success: Boolean indicating if filtering succeeded
+        - reason: String describing the result (for logging/debugging)
+    """
+    if "trial_type" not in df.columns:
+        logger.warning(
+            "Column 'trial_type' not found in matrix; "
+            "proceeding with all available rows"
+        )
+        return df, True, "no_trial_type_column"
+
+    # Normalize: strip whitespace, lowercase
+    df = df.copy()
+    df["trial_type_clean"] = (
+        df["trial_type"]
+        .astype(str)
+        .str.strip()
+        .str.lower()
+    )
+
+    # Count available trial types
+    available_types = df["trial_type_clean"].unique()
+    available_counts = df["trial_type_clean"].value_counts().to_dict()
+    logger.info(
+        f"Available trial types: {available_counts}"
+    )
+
+    # Filter to target type
+    mask = df["trial_type_clean"] == target_type.lower()
+    filtered = df.loc[mask].copy()
+
+    if not filtered.empty:
+        logger.info(
+            f"Filtered to '{target_type}' trials: "
+            f"{len(filtered)} rows remain (from {len(df)} total)"
+        )
+        return filtered, True, f"filtered_to_{target_type}"
+
+    # Target type not found
+    logger.warning(
+        f"No '{target_type}' trials found in matrix. "
+        f"Available types: {list(available_types)}"
+    )
+
+    if fallback_to_all:
+        logger.warning(
+            f"Falling back to ALL trials ({len(df)} rows) "
+            f"for visualization"
+        )
+        return df, True, "fallback_to_all"
+    else:
+        logger.error(
+            f"Cannot proceed without '{target_type}' trials"
+        )
+        return pd.DataFrame(), False, "no_target_trials"
 
 
 def _load_matrix(matrix_path: Path, codes_json: Path) -> tuple[pd.DataFrame, list[str]]:
@@ -718,7 +868,8 @@ def reaction_rate_stats_from_rows(
         missing_odors = stats_df.loc[zero_trial_mask, "odor"].tolist()
         logger.warning("Odors with zero trials encountered in %s: %s", context, missing_odors)
 
-    highlight_label = DISPLAY_LABEL.get(dataset_canon, dataset_canon)
+    # Use PRIMARY_ODOR_LABEL for control datasets to get the correct trained odor
+    highlight_label = _trained_label(dataset_canon)
     stats_df["is_trained"] = stats_df["odor"].astype(str).str.casefold() == highlight_label.casefold()
 
     stats_df = stats_df.sort_values(["rate", "odor"], ascending=[False, True], kind="mergesort")
@@ -762,7 +913,19 @@ def plot_reaction_rate_bars(
         linewidth=0.75,
     )
     ax.set_xticks(x)
-    ax.set_xticklabels(stats_df["odor"].astype(str), rotation=35, ha="right")
+
+    # Display trained odor in ALL CAPS and blue
+    labels = [
+        str(odor).upper() if bool(is_trained) else str(odor)
+        for odor, is_trained in zip(stats_df["odor"], stats_df["is_trained"])
+    ]
+    ax.set_xticklabels(labels, rotation=35, ha="right")
+
+    # Color trained odor labels blue
+    for tick, is_trained in zip(ax.get_xticklabels(), stats_df["is_trained"]):
+        if bool(is_trained):
+            tick.set_color("tab:blue")
+            tick.set_weight("bold")
     ax.set_ylim(0.0, 1.05)
     ax.set_ylabel("Reaction Rate")
     ax.set_xlabel("Odor")
@@ -830,9 +993,29 @@ def _matrix_title(dataset_canon: str) -> str:
 
 def generate_reaction_matrices(cfg: MatrixPlotConfig) -> None:
     df, env_cols = _load_matrix(cfg.matrix_npy, cfg.codes_json)
-    df = df[df["trial_type"].str.lower() == "testing"].copy()
-    if df.empty:
-        raise RuntimeError("No testing trials found in matrix; cannot build reaction matrices.")
+
+    # Robust trial type filtering with diagnostics
+    df_filtered, success, reason = filter_and_validate_trial_type(
+        df,
+        target_type="testing",
+        fallback_to_all=False  # Strict: don't mix testing and training
+    )
+
+    if not success or df_filtered.empty:
+        available_types = df.get("trial_type", pd.Series()).unique() if "trial_type" in df.columns else "unknown"
+        logger.error(
+            f"Cannot build reaction matrices: {reason}. "
+            f"Ensure matrix contains testing trials. "
+            f"Available trial types: {available_types}"
+        )
+        raise RuntimeError(
+            f"No testing trials found in matrix; cannot build reaction matrices. "
+            f"Reason: {reason}. "
+            f"If this is a training-only dataset, "
+            f"use generate_envelope_plots() instead."
+        )
+
+    df = df_filtered
 
     df["fps"] = df["fps"].replace([np.inf, -np.inf], np.nan).fillna(cfg.fps_default)
     df["dataset_canon"] = df["dataset"].map(_canon_dataset)
@@ -903,6 +1086,9 @@ def generate_reaction_matrices(cfg: MatrixPlotConfig) -> None:
     present = scores_df["dataset"].unique().tolist()
     ordered_present = [odor for odor in ODOR_ORDER if odor in present]
     extras = sorted(odor for odor in present if odor not in ODOR_ORDER)
+
+    # Collect reaction rate statistics for CSV export
+    all_rate_stats = []
 
     for order in cfg.trial_orders:
         order_suffix = _order_suffix(order)
@@ -1029,6 +1215,16 @@ def generate_reaction_matrices(cfg: MatrixPlotConfig) -> None:
                     rate_stats,
                     title="Reaction Rates by Odor",
                 )
+                # Collect rate stats for CSV export
+                for _, row in rate_stats.iterrows():
+                    all_rate_stats.append({
+                        "dataset": odor,
+                        "trial_order": order,
+                        "odor_sent": str(row["odor"]),
+                        "reaction_rate": float(row["rate"]),
+                        "num_reactions": int(row["num_reactions"]),
+                        "num_trials": int(row["num_trials"]),
+                    })
 
             shift_frac = cfg.bottom_shift_in / fig_h if fig_h else 0.0
             for axis in (ax_dc,):
@@ -1087,6 +1283,42 @@ def generate_reaction_matrices(cfg: MatrixPlotConfig) -> None:
 
             plt.close(fig)
 
+    # Export aggregated reaction rate statistics to CSV
+    if all_rate_stats:
+        stats_df = pd.DataFrame(all_rate_stats)
+
+        # For each trial order, create a separate summary CSV
+        for order in cfg.trial_orders:
+            order_stats = stats_df[stats_df["trial_order"] == order].copy()
+            if order_stats.empty:
+                continue
+
+            # Create pivot table: rows = datasets, columns = odor_sent, values = reaction_rate
+            pivot = order_stats.pivot_table(
+                index="dataset",
+                columns="odor_sent",
+                values="reaction_rate",
+                aggfunc="first"  # Should only be one value per dataset-odor pair
+            )
+
+            # Sort datasets by ODOR_ORDER
+            ordered_datasets = [d for d in ODOR_ORDER if d in pivot.index]
+            extra_datasets = sorted(d for d in pivot.index if d not in ODOR_ORDER)
+            all_datasets = ordered_datasets + extra_datasets
+            pivot = pivot.loc[all_datasets]
+
+            # Reset index to make dataset a column
+            pivot = pivot.reset_index()
+
+            # Save to CSV
+            order_suffix = _order_suffix(order)
+            csv_filename = f"reaction_rates_summary_{order_suffix}.csv"
+            csv_path = cfg.out_dir / csv_filename
+
+            if should_write(csv_path, cfg.overwrite):
+                pivot.to_csv(csv_path, index=False, float_format="%.4f")
+                logger.info("Exported reaction rate summary to %s", csv_path)
+
 
 # ---------------------------------------------------------------------------
 # Envelope traces per fly
@@ -1114,11 +1346,26 @@ def generate_envelope_plots(cfg: EnvelopePlotConfig) -> None:
     if trial_type not in {"testing", "training"}:
         raise ValueError(f"Unsupported trial type: {cfg.trial_type!r}")
 
-    df = df[df["trial_type"].str.lower() == trial_type].copy()
-    if df.empty:
-        raise RuntimeError(
-            f"No {trial_type} trials found in matrix; cannot build envelope plots."
+    # Robust trial type filtering with diagnostics
+    df_filtered, success, reason = filter_and_validate_trial_type(
+        df,
+        target_type=trial_type,
+        fallback_to_all=False
+    )
+
+    if not success or df_filtered.empty:
+        available_types = df.get("trial_type", pd.Series()).unique() if "trial_type" in df.columns else "unknown"
+        logger.error(
+            f"Cannot build {trial_type} envelope plots: {reason}. "
+            f"Available trial types: {available_types}"
         )
+        raise RuntimeError(
+            f"No {trial_type} trials found in matrix; cannot build envelope plots. "
+            f"Reason: {reason}. "
+            f"Available trial types: {available_types}"
+        )
+
+    df = df_filtered
 
     if "fly_number" not in df.columns:
         df["fly_number"] = "UNKNOWN"
