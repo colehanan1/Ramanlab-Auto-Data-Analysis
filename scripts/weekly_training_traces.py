@@ -417,7 +417,7 @@ def create_all_weeks_combined_plot(
 
     # Create color spectrum from green to blue
     # Using a colormap that goes through green -> cyan -> blue
-    cmap = plt.cm.get_cmap('viridis', len(weeks))
+    cmap = plt.colormaps.get_cmap('viridis').resampled(len(weeks))
     colors = [cmap(i) for i in range(len(weeks))]
 
     # Plot each week's grand average
@@ -507,8 +507,24 @@ def extract_odor_period_response(
     if len(odor_period) == 0:
         return np.nan, np.nan
 
-    mean_resp = np.nanmean(odor_period)
-    peak_resp = np.nanmax(odor_period)
+    # Convert to numpy array if needed (handles pandas Series)
+    if hasattr(odor_period, 'values'):
+        odor_period = odor_period.values
+    else:
+        odor_period = np.asarray(odor_period)
+
+    # Convert to float array, handling any conversion issues
+    try:
+        odor_period = np.asarray(odor_period, dtype=float)
+    except (ValueError, TypeError):
+        return np.nan, np.nan
+
+    # Check if all values are NaN
+    if len(odor_period) == 0 or np.all(np.isnan(odor_period)):
+        return np.nan, np.nan
+
+    mean_resp = float(np.nanmean(odor_period))
+    peak_resp = float(np.nanmax(odor_period))
 
     return mean_resp, peak_resp
 
@@ -694,7 +710,7 @@ def create_response_amplitude_plot(
                      meanprops=dict(marker='D', markerfacecolor='red', markersize=8))
 
     # Color boxes with gradient
-    cmap = plt.cm.get_cmap('viridis', len(weeks))
+    cmap = plt.colormaps.get_cmap('viridis').resampled(len(weeks))
     for patch, idx in zip(bp['boxes'], range(len(weeks))):
         patch.set_facecolor(cmap(idx))
         patch.set_alpha(0.6)
@@ -796,6 +812,12 @@ def perform_pca_analysis(
             for _, row in filtered.iterrows():
                 trace_odor = row[odor_cols].values
 
+                # Convert to float array
+                try:
+                    trace_odor = np.asarray(trace_odor, dtype=float)
+                except (ValueError, TypeError):
+                    continue
+
                 # Only include if no NaN values
                 if not np.any(np.isnan(trace_odor)):
                     pca_data.append(trace_odor)
@@ -881,7 +903,7 @@ def create_pca_plot(
     ax1 = fig.add_subplot(131)
 
     unique_weeks = sorted(set(labels))
-    cmap = plt.cm.get_cmap('viridis', len(unique_weeks))
+    cmap = plt.colormaps.get_cmap('viridis').resampled(len(unique_weeks))
 
     for idx, week in enumerate(unique_weeks):
         mask = labels == week
@@ -1077,7 +1099,29 @@ def main():
     if combined_filepath:
         output_files.append(combined_filepath)
 
-    # Step 7: Generate validation report
+    # Step 7: Perform statistical analysis
+    logger.info("Performing statistical analysis on response amplitudes...")
+    stats_report_path = perform_statistical_analysis(df, dir_cols, OUTPUT_DIR, fps)
+    if stats_report_path:
+        logger.info(f"Statistical analysis completed: {stats_report_path}")
+        output_files.append(stats_report_path)
+        # Add the amplitude plot if it was generated
+        amplitude_plot = OUTPUT_DIR / 'response_amplitude_analysis.png'
+        if amplitude_plot.exists():
+            output_files.append(str(amplitude_plot))
+
+    # Step 8: Perform PCA analysis (only on weeks with >1 fly)
+    logger.info("Performing PCA analysis on weekly patterns...")
+    pca_report_path = perform_pca_analysis(df, dir_cols, OUTPUT_DIR, fps)
+    if pca_report_path:
+        logger.info(f"PCA analysis completed: {pca_report_path}")
+        output_files.append(pca_report_path)
+        # Add the PCA plot if it was generated
+        pca_plot = OUTPUT_DIR / 'pca_analysis_plot.png'
+        if pca_plot.exists():
+            output_files.append(str(pca_plot))
+
+    # Step 9: Generate validation report
     report_path = generate_validation_report(df, output_files, OUTPUT_DIR, total_exp_rows, non_reactive_count)
 
     logger.info("=" * 80)
