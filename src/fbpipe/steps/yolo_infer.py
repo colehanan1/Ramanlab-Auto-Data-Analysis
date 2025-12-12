@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import math
 import time
+import subprocess
 
 import cv2
 import numpy as np
@@ -500,7 +501,20 @@ def main(cfg: Settings):
                 w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)) or 1080
                 h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) or 1080
                 # Use H.264 codec (avc1) for better compression - output videos will be similar size to input
-                writer = cv2.VideoWriter(str(out_mp4), cv2.VideoWriter_fourcc(*"avc1"), fps, (w, h))
+                # Try X264 (libx264) codec first, fall back to mp4v if not available
+                fourcc = cv2.VideoWriter_fourcc(*"X264")
+                writer = cv2.VideoWriter(str(out_mp4), fourcc, fps, (w, h))
+
+                # If X264 fails, try mp4v as fallback
+                if not writer.isOpened():
+                    log.warning("X264 codec not available, falling back to mp4v")
+                    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+                    writer = cv2.VideoWriter(str(out_mp4), fourcc, fps, (w, h))
+
+                # Verify writer opened successfully
+                if not writer.isOpened():
+                    log.error(f"Failed to open VideoWriter for {out_mp4}, skipping video")
+                    continue
 
                 single_trackers = {
                     cls: SingleClassTracker(
@@ -548,6 +562,36 @@ def main(cfg: Settings):
                     rows.append(row)
                     frame_idx += 1
                 cap.release(); writer.release()
+
+                # Re-encode with H.264 using ffmpeg for better compression
+                temp_mp4 = out_mp4.with_name(out_mp4.stem + "_temp.mp4")
+                out_mp4.rename(temp_mp4)  # Rename original to temp
+
+                log.info(f"Re-encoding with H.264 for better compression...")
+                try:
+                    subprocess.run([
+                        '/usr/bin/ffmpeg',  # Use system ffmpeg with libx264 support
+                        '-y',  # Overwrite output file
+                        '-i', str(temp_mp4),
+                        '-c:v', 'libx264',
+                        '-preset', 'medium',
+                        '-crf', '30',  # Match user's compression preference
+                        '-c:a', 'copy',
+                        str(out_mp4)
+                    ], check=True, capture_output=True, text=True)
+
+                    # Delete temp file after successful re-encoding
+                    temp_mp4.unlink()
+
+                    # Log file size comparison
+                    final_size = out_mp4.stat().st_size / (1024**2)
+                    log.info(f"  Final output: {final_size:.1f} MB")
+                except subprocess.CalledProcessError as e:
+                    log.warning(f"  ffmpeg re-encoding failed, keeping original: {e.stderr}")
+                    # Restore original if ffmpeg fails
+                    if temp_mp4.exists():
+                        temp_mp4.rename(out_mp4)
+
                 df_rows = pd.DataFrame(rows)
                 merged_csv_path = out_dir / f"{folder_name}_distances_merged.csv"
                 df_rows.to_csv(merged_csv_path, index=False)
