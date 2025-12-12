@@ -2,15 +2,7 @@
 # Project configuration
 model_path: "/home/ramanlab/Documents/cole/sam2/notebooks/YOLOProjectProboscisLegs/runs/obb/train5/weights/best.pt"
 main_directory:
-          - "/home/ramanlab/Documents/cole/Data/flys/opto_EB(6-training)/"
-          - "/home/ramanlab/Documents/cole/Data/flys/opto_benz_1/"
-          - "/home/ramanlab/Documents/cole/Data/flys/opto_hex/"
-          - "/home/ramanlab/Documents/cole/Data/flys/opto_ACV/"
-          - "/home/ramanlab/Documents/cole/Data/flys/hex_control/"
-          - "/home/ramanlab/Documents/cole/Data/flys/EB_control/"
-          - "/home/ramanlab/Documents/cole/Data/flys/Benz_control/"
-          - "/home/ramanlab/Documents/cole/Data/flys/opto_AIR/"
-          - "/home/ramanlab/Documents/cole/Data/flys/opto_3-oct/"
+          - "/home/ramanlab/Documents/cole/Data/flys/test8/"
 
 cache_dir: "/home/ramanlab/Documents/cole/cache"
 force:
@@ -46,7 +38,7 @@ yolo:
   iou_match_thres: 0.25
   max_age: 5
   ema_alpha: 0.20
-  use_optical_flow: true
+  use_optical_flow: false
   flow_skip_edge: 10
   max_flies: 3
   max_proboscis_tracks: 3
