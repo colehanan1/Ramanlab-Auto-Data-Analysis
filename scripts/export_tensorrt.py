@@ -37,7 +37,7 @@ def main():
     log.info("Exporting to TensorRT engine (this may take 5-15 minutes)...")
     log.info("Using FP16 precision for RTX 3090 Tensor Cores")
 
-    model.export(format="engine", half=True, device=0)
+    model.export(format="engine", half=True, device="cuda:0")
 
     log.info(f"✓ TensorRT engine created: {engine_path}")
     log.info("YOLO inference will now use this optimized engine automatically")

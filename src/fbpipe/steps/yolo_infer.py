@@ -418,137 +418,142 @@ def main(cfg: Settings):
             raise
 
     AX, AY = cfg.anchor_x, cfg.anchor_y
-    root = Path(cfg.main_directory).expanduser().resolve()
-    if not root.is_dir():
-        print(f"[YOLO] main_directory does not exist: {root}")
-        return
 
-    for fly in [p for p in root.iterdir() if p.is_dir()]:
-        video_files = [f for f in fly.iterdir() if f.suffix.lower() in (".mp4",".avi")]
-        for video_path in video_files:
-            base = video_path.stem
-            csv_file_path = fly / f"{base.replace('_preprocessed','')}.csv"
-            parts = base.split("_")
-            folder_name = "_".join(parts[1:7]) if len(parts)>=7 else base
-            out_dir = fly / folder_name
-            if out_dir.exists():
-                print(f"[YOLO] Skipping {video_path.name}: detected processed folder {out_dir.name}")
-                continue
-            out_dir.mkdir(exist_ok=True)
-            out_mp4 = out_dir / f"{folder_name}_distance_annotated.mp4"
+    # Handle main_directory as either string or list
+    directories = cfg.main_directory if isinstance(cfg.main_directory, list) else [cfg.main_directory]
 
-            cap = cv2.VideoCapture(str(video_path))
-            if not cap.isOpened():
-                print(f"[YOLO] Cannot open {video_path}")
-                continue
+    for main_dir in directories:
+        root = Path(main_dir).expanduser().resolve()
+        if not root.is_dir():
+            print(f"[YOLO] main_directory does not exist: {root}")
+            continue
 
-            original_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)) or 1080
-            original_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) or 1080
-            target_w, target_h = (1080, 1080) if (original_w, original_h) != (1080, 1080) else (original_w, original_h)
+        for fly in [p for p in root.iterdir() if p.is_dir()]:
+            video_files = [f for f in fly.iterdir() if f.suffix.lower() in (".mp4",".avi")]
+            for video_path in video_files:
+                base = video_path.stem
+                csv_file_path = fly / f"{base.replace('_preprocessed','')}.csv"
+                parts = base.split("_")
+                folder_name = "_".join(parts[1:7]) if len(parts)>=7 else base
+                out_dir = fly / folder_name
+                if out_dir.exists():
+                    print(f"[YOLO] Skipping {video_path.name}: detected processed folder {out_dir.name}")
+                    continue
+                out_dir.mkdir(exist_ok=True)
+                out_mp4 = out_dir / f"{folder_name}_distance_annotated.mp4"
 
-            scan_frames = 5
-            detected_flies = _scan_initial_fly_count(cap, scan_frames, (target_w, target_h), cfg, predict_fn)
-            if not cap.set(cv2.CAP_PROP_POS_FRAMES, 0):
-                cap.release()
                 cap = cv2.VideoCapture(str(video_path))
                 if not cap.isOpened():
-                    print(f"[YOLO] Cannot reopen {video_path} after warm-up scan")
+                    print(f"[YOLO] Cannot open {video_path}")
                     continue
 
-            if detected_flies == 0:
-                print(
-                    f"[YOLO] {video_path.name}: no eyes detected in first {scan_frames} frames; "
-                    f"using configured max ({cfg.max_flies})."
+                original_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)) or 1080
+                original_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) or 1080
+                target_w, target_h = (1080, 1080) if (original_w, original_h) != (1080, 1080) else (original_w, original_h)
+
+                scan_frames = 5
+                detected_flies = _scan_initial_fly_count(cap, scan_frames, (target_w, target_h), cfg, predict_fn)
+                if not cap.set(cv2.CAP_PROP_POS_FRAMES, 0):
+                    cap.release()
+                    cap = cv2.VideoCapture(str(video_path))
+                    if not cap.isOpened():
+                        print(f"[YOLO] Cannot reopen {video_path} after warm-up scan")
+                        continue
+
+                if detected_flies == 0:
+                    print(
+                        f"[YOLO] {video_path.name}: no eyes detected in first {scan_frames} frames; "
+                        f"using configured max ({cfg.max_flies})."
+                    )
+                    active_max_flies = cfg.max_flies
+                else:
+                    active_max_flies = min(detected_flies, cfg.max_flies)
+                    print(
+                        f"[YOLO] {video_path.name}: detected {active_max_flies} fly/fly slots from first {scan_frames} frames."
+                    )
+
+                total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) or 0
+                max_frame = total_frames-1 if total_frames>0 else 10**9
+                timestamps = {}
+                calculated_fps = cap.get(cv2.CAP_PROP_FPS) or cfg.fps_default
+
+                if csv_file_path.exists():
+                    df_timestamps = pd.read_csv(csv_file_path)
+                    frame_col = pick_frame_column(df_timestamps)
+                    if frame_col is not None:
+                        ts_col = pick_timestamp_column(df_timestamps)
+                        if ts_col is not None:
+                            secs = to_seconds_series(df_timestamps, ts_col)
+                            tmp = pd.DataFrame({
+                                "_frame": pd.to_numeric(df_timestamps[frame_col], errors="coerce"),
+                                "seconds": secs
+                            }).dropna(subset=["_frame", "seconds"])
+                            tmp["_frame"] = tmp["_frame"].astype(int)
+                            timestamps = tmp.set_index("_frame")["seconds"].to_dict()
+                            if not tmp["_frame"].empty:
+                                max_frame = int(tmp["_frame"].max())
+                            fps_from_csv = (tmp.shape[0] / (tmp["seconds"].iloc[-1] - tmp["seconds"].iloc[0])) if tmp.shape[0] >= 2 else None
+                            if fps_from_csv and np.isfinite(fps_from_csv) and fps_from_csv > 0:
+                                calculated_fps = fps_from_csv
+
+                fps = calculated_fps
+                w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)) or 1080
+                h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) or 1080
+                writer = cv2.VideoWriter(str(out_mp4), cv2.VideoWriter_fourcc(*"mp4v"), fps, (w, h))
+
+                single_trackers = {
+                    cls: SingleClassTracker(
+                        iou_thres=cfg.iou_match_thres, max_age=cfg.max_age, ema_alpha=cfg.ema_alpha
+                    )
+                    for cls in SINGLE_TRACK_CLASSES
+                }
+                eye_mgr = EyeAnchorManager(max_eyes=active_max_flies, zero_iou_eps=cfg.zero_iou_epsilon)
+                cls8_tracker = MultiObjectTracker(
+                    iou_thres=cfg.iou_match_thres,
+                    max_age=cfg.max_age,
+                    ema_alpha=cfg.ema_alpha,
+                    max_tracks=cfg.max_proboscis_tracks,
                 )
-                active_max_flies = cfg.max_flies
-            else:
-                active_max_flies = min(detected_flies, cfg.max_flies)
-                print(
-                    f"[YOLO] {video_path.name}: detected {active_max_flies} fly/fly slots from first {scan_frames} frames."
-                )
+                pairer = StablePairing(max_pairs=active_max_flies)
 
-            total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) or 0
-            max_frame = total_frames-1 if total_frames>0 else 10**9
-            timestamps = {}
-            calculated_fps = cap.get(cv2.CAP_PROP_FPS) or cfg.fps_default
+                target_w, target_h = (1080, 1080) if (w, h) != (1080, 1080) else (w, h)
+                pairer.rebind_max_dist_px = cfg.pair_rebind_ratio * math.hypot(target_w, target_h)
 
-            if csv_file_path.exists():
-                df_timestamps = pd.read_csv(csv_file_path)
-                frame_col = pick_frame_column(df_timestamps)
-                if frame_col is not None:
-                    ts_col = pick_timestamp_column(df_timestamps)
-                    if ts_col is not None:
-                        secs = to_seconds_series(df_timestamps, ts_col)
-                        tmp = pd.DataFrame({
-                            "_frame": pd.to_numeric(df_timestamps[frame_col], errors="coerce"),
-                            "seconds": secs
-                        }).dropna(subset=["_frame", "seconds"])
-                        tmp["_frame"] = tmp["_frame"].astype(int)
-                        timestamps = tmp.set_index("_frame")["seconds"].to_dict()
-                        if not tmp["_frame"].empty:
-                            max_frame = int(tmp["_frame"].max())
-                        fps_from_csv = (tmp.shape[0] / (tmp["seconds"].iloc[-1] - tmp["seconds"].iloc[0])) if tmp.shape[0] >= 2 else None
-                        if fps_from_csv and np.isfinite(fps_from_csv) and fps_from_csv > 0:
-                            calculated_fps = fps_from_csv
+                rows = []
+                prev_gray = None
+                frame_idx = 0
+                t0 = time.time()
+                while cap.isOpened() and frame_idx <= max_frame:
+                    ok, frame = cap.read()
+                    if not ok: break
+                    if (w, h) != (1080, 1080):
+                        frame = cv2.resize(frame, (1080,1080), interpolation=cv2.INTER_LINEAR)
+                    ts = timestamps.get(frame_idx, frame_idx / fps)
+                    frame, row, prev_gray = _process_frame(
+                        frame,
+                        frame_idx,
+                        ts,
+                        single_trackers,
+                        prev_gray,
+                        (AX, AY),
+                        cfg,
+                        predict_fn,
+                        eye_mgr,
+                        cls8_tracker,
+                        pairer,
+                        active_max_flies,
+                    )
+                    writer.write(frame)
+                    rows.append(row)
+                    frame_idx += 1
+                cap.release(); writer.release()
+                df_rows = pd.DataFrame(rows)
+                merged_csv_path = out_dir / f"{folder_name}_distances_merged.csv"
+                df_rows.to_csv(merged_csv_path, index=False)
 
-            fps = calculated_fps
-            w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)) or 1080
-            h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) or 1080
-            writer = cv2.VideoWriter(str(out_mp4), cv2.VideoWriter_fourcc(*"mp4v"), fps, (w, h))
+                per_fly_paths = _export_per_fly_csvs(df_rows, out_dir, folder_name, cfg, active_max_flies)
 
-            single_trackers = {
-                cls: SingleClassTracker(
-                    iou_thres=cfg.iou_match_thres, max_age=cfg.max_age, ema_alpha=cfg.ema_alpha
-                )
-                for cls in SINGLE_TRACK_CLASSES
-            }
-            eye_mgr = EyeAnchorManager(max_eyes=active_max_flies, zero_iou_eps=cfg.zero_iou_epsilon)
-            cls8_tracker = MultiObjectTracker(
-                iou_thres=cfg.iou_match_thres,
-                max_age=cfg.max_age,
-                ema_alpha=cfg.ema_alpha,
-                max_tracks=cfg.max_proboscis_tracks,
-            )
-            pairer = StablePairing(max_pairs=active_max_flies)
-
-            target_w, target_h = (1080, 1080) if (w, h) != (1080, 1080) else (w, h)
-            pairer.rebind_max_dist_px = cfg.pair_rebind_ratio * math.hypot(target_w, target_h)
-
-            rows = []
-            prev_gray = None
-            frame_idx = 0
-            t0 = time.time()
-            while cap.isOpened() and frame_idx <= max_frame:
-                ok, frame = cap.read()
-                if not ok: break
-                if (w, h) != (1080, 1080):
-                    frame = cv2.resize(frame, (1080,1080), interpolation=cv2.INTER_LINEAR)
-                ts = timestamps.get(frame_idx, frame_idx / fps)
-                frame, row, prev_gray = _process_frame(
-                    frame,
-                    frame_idx,
-                    ts,
-                    single_trackers,
-                    prev_gray,
-                    (AX, AY),
-                    cfg,
-                    predict_fn,
-                    eye_mgr,
-                    cls8_tracker,
-                    pairer,
-                    active_max_flies,
-                )
-                writer.write(frame)
-                rows.append(row)
-                frame_idx += 1
-            cap.release(); writer.release()
-            df_rows = pd.DataFrame(rows)
-            merged_csv_path = out_dir / f"{folder_name}_distances_merged.csv"
-            df_rows.to_csv(merged_csv_path, index=False)
-
-            per_fly_paths = _export_per_fly_csvs(df_rows, out_dir, folder_name, cfg, active_max_flies)
-
-            extra_msg = ""
-            if per_fly_paths:
-                extra_msg = " (per-fly CSVs: " + ", ".join(p.name for p in per_fly_paths) + ")"
-            print(f"[YOLO] {video_path.name} → {out_dir} in {time.time()-t0:.1f}s{extra_msg}")
+                extra_msg = ""
+                if per_fly_paths:
+                    extra_msg = " (per-fly CSVs: " + ", ".join(p.name for p in per_fly_paths) + ")"
+                print(f"[YOLO] {video_path.name} → {out_dir} in {time.time()-t0:.1f}s{extra_msg}")
