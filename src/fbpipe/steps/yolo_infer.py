@@ -499,7 +499,8 @@ def main(cfg: Settings):
                 fps = calculated_fps
                 w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)) or 1080
                 h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) or 1080
-                writer = cv2.VideoWriter(str(out_mp4), cv2.VideoWriter_fourcc(*"mp4v"), fps, (w, h))
+                # Use H.264 codec (avc1) for better compression - output videos will be similar size to input
+                writer = cv2.VideoWriter(str(out_mp4), cv2.VideoWriter_fourcc(*"avc1"), fps, (w, h))
 
                 single_trackers = {
                     cls: SingleClassTracker(
