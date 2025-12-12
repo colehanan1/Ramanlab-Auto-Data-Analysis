@@ -54,6 +54,7 @@ from scripts.envelope_combined import (
     secure_copy_and_cleanup,
     wide_to_matrix,
 )
+from scripts import weekly_training_traces
 
 
 def _resolve_path(value: str | Path | None) -> Path | None:
@@ -467,6 +468,18 @@ def _run_training(cfg: Mapping[str, Any] | None) -> None:
             trials_of_interest=trials,
             **opts,
         )
+
+    weekly_cfg = cfg.get("weekly_traces")
+    if weekly_cfg and weekly_cfg.get("enabled", True):
+        csv_path = _ensure_path(weekly_cfg.get("csv_path"), "weekly_traces.csv_path")
+        output_dir = _ensure_path(weekly_cfg.get("output_dir"), "weekly_traces.output_dir")
+        if csv_path.exists():
+            print(f"[analysis] training.weekly_traces → {output_dir}")
+            # Import and call the main function from weekly_training_traces
+            # The module uses hardcoded paths, so we'll just run it directly
+            weekly_training_traces.main()
+        else:
+            print(f"[WARN] Weekly training traces skipped: CSV not found at {csv_path}")
 
 
 def _auto_sync_wide_roots(

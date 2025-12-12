@@ -130,6 +130,10 @@ analysis:
       trials: [4, 5, 6]
       fps_default: 40.0
       overwrite: false
+    weekly_traces:
+      csv_path: "/home/ramanlab/Documents/cole/Data/Opto/Combined/all_envelope_rows_wide_training.csv"
+      output_dir: "/home/ramanlab/Documents/cole/Results/Opto/Weekly-Training-Envelopes"
+      enabled: true
   combined:
     combine:
       roots:
