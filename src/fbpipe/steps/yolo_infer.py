@@ -369,7 +369,14 @@ def main(cfg: Settings):
     if cfg.allow_cpu and cuda_available and not use_cuda:
         log.warning("allow_cpu is enabled; forcing YOLO inference to run on CPU.")
 
-    model = YOLO(cfg.model_path)
+    # Check for TensorRT engine first, fall back to .pt file
+    engine_path = str(Path(cfg.model_path).with_suffix('.engine'))
+    if Path(engine_path).exists():
+        log.info(f"Loading TensorRT engine: {engine_path}")
+        model = YOLO(engine_path)
+    else:
+        log.info(f"Loading PyTorch model: {cfg.model_path} (export to .engine for 2-5x speedup)")
+        model = YOLO(cfg.model_path)
     device_in_use: Optional[str] = None
 
     def _set_device(target: str):
@@ -402,12 +409,12 @@ def main(cfg: Settings):
     def predict_fn(image, conf_thres):
         nonlocal device_in_use
         try:
-            return model.predict(image, conf=conf_thres, verbose=False, device=device_in_use)
+            return model.predict(image, conf=conf_thres, verbose=False, device=device_in_use, half=True)
         except RuntimeError as exc:
             if device_in_use == "cuda" and cfg.allow_cpu and _is_cuda_failure(exc):
                 log.warning("CUDA inference failed (%s); switching to CPU for the rest of the run.", exc)
                 _set_device("cpu")
-                return model.predict(image, conf=conf_thres, verbose=False, device=device_in_use)
+                return model.predict(image, conf=conf_thres, verbose=False, device=device_in_use, half=True)
             raise
 
     AX, AY = cfg.anchor_x, cfg.anchor_y

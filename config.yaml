@@ -46,7 +46,7 @@ yolo:
   iou_match_thres: 0.25
   max_age: 5
   ema_alpha: 0.20
-  use_optical_flow: true
+  use_optical_flow: false
   flow_skip_edge: 10
   max_flies: 3
   max_proboscis_tracks: 3
