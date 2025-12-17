@@ -3,13 +3,14 @@
 
 End-to-end, reproducible pipeline that:
 1) Runs YOLO (OBB or axis-aligned) on videos with a Kalman tracker + optional optical flow.
-2) Writes per-frame CSVs (coordinates, distances, angles).
-3) Computes global min/max for distances; normalizes to percent.
-4) Flags dropped frames, stages RMS-ready CSVs, and annotates OFM state.
-5) Organizes trial videos and renders line-panel videos with RMS overlays.
-6) Produces consistent, versioned outputs under each *fly* folder and hands matrix-ready data to the analysis scripts.
-7) Scores proboscis reactions with the `flybehavior-response` model CLI.
-8) Builds black/white reaction matrices directly from the model predictions.
+2) **Curates training data** by identifying problematic tracking videos and extracting frames for manual labeling (optional).
+3) Writes per-frame CSVs (coordinates, distances, angles).
+4) Computes global min/max for distances; normalizes to percent.
+5) Flags dropped frames, stages RMS-ready CSVs, and annotates OFM state.
+6) Organizes trial videos and renders line-panel videos with RMS overlays.
+7) Produces consistent, versioned outputs under each *fly* folder and hands matrix-ready data to the analysis scripts.
+8) Scores proboscis reactions with the `flybehavior-response` model CLI.
+9) Builds black/white reaction matrices directly from the model predictions.
 
 > **Minimum**: Linux + CUDA GPU. Set `model_path` and `main_directory` in `config.yaml` or `.env`.
 
@@ -97,9 +98,10 @@ Remember to keep CUDA drivers and GPU libraries aligned across machines; the exp
 fbpipe/
   config.py                  # load config (YAML + .env + env vars)
   pipeline.py                # simple CLI orchestrator
-  utils/                     # helpers (timestamps, tracking, geometry)
+  utils/                     # helpers (timestamps, tracking, geometry, augmentation)
   steps/                     # individual steps (you can run separately)
-    yolo_infer.py
+    yolo_infer.py            # YOLO inference with tracking
+    curate_yolo_dataset.py   # Dataset curation (quality analysis + frame extraction)
     distance_stats.py
     distance_normalize.py
     detect_dropped_frames.py
@@ -114,6 +116,7 @@ fbpipe/
 Each step can also be run independently:
 ```bash
 python -m fbpipe.steps.yolo_infer --config config.yaml
+python -m fbpipe.steps.curate_yolo_dataset --config config.yaml
 python -m fbpipe.steps.distance_stats --config config.yaml
 ...
 ```
@@ -280,6 +283,104 @@ separates the class-2 detections. Raising `zero_iou_epsilon` loosens the
 non-overlap constraint if detections sit close together, while reducing
 `pair_rebind_ratio` tightens how far a proboscis track can drift before it is
 considered unpaired.
+
+## YOLO Dataset Curation
+
+The pipeline includes an automated dataset curation system that systematically identifies problematic tracking videos and extracts frames for manual labeling to improve your YOLO model. This transforms reactive quality control into systematic dataset improvement.
+
+### What it does
+
+1. **Analyzes tracking quality** – Computes spatial jitter (frame-to-frame movement) and missing frame percentages from YOLO outputs
+2. **Flags problematic videos** – Automatically identifies videos with high jitter (>50px median movement) or excessive missing frames (>10%)
+3. **Extracts strategic frames** – Uses stratified sampling to extract frames from:
+   - High-quality regions (low jitter, valid tracking) → seed data for validation
+   - Low-quality regions (high jitter or missing) → problem cases for training
+   - Boundary regions (moderate quality) → edge cases
+4. **Manages labeling workflow** – Auto-detects labeled frames (PNG+TXT pairs) and moves them to organized directories
+5. **Applies data augmentation** – Automatically generates variations (horizontal flip, brightness/contrast jitter, minor rotation) to expand the dataset
+
+### Quick start
+
+1. **Enable curation** in `config.yaml`:
+
+   ```yaml
+   yolo_curation:
+     enabled: true  # Set to true to activate
+     quality_thresholds:
+       max_jitter_px: 50.0      # Flag videos with median jitter > 50px
+       max_missing_pct: 0.10    # Flag videos with >10% missing frames
+     target_frames:
+       per_video: 10            # Extract ~10 frames per flagged video
+     video_source_dirs:         # Where to find videos (if different from CSV location)
+       - "/securedstorage/DATAsec/cole/Data-secured/opto_EB/"
+       # ... additional directories
+   ```
+
+2. **Run the curation step**:
+
+   ```bash
+   python -m src.fbpipe.pipeline --config config.yaml curate_yolo_dataset
+   # Or run the full pipeline (curation runs automatically after YOLO)
+   make run
+   ```
+
+3. **Check the output** under each fly directory:
+
+   ```
+   {FLY_DIR}/yolo_curation/
+   ├── quality_metrics.json          # Tracking quality analysis
+   ├── flagged_videos.json           # Videos needing re-labeling
+   ├── to_label/                     # PNG frames awaiting annotation
+   │   ├── video1_frame_000042_high_quality.png
+   │   ├── video1_frame_000153_low_quality.png
+   │   └── video2_frame_000089_boundary.png
+   ├── labeled/                      # Annotated frames (you add these)
+   │   ├── frame_000042_high_quality.png
+   │   ├── frame_000042_high_quality.txt  # YOLO format annotation
+   │   └── ...
+   └── augmented/                    # Auto-generated augmentations
+       └── ...
+   ```
+
+4. **Label frames** using Roboflow, Label Studio, or CVAT:
+   - Annotate bounding boxes for eyes (class 0) and proboscis (class 8)
+   - Export in YOLO format (.txt files)
+   - Place PNG+TXT pairs in the `to_label/` directory
+
+5. **Re-run the pipeline** – The module auto-detects labeled frames, moves them to `labeled/`, and generates augmented variations in `augmented/`
+
+6. **Integrate with YOLO training**:
+
+   ```bash
+   # Copy curated frames to your YOLO dataset
+   cp */yolo_curation/labeled/*.{png,txt} {YOLO_DATASET}/images/train/curated/
+   cp */yolo_curation/augmented/*.{png,txt} {YOLO_DATASET}/images/train/curated/
+
+   # Retrain your model
+   yolo train data={YOLO_DATASET}/data.yaml model=yolov8m-obb.pt epochs=100
+   ```
+
+### Video search
+
+The module intelligently finds videos even when they're stored separately from YOLO outputs. For videos following the pattern `output_{fly_name}_{trial_type}_{N}_{timestamp}.mp4` (e.g., `output_september_16_fly_1_testing_3_20250916_143551.mp4`), the module uses glob patterns to match videos regardless of timestamp.
+
+Configure `video_source_dirs` to point to secure storage or alternate locations, and the module will search across all configured directories to find matching videos.
+
+### Expected results
+
+After labeling ~200 curated frames and retraining:
+- 15-20% fewer missing detections
+- +5-10% average confidence scores
+- Reduced tracking jitter from fewer identity swaps
+- Better handling of challenging poses and lighting conditions
+
+### Configuration reference
+
+See [docs/YOLO_DATASET_CURATION.md](docs/YOLO_DATASET_CURATION.md) for detailed configuration options, troubleshooting, and advanced usage. Key verification reports:
+- [VIDEO_SEARCH_VERIFIED.md](VIDEO_SEARCH_VERIFIED.md) – Video search pattern testing
+- [CURATION_UPDATE.md](CURATION_UPDATE.md) – Secure storage integration details
+
+The curation module integrates seamlessly with the existing pipeline and can be run independently or as part of the full `make run` workflow.
 
 ## GPU requirements
 

@@ -5,6 +5,7 @@ from typing import Any
 
 __all__ = [
     "yolo_infer",
+    "curate_yolo_dataset",
     "distance_stats",
     "distance_normalize",
     "distance_normalize_gpu",  # GPU-accelerated version (6.2x faster)

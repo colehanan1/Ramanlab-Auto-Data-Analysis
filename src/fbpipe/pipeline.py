@@ -18,6 +18,7 @@ if USE_GPU:
     from .steps import (
         calculate_acceleration_gpu as calculate_acceleration,
         compose_videos_rms,
+        curate_yolo_dataset,
         detect_dropped_frames,
         distance_normalize_ultra as distance_normalize,  # ULTRA: Batch processing
         distance_stats,
@@ -31,6 +32,7 @@ else:
     from .steps import (
         calculate_acceleration,
         compose_videos_rms,
+        curate_yolo_dataset,
         detect_dropped_frames,
         distance_normalize,
         distance_stats,
@@ -54,8 +56,10 @@ class Step:
 # stats, OFM state annotations require the RMS copies, and the video overlay
 # comes last so that all metadata is already embedded in the CSVs.
 # Modification #4: Added calculate_acceleration step after compose_videos_rms
+# Modification #5: Added curate_yolo_dataset step after yolo for dataset curation
 ORDERED_STEPS: tuple[Step, ...] = (
     Step("yolo", yolo_infer.main, "Run Ultralytics YOLO inference and export merged CSVs"),
+    Step("curate_yolo_dataset", curate_yolo_dataset.main, "Identify problematic tracking and extract frames for labeling"),
     Step("distance_stats", distance_stats.main, "Derive global class-2 distance bounds per fly"),
     Step("distance_normalize", distance_normalize.main, "Convert distances into percentage scores"),
     Step("detect_dropped_frames", detect_dropped_frames.main, "Report missing frames and NaN segments"),

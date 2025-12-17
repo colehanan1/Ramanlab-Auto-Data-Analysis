@@ -68,6 +68,54 @@ class TrackingConfig:
 
 
 @dataclass
+class YoloCurationQualityThresholds:
+    """Quality thresholds for identifying problematic tracking videos."""
+    max_jitter_px: float = 50.0  # Flag if median jitter exceeds this (pixels)
+    max_missing_pct: float = 0.10  # Flag if >10% frames missing
+
+
+@dataclass
+class YoloCurationTargetFrames:
+    """Configuration for frame extraction targets."""
+    per_video: int = 10  # Extract ~10 frames per bad video
+    total: int = 200  # Stop extraction at 200 total frames (not yet implemented)
+    stratification: Dict[str, float] = field(default_factory=lambda: {
+        "high_quality": 0.30,  # 30% from low jitter, valid tracking
+        "low_quality": 0.50,   # 50% from high jitter or missing
+        "boundary": 0.20,      # 20% from moderate quality
+    })
+
+
+@dataclass
+class YoloCurationAugmentation:
+    """Data augmentation configuration."""
+    enabled: bool = True
+    strategies: Tuple[str, ...] = (
+        "horizontal_flip",
+        "brightness_contrast_jitter",
+        "minor_rotation",
+    )
+    multiplier: int = 2  # Aim for 2× dataset size via augmentation
+
+
+@dataclass
+class YoloCurationSettings:
+    """Configuration for YOLO dataset curation module."""
+    enabled: bool = True
+    quality_thresholds: YoloCurationQualityThresholds = field(
+        default_factory=YoloCurationQualityThresholds
+    )
+    target_frames: YoloCurationTargetFrames = field(
+        default_factory=YoloCurationTargetFrames
+    )
+    augmentation: YoloCurationAugmentation = field(
+        default_factory=YoloCurationAugmentation
+    )
+    output_dir: str = "yolo_curation"  # Relative to FLY_DIR
+    video_source_dirs: Tuple[str, ...] = ()  # Additional directories to search for videos
+
+
+@dataclass
 class ForceSettings:
     pipeline: bool = True
     yolo: bool = True
@@ -115,6 +163,9 @@ class Settings:
 
     # tracking quality
     tracking: TrackingConfig = field(default_factory=TrackingConfig)
+
+    # YOLO dataset curation
+    yolo_curation: YoloCurationSettings = field(default_factory=YoloCurationSettings)
 
 def _get(d: Dict[str, Any], key: str, default: Any):
     return d.get(key, default)
@@ -264,6 +315,52 @@ def load_settings(config_path: str | Path) -> Settings:
         ),
     )
 
+    # YOLO curation config
+    curation_cfg = data.get("yolo_curation", {})
+    quality_thresh_cfg = curation_cfg.get("quality_thresholds", {})
+    target_frames_cfg = curation_cfg.get("target_frames", {})
+    augmentation_cfg = curation_cfg.get("augmentation", {})
+
+    yolo_curation_quality = YoloCurationQualityThresholds(
+        max_jitter_px=float(quality_thresh_cfg.get("max_jitter_px", 50.0)),
+        max_missing_pct=float(quality_thresh_cfg.get("max_missing_pct", 0.10)),
+    )
+
+    stratification_cfg = target_frames_cfg.get("stratification", {})
+    yolo_curation_target_frames = YoloCurationTargetFrames(
+        per_video=int(target_frames_cfg.get("per_video", 10)),
+        total=int(target_frames_cfg.get("total", 200)),
+        stratification={
+            "high_quality": float(stratification_cfg.get("high_quality", 0.30)),
+            "low_quality": float(stratification_cfg.get("low_quality", 0.50)),
+            "boundary": float(stratification_cfg.get("boundary", 0.20)),
+        },
+    )
+
+    augmentation_strategies = augmentation_cfg.get("strategies", [
+        "horizontal_flip",
+        "brightness_contrast_jitter",
+        "minor_rotation",
+    ])
+    yolo_curation_augmentation = YoloCurationAugmentation(
+        enabled=_as_bool(augmentation_cfg.get("enabled", True), True),
+        strategies=tuple(augmentation_strategies),
+        multiplier=int(augmentation_cfg.get("multiplier", 2)),
+    )
+
+    video_source_dirs = curation_cfg.get("video_source_dirs", [])
+    if not isinstance(video_source_dirs, list):
+        video_source_dirs = []
+
+    yolo_curation = YoloCurationSettings(
+        enabled=_as_bool(curation_cfg.get("enabled", False), False),
+        quality_thresholds=yolo_curation_quality,
+        target_frames=yolo_curation_target_frames,
+        augmentation=yolo_curation_augmentation,
+        output_dir=str(curation_cfg.get("output_dir", "yolo_curation")),
+        video_source_dirs=tuple(video_source_dirs),
+    )
+
     return Settings(
         model_path=model_path,
         main_directory=main_directory,
@@ -296,4 +393,5 @@ def load_settings(config_path: str | Path) -> Settings:
         reaction_prediction=reaction_prediction,
         force=force,
         tracking=tracking,
+        yolo_curation=yolo_curation,
     )

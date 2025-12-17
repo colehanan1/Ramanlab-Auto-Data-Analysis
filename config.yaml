@@ -15,7 +15,7 @@ main_directory:
 
 cache_dir: "/home/ramanlab/Documents/cole/cache"
 force:
-  pipeline: false  # Set to true to force full reprocessing (bypasses cache)
+  pipeline: true  # Set to true to force full reprocessing (bypasses cache)
   yolo: false      # Set to true to rerun YOLO inference even if outputs exist
   combined: false  # Set to true to force reprocessing of combined analysis
   reaction_prediction: true  # Set to true to force model re-prediction
@@ -71,6 +71,39 @@ tracking:
   max_missing_frames_per_trial: 5000  # Flag if any trial has >5000 frames without proboscis detection
   max_missing_frames_pct_per_trial: 50.0  # Flag if >50% of trial frames lack detection
   apply_missing_frame_check: true  # Enable/disable tracking quality check
+
+# YOLO Dataset Curation
+yolo_curation:
+  enabled: true  # Enable/disable curation module (set to true to start curating)
+  quality_thresholds:
+    max_jitter_px: 20.0  # Flag videos with median jitter > 20 pixels (lowered to get more images)
+    max_missing_pct: 0.05  # Flag videos with >5% frames missing proboscis detection (lowered to get more images)
+  target_frames:
+    per_video: 15  # Extract ~10 frames per flagged video
+    total: 300  # Target total frames to extract (not yet enforced)
+    stratification:
+      high_quality: 0.30  # 30% from high-quality regions (low jitter, valid tracking)
+      low_quality: 0.50  # 50% from low-quality regions (high jitter or missing)
+      boundary: 0.20  # 20% from boundary regions (moderate quality)
+  augmentation:
+    enabled: true
+    strategies:
+      - horizontal_flip
+      - brightness_contrast_jitter
+      - minor_rotation
+    multiplier: 2  # Aim for 2x dataset size via augmentation
+  output_dir: "yolo_curation"  # Directory name (relative to FLY_DIR)
+  video_source_dirs:  # Additional directories to search for videos (e.g., secure storage)
+    - "/securedstorage/DATAsec/cole/Data-secured/opto_EB/"
+    - "/securedstorage/DATAsec/cole/Data-secured/opto_EB(6-training)/"
+    - "/securedstorage/DATAsec/cole/Data-secured/opto_benz_1/"
+    - "/securedstorage/DATAsec/cole/Data-secured/opto_hex/"
+    - "/securedstorage/DATAsec/cole/Data-secured/opto_ACV/"
+    - "/securedstorage/DATAsec/cole/Data-secured/hex_control/"
+    - "/securedstorage/DATAsec/cole/Data-secured/EB_control/"
+    - "/securedstorage/DATAsec/cole/Data-secured/Benz_control/"
+    - "/securedstorage/DATAsec/cole/Data-secured/opto_AIR/"
+    - "/securedstorage/DATAsec/cole/Data-secured/opto_3-oct/"
 
 # Envelope / RMS
 fps_default: 40.0
