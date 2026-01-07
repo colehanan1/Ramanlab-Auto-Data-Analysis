@@ -307,6 +307,128 @@ def create_curation_manifest(
     return manifest
 
 
+def get_next_batch_number(dest_dir: Path) -> int:
+    """
+    Determine the next batch number by checking existing batch directories.
+
+    Args:
+        dest_dir: Destination directory containing batch folders
+
+    Returns:
+        Next available batch number
+    """
+    if not dest_dir.exists():
+        return 1
+
+    existing_batches = [
+        d for d in dest_dir.iterdir()
+        if d.is_dir() and d.name.startswith("batch_")
+    ]
+
+    if not existing_batches:
+        return 1
+
+    # Extract batch numbers and find max
+    batch_numbers = []
+    for batch_dir in existing_batches:
+        try:
+            num = int(batch_dir.name.replace("batch_", ""))
+            batch_numbers.append(num)
+        except ValueError:
+            continue
+
+    return max(batch_numbers) + 1 if batch_numbers else 1
+
+
+def collect_to_label_images_batch(
+    source_root: Path,
+    dest_dir: Path,
+    batch_number: Optional[int] = None,
+) -> Dict:
+    """
+    Collect all images from yolo_curation/to_label directories into a new batch folder.
+
+    Args:
+        source_root: Root directory to search for to_label folders
+        dest_dir: Base destination directory for batched images
+        batch_number: Optional specific batch number, otherwise auto-increments
+
+    Returns:
+        Dictionary with collection statistics
+    """
+    from collections import defaultdict
+
+    stats = defaultdict(int)
+
+    # Determine batch number
+    if batch_number is None:
+        batch_number = get_next_batch_number(dest_dir)
+
+    batch_dir = dest_dir / f"batch_{batch_number}"
+    batch_dir.mkdir(parents=True, exist_ok=True)
+
+    log.info(f"[BATCH COLLECTION] Collecting to_label images into: {batch_dir}")
+
+    # Find all to_label directories
+    to_label_dirs = list(source_root.glob("**/yolo_curation/to_label"))
+
+    if not to_label_dirs:
+        log.info("[BATCH COLLECTION] No to_label directories found")
+        return stats
+
+    log.info(f"[BATCH COLLECTION] Found {len(to_label_dirs)} to_label directories")
+
+    copied_files = []
+
+    for to_label_dir in sorted(to_label_dirs):
+        # Extract dataset and experiment names for context
+        parts = to_label_dir.relative_to(source_root).parts
+        dataset_name = parts[0] if len(parts) > 0 else "unknown"
+        experiment_name = parts[1] if len(parts) > 1 else "unknown"
+
+        # Find all PNG files in this directory (unlabeled only)
+        png_files = []
+        for png_file in to_label_dir.glob("*.png"):
+            txt_file = png_file.with_suffix('.txt')
+            # Only copy unlabeled images
+            if not txt_file.exists():
+                png_files.append(png_file)
+
+        if not png_files:
+            continue
+
+        log.info(f"[BATCH COLLECTION] {dataset_name}/{experiment_name}: {len(png_files)} unlabeled images")
+        stats[f"{dataset_name}/{experiment_name}"] = len(png_files)
+
+        for png_file in png_files:
+            # Create prefixed filename: dataset__experiment__original_filename.png
+            prefix = f"{dataset_name}__{experiment_name}__"
+            dest_path = batch_dir / (prefix + png_file.name)
+
+            # Copy PNG file
+            shutil.copy2(png_file, dest_path)
+            copied_files.append(dest_path)
+            stats['total_images'] += 1
+
+    # Write batch manifest
+    manifest = {
+        "batch_number": batch_number,
+        "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "source_root": str(source_root),
+        "total_images": stats['total_images'],
+        "source_breakdown": {k: v for k, v in stats.items() if k != 'total_images'},
+    }
+
+    manifest_path = batch_dir / "batch_manifest.json"
+    with open(manifest_path, "w") as f:
+        json.dump(manifest, f, indent=2)
+
+    log.info(f"[BATCH COLLECTION] Collected {stats['total_images']} images → {batch_dir}")
+    log.info(f"[BATCH COLLECTION] Batch manifest written → {manifest_path}")
+
+    return stats
+
+
 def main(cfg: Settings) -> None:
     """
     Main entry point for YOLO dataset curation.
@@ -572,3 +694,30 @@ def main(cfg: Settings) -> None:
     log.info(f"[CURATION] After labeling, place .txt annotation files next to .png files")
     log.info(f"[CURATION] Run the pipeline again to auto-move labeled frames and apply augmentation")
     log.info(f"[CURATION] To reset cache and re-process all flies: rm {cache_file}")
+
+    # Collect all to_label images into batched directory for centralized labeling
+    if curation_cfg.video_source_dirs:
+        batch_dest = Path("/home/ramanlab/Documents/cole/model/to-be-labelled").expanduser().resolve()
+
+        # Find common parent directory to search once instead of per-subdirectory
+        source_paths = [Path(d).expanduser().resolve() for d in curation_cfg.video_source_dirs if Path(d).exists()]
+
+        if source_paths:
+            # Try to find common parent (e.g., /securedstorage/DATAsec/cole/Data-secured)
+            common_parent = None
+            first_path = source_paths[0]
+
+            # Check if all paths share a common parent
+            for parent in first_path.parents:
+                if all(parent in p.parents or p == parent for p in source_paths):
+                    common_parent = parent
+                    break
+
+            if common_parent and common_parent.exists():
+                log.info(f"[BATCH COLLECTION] Searching common parent: {common_parent}")
+                collect_to_label_images_batch(common_parent, batch_dest)
+            else:
+                # Fallback: search each directory individually
+                for source_path in source_paths:
+                    log.info(f"[BATCH COLLECTION] Searching: {source_path}")
+                    collect_to_label_images_batch(source_path, batch_dest)
