@@ -5,6 +5,7 @@ from typing import Iterable, Optional, Tuple
 
 import pandas as pd
 
+EYE_CLASS = 2
 PROBOSCIS_CLASS = 8
 
 PROBOSCIS_X_COL = f"x_class{PROBOSCIS_CLASS}"
@@ -132,6 +133,7 @@ def find_proboscis_max_distance_column(df: pd.DataFrame) -> Optional[str]:
 
 
 __all__ = [
+    "EYE_CLASS",
     "PROBOSCIS_CLASS",
     "PROBOSCIS_X_COL",
     "PROBOSCIS_Y_COL",

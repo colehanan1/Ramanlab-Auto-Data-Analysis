@@ -16,10 +16,12 @@ import gc  # Add this import
 
 from ..config import Settings
 from ..utils.timestamps import pick_timestamp_column, pick_frame_column, to_seconds_series
-from ..utils.vision import order_corners, xyxy_to_cxcywh
+from ..utils.vision import xyxy_to_cxcywh
+from ..utils.yolo_results import collect_detections
 from ..utils.track import MultiObjectTracker, SingleClassTracker
 from ..utils.multi_fly import EyeAnchorManager, StablePairing, enforce_zero_iou_and_topk
 from ..utils.columns import (
+    EYE_CLASS,
     PROBOSCIS_CLASS,
     PROBOSCIS_CORNERS_COL,
     PROBOSCIS_DISTANCE_COL,
@@ -31,7 +33,6 @@ from ..utils.columns import (
 log = logging.getLogger("fbpipe.yolo")
 logging.getLogger("ultralytics").setLevel(logging.WARNING)
 
-EYE_CLASS = 2
 SINGLE_TRACK_CLASSES = (1,)
 ALL_TRACKED_CLASSES = SINGLE_TRACK_CLASSES + (EYE_CLASS, PROBOSCIS_CLASS)
 
@@ -46,47 +47,6 @@ def _flow_nudge(prev_gray, gray, box_xyxy, flow_skip_edge: int, flow_params: dic
     nudged = box_xyxy.copy().astype(np.float32)
     nudged[0::2] += dx; nudged[1::2] += dy
     return nudged
-
-def _collect_detections(result) -> Dict[int, Dict[str, np.ndarray]]:
-    out: Dict[int, Dict[str, List[np.ndarray]]] = {
-        cls: {"boxes": [], "scores": [], "corners": []} for cls in ALL_TRACKED_CLASSES
-    }
-
-    if hasattr(result, "obb") and result.obb is not None:
-        xyxyxyxy = result.obb.xyxyxyxy.cpu().numpy()
-        cls_arr = result.obb.cls.cpu().numpy().astype(int)
-        if hasattr(result.obb, "conf") and result.obb.conf is not None:
-            conf_arr = result.obb.conf.cpu().numpy()
-        else:
-            conf_arr = np.ones_like(cls_arr, dtype=np.float32)
-        for idx, (cls_id, conf) in enumerate(zip(cls_arr, conf_arr)):
-            if cls_id not in out:
-                continue
-            corners = xyxyxyxy[idx].reshape(4, 2)
-            x1, y1 = corners[:, 0].min(), corners[:, 1].min()
-            x2, y2 = corners[:, 0].max(), corners[:, 1].max()
-            out[cls_id]["boxes"].append(np.array([x1, y1, x2, y2], dtype=np.float32))
-            out[cls_id]["scores"].append(float(conf))
-            out[cls_id]["corners"].append(order_corners(corners))
-    else:
-        if result.boxes is not None and len(result.boxes) > 0:
-            xyxy = result.boxes.xyxy.cpu().numpy().astype(np.float32)
-            cls_arr = result.boxes.cls.cpu().numpy().astype(int)
-            conf_arr = result.boxes.conf.cpu().numpy().astype(np.float32)
-            for box, cls_id, conf in zip(xyxy, cls_arr, conf_arr):
-                if cls_id not in out:
-                    continue
-                out[cls_id]["boxes"].append(box)
-                out[cls_id]["scores"].append(float(conf))
-                out[cls_id]["corners"].append(None)
-
-    parsed: Dict[int, Dict[str, np.ndarray]] = {}
-    for cls_id, data in out.items():
-        boxes = np.stack(data["boxes"], axis=0) if data["boxes"] else np.zeros((0, 4), np.float32)
-        scores = np.array(data["scores"], dtype=np.float32) if data["scores"] else np.zeros((0,), np.float32)
-        parsed[cls_id] = {"boxes": boxes, "scores": scores, "corners": data["corners"]}
-    return parsed
-
 
 def _angle_deg_between(v1: Tuple[float, float], v2: Tuple[float, float]) -> float:
     dot = v1[0] * v2[0] + v1[1] * v2[1]
@@ -127,7 +87,7 @@ def _scan_initial_fly_count(
             frame = cv2.resize(frame, (target_w, target_h), interpolation=cv2.INTER_LINEAR)
 
         result = predict_fn(frame, settings.conf_thres)[0]
-        dets = _collect_detections(result)
+        dets = collect_detections(result, ALL_TRACKED_CLASSES)
         cls2_boxes = dets.get(EYE_CLASS, {}).get("boxes", np.zeros((0, 4), np.float32))
         cls2_scores = dets.get(EYE_CLASS, {}).get("scores", np.zeros((0,), np.float32))
         cls2_boxes, cls2_scores = enforce_zero_iou_and_topk(
@@ -164,7 +124,7 @@ def _process_frame(
     flow_params = dict(pyr_scale=0.5, levels=3, winsize=15, iterations=3, poly_n=5, poly_sigma=1.2, flags=0)
 
     result = predict_fn(frame, conf_thres)[0]
-    dets = _collect_detections(result)
+    dets = collect_detections(result, ALL_TRACKED_CLASSES)
 
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 

@@ -116,6 +116,50 @@ class YoloCurationSettings:
 
 
 @dataclass
+class PseudolabelDiversityBins:
+    enabled: bool = False
+    x_bins: int = 8
+    y_bins: int = 8
+    size_bins: int = 6
+    per_bin_cap: int = 200
+
+
+@dataclass
+class PseudolabelSettings:
+    enabled: bool = False
+    target_total: int = 40000
+    stride: int = 10
+    random_sample_per_video: int = 0
+    batch_size: int = 16
+
+    # Confidence controls
+    min_conf_keep: float = 0.85
+    min_conf_export: float = 0.85
+
+    # Dataset split
+    val_frac: float = 0.1
+    seed: int = 1337
+
+    # Diversity / scaling controls
+    per_video_cap: int = 400
+    diversity_bins: PseudolabelDiversityBins = field(default_factory=PseudolabelDiversityBins)
+
+    # Label quality controls
+    require_both: bool = True
+    export_classes: Tuple[int, ...] = (2, 8)
+    max_eye_prob_center_dist_px: float = 0.0  # 0 disables the sanity check
+    min_box_area_px: float = 0.0  # 0 disables the sanity check
+    max_box_area_frac: float = 1.0  # 1 disables the sanity check
+
+    # Output controls
+    dataset_out: str = ""
+    image_ext: str = "jpg"
+    jpeg_quality: int = 95
+    label_format: str = "bbox"  # "bbox" (default) or "obb"
+    export_coco_json: bool = False
+
+
+@dataclass
 class ForceSettings:
     pipeline: bool = True
     yolo: bool = True
@@ -166,6 +210,9 @@ class Settings:
 
     # YOLO dataset curation
     yolo_curation: YoloCurationSettings = field(default_factory=YoloCurationSettings)
+
+    # Pseudolabel mining + export
+    pseudolabel: PseudolabelSettings = field(default_factory=PseudolabelSettings)
 
 def _get(d: Dict[str, Any], key: str, default: Any):
     return d.get(key, default)
@@ -361,6 +408,55 @@ def load_settings(config_path: str | Path) -> Settings:
         video_source_dirs=tuple(video_source_dirs),
     )
 
+    # pseudolabel config
+    pseudolabel_cfg = data.get("pseudolabel", {})
+    if not isinstance(pseudolabel_cfg, dict):
+        pseudolabel_cfg = {}
+
+    min_conf = pseudolabel_cfg.get("min_conf", 0.85)
+    min_conf_keep = float(pseudolabel_cfg.get("min_conf_keep", min_conf))
+    min_conf_export = float(pseudolabel_cfg.get("min_conf_export", min_conf))
+
+    export_classes_cfg = pseudolabel_cfg.get("export_classes", [2, 8])
+    if not isinstance(export_classes_cfg, list):
+        export_classes_cfg = [2, 8]
+    export_classes_tuple = tuple(int(x) for x in export_classes_cfg)
+
+    diversity_cfg = pseudolabel_cfg.get("diversity_bins", {})
+    if not isinstance(diversity_cfg, dict):
+        diversity_cfg = {}
+    pseudolabel_diversity = PseudolabelDiversityBins(
+        enabled=_as_bool(diversity_cfg.get("enabled", False), False),
+        x_bins=int(diversity_cfg.get("x_bins", 8)),
+        y_bins=int(diversity_cfg.get("y_bins", 8)),
+        size_bins=int(diversity_cfg.get("size_bins", 6)),
+        per_bin_cap=int(diversity_cfg.get("per_bin_cap", 200)),
+    )
+
+    pseudolabel = PseudolabelSettings(
+        enabled=_as_bool(pseudolabel_cfg.get("enabled", False), False),
+        target_total=int(pseudolabel_cfg.get("target_total", 40000)),
+        stride=int(pseudolabel_cfg.get("stride", 10)),
+        random_sample_per_video=int(pseudolabel_cfg.get("random_sample_per_video", 0)),
+        batch_size=int(pseudolabel_cfg.get("batch_size", 16)),
+        min_conf_keep=min_conf_keep,
+        min_conf_export=min_conf_export,
+        val_frac=float(pseudolabel_cfg.get("val_frac", 0.1)),
+        seed=int(pseudolabel_cfg.get("seed", 1337)),
+        per_video_cap=int(pseudolabel_cfg.get("per_video_cap", 400)),
+        diversity_bins=pseudolabel_diversity,
+        require_both=_as_bool(pseudolabel_cfg.get("require_both", True), True),
+        export_classes=export_classes_tuple,
+        max_eye_prob_center_dist_px=float(pseudolabel_cfg.get("max_eye_prob_center_dist_px", 0.0)),
+        min_box_area_px=float(pseudolabel_cfg.get("min_box_area_px", 0.0)),
+        max_box_area_frac=float(pseudolabel_cfg.get("max_box_area_frac", 1.0)),
+        dataset_out=str(pseudolabel_cfg.get("dataset_out", "")),
+        image_ext=str(pseudolabel_cfg.get("image_ext", "jpg")),
+        jpeg_quality=int(pseudolabel_cfg.get("jpeg_quality", 95)),
+        label_format=str(pseudolabel_cfg.get("label_format", "bbox")),
+        export_coco_json=_as_bool(pseudolabel_cfg.get("export_coco_json", False), False),
+    )
+
     return Settings(
         model_path=model_path,
         main_directory=main_directory,
@@ -394,4 +490,5 @@ def load_settings(config_path: str | Path) -> Settings:
         force=force,
         tracking=tracking,
         yolo_curation=yolo_curation,
+        pseudolabel=pseudolabel,
     )

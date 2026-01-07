@@ -4,13 +4,14 @@
 End-to-end, reproducible pipeline that:
 1) Runs YOLO (OBB or axis-aligned) on videos with a Kalman tracker + optional optical flow.
 2) **Curates training data** by identifying problematic tracking videos and extracting frames for manual labeling (optional).
-3) Writes per-frame CSVs (coordinates, distances, angles).
-4) Computes global min/max for distances; normalizes to percent.
-5) Flags dropped frames, stages RMS-ready CSVs, and annotates OFM state.
-6) Organizes trial videos and renders line-panel videos with RMS overlays.
-7) Produces consistent, versioned outputs under each *fly* folder and hands matrix-ready data to the analysis scripts.
-8) Scores proboscis reactions with the `flybehavior-response` model CLI.
-9) Builds black/white reaction matrices directly from the model predictions.
+3) **Mines high-confidence frames** and exports pseudo-labels to bootstrap large YOLO training datasets (optional).
+4) Writes per-frame CSVs (coordinates, distances, angles).
+5) Computes global min/max for distances; normalizes to percent.
+6) Flags dropped frames, stages RMS-ready CSVs, and annotates OFM state.
+7) Organizes trial videos and renders line-panel videos with RMS overlays.
+8) Produces consistent, versioned outputs under each *fly* folder and hands matrix-ready data to the analysis scripts.
+9) Scores proboscis reactions with the `flybehavior-response` model CLI.
+10) Builds black/white reaction matrices directly from the model predictions.
 
 > **Minimum**: Linux + CUDA GPU. Set `model_path` and `main_directory` in `config.yaml` or `.env`.
 
@@ -102,6 +103,7 @@ fbpipe/
   steps/                     # individual steps (you can run separately)
     yolo_infer.py            # YOLO inference with tracking
     curate_yolo_dataset.py   # Dataset curation (quality analysis + frame extraction)
+    pseudolabel_export.py    # Top-confidence frame mining + pseudo-label export
     distance_stats.py
     distance_normalize.py
     detect_dropped_frames.py
@@ -117,6 +119,7 @@ Each step can also be run independently:
 ```bash
 python -m fbpipe.steps.yolo_infer --config config.yaml
 python -m fbpipe.steps.curate_yolo_dataset --config config.yaml
+PYTHONPATH=src python -m fbpipe.steps.pseudolabel_export --config config.yaml --dataset-out /tmp/pseudolabel_dataset
 python -m fbpipe.steps.distance_stats --config config.yaml
 ...
 ```
@@ -382,6 +385,41 @@ See [docs/YOLO_DATASET_CURATION.md](docs/YOLO_DATASET_CURATION.md) for detailed 
 
 The curation module integrates seamlessly with the existing pipeline and can be run independently or as part of the full `make run` workflow.
 
+## Pseudo-label Export (Top-confidence Frame Mining)
+
+Use the trained YOLO model as a teacher to automatically mine frames with strong detections and export an Ultralytics-compatible dataset:
+
+```
+dataset_out/
+  images/train, images/val
+  labels/train, labels/val
+  data.yaml
+  manifest.csv
+```
+
+### Recommended workflow
+
+- Start conservative (e.g., `--min-conf 0.85`, `--stride 10`, `--per-video-cap 400`) and spot-check labels before retraining.
+- Use `--diversity-bins X Y SIZE CAP` to avoid near-duplicates (optional).
+- Use `--dry-run` to build `manifest.csv` + `data.yaml` without writing images/labels.
+- Use `--export-coco-json` to also write COCO annotation JSON files (optional).
+
+### Example
+
+```bash
+PYTHONPATH=src python -m fbpipe.steps.pseudolabel_export --config config.yaml \
+  --dataset-out /path/to/dataset_out \
+  --target-total 40000 \
+  --stride 10 \
+  --min-conf 0.85 \
+  --val-frac 0.1 \
+  --seed 1337
+```
+
+By default this searches for videos under `main_directory`; if none are found, it falls back to `yolo_curation.video_source_dirs`. Use `--roots ...` to override explicitly.
+
+Pseudo-labels need spot-checking; treat them as a starting point, not ground truth. See `docs/PSEUDOLABEL_EXPORT.md` for details.
+
 ## GPU requirements
 
 The pipeline expects a CUDA-capable GPU for production workloads. Setting `allow_cpu: true` (or `ALLOW_CPU=true` via environment) now **forces** the YOLO step to run entirely on CPU, which is useful for smoke tests or when the local CUDA stack is unstable. If CUDA initialisation or inference fails while GPU mode is requested and `allow_cpu` is enabled, the step logs a warning and permanently switches to CPU for the rest of the run. CPU mode is significantly slower and should only be used for debugging.
@@ -584,5 +622,12 @@ To run the full pipeline every night at midnight, use the bundled cron helpers:
    crontab -e        # edit manually if needed
    ```
 
-To remove the scheduled run entirely, delete the two lines marked with the
-`Ramanlab Auto Data Analysis nightly make run` comment from your crontab.
+5. Disable/remove the scheduled run:
+
+   ```bash
+   ./scripts/uninstall_midnight_cron.sh
+   # or: make cron-uninstall
+   ```
+
+   You can also remove it manually by deleting the two lines marked with the
+   `Ramanlab Auto Data Analysis nightly make run` comment from your crontab.

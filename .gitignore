@@ -42,6 +42,9 @@ docs-claude-output/
 
 # Test outputs and fixtures
 tests/
+!tests/
+tests/**
+!tests/test_pseudolabel_export.py
 pytest_cache/
 .coverage
 htmlcov/

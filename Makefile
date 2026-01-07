@@ -1,10 +1,13 @@
-.PHONY: help setup run all yolo infer distances plots angles videos clean
+.PHONY: help setup run all yolo infer distances plots angles videos clean cron-install cron-uninstall cron-list
 
 help:
 	@echo "Targets:"
 	@echo "  setup     - install requirements into the active environment"
 	@echo "  run       - run the full pipeline with config.yaml"
 	@echo "  all       - same as run"
+	@echo "  cron-install   - schedule nightly run at midnight"
+	@echo "  cron-uninstall - remove the scheduled nightly run"
+	@echo "  cron-list      - show current crontab entries"
 	@echo "  clean     - remove build artifacts"
 
 setup:
@@ -20,3 +23,12 @@ yolo:
 
 clean:
 	rm -rf **/__pycache__ **/*.pyc
+
+cron-install:
+	./scripts/install_midnight_cron.sh
+
+cron-uninstall:
+	./scripts/uninstall_midnight_cron.sh
+
+cron-list:
+	crontab -l || true

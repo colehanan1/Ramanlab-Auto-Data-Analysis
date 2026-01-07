@@ -105,6 +105,40 @@ yolo_curation:
     - "/securedstorage/DATAsec/cole/Data-secured/opto_AIR/"
     - "/securedstorage/DATAsec/cole/Data-secured/opto_3-oct/"
 
+# Pseudolabel mining + export (builds an Ultralytics-compatible dataset from videos)
+pseudolabel:
+  enabled: false
+  target_total: 40000
+  stride: 10
+  random_sample_per_video: 0
+  batch_size: 16
+  # Confidence controls (min_conf sets both keep+export unless overridden)
+  min_conf: 0.85
+  min_conf_keep: 0.85
+  min_conf_export: 0.85
+  # Train/val split (split by fly directory)
+  val_frac: 0.1
+  seed: 1337
+  per_video_cap: 400
+  require_both: true
+  export_classes: [2, 8]  # eye=2, proboscis=8
+  # Optional sanity checks (0/1 disables)
+  max_eye_prob_center_dist_px: 0
+  min_box_area_px: 0
+  max_box_area_frac: 1.0
+  # Output controls (empty uses {cache_dir}/pseudolabel_dataset)
+  dataset_out: ""
+  image_ext: "jpg"
+  jpeg_quality: 95
+  label_format: "bbox"  # "bbox" (default) or "obb"
+  export_coco_json: false
+  diversity_bins:
+    enabled: false
+    x_bins: 8
+    y_bins: 8
+    size_bins: 6
+    per_bin_cap: 200
+
 # Envelope / RMS
 fps_default: 40.0
 window_sec: 0.25
