@@ -104,6 +104,10 @@ def _resolve_pseudolabel_settings(cfg: Settings, args: argparse.Namespace) -> Ps
         ps = replace(ps, min_box_area_px=float(args.min_box_area_px))
     if args.max_box_area_frac is not None:
         ps = replace(ps, max_box_area_frac=float(args.max_box_area_frac))
+    if args.reject_multi_eye_first_n_frames is not None:
+        ps = replace(ps, reject_multi_eye_first_n_frames=int(args.reject_multi_eye_first_n_frames))
+    if args.reject_multi_eye_zero_iou_eps is not None:
+        ps = replace(ps, reject_multi_eye_zero_iou_eps=float(args.reject_multi_eye_zero_iou_eps))
     if args.diversity_bins is not None:
         x_bins, y_bins, size_bins, per_bin_cap = (int(v) for v in args.diversity_bins)
         ps = replace(
@@ -168,6 +172,16 @@ def _parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     p.add_argument("--max-eye-prob-center-dist-px", type=float, help="Geometry sanity check (0 disables)")
     p.add_argument("--min-box-area-px", type=float, help="Minimum bbox area in pixels (0 disables)")
     p.add_argument("--max-box-area-frac", type=float, help="Maximum bbox area as fraction of image (1 disables)")
+    p.add_argument(
+        "--reject-multi-eye-first-n-frames",
+        type=int,
+        help="Skip videos if disjoint multi-eye detected in first N frames (0 disables)",
+    )
+    p.add_argument(
+        "--reject-multi-eye-zero-iou-eps",
+        type=float,
+        help="IoU tolerance for disjoint multi-eye check",
+    )
 
     p.add_argument("--image-ext", choices=["jpg", "png"], help="Output image format")
     p.add_argument("--jpeg-quality", type=int, help="JPEG quality (when image-ext=jpg)")
@@ -294,6 +308,8 @@ def run(
         max_eye_prob_center_dist_px=float(ps.max_eye_prob_center_dist_px),
         min_box_area_px=float(ps.min_box_area_px),
         max_box_area_frac=float(ps.max_box_area_frac),
+        reject_multi_eye_first_n_frames=int(ps.reject_multi_eye_first_n_frames),
+        reject_multi_eye_zero_iou_eps=float(ps.reject_multi_eye_zero_iou_eps),
         diversity_bins=diversity_bins,
         seed=int(ps.seed),
     )

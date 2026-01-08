@@ -150,6 +150,8 @@ class PseudolabelSettings:
     max_eye_prob_center_dist_px: float = 0.0  # 0 disables the sanity check
     min_box_area_px: float = 0.0  # 0 disables the sanity check
     max_box_area_frac: float = 1.0  # 1 disables the sanity check
+    reject_multi_eye_first_n_frames: int = 5
+    reject_multi_eye_zero_iou_eps: float = 1e-9
 
     # Output controls
     dataset_out: str = ""
@@ -450,6 +452,12 @@ def load_settings(config_path: str | Path) -> Settings:
         max_eye_prob_center_dist_px=float(pseudolabel_cfg.get("max_eye_prob_center_dist_px", 0.0)),
         min_box_area_px=float(pseudolabel_cfg.get("min_box_area_px", 0.0)),
         max_box_area_frac=float(pseudolabel_cfg.get("max_box_area_frac", 1.0)),
+        reject_multi_eye_first_n_frames=int(
+            pseudolabel_cfg.get("reject_multi_eye_first_n_frames", 5)
+        ),
+        reject_multi_eye_zero_iou_eps=float(
+            pseudolabel_cfg.get("reject_multi_eye_zero_iou_eps", 1e-9)
+        ),
         dataset_out=str(pseudolabel_cfg.get("dataset_out", "")),
         image_ext=str(pseudolabel_cfg.get("image_ext", "jpg")),
         jpeg_quality=int(pseudolabel_cfg.get("jpeg_quality", 95)),

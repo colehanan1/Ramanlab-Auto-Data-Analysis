@@ -15,6 +15,7 @@ import cv2
 import numpy as np
 
 from .columns import EYE_CLASS, PROBOSCIS_CLASS
+from .multi_fly import enforce_zero_iou_and_topk
 from .vision import xyxy_to_cxcywh
 from .yolo_results import collect_detections
 
@@ -264,6 +265,8 @@ def mine_top_confidence_frames(
     min_box_area_px: float = 0.0,
     max_box_area_frac: float = 1.0,
     diversity_bins: Optional[Tuple[int, int, int, int]] = None,
+    reject_multi_eye_first_n_frames: int = 5,
+    reject_multi_eye_zero_iou_eps: float = 1e-9,
     seed: int = 1337,
 ) -> Tuple[List[FrameCandidate], Dict[str, int]]:
     """Scan videos and retain a bounded top-K set of high-confidence frames."""
@@ -281,6 +284,7 @@ def mine_top_confidence_frames(
     stats: Dict[str, int] = {
         "videos_total": len(video_paths),
         "videos_open_failed": 0,
+        "videos_skipped_multi_eye": 0,
         "frames_sampled": 0,
         "frames_rejected": 0,
         "frames_kept": 0,
@@ -291,6 +295,36 @@ def mine_top_confidence_frames(
     bins: Dict[Tuple[int, int, int], List[Tuple[float, str, FrameCandidate]]] = {}
     use_bins = diversity_bins is not None and len(diversity_bins) == 4 and diversity_bins[3] > 0
     collect_classes = tuple(sorted(set(int(c) for c in export_classes) | {EYE_CLASS, PROBOSCIS_CLASS}))
+
+    def _result_has_disjoint_multi_eye(result: object) -> bool:
+        dets = collect_detections(result, collect_classes)
+        eye_data = dets.get(EYE_CLASS)
+        if not eye_data:
+            return False
+        boxes = np.asarray(eye_data.get("boxes"))
+        scores = np.asarray(eye_data.get("scores"))
+        if boxes.size == 0 or scores.size == 0:
+            return False
+        keep = scores >= float(min_conf_keep)
+        if int(np.count_nonzero(keep)) < 2:
+            return False
+        kept_boxes = boxes[keep]
+        kept_scores = scores[keep]
+        kept_boxes, _ = enforce_zero_iou_and_topk(
+            kept_boxes,
+            kept_scores,
+            k=2,
+            eps=float(reject_multi_eye_zero_iou_eps),
+        )
+        return bool(kept_boxes.shape[0] >= 2)
+
+    def _batch_has_disjoint_multi_eye(frames: Sequence[np.ndarray]) -> bool:
+        if not frames:
+            return False
+        results = list(predict_fn(frames, float(min_conf_keep)))
+        if len(results) != len(frames):
+            raise RuntimeError(f"predict_fn returned {len(results)} results for {len(frames)} frames")
+        return any(_result_has_disjoint_multi_eye(result) for result in results)
 
     for vid_idx, video_path in enumerate(video_paths, start=1):
         cap = cv2.VideoCapture(str(video_path))
@@ -306,6 +340,40 @@ def mine_top_confidence_frames(
         if width_px <= 0 or height_px <= 0:
             width_px = 1080
             height_px = 1080
+
+        if reject_multi_eye_first_n_frames > 0:
+            max_check_frames = int(reject_multi_eye_first_n_frames)
+            if total_frames > 0:
+                max_check_frames = min(max_check_frames, int(total_frames))
+            if max_check_frames > 0:
+                cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                check_batch: List[np.ndarray] = []
+                checked = 0
+                skip_video = False
+                while checked < max_check_frames:
+                    ok, frame = cap.read()
+                    if not ok:
+                        break
+                    check_batch.append(frame)
+                    checked += 1
+                    if len(check_batch) >= batch_size:
+                        if _batch_has_disjoint_multi_eye(check_batch):
+                            skip_video = True
+                            break
+                        check_batch = []
+                if not skip_video and check_batch:
+                    if _batch_has_disjoint_multi_eye(check_batch):
+                        skip_video = True
+                if skip_video:
+                    stats["videos_skipped_multi_eye"] += 1
+                    log.warning(
+                        "Skipping video due to disjoint multi-eye in first %d frames: %s",
+                        max_check_frames,
+                        video_path,
+                    )
+                    cap.release()
+                    continue
+                cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
 
         per_video_heap: List[Tuple[float, str, FrameCandidate]] = []
 
