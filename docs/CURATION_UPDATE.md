@@ -6,7 +6,7 @@ Updated the YOLO dataset curation module to support searching for videos in secu
 
 ## Changes Made
 
-### 1. Configuration ([config.yaml](config.yaml#L96-L106))
+### 1. Configuration ([config/config.yaml](../config/config.yaml#L96-L106))
 
 Added `video_source_dirs` to specify additional directories to search for videos:
 
@@ -15,16 +15,16 @@ yolo_curation:
   enabled: false
   # ... other settings ...
   video_source_dirs:
-    - "/securedstorage/DATAsec/cole/Data-secured/opto_EB/"
-    - "/securedstorage/DATAsec/cole/Data-secured/opto_EB(6-training)/"
-    - "/securedstorage/DATAsec/cole/Data-secured/opto_benz_1/"
-    - "/securedstorage/DATAsec/cole/Data-secured/opto_hex/"
-    - "/securedstorage/DATAsec/cole/Data-secured/opto_ACV/"
-    - "/securedstorage/DATAsec/cole/Data-secured/hex_control/"
-    - "/securedstorage/DATAsec/cole/Data-secured/EB_control/"
-    - "/securedstorage/DATAsec/cole/Data-secured/Benz_control/"
-    - "/securedstorage/DATAsec/cole/Data-secured/opto_AIR/"
-    - "/securedstorage/DATAsec/cole/Data-secured/opto_3-oct/"
+    - "/path/to/secure/storage/opto_EB/"
+    - "/path/to/secure/storage/opto_EB(6-training)/"
+    - "/path/to/secure/storage/opto_benz_1/"
+    - "/path/to/secure/storage/opto_hex/"
+    - "/path/to/secure/storage/opto_ACV/"
+    - "/path/to/secure/storage/hex_control/"
+    - "/path/to/secure/storage/EB_control/"
+    - "/path/to/secure/storage/Benz_control/"
+    - "/path/to/secure/storage/opto_AIR/"
+    - "/path/to/secure/storage/opto_3-oct/"
 ```
 
 ### 2. Configuration Schema ([src/fbpipe/config.py](src/fbpipe/config.py#L115))
@@ -48,7 +48,7 @@ Added section explaining the video source directories feature and how path mappi
 
 **CSV Location:**
 ```
-/home/ramanlab/Documents/cole/Data/flys/opto_EB/september_16_fly_1/
+/path/to/Data/flys/opto_EB/september_16_fly_1/
   └── september_16_fly_1_testing_3/
       ├── september_16_fly_1_testing_3_fly1_distances.csv  ← YOLO output
       └── september_16_fly_1_testing_3_distances_merged.csv
@@ -56,7 +56,7 @@ Added section explaining the video source directories feature and how path mappi
 
 **Video Location:**
 ```
-/securedstorage/DATAsec/cole/Data-secured/opto_EB/september_16_fly_1/
+/path/to/secure/storage/opto_EB/september_16_fly_1/
   └── output_september_16_fly_1_testing_3_20250916_143551.mp4  ← Original video
 ```
 
@@ -102,10 +102,10 @@ $ python test_video_search.py
   - Video source dirs: 10
 
   Configured video source directories:
-    1. ✓ /securedstorage/DATAsec/cole/Data-secured/opto_EB/
-    2. ✓ /securedstorage/DATAsec/cole/Data-secured/opto_EB(6-training)/
+    1. ✓ /path/to/secure/storage/opto_EB/
+    2. ✓ /path/to/secure/storage/opto_EB(6-training)/
     ...
-    10. ✓ /securedstorage/DATAsec/cole/Data-secured/opto_3-oct/
+    10. ✓ /path/to/secure/storage/opto_3-oct/
 
 ✓ TEST PASSED
 ======================================================================
@@ -116,12 +116,12 @@ $ python test_video_search.py
 No changes to usage! Simply enable curation and run:
 
 ```bash
-# Enable in config.yaml
+# Enable in config/config.yaml
 yolo_curation:
   enabled: true  # ← Set to true
 
 # Run pipeline
-python -m src.fbpipe.pipeline --config config.yaml curate_yolo_dataset
+python -m src.fbpipe.pipeline --config config/config.yaml curate_yolo_dataset
 ```
 
 The module will automatically search secure storage for videos.
@@ -134,7 +134,7 @@ New log messages show when secure storage search is active:
 [CURATION] Starting YOLO dataset curation
 [CURATION] Quality thresholds: jitter<=50.0px, missing<=10.0%
 [CURATION] Searching for videos in 10 additional source directories
-[CURATION] Processing root directory: /home/ramanlab/Documents/cole/Data/flys/opto_EB/
+[CURATION] Processing root directory: /path/to/Data/flys/opto_EB/
 ...
 ```
 
@@ -146,7 +146,7 @@ If a video isn't found, the warning now shows how many locations were checked:
 
 ## Files Modified
 
-1. [config.yaml](config.yaml) - Added `video_source_dirs` configuration
+1. [config/config.yaml](../config/config.yaml) - Added `video_source_dirs` configuration
 2. [src/fbpipe/config.py](src/fbpipe/config.py) - Added config field and loader
 3. [src/fbpipe/steps/curate_yolo_dataset.py](src/fbpipe/steps/curate_yolo_dataset.py) - Enhanced video search logic
 4. [docs/YOLO_DATASET_CURATION.md](docs/YOLO_DATASET_CURATION.md) - Added documentation

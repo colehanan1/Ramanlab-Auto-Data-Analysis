@@ -23,7 +23,7 @@ When you run `make run` for the first time:
 ```bash
 $ make run
 
-[analysis] pipeline → processing /home/ramanlab/.../opto_EB/
+[analysis] pipeline → processing /path/to/.../opto_EB/
 2025-12-11 15:30:00 [INFO] Built file manifest for opto_EB: 247 files in 0.05s
 [YOLO] Processing opto_EB...                    # ← Full processing
 [DISTANCE] Normalizing distances...
@@ -67,7 +67,7 @@ $ make run
 
 [CACHE HIT] No file changes in opto_EB (247 files checked)
 [CACHE MISS] File changes detected: 2 new, 0 modified, 0 deleted
-[analysis] pipeline → processing /home/ramanlab/.../opto_hex/
+[analysis] pipeline → processing /path/to/.../opto_hex/
 [YOLO] Processing opto_hex...                    # ← Only this dataset
 ...
 [CACHE HIT] No file changes in opto_ACV (189 files checked)
@@ -193,14 +193,14 @@ The system detects three types of changes:
 ### View Cache Status
 
 ```bash
-./cache_manager.sh status
+scripts/dev/cache_manager.sh status
 ```
 
 Output:
 ```
 === Cache Status ===
 
-Cache directory: /home/ramanlab/Documents/cole/cache
+Cache directory: /path/to/cache
 Total size: 2.0M
 
 Pipeline caches: 10 datasets
@@ -216,7 +216,7 @@ Next make run will:
 
 ### Force Reprocessing
 
-#### Method 1: Edit `config.yaml`
+#### Method 1: Edit `config/config.yaml`
 
 ```yaml
 force:
@@ -238,34 +238,34 @@ make run                      # Will bypass cache for enabled flags
 
 ```bash
 # Clear ALL caches (forces full reprocessing)
-./cache_manager.sh clear-all
+scripts/dev/cache_manager.sh clear-all
 
 # Clear only pipeline caches
-./cache_manager.sh clear-pipeline
+scripts/dev/cache_manager.sh clear-pipeline
 
 # Clear specific dataset
-./cache_manager.sh clear-dataset /home/ramanlab/Documents/cole/Data/flys/opto_EB
+scripts/dev/cache_manager.sh clear-dataset /path/to/Data/flys/opto_EB
 
 # Clear combined analysis only
-./cache_manager.sh clear-combined
+scripts/dev/cache_manager.sh clear-combined
 
 # Clear reaction prediction/matrix
-./cache_manager.sh clear-reactions
+scripts/dev/cache_manager.sh clear-reactions
 ```
 
 ### List Cached Datasets
 
 ```bash
-./cache_manager.sh list-datasets
+scripts/dev/cache_manager.sh list-datasets
 ```
 
 Output:
 ```
 === Cached Datasets ===
 
-1. /home/ramanlab/Documents/cole/Data/flys/opto_EB
-2. /home/ramanlab/Documents/cole/Data/flys/opto_hex
-3. /home/ramanlab/Documents/cole/Data/flys/opto_ACV
+1. /path/to/Data/flys/opto_EB
+2. /path/to/Data/flys/opto_hex
+3. /path/to/Data/flys/opto_ACV
 ...
 
 Total: 10 datasets
@@ -321,7 +321,7 @@ make run
 
 **Workflow**:
 ```yaml
-# config.yaml - try new threshold
+# config/config.yaml - try new threshold
 non_reactive_span_px: 10.0    # was 7.5
 ```
 
@@ -342,7 +342,7 @@ make run
 
 **Workflow**:
 ```yaml
-# config.yaml - force reprocessing
+# config/config.yaml - force reprocessing
 force:
   combined: true              # Regenerate combined analysis
   reaction_matrix: true       # Regenerate plots
@@ -366,10 +366,10 @@ make run
 **Workflow**:
 ```bash
 # Nuclear option: clear everything
-./cache_manager.sh clear-all
+scripts/dev/cache_manager.sh clear-all
 
 # Or targeted clearing
-./cache_manager.sh clear-dataset /path/to/suspicious/dataset
+scripts/dev/cache_manager.sh clear-dataset /path/to/suspicious/dataset
 
 # Then rerun
 make run
@@ -463,13 +463,13 @@ The system uses separate cache categories:
 
 - **Let the cache work**: Set all `force` flags to `false` for daily workflows
 - **Use targeted clearing**: Clear specific datasets instead of `clear-all`
-- **Check status first**: Run `./cache_manager.sh status` before clearing
+- **Check status first**: Run `scripts/dev/cache_manager.sh status` before clearing
 - **Trust the cache**: File manifest tracking is reliable (mtime + size)
 
 ### ❌ DON'T
 
 - **Don't leave force flags enabled**: Always set back to `false` after forced reprocessing
-- **Don't manually edit state.json**: Use cache_manager.sh instead
+- **Don't manually edit state.json**: Use scripts/dev/cache_manager.sh instead
 - **Don't delete cache directory**: Use `clear-all` command instead
 - **Don't worry about hash collisions**: mtime + size is sufficient for CSV files
 
@@ -481,7 +481,7 @@ The system uses separate cache categories:
 
 **Check**:
 ```yaml
-# config.yaml
+# config/config.yaml
 force:
   pipeline: false    # Must be false!
   combined: false    # Must be false!
@@ -493,13 +493,13 @@ force:
 
 **Check**:
 ```bash
-./cache_manager.sh status
+scripts/dev/cache_manager.sh status
 # Look for "Pipeline caches: X datasets"
 ```
 
 **Solution**:
 ```bash
-./cache_manager.sh clear-pipeline
+scripts/dev/cache_manager.sh clear-pipeline
 make run
 ```
 
@@ -521,7 +521,7 @@ du -sh ~/.cache/ramanlab_auto_data_analysis
 
 **Solution**: Cache size is minimal (~2MB for 10 datasets). If large:
 ```bash
-./cache_manager.sh clear-all
+scripts/dev/cache_manager.sh clear-all
 ```
 
 ---

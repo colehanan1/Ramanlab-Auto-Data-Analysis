@@ -13,7 +13,7 @@ End-to-end, reproducible pipeline that:
 9) Scores proboscis reactions with the `flybehavior-response` model CLI.
 10) Builds black/white reaction matrices directly from the model predictions.
 
-> **Minimum**: Linux + CUDA GPU. Set `model_path` and `main_directory` in `config.yaml` or `.env`.
+> **Minimum**: Linux + CUDA GPU. Set `model_path` and `main_directory` in `config/config.yaml` or `config/.env`.
 
 ---
 
@@ -37,11 +37,12 @@ python -m pip install -e .
 # completes but future-proofs the workflow if you ever upgrade again.
 
 # 2) Configure paths
-cp .env.example .env
-# edit MODEL_PATH and MAIN_DIRECTORY, or edit config.yaml directly
+cp config/example.yaml config/config.yaml
+cp config/example.env config/.env
+# edit MODEL_PATH and MAIN_DIRECTORY, or edit config/config.yaml directly
 
 # 3) Run everything (env must stay active)
-make run   # or: python scripts/run_workflows.py --config config.yaml
+make run   # or: python scripts/pipeline/run_workflows.py --config config/config.yaml
 ```
 
 ### Using an existing Conda environment
@@ -71,15 +72,15 @@ To let others reproduce your Conda setup:
 1. Export a lock file that records the packages you are using:
 
    ```bash
-   conda env export --name yolo-env --from-history > environment.yml
+   conda env export --name yolo-env --from-history > config/environment.yml
    ```
 
    The `--from-history` flag keeps the file focused on top-level dependencies rather than every transitive build detail, which reduces cross-platform friction. Drop the flag if you need an exact replica including build strings.
 
-2. Commit or distribute `environment.yml` alongside the code. Collaborators can recreate the environment with:
+2. Commit or distribute `config/environment.yml` alongside the code. Collaborators can recreate the environment with:
 
    ```bash
-   conda env create -f environment.yml -n yolo-env
+   conda env create -f config/environment.yml -n yolo-env
    conda activate yolo-env
    ```
 
@@ -117,10 +118,10 @@ fbpipe/
 
 Each step can also be run independently:
 ```bash
-python -m fbpipe.steps.yolo_infer --config config.yaml
-python -m fbpipe.steps.curate_yolo_dataset --config config.yaml
-PYTHONPATH=src python -m fbpipe.steps.pseudolabel_export --config config.yaml --dataset-out /tmp/pseudolabel_dataset
-python -m fbpipe.steps.distance_stats --config config.yaml
+python -m fbpipe.steps.yolo_infer --config config/config.yaml
+python -m fbpipe.steps.curate_yolo_dataset --config config/config.yaml
+PYTHONPATH=src python -m fbpipe.steps.pseudolabel_export --config config/config.yaml --dataset-out /tmp/pseudolabel_dataset
+python -m fbpipe.steps.distance_stats --config config/config.yaml
 ...
 ```
 
@@ -128,13 +129,13 @@ The two reaction-analysis steps wrap the new automation (run automatically at
 the end of `make run`):
 
 ```bash
-python -m fbpipe.steps.predict_reactions --config config.yaml
-python -m fbpipe.steps.reaction_matrix --config config.yaml
+python -m fbpipe.steps.predict_reactions --config config/config.yaml
+python -m fbpipe.steps.reaction_matrix --config config/config.yaml
 ```
 
 The first command invokes the packaged `flybehavior-response predict` CLI to
 write a spreadsheet of binary responses. The second command feeds that
-spreadsheet into `scripts/reaction_matrix_from_spreadsheet.py`, reproducing the
+spreadsheet into `scripts/analysis/reaction_matrix_from_spreadsheet.py`, reproducing the
 figure layout without manual intervention. Both stages now filter the source
 tables down to testing trials automatically, so training rows never inflate the
 model summary or the threshold heatmaps. If your spreadsheet only contains
@@ -142,31 +143,31 @@ training rows the command exits early with a clear error, prompting you to
 regenerate the predictions against testing data.
 
 The reaction scorer now honours a dedicated `non_reactive_span_px` setting in
-`config.yaml`. Increase the pixel span to keep more marginal flies in the
+`config/config.yaml`. Increase the pixel span to keep more marginal flies in the
 prediction CSV, or tighten it to skip flies whose global min/max distance span
 never exceeds your reaction threshold.
 
 ## Geometric feature extraction CLI
 
-The repository ships with `geom_features.py`, a standalone tool for deriving
+The repository ships with `scripts/analysis/geom_features.py`, a standalone tool for deriving
 per-frame and per-trial geometry from the eye/proboscis coordinate exports. Run
 it after the YOLO step has written the post-processed CSVs:
 
 ```bash
 # Basic invocation: scan one or more dataset roots and write outputs under outdir
-python geom_features.py --roots /data/opto_EB /data/opto_PB --outdir /data/geom
+python scripts/analysis/geom_features.py --roots /data/opto_EB /data/opto_PB --outdir /data/geom
 
 # Preview the work without writing files
-python geom_features.py --roots /data/opto_EB --outdir /tmp/geom --dry-run
+python scripts/analysis/geom_features.py --roots /data/opto_EB --outdir /tmp/geom --dry-run
 
 # Smoke-test a subset of flies/trials
-python geom_features.py --roots /data/opto_EB --outdir /tmp/geom --limit-flies 1 --limit-trials 2
+python scripts/analysis/geom_features.py --roots /data/opto_EB --outdir /tmp/geom --limit-flies 1 --limit-trials 2
 
 # Append behaviour windows to a single enriched CSV
-python geom_features.py --input /data/opto_EB/.../testing_6_fly1_distances_geom.csv
+python scripts/analysis/geom_features.py --input /data/opto_EB/.../testing_6_fly1_distances_geom.csv
 ```
 
-> **Note:** `geom_features.py` creates directories under `--outdir`. Pick a
+> **Note:** `scripts/analysis/geom_features.py` creates directories under `--outdir`. Pick a
 > location that already exists or that you have permission to create (for
 > example, somewhere under your home directory or within the dataset roots).
 > Using protected locations such as `/data` without elevated privileges will
@@ -204,7 +205,7 @@ Key behaviours:
   `pandas`/`polars`/Spark. Expect this file to grow large (tens of millions of
   rows) when processing entire cohorts.
 * You can enrich a previously generated CSV in isolation with the new window
-  metrics via `python geom_features.py --input path/to/trial_geom.csv`. This
+  metrics via `python scripts/analysis/geom_features.py --input path/to/trial_geom.csv`. This
   mode writes `path/to/trial_with_behavior.csv` (or prints the intended action
   when combined with `--dry-run`) and logs the key diagnostics: frame counts per
   window, baseline/during means, fraction of high extensions during odor, rise
@@ -249,9 +250,9 @@ behaviour without recomputing window logic.
 The pipeline now exports up to four concurrent flies (class-2 eyes paired with
 class-8 proboscis tracks) from a single video. No extra entry point is required:
 once configured, `make run` or `python -m fbpipe.steps.yolo_infer --config
-config.yaml` automatically fans the merged CSV into per-fly files.
+config/config.yaml` automatically fans the merged CSV into per-fly files.
 
-1. **Configure limits** – edit `config.yaml` (or corresponding environment
+1. **Configure limits** – edit `config/config.yaml` (or corresponding environment
    variables) under the `yolo` section:
 
    | Key | Purpose |
@@ -261,13 +262,13 @@ config.yaml` automatically fans the merged CSV into per-fly files.
    | `pair_rebind_ratio` | Fraction of the frame diagonal used as the rebinding radius when an eye temporarily loses its paired proboscis. |
    | `zero_iou_epsilon` | Numeric tolerance for enforcing non-overlapping eye anchors. |
 
-   Environment overrides are available (e.g., `MAX_FLIES=3 make run`).【F:config.yaml†L11-L33】【F:src/fbpipe/config.py†L11-L72】
+   Environment overrides are available (e.g., `MAX_FLIES=3 make run`).【F:config/example.yaml†L1-L60】【F:src/fbpipe/config.py†L11-L72】
 
 2. **Run inference** – execute `make run` for the entire pipeline or call the
    YOLO step directly if you only need detections:
 
    ```bash
-   python -m fbpipe.steps.yolo_infer --config config.yaml
+   python -m fbpipe.steps.yolo_infer --config config/config.yaml
    ```
 
    The step emits:
@@ -304,7 +305,7 @@ The pipeline includes an automated dataset curation system that systematically i
 
 ### Quick start
 
-1. **Enable curation** in `config.yaml`:
+1. **Enable curation** in `config/config.yaml`:
 
    ```yaml
    yolo_curation:
@@ -315,14 +316,14 @@ The pipeline includes an automated dataset curation system that systematically i
      target_frames:
        per_video: 10            # Extract ~10 frames per flagged video
      video_source_dirs:         # Where to find videos (if different from CSV location)
-       - "/securedstorage/DATAsec/cole/Data-secured/opto_EB/"
+      - "/path/to/secure/storage/opto_EB/"
        # ... additional directories
    ```
 
 2. **Run the curation step**:
 
    ```bash
-   python -m src.fbpipe.pipeline --config config.yaml curate_yolo_dataset
+   python -m fbpipe.pipeline --config config/config.yaml curate_yolo_dataset
    # Or run the full pipeline (curation runs automatically after YOLO)
    make run
    ```
@@ -407,7 +408,7 @@ dataset_out/
 ### Example
 
 ```bash
-PYTHONPATH=src python -m fbpipe.steps.pseudolabel_export --config config.yaml \
+PYTHONPATH=src python -m fbpipe.steps.pseudolabel_export --config config/config.yaml \
   --dataset-out /path/to/dataset_out \
   --target-total 40000 \
   --stride 10 \
@@ -428,7 +429,7 @@ The pipeline expects a CUDA-capable GPU for production workloads. Setting `allow
 
 - The pipeline is resilient to missing files/columns; steps skip gracefully when inputs are absent.
 - RMS/Envelope calculations ignore values outside `[0, 100]` and NaNs.
-- Video overlay deletes source trial videos after composing by default; toggle in `config.yaml`.
+- Video overlay deletes source trial videos after composing by default; toggle in `config/config.yaml`.
 - See `docs/pipeline_overview.md` for a deeper look at how the steps are orchestrated.
 
 ## dir_val heatmap utility
@@ -436,7 +437,7 @@ The pipeline expects a CUDA-capable GPU for production workloads. Setting `allow
 Generate per-fly odor heatmaps, combined-condition views, and mean ± SEM traces from a wide CSV. The utility now caps every heatmap to the first 3,600 frames and produces dataset-wide aggregates that stack all `testing_6`–`testing_10` trials across flies alongside the per-fly combined figure. A second dataset overview renders a single heatmap where each row is the across-fly average trace for `TRAIN-COMBINED`, `TEST-COMBINED`, and `testing_6`–`testing_10`, making it easy to spot cross-fly consensus dynamics at a glance:
 
 ```bash
-python scripts/plot_dirval_heatmaps.py \
+python scripts/analysis/plot_dirval_heatmaps.py \
   --csv /path/to/all_envelope_rows_wide.csv \
   --dataset opto_EB \
   --outdir results/heatmaps \
@@ -454,7 +455,7 @@ python scripts/plot_dirval_heatmaps.py \
 Every row in `all_envelope_rows_wide.csv` now exposes `local_min` and `local_max` beside `global_min` and `global_max`, all of which are computed directly from the pixel-distance traces in each trial. The export also records `local_min_during` and `local_max_during` for frames 1,260–2,460 (the odor window) alongside both peak ratios: `local_max_over_global_min` and `local_max_during_over_global_min`. Operators can immediately gauge how strongly each trial peaks relative to the fly-wide baseline both overall and during odor delivery. The builder streams every distance CSV for a given fly, filters samples against the configured `[class2_min, class2_max]` span, and aggregates the in-range values to derive a per-fly global span before writing any rows. That means the global extrema now match the same source data as the trial-level minima/maxima instead of relying on the legacy JSON stats. Rebuild the export with:
 
 ```bash
-python scripts/envelope_combined.py \
+python scripts/analysis/envelope_combined.py \
   wide \
   --root /path/to/dataset/root \
   --output-csv /tmp/all_envelope_rows_wide.csv \
@@ -476,7 +477,7 @@ Historically the plots relied on z-score normalisation and percentile clipping t
 
 ### Control odor ordering
 
-The combined-envelope tooling (`scripts/envelope_combined.py`, `scripts/envelope_visuals.py`, and `scripts/envelope_training.py`) now aliases each optogenetic dataset to its control counterpart. Late testing trials therefore share the same odor schedule for pairs like `opto_EB`/`EB_control`, `opto_hex`/`hex_control`, and `opto_benz`/`benz_control` (including `opto_benz_1`). For example, `testing_6`–`testing_10` present Apple Cider Vinegar, 3-Octonol, Benzaldehyde, Citral, and Linalool regardless of whether the data originated from the control or opto cohort.
+The combined-envelope tooling (`scripts/analysis/envelope_combined.py`, `scripts/analysis/envelope_visuals.py`, and `scripts/analysis/envelope_training.py`) now aliases each optogenetic dataset to its control counterpart. Late testing trials therefore share the same odor schedule for pairs like `opto_EB`/`EB_control`, `opto_hex`/`hex_control`, and `opto_benz`/`benz_control` (including `opto_benz_1`). For example, `testing_6`–`testing_10` present Apple Cider Vinegar, 3-Octonol, Benzaldehyde, Citral, and Linalool regardless of whether the data originated from the control or opto cohort.
 
 Training exports follow a unified experimental script across every dataset root: trials `training_1`, `training_2`, `training_3`, `training_4`, `training_6`, and `training_8` are Benzaldehyde exposures, while `training_5` and `training_7` deliver Hexanol. This schedule applies equally to the opto cohorts so rerunning `make run` backfills legacy flies with the correct training overlays. Regression coverage in `tests/test_envelope_combined.py::test_testing_aliases_follow_control_ordering` and `tests/test_envelope_combined.py::test_training_schedule_matches_spec` locks the mapping in place.
 
@@ -494,8 +495,8 @@ Generate the black/white reaction matrices directly from the manual scoring
 spreadsheet used during the review process:
 
 ```bash
-python scripts/reaction_matrix_from_spreadsheet.py \
-    --csv-path /home/ramanlab/PycharmProjects/FlyBehaviorScoring/artifacts/predictions_envelope_t2.csv \
+python scripts/analysis/reaction_matrix_from_spreadsheet.py \
+    --csv-path /path/to/predictions_envelope.csv \
     --out-dir artifacts/reaction_matrices_spreadsheet \
     --latency-sec 0.0
 ```
@@ -512,13 +513,13 @@ removed so the figures emphasise the odor-at-fly timing.
 To regenerate the revised plots once your matrix artifacts are ready, run:
 
 ```bash
-python scripts/envelope_visuals.py envelopes \
+python scripts/analysis/envelope_visuals.py envelopes \
     --matrix-npy path/to/envelopes.npy \
     --codes-json path/to/envelopes_codes.json \
     --out-dir artifacts/envelope_plots \
     --odor-latency-s 2.15
 
-python scripts/envelope_combined.py \
+python scripts/analysis/envelope_combined.py \
     --matrix-npy path/to/envelopes.npy \
     --codes-json path/to/envelopes_codes.json \
     --out-dir artifacts/envelope_plots_combined
@@ -534,8 +535,8 @@ markers as the overlays, without any valve transit shading. Generate the
 artifacts for a control dataset with:
 
 ```bash
-python scripts/envelope_combined.py combine \
-    --root /securedstorage/DATAsec/cole/Data-secured/EB_control \
+python scripts/analysis/envelope_combined.py combine \
+    --root /path/to/secure/storage/EB_control \
     --odor-on 30 --odor-off 60 --odor-latency 2.15
 ```
 
@@ -555,7 +556,7 @@ the control training cohorts so they match the testing layout and naming
 `--trial-type training` flag:
 
 ```bash
-python scripts/envelope_combined.py envelopes \
+python scripts/analysis/envelope_combined.py envelopes \
     --matrix-npy path/to/combined_envelopes.npy \
     --codes-json path/to/combined_envelopes_codes.json \
     --out-dir artifacts/envelope_plots_combined \
@@ -601,16 +602,16 @@ To run the full pipeline every night at midnight, use the bundled cron helpers:
 2. From the repository root, install/update the cron job:
 
    ```bash
-   ./scripts/install_midnight_cron.sh
+   ./scripts/dev/install_midnight_cron.sh
    ```
 
    The installer writes a `0 0 * * *` entry that launches `make run` via
-   `scripts/nightly_make_run.sh`, appending logs to `logs/nightly_make_run.log`.
+   `scripts/dev/nightly_make_run.sh`, appending logs to `logs/nightly_make_run.log`.
 
 3. Adjust behaviour via environment variables when invoking the installer:
 
    ```bash
-   YOLO_ENV_NAME=my-env ./scripts/install_midnight_cron.sh
+   YOLO_ENV_NAME=my-env ./scripts/dev/install_midnight_cron.sh
    ```
 
    This overrides the Conda environment activated before `make run` executes.
@@ -625,7 +626,7 @@ To run the full pipeline every night at midnight, use the bundled cron helpers:
 5. Disable/remove the scheduled run:
 
    ```bash
-   ./scripts/uninstall_midnight_cron.sh
+   ./scripts/dev/uninstall_midnight_cron.sh
    # or: make cron-uninstall
    ```
 

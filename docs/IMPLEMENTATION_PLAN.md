@@ -894,7 +894,7 @@ If any modification causes issues:
    - Can revert individual commits without affecting others
 
 2. **Feature flags (optional):**
-   - Add config.yaml flags to enable/disable each modification
+   - Add config/config.yaml flags to enable/disable each modification
    - Example: `use_95px_threshold: true`
 
 3. **Backward compatibility:**
@@ -912,7 +912,7 @@ If any modification causes issues:
    - Document condition organization structure
    - Document acceleration threshold configuration
 
-2. **Update config.yaml schema:**
+2. **Update config/config.yaml schema:**
    - Add `effective_max_threshold: 95.0`
    - Add `trim_fraction: 0.10`
    - Add `acceleration_threshold: 100.0`

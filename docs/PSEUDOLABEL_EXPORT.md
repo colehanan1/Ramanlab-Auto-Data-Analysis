@@ -30,7 +30,7 @@ The selection score is `min(eye_conf, prob_conf)` by default.
 
 ```bash
 PYTHONPATH=src \
-python -m fbpipe.steps.pseudolabel_export --config config.yaml \
+python -m fbpipe.steps.pseudolabel_export --config config/config.yaml \
   --dataset-out /path/to/dataset_out \
   --target-total 40000 \
   --stride 10 \
@@ -54,9 +54,9 @@ Optional scaling knobs:
 - `--export-coco-json` also writes `annotations_train.json` and `annotations_val.json`.
 - `--scan-only` only discovers videos and exits (prints the first 10).
 
-## Config (`config.yaml`)
+## Config (`config/config.yaml`)
 
-See the `pseudolabel:` section in `config.yaml`. CLI flags override config values.
+See the `pseudolabel:` section in `config/config.yaml`. CLI flags override config values.
 
 ## Manifest
 

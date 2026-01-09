@@ -152,7 +152,7 @@ batch_size = estimate_batch_size(
 
 ### Enable/Disable GPU
 
-**In [config.yaml](../config.yaml):**
+**In [config/config.yaml](../config/config.yaml):**
 
 ```yaml
 # GPU Settings
@@ -364,7 +364,7 @@ rms = compute_rms_gpu(values, window_size)
 
 1. **Profile your pipeline** to identify remaining bottlenecks:
    ```bash
-   python -m cProfile -o profile.stats scripts/run_pipeline.py
+   python -m cProfile -o profile.stats scripts/pipeline/run_workflows.py
    ```
 
 2. **YOLO frame batching** (if YOLO is >50% of runtime):

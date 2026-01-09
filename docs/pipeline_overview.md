@@ -4,11 +4,11 @@ This document explains how the Fly Behavior Pipeline organizes its computation a
 
 ## Configuration loading
 
-`fbpipe.config.load_settings` merges values from `config.yaml`, optional `.env`, and process environment variables into a single `Settings` dataclass. Paths such as `model_path` and `main_directory`, CUDA tuning flags, and detection thresholds are all centralized there.【F:src/fbpipe/config.py†L1-L73】
+`fbpipe.config.load_settings` merges values from `config/config.yaml`, optional `config/.env`, and process environment variables into a single `Settings` dataclass. Paths such as `model_path` and `main_directory`, CUDA tuning flags, and detection thresholds are all centralized there.【F:src/fbpipe/config.py†L1-L73】
 
 ## Execution graph
 
-`fbpipe.pipeline` defines the ordered list of processing stages and wires them into a simple CLI. Calling `python -m fbpipe.pipeline --config config.yaml all` loads the consolidated settings and then runs each step in `STEPS_IN_ORDER`. Selecting specific step names on the command line runs only those functions with the same shared configuration object.【F:src/fbpipe/pipeline.py†L1-L59】
+`fbpipe.pipeline` defines the ordered list of processing stages and wires them into a simple CLI. Calling `python -m fbpipe.pipeline --config config/config.yaml all` loads the consolidated settings and then runs each step in `STEPS_IN_ORDER`. Selecting specific step names on the command line runs only those functions with the same shared configuration object.【F:src/fbpipe/pipeline.py†L1-L59】
 
 ## Core stages
 
