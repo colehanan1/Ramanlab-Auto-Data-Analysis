@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import shutil
 import time
@@ -462,7 +463,13 @@ def main(cfg: Settings) -> None:
     roots = get_main_directories(cfg)
 
     # Load global cache to track processed flies
-    cache_file = Path.cwd() / ".yolo_curation_cache.json"
+    cache_root = (
+        Path(cfg.cache_dir).expanduser()
+        if getattr(cfg, "cache_dir", "")
+        else Path(__file__).resolve().parents[3] / "cache"
+    )
+    cache_root.mkdir(parents=True, exist_ok=True)
+    cache_file = cache_root / "yolo_curation_cache.json"
     if cache_file.exists():
         with open(cache_file, "r") as f:
             cache = json.load(f)
@@ -697,7 +704,10 @@ def main(cfg: Settings) -> None:
 
     # Collect all to_label images into batched directory for centralized labeling
     if curation_cfg.video_source_dirs:
-        batch_dest = Path("/home/ramanlab/Documents/cole/model/to-be-labelled").expanduser().resolve()
+        repo_root = Path(__file__).resolve().parents[3]
+        batch_dest = Path(
+            os.getenv("CURATION_BATCH_DEST", str(repo_root / "data" / "to-be-labelled"))
+        ).expanduser().resolve()
 
         # Find common parent directory to search once instead of per-subdirectory
         source_paths = [Path(d).expanduser().resolve() for d in curation_cfg.video_source_dirs if Path(d).exists()]

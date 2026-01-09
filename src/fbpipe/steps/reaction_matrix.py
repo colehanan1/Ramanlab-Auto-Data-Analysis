@@ -11,7 +11,7 @@ from ..config import Settings
 
 def _script_path() -> Path:
     repo_root = Path(__file__).resolve().parents[3]
-    return repo_root / "scripts" / "reaction_matrix_from_spreadsheet.py"
+    return repo_root / "scripts" / "analysis" / "reaction_matrix_from_spreadsheet.py"
 
 
 def main(cfg: Settings) -> None:

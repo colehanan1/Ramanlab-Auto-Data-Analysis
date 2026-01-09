@@ -1,10 +1,17 @@
 
 from __future__ import annotations
-import os, yaml
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
+
+import yaml
 from dotenv import load_dotenv
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+DEFAULT_CONFIG_NAME = "config.yaml"
+DEFAULT_CONFIG_PATH = REPO_ROOT / "config" / DEFAULT_CONFIG_NAME
+DEFAULT_ENV_PATH = REPO_ROOT / "config" / ".env"
 
 
 def _as_bool(value, default: bool) -> bool:
@@ -15,6 +22,49 @@ def _as_bool(value, default: bool) -> bool:
     if isinstance(value, str):
         return value.strip().lower() in {"1", "true", "yes", "on"}
     return bool(value)
+
+
+def resolve_config_path(config_path: str | Path) -> Path:
+    candidate = Path(config_path)
+    if candidate.is_absolute():
+        return candidate
+
+    search_paths = [
+        Path.cwd() / candidate,
+        REPO_ROOT / candidate,
+    ]
+    if candidate.name == DEFAULT_CONFIG_NAME:
+        search_paths.append(DEFAULT_CONFIG_PATH)
+
+    for path in search_paths:
+        if path.exists():
+            return path.resolve()
+
+    # Fall back to repo-relative path if nothing exists yet.
+    return (REPO_ROOT / candidate).resolve()
+
+
+def resolve_env_path(config_path: str | Path | None = None) -> Path:
+    candidates = []
+    if config_path is not None:
+        resolved = resolve_config_path(config_path)
+        candidates.append(resolved.parent / ".env")
+    candidates.append(DEFAULT_ENV_PATH)
+    candidates.append(REPO_ROOT / ".env")
+
+    for path in candidates:
+        if path.exists():
+            return path
+
+    return candidates[0]
+
+
+def load_raw_config(config_path: str | Path) -> Dict[str, Any]:
+    path = resolve_config_path(config_path)
+    if path.exists():
+        with path.open("r", encoding="utf-8") as f:
+            return yaml.safe_load(f) or {}
+    return {}
 
 
 def get_main_directories(cfg: Settings) -> list[Path]:
@@ -220,8 +270,10 @@ def _get(d: Dict[str, Any], key: str, default: Any):
     return d.get(key, default)
 
 def load_settings(config_path: str | Path) -> Settings:
-    load_dotenv(dotenv_path=Path(".env"))  # optional
-    p = Path(config_path)
+    env_path = resolve_env_path(config_path)
+    if env_path.exists():
+        load_dotenv(dotenv_path=env_path)
+    p = resolve_config_path(config_path)
     data: Dict[str, Any] = {}
     if p.exists():
         with open(p, "r", encoding="utf-8") as f:
