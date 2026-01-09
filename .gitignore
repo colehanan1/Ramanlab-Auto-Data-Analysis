@@ -1,12 +1,86 @@
-
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
 *$py.class
 
+# Packaging / build artifacts
+*.egg-info/
+build/
+dist/
+
 # Virtual envs
 .venv/
+.venv*/
+venv/
+ENV/
+env/
 .env
+.env.*
+
+# Config (local only)
+config/*
+!config/example.env
+!config/example.yaml
+!config/environment.yml
+
+# Data, outputs, logs
+cache/
+logs/
+data/
+datasets/
+dataset/
+outputs/
+output/
+results/
+runs/
+weights/
+checkpoints/
+models/
+**/cache/
+**/caches/
+**/logs/
+**/output_runs/
+**/RMS_calculations/
+**/angle_plots/
+**/videos_with_rms/
+**/three_line_videos/
+**/all_envelope_plots/
+
+# Large media / binaries
+*.mp4
+*.avi
+*.mov
+*.mkv
+*.mpg
+*.mpeg
+*.wmv
+*.flv
+*.webm
+*.pt
+*.onnx
+*.engine
+*.trt
+*.tflite
+*.ckpt
+*.h5
+*.joblib
+*.pkl
+*.npy
+*.npz
+
+# Logs & temp files
+*.log
+*.tmp
+*.csv~
+*.png~
+*.ipynb_checkpoints/
+
+# Caches
+.mypy_cache/
+.pytest_cache/
+.cache/
+.coverage
+htmlcov/
 
 # OS / editor
 .DS_Store
@@ -14,37 +88,5 @@ Thumbs.db
 .vscode/
 .idea/
 
-# Data & outputs
-**/output_runs/
-**/logs/
-**/RMS_calculations/
-**/angle_plots/
-**/videos_with_rms/
-**/three_line_videos/
-**/all_envelope_plots/
-**/*_time.png
-**/*.mp4
-**/*.avi
-**/*.mov
-**/*.mkv
-
-# Caches
-*.log
-*.tmp
-*.npy
-*.npz
-*.csv~
-*.png~
-*.ipynb_checkpoints/
-
 # Claude AI generated documentation
-docs-claude-output/
-
-# Test outputs and fixtures
-tests/
-!tests/
-tests/**
-!tests/test_pseudolabel_export.py
-pytest_cache/
-.coverage
-htmlcov/
+docs/claude-output/
