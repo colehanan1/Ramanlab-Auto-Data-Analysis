@@ -14,7 +14,7 @@ setup:
 	pip install --upgrade pip && pip install -r requirements.txt
 
 run:
-	export MPLBACKEND=Agg && python scripts/pipeline/run_workflows.py --config config/config.yaml
+	export MPLBACKEND=Agg && export ORT_LOGGING_LEVEL=3 && python scripts/pipeline/run_workflows.py --config config/config.yaml
 
 all: run
 
