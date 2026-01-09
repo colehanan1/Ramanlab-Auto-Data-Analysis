@@ -152,7 +152,7 @@ Run a timing analysis to identify the real bottleneck:
 
 ```bash
 # Add timing to each step
-python -m cProfile -o profile.stats scripts/run_pipeline.py
+python -m cProfile -o profile.stats scripts/pipeline/run_workflows.py
 python -c "import pstats; pstats.Stats('profile.stats').sort_stats('cumulative').print_stats(20)"
 ```
 
@@ -200,14 +200,14 @@ Requires:
 
 ## Current Configuration Check
 
-From [config.yaml](../config.yaml:41-42):
+From [config/config.yaml](../config/config.yaml:41-42):
 
 ```yaml
 allow_cpu: false        # ✅ GPU enabled
 cuda_allow_tf32: true   # ✅ TF32 enabled (good for RTX 3090)
 ```
 
-From [config.yaml](../config.yaml:44-55):
+From [config/config.yaml](../config/config.yaml:44-55):
 
 ```yaml
 yolo:

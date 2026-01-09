@@ -82,7 +82,11 @@ def run_steps(step_names: Iterable[str], config_path: str | Path) -> None:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Fly Behavior Pipeline")
-    parser.add_argument("--config", default="config.yaml", help="Path to pipeline configuration")
+    parser.add_argument(
+        "--config",
+        default=str(Path("config") / "config.yaml"),
+        help="Path to pipeline configuration",
+    )
     parser.add_argument(
         "steps",
         nargs="*",

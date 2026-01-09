@@ -67,22 +67,22 @@ Results: 4/4 successful pattern matches (100%)
 
 ## Configuration
 
-Your [config.yaml](config.yaml#L95-L106) is already configured:
+Your [config/config.yaml](../config/config.yaml#L95-L106) is already configured:
 
 ```yaml
 yolo_curation:
   enabled: true  # ← Ready to use
   video_source_dirs:
-    - "/securedstorage/DATAsec/cole/Data-secured/opto_EB/"
-    - "/securedstorage/DATAsec/cole/Data-secured/opto_EB(6-training)/"
-    - "/securedstorage/DATAsec/cole/Data-secured/opto_benz_1/"
-    - "/securedstorage/DATAsec/cole/Data-secured/opto_hex/"
-    - "/securedstorage/DATAsec/cole/Data-secured/opto_ACV/"
-    - "/securedstorage/DATAsec/cole/Data-secured/hex_control/"
-    - "/securedstorage/DATAsec/cole/Data-secured/EB_control/"
-    - "/securedstorage/DATAsec/cole/Data-secured/Benz_control/"
-    - "/securedstorage/DATAsec/cole/Data-secured/opto_AIR/"
-    - "/securedstorage/DATAsec/cole/Data-secured/opto_3-oct/"
+    - "/path/to/secure/storage/opto_EB/"
+    - "/path/to/secure/storage/opto_EB(6-training)/"
+    - "/path/to/secure/storage/opto_benz_1/"
+    - "/path/to/secure/storage/opto_hex/"
+    - "/path/to/secure/storage/opto_ACV/"
+    - "/path/to/secure/storage/hex_control/"
+    - "/path/to/secure/storage/EB_control/"
+    - "/path/to/secure/storage/Benz_control/"
+    - "/path/to/secure/storage/opto_AIR/"
+    - "/path/to/secure/storage/opto_3-oct/"
 ```
 
 ## Ready to Use!
@@ -97,8 +97,8 @@ The curation module will now:
 ## Run the Pipeline
 
 ```bash
-# The module is already enabled in config.yaml
-python -m src.fbpipe.pipeline --config config.yaml curate_yolo_dataset
+# The module is already enabled in config/config.yaml
+python -m src.fbpipe.pipeline --config config/config.yaml curate_yolo_dataset
 ```
 
 Expected output:
@@ -116,7 +116,7 @@ Expected output:
 ## Files Updated
 
 1. [src/fbpipe/steps/curate_yolo_dataset.py](src/fbpipe/steps/curate_yolo_dataset.py#L375-L419) - Enhanced video search with glob patterns
-2. [config.yaml](config.yaml#L95-L106) - Added video_source_dirs configuration
+2. [config/config.yaml](../config/config.yaml#L95-L106) - Added video_source_dirs configuration
 3. [CURATION_UPDATE.md](CURATION_UPDATE.md#L47-L84) - Updated documentation with real examples
 
 ## Test Scripts

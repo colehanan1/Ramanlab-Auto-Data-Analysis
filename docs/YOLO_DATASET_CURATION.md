@@ -16,7 +16,7 @@ The YOLO Dataset Curation module systematically identifies problematic tracking 
 
 ### 1. Enable Curation in Config
 
-Edit `config.yaml`:
+Edit `config/config.yaml`:
 
 ```yaml
 yolo_curation:
@@ -43,10 +43,10 @@ yolo_curation:
 
 ```bash
 # Run full pipeline (includes curation after YOLO)
-python -m src.fbpipe.pipeline --config config.yaml
+python -m src.fbpipe.pipeline --config config/config.yaml
 
 # Or run just the curation step
-python -m src.fbpipe.pipeline --config config.yaml curate_yolo_dataset
+python -m src.fbpipe.pipeline --config config/config.yaml curate_yolo_dataset
 ```
 
 ### 3. Output Structure
@@ -174,8 +174,8 @@ augmentation:
 
 ```yaml
 video_source_dirs:
-  - "/securedstorage/DATAsec/cole/Data-secured/opto_EB/"
-  - "/securedstorage/DATAsec/cole/Data-secured/opto_hex/"
+  - "/path/to/secure/storage/opto_EB/"
+  - "/path/to/secure/storage/opto_hex/"
 ```
 
 **Purpose**: Specify additional directories to search for video files when they're not in the same location as YOLO output CSVs.

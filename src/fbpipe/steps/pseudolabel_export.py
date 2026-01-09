@@ -141,7 +141,11 @@ def _parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(
         description="Mine top-confidence frames from videos and export pseudo-label YOLO dataset."
     )
-    p.add_argument("--config", default="config.yaml", help="Path to config.yaml")
+    p.add_argument(
+        "--config",
+        default=str(Path("config") / "config.yaml"),
+        help="Path to config/config.yaml",
+    )
     p.add_argument("--dataset-out", help="Output dataset directory (default: cfg.pseudolabel.dataset_out)")
     p.add_argument("--roots", nargs="*", help="Override input roots (default: cfg.main_directory)")
 
@@ -229,7 +233,7 @@ def run(
         raise SystemExit(
             "No videos found under provided roots. "
             "If your videos live in secure storage, pass --roots /securedstorage/... "
-            "or set yolo_curation.video_source_dirs in config.yaml."
+            "or set yolo_curation.video_source_dirs in config/config.yaml."
         )
 
     cuda_available = torch.cuda.is_available()

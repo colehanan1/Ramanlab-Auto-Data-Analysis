@@ -1,0 +1,373 @@
+
+# Project configuration
+model_path: "/path/to/sam2/notebooks/YOLOProjectProboscisLegs/runs/obb/train5/weights/best.pt"
+main_directory:
+          - "/path/to/Data/flys/Benz_control/"
+          - "/path/to/Data/flys/EB_control/"
+          - "/path/to/Data/flys/hex_control/"
+          - "/path/to/Data/flys/opto_ACV/"
+          - "/path/to/Data/flys/opto_AIR/"
+          - "/path/to/Data/flys/opto_benz_1/"
+          - "/path/to/Data/flys/opto_EB/"
+          - "/path/to/Data/flys/opto_EB(6-training)/"
+          - "/path/to/Data/flys/opto_hex/"
+          - "/path/to/Data/flys/opto_3-oct/"
+
+cache_dir: "/path/to/cache"
+force:
+  pipeline: true  # Set to true to force full reprocessing (bypasses cache)
+  yolo: false      # Set to true to rerun YOLO inference even if outputs exist
+  combined: false  # Set to true to force reprocessing of combined analysis
+  reaction_prediction: true  # Set to true to force model re-prediction
+  reaction_matrix: true      # Set to true to force matrix regeneration
+
+reaction_prediction:
+  data_csv: "/path/to/Data/Opto/Combined/all_envelope_rows_wide.csv"
+  model_path: "/path/to/VSCode/FlyBehaviorScoring/artifacts/2025-12-10T20-37-33Z/model_random_forest.joblib"
+  output_csv: "/path/to/Data/Opto/Combined/model_predictions.csv"
+  threshold: 0.35
+  matrix:
+    out_dir: "/path/to/Results/Opto/Reaction_Predictions(Strictest)"
+    latency_sec: 2.15
+    after_window_sec: 30.0
+    row_gap: 0.6
+    height_per_gap_in: 3.0
+    bottom_shift_in: 0.5
+    trial_orders: ["observed", "trained-first"]
+    include_hexanol: true
+    overwrite: false
+
+# Compute
+allow_cpu: false
+cuda_allow_tf32: true
+
+# Detection / tracking
+yolo:
+  conf_thres: 0.40
+  iou_match_thres: 0.25
+  max_age: 5
+  ema_alpha: 0.20
+  use_optical_flow: false
+  flow_skip_edge: 10
+  max_flies: 3
+  max_proboscis_tracks: 3
+  pair_rebind_ratio: 0.20
+  zero_iou_epsilon: 1.0e-8
+
+# Geometry
+anchor_x: 1079.0
+anchor_y: 540.0
+
+# Distance stats
+distance_limits:
+  class2_min: 10.0
+  class2_max: 250.0
+
+# Reaction filtering
+non_reactive_span_px: 7.5  # flag flies when global span ≤ this threshold (pixels)
+
+# Tracking quality filtering
+tracking:
+  max_missing_frames_per_trial: 5000  # Flag if any trial has >5000 frames without proboscis detection
+  max_missing_frames_pct_per_trial: 50.0  # Flag if >50% of trial frames lack detection
+  apply_missing_frame_check: true  # Enable/disable tracking quality check
+
+# YOLO Dataset Curation
+yolo_curation:
+  enabled: true  # Enable/disable curation module (set to true to start curating)
+  quality_thresholds:
+    max_jitter_px: 20.0  # Flag videos with median jitter > 20 pixels (lowered to get more images)
+    max_missing_pct: 0.05  # Flag videos with >5% frames missing proboscis detection (lowered to get more images)
+  target_frames:
+    per_video: 15  # Extract ~10 frames per flagged video
+    total: 300  # Target total frames to extract (not yet enforced)
+    stratification:
+      high_quality: 0.30  # 30% from high-quality regions (low jitter, valid tracking)
+      low_quality: 0.50  # 50% from low-quality regions (high jitter or missing)
+      boundary: 0.20  # 20% from boundary regions (moderate quality)
+  augmentation:
+    enabled: true
+    strategies:
+      - horizontal_flip
+      - brightness_contrast_jitter
+      - minor_rotation
+    multiplier: 2  # Aim for 2x dataset size via augmentation
+  output_dir: "yolo_curation"  # Directory name (relative to FLY_DIR)
+  video_source_dirs:  # Additional directories to search for videos (e.g., secure storage)
+    - "/path/to/secure/storage/opto_EB/"
+    - "/path/to/secure/storage/opto_EB(6-training)/"
+    - "/path/to/secure/storage/opto_benz_1/"
+    - "/path/to/secure/storage/opto_hex/"
+    - "/path/to/secure/storage/opto_ACV/"
+    - "/path/to/secure/storage/hex_control/"
+    - "/path/to/secure/storage/EB_control/"
+    - "/path/to/secure/storage/Benz_control/"
+    - "/path/to/secure/storage/opto_AIR/"
+    - "/path/to/secure/storage/opto_3-oct/"
+
+# Pseudolabel mining + export (builds an Ultralytics-compatible dataset from videos)
+pseudolabel:
+  enabled: false
+  target_total: 40000
+  stride: 10
+  random_sample_per_video: 0
+  batch_size: 16
+  # Confidence controls (min_conf sets both keep+export unless overridden)
+  min_conf: 0.85
+  min_conf_keep: 0.85
+  min_conf_export: 0.85
+  # Train/val split (split by fly directory)
+  val_frac: 0.1
+  seed: 1337
+  per_video_cap: 400
+  require_both: true
+  export_classes: [2, 8]  # eye=2, proboscis=8
+  # Optional sanity checks (0/1 disables)
+  max_eye_prob_center_dist_px: 0
+  min_box_area_px: 0
+  max_box_area_frac: 1.0
+  # Output controls (empty uses {cache_dir}/pseudolabel_dataset)
+  dataset_out: "/path/to/model/pseudolabel_dataset_50k"
+  image_ext: "jpg"
+  jpeg_quality: 95
+  label_format: "bbox"  # "bbox" (default) or "obb"
+  export_coco_json: false
+  diversity_bins:
+    enabled: false
+    x_bins: 8
+    y_bins: 8
+    size_bins: 6
+    per_bin_cap: 200
+
+# Envelope / RMS
+fps_default: 40.0
+window_sec: 0.25
+odor_on_s: 30.0
+odor_off_s: 60.0
+odor_latency_s: 2.15
+
+# Videos
+delete_source_after_render: true
+
+analysis:
+  envelope_visuals:
+    matrices:
+      matrix_npy: "/path/to/Data/Opto/Combined/matrix/envelope_matrix_float16.npy"
+      codes_json: "/path/to/Data/Opto/Combined/matrix/code_maps.json"
+      out_dir: "/path/to/Results/Opto/Reaction_Matrices"
+      latency_sec: 0.0
+      fps_default: 40.0
+      before_sec: 30.0
+      during_sec: 30.0
+      after_window_sec: 30.0
+      threshold_std_mult: 4.0
+      min_samples_over: 20
+      row_gap: 0.6
+      height_per_gap_in: 3.0
+      bottom_shift_in: 0.5
+      trial_orders: ["observed", "trained-first"]
+      include_hexanol: true
+      overwrite: true
+    envelopes:
+      matrix_npy: "/path/to/Data/Opto/Combined/matrix/envelope_matrix_float16.npy"
+      codes_json: "/path/to/Data/Opto/Combined/matrix/code_maps.json"
+      out_dir: "/path/to/Results/Opto/PER-Envelopes"
+      latency_sec: 0.0
+      fps_default: 40.0
+      odor_on_s: 30.0
+      odor_off_s: 60.0
+      odor_latency_s: 2.15
+      after_show_sec: 30.0
+      threshold_std_mult: 4.0
+      trial_type: testing
+      overwrite: false
+  training:
+    envelopes:
+      matrix_npy: "/path/to/Data/Opto/Combined/matrix/training/envelope_matrix_float16.npy"
+      codes_json: "/path/to/Data/Opto/Combined/matrix/training/code_maps.json"
+      out_dir: "/path/to/Results/Opto/Training-PER-Envelopes"
+      latency_sec: 0.0
+      fps_default: 40.0
+      odor_on_s: 30.0
+      odor_off_s: 60.0
+      odor_latency_s: 2.15
+      after_show_sec: 30.0
+      threshold_std_mult: 4.0
+      trial_type: training
+      overwrite: false
+    latency:
+      matrix_npy: "/path/to/Data/Opto/Combined/matrix/training/envelope_matrix_float16.npy"
+      codes_json: "/path/to/Data/Opto/Combined/matrix/training/code_maps.json"
+      out_dir: "/path/to/Results/Opto/Training-Latency"
+      before_sec: 30.0
+      during_sec: 35.0
+      threshold_mult: 4.0
+      latency_ceiling: 9.5
+      trials: [4, 5, 6]
+      fps_default: 40.0
+      overwrite: false
+  combined:
+    combine:
+      roots:
+        - "/path/to/Data/flys/opto_benz_1/"
+        - "/path/to/Data/flys/hex_control/"
+        - "/path/to/Data/flys/EB_control/"
+        - "/path/to/Data/flys/Benz_control/"
+        - "/path/to/Data/flys/opto_EB/"
+        - "/path/to/Data/flys/opto_EB(6-training)/"
+        - "/path/to/Data/flys/opto_hex/"
+        - "/path/to/Data/flys/opto_ACV/"
+        - "/path/to/Data/flys/opto_AIR/"
+        - "/path/to/Data/flys/opto_3-oct/"
+
+      fps_default: 40.0
+      window_sec: 0.25
+      odor_on: 30.0
+      odor_off: 60.0
+      odor_latency_s: 2.15
+    wide:
+      mirror:
+        - source: "/path/to/Data/flys/opto_hex/"
+          destination: "/path/to/secure/storage/opto_hex/"
+        - source: "/path/to/Data/flys/opto_ACV/"
+          destination: "/path/to/secure/storage/opto_ACV/"
+        - source: "/path/to/Data/flys/opto_EB(6-training)/"
+          destination: "/path/to/secure/storage/opto_EB(6-training)/"
+      roots:
+        - "/path/to/secure/storage/opto_EB/"
+        - "/path/to/secure/storage/opto_EB(6-training)/"
+        - "/path/to/secure/storage/opto_benz_1/"
+        - "/path/to/secure/storage/opto_hex/"
+        - "/path/to/secure/storage/opto_ACV/"
+        - "/path/to/secure/storage/hex_control/"
+        - "/path/to/secure/storage/EB_control/"
+        - "/path/to/secure/storage/Benz_control/"
+        - "/path/to/secure/storage/opto_AIR/"
+        - "/path/to/secure/storage/opto_3-oct/"
+      exclude_roots:
+        - "/path/to/secure/storage/opto_benz/"
+      output_csv: "/path/to/Data/Opto/Combined/all_envelope_rows_wide.csv"
+      measure_cols: ["envelope_of_rms"]
+      fps_fallback: 40.0
+      trial_type_exports:
+        - trial_type: training
+          output_csv: "/path/to/Data/Opto/Combined/all_envelope_rows_wide_training.csv"
+          matrix_out_dir: "/path/to/Data/Opto/Combined/matrix/training"
+    matrix:
+      input_csv: "/path/to/Data/Opto/Combined/all_envelope_rows_wide.csv"
+      out_dir: "/path/to/Data/Opto/Combined/matrix"
+    matrices:
+      matrix_npy: "/path/to/Data/Opto/Combined/matrix/envelope_matrix_float16.npy"
+      codes_json: "/path/to/Data/Opto/Combined/matrix/code_maps.json"
+      out_dir: "/path/to/Results/Opto/Reaction_Matrices"
+      latency_sec: 0.0
+      fps_default: 40.0
+      before_sec: 30.0
+      during_sec: 30.0
+      after_window_sec: 30.0
+      threshold_std_mult: 4.0
+      min_samples_over: 20
+      row_gap: 0.6
+      height_per_gap_in: 3.0
+      bottom_shift_in: 0.5
+      trial_orders: ["observed", "trained-first"]
+      include_hexanol: true
+      overwrite: true
+    envelopes:
+      - matrix_npy: "/path/to/Data/Opto/Combined/matrix/envelope_matrix_float16.npy"
+        codes_json: "/path/to/Data/Opto/Combined/matrix/code_maps.json"
+        out_dir: "/path/to/Results/Opto/PER-Envelopes"
+        latency_sec: 0.0
+        fps_default: 40.0
+        odor_on_s: 30.0
+        odor_off_s: 60.0
+        odor_latency_s: 2.15
+        after_show_sec: 30.0
+        threshold_std_mult: 4.0
+        overwrite: false
+      - matrix_npy: "/path/to/Data/Opto/Combined/matrix/training/envelope_matrix_float16.npy"
+        codes_json: "/path/to/Data/Opto/Combined/matrix/training/code_maps.json"
+        out_dir: "/path/to/Results/Opto/Training-PER-Envelopes"
+        latency_sec: 0.0
+        fps_default: 40.0
+        odor_on_s: 30.0
+        odor_off_s: 60.0
+        odor_latency_s: 2.15
+        after_show_sec: 30.0
+        threshold_std_mult: 4.0
+        trial_type: training
+        overwrite: false
+    overlay:
+      combined_matrix: "/path/to/Data/Opto/Combined/matrix/envelope_matrix_float16.npy"
+      combined_codes: "/path/to/Data/Opto/Combined/matrix/code_maps.json"
+      distance_matrix: "/path/to/Data/single_matrix_opto/envelope_matrix_float16.npy"
+      distance_codes: "/path/to/Data/single_matrix_opto/code_maps.json"
+      out_dir: "/path/to/Results/Opto/Reaction_Matrices/Overlay"
+      latency_sec: 0.0
+      after_show_sec: 30.0
+      threshold_std_mult: 4.0
+      odor_on_s: 30.0
+      odor_off_s: 60.0
+      odor_latency_s: 2.15
+      overwrite: false
+    secure_cleanup:
+      destination: "/path/to/secure/storage/"
+      sources:
+        - "/path/to/Data/flys/opto_EB/"
+        - "/path/to/Data/flys/opto_EB(6-training)/"
+        - "/path/to/Data/flys/opto_benz_1/"
+        - "/path/to/Data/flys/opto_hex/"
+        - "/path/to/Data/flys/opto_ACV/"
+        - "/path/to/Data/flys/hex_control/"
+        - "/path/to/Data/flys/EB_control/"
+        - "/path/to/Data/flys/Benz_control/"
+        - "/path/to/Data/flys/opto_AIR/"
+        - "/path/to/Data/flys/opto_3-oct/"
+
+tools:
+  auto_label_images:
+    model_path: "/path/to/sam2/notebooks/YOLOProjectProboscisLegs/runs/obb/train5/weights/best.pt"
+    data_root: "/path/to/Data/flys"
+    output_dir: "/path/to/model/auto_labelled_images"
+    conf_threshold: 0.25
+    iou_threshold: 0.45
+  xanylabeling:
+    model_path: "/path/to/sam2/notebooks/YOLOProjectProboscisLegs/runs/obb/train5/weights/best.pt"
+    output_dir: "/path/to/sam2/notebooks/YOLOProjectProboscisLegs/runs/obb/train5/x-anylabeling-model"
+    target_class_indices: [2, 8]
+    iou_threshold: 0.45
+    conf_threshold: 0.25
+  onnx_filter:
+    input_onnx_path: "/path/to/sam2/notebooks/YOLOProjectProboscisLegs/runs/obb/train5/x-anylabeling-model/best.onnx"
+    output_dir: "/path/to/sam2/notebooks/YOLOProjectProboscisLegs/runs/obb/train5/x-anylabeling-model"
+    output_name: "best_eye_proboscis_only.onnx"
+    target_class_indices: [2, 8]
+    class_names:
+      0: abdomen
+      1: antenna
+      2: eye
+      3: frontLegs
+      4: glue
+      5: head
+      6: needle-glue
+      7: pipette
+      8: proboscis
+  collect_to_label_images:
+    source_root: "/path/to/secure/storage"
+    dest_dir: "/path/to/model/to-be-labelled"
+  collect_eye_prob_coords:
+    sources:
+      - "/path/to/secure/storage/opto_EB/"
+      - "/path/to/secure/storage/opto_benz_1/"
+      - "/path/to/secure/storage/opto_hex/"
+      - "/path/to/secure/storage/opto_ACV/"
+      - "/path/to/secure/storage/hex_control/"
+    output_csv: "/path/to/Data/Opto/all_eye_prob_coords_wide.csv"
+    fps: 40
+    max_frames: 3600
+  export_reaction_rates_simple:
+    wide_csv: "/path/to/Data/Opto/Combined/all_envelope_rows_wide.csv"
+    out_dir: "/path/to/Results/Opto/Reaction_Predictions(Strictest)"
+  weekly_training_traces:
+    csv_path: "/path/to/Data/Opto/Combined/all_envelope_rows_wide_training.csv"
+    output_dir: "/path/to/Results/Opto/Weekly-Training-Envelopes"

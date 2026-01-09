@@ -1,7 +1,3 @@
 #!/usr/bin/env bash
 set -euo pipefail
-
-pip -q install --upgrade pip
-pip -q install -r requirements.txt
-
-python -m fbpipe.pipeline --config config.yaml all
+exec "$(dirname "${BASH_SOURCE[0]}")/scripts/dev/run.sh" "$@"
