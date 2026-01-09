@@ -6,10 +6,10 @@ This script filters X-AnyLabeling annotation JSON files to only include
 specific target classes (eye and proboscis), removing all other class detections.
 
 Usage:
-    python filter_xanylabeling_annotations.py <input_json> <output_json>
+    python scripts/curation/filter_xanylabeling_annotations.py <input_json> <output_json>
 
 Or run in batch mode on a directory:
-    python filter_xanylabeling_annotations.py <input_dir> <output_dir>
+    python scripts/curation/filter_xanylabeling_annotations.py <input_dir> <output_dir>
 
 Author: Auto-generated
 Date: 2025-01-07

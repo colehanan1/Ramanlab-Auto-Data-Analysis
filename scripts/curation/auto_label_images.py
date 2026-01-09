@@ -6,13 +6,23 @@ Collects images from yolo_curation/to_label directories, runs YOLO inference,
 and saves auto-labeled images with annotations to a target directory.
 
 Usage:
-    python auto_label_images.py
+    python scripts/curation/auto_label_images.py
 """
 
+import argparse
 import shutil
+import sys
 from pathlib import Path
+
 from ultralytics import YOLO
-import yaml
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+SRC_ROOT = REPO_ROOT / "src"
+for path in (str(REPO_ROOT), str(SRC_ROOT)):
+    if path not in sys.path:
+        sys.path.insert(0, path)
+
+from fbpipe.config import load_raw_config
 
 
 def find_curation_images(data_root: Path):
@@ -60,7 +70,7 @@ def auto_label_images(
 
     if not image_paths:
         print("\n⚠ No images found in yolo_curation/to_label directories!")
-        print("Run curation first: python -m src.fbpipe.pipeline --config config.yaml curate_yolo_dataset")
+        print("Run curation first: python -m fbpipe.pipeline --config config/config.yaml curate_yolo_dataset")
         return
 
     # Create output directory
@@ -150,27 +160,58 @@ def auto_label_images(
 
 def main():
     """Main execution."""
-    # Configuration
-    MODEL_PATH = "/home/ramanlab/Documents/cole/sam2/notebooks/YOLOProjectProboscisLegs/runs/obb/train5/weights/best.pt"
-    DATA_ROOT = Path("/home/ramanlab/Documents/cole/Data/flys")
-    OUTPUT_DIR = Path("/home/ramanlab/Documents/cole/model/auto_labelled_images")
-    CONF_THRESHOLD = 0.25
-    IOU_THRESHOLD = 0.45
+    parser = argparse.ArgumentParser(description="Auto-label curation images using a YOLO model.")
+    parser.add_argument(
+        "--config",
+        default=str(Path("config") / "config.yaml"),
+        help="Path to pipeline configuration YAML.",
+    )
+    parser.add_argument("--model-path", default=None, help="Path to the YOLO model.")
+    parser.add_argument("--data-root", default=None, help="Root directory to scan for yolo_curation/to_label.")
+    parser.add_argument("--output-dir", default=None, help="Directory to save auto-labeled images.")
+    parser.add_argument("--conf-threshold", type=float, default=None, help="Detection confidence threshold.")
+    parser.add_argument("--iou-threshold", type=float, default=None, help="IoU threshold for NMS.")
+    args = parser.parse_args()
+
+    config_data = load_raw_config(args.config)
+    tool_cfg = config_data.get("tools", {}).get("auto_label_images", {})
+    if not isinstance(tool_cfg, dict):
+        tool_cfg = {}
+
+    model_path = args.model_path or tool_cfg.get("model_path") or config_data.get("model_path", "")
+    data_root = args.data_root or tool_cfg.get("data_root", "")
+    output_dir = args.output_dir or tool_cfg.get("output_dir", "")
+    conf_threshold = (
+        args.conf_threshold if args.conf_threshold is not None else tool_cfg.get("conf_threshold", 0.25)
+    )
+    iou_threshold = (
+        args.iou_threshold if args.iou_threshold is not None else tool_cfg.get("iou_threshold", 0.45)
+    )
+
+    if not model_path:
+        print("✗ ERROR: Model path not configured. Provide --model-path or set tools.auto_label_images.model_path.")
+        return 1
+    if not data_root:
+        print("✗ ERROR: Data root not configured. Provide --data-root or set tools.auto_label_images.data_root.")
+        return 1
+    if not output_dir:
+        print("✗ ERROR: Output directory not configured. Provide --output-dir or set tools.auto_label_images.output_dir.")
+        return 1
 
     # Check if model exists
-    if not Path(MODEL_PATH).exists():
-        print(f"✗ ERROR: Model not found at {MODEL_PATH}")
-        print("\nPlease update MODEL_PATH in the script to point to your trained YOLO model.")
+    if not Path(model_path).exists():
+        print(f"✗ ERROR: Model not found at {model_path}")
+        print("\nProvide --model-path or update tools.auto_label_images.model_path in the config.")
         return 1
 
     # Run auto-labeling
     try:
         auto_label_images(
-            model_path=MODEL_PATH,
-            data_root=DATA_ROOT,
-            output_dir=OUTPUT_DIR,
-            conf_threshold=CONF_THRESHOLD,
-            iou_threshold=IOU_THRESHOLD
+            model_path=model_path,
+            data_root=Path(data_root),
+            output_dir=Path(output_dir),
+            conf_threshold=float(conf_threshold),
+            iou_threshold=float(iou_threshold),
         )
         return 0
     except Exception as e:

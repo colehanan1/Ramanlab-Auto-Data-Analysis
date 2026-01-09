@@ -9,13 +9,36 @@ Author: Auto-generated
 Date: 2025-01-07
 """
 
+import argparse
 import os
 import sys
 from pathlib import Path
 import json
+import yaml
 import onnx
 from onnx import numpy_helper
 import numpy as np
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+SRC_ROOT = REPO_ROOT / "src"
+for path in (str(REPO_ROOT), str(SRC_ROOT)):
+    if path not in sys.path:
+        sys.path.insert(0, path)
+
+from fbpipe.config import load_raw_config
+
+DEFAULT_TARGET_CLASS_INDICES = [2, 8]
+DEFAULT_CLASS_NAMES = {
+    0: "abdomen",
+    1: "antenna",
+    2: "eye",
+    3: "frontLegs",
+    4: "glue",
+    5: "head",
+    6: "needle-glue",
+    7: "pipette",
+    8: "proboscis",
+}
 
 
 def filter_yolo_onnx_model(
@@ -87,33 +110,59 @@ def main():
     print("Filtering to Eye & Proboscis Only")
     print("="*70 + "\n")
 
-    # Configuration
-    INPUT_ONNX = "/home/ramanlab/Documents/cole/sam2/notebooks/YOLOProjectProboscisLegs/runs/obb/train5/x-anylabeling-model/best.onnx"
-    OUTPUT_DIR = "/home/ramanlab/Documents/cole/sam2/notebooks/YOLOProjectProboscisLegs/runs/obb/train5/x-anylabeling-model"
-    OUTPUT_ONNX = "best_eye_proboscis_only.onnx"
-    TARGET_CLASS_INDICES = [2, 8]  # eye, proboscis
-    ALL_CLASS_NAMES = {
-        0: 'abdomen', 1: 'antenna', 2: 'eye', 3: 'frontLegs',
-        4: 'glue', 5: 'head', 6: 'needle-glue', 7: 'pipette', 8: 'proboscis'
-    }
+    parser = argparse.ArgumentParser(description="Filter YOLO ONNX model metadata to target classes.")
+    parser.add_argument(
+        "--config",
+        default=str(Path("config") / "config.yaml"),
+        help="Path to pipeline configuration YAML.",
+    )
+    parser.add_argument("--input-onnx", default=None, help="Path to the source ONNX model.")
+    parser.add_argument("--output-dir", default=None, help="Directory to write the filtered model.")
+    parser.add_argument("--output-name", default=None, help="Filename for the filtered ONNX model.")
+    parser.add_argument(
+        "--class-ids",
+        nargs="*",
+        type=int,
+        default=None,
+        help="Target class indices to keep (default: 2 8).",
+    )
+    args = parser.parse_args()
+
+    config_data = load_raw_config(args.config)
+    tool_cfg = config_data.get("tools", {}).get("onnx_filter", {})
+    if not isinstance(tool_cfg, dict):
+        tool_cfg = {}
+
+    input_onnx = args.input_onnx or tool_cfg.get("input_onnx_path", "")
+    output_dir = args.output_dir or tool_cfg.get("output_dir", "")
+    output_name = args.output_name or tool_cfg.get("output_name", "best_eye_proboscis_only.onnx")
+    target_class_indices = args.class_ids or tool_cfg.get("target_class_indices") or DEFAULT_TARGET_CLASS_INDICES
+    class_names = tool_cfg.get("class_names", DEFAULT_CLASS_NAMES)
+    if not isinstance(class_names, dict):
+        class_names = DEFAULT_CLASS_NAMES
+    all_class_names = {int(k): str(v) for k, v in class_names.items()}
 
     try:
         # Validate input
-        input_path = Path(INPUT_ONNX)
+        if not input_onnx:
+            raise ValueError("Input ONNX path not configured. Provide --input-onnx or set tools.onnx_filter.input_onnx_path.")
+        input_path = Path(input_onnx).expanduser()
         if not input_path.exists():
             raise FileNotFoundError(f"Input ONNX model not found: {input_path}")
 
         # Setup output
-        output_dir = Path(OUTPUT_DIR)
+        if not output_dir:
+            raise ValueError("Output directory not configured. Provide --output-dir or set tools.onnx_filter.output_dir.")
+        output_dir = Path(output_dir).expanduser()
         output_dir.mkdir(parents=True, exist_ok=True)
-        output_path = output_dir / OUTPUT_ONNX
+        output_path = output_dir / output_name
 
         # Filter the model
         filtered_model_path, filtered_classes, class_mapping = filter_yolo_onnx_model(
             input_onnx_path=input_path,
             output_onnx_path=output_path,
-            target_class_indices=TARGET_CLASS_INDICES,
-            all_class_names=ALL_CLASS_NAMES
+            target_class_indices=[int(idx) for idx in target_class_indices],
+            all_class_names=all_class_names
         )
 
         print("\n" + "="*70)

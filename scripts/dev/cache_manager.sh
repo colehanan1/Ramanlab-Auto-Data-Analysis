@@ -2,7 +2,32 @@
 # Cache Manager for Ramanlab Auto Data Analysis Pipeline
 # Helps manage the state cache system to avoid redundant processing
 
-CACHE_DIR="/home/ramanlab/Documents/cole/cache"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+CONFIG_PATH="${CONFIG_PATH:-${REPO_ROOT}/config/config.yaml}"
+
+CACHE_DIR="${CACHE_DIR:-}"
+if [ -z "${CACHE_DIR}" ] && [ -f "${CONFIG_PATH}" ]; then
+    CACHE_DIR="$(python - <<'PY' "${CONFIG_PATH}"
+import sys
+from pathlib import Path
+try:
+    import yaml
+except ImportError:
+    print("")
+    raise SystemExit(0)
+
+path = Path(sys.argv[1])
+data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+value = data.get("cache_dir") or ""
+print(value)
+PY
+)"
+fi
+
+if [ -z "${CACHE_DIR}" ]; then
+    CACHE_DIR="${HOME}/.cache/ramanlab_auto_data_analysis"
+fi
 
 # Colors for output
 RED='\033[0;31m'
@@ -11,7 +36,7 @@ YELLOW='\033[1;33m'
 NC='\033[0m' # No Color
 
 function show_usage() {
-    echo "Usage: ./cache_manager.sh [command]"
+    echo "Usage: scripts/dev/cache_manager.sh [command]"
     echo ""
     echo "Commands:"
     echo "  status        - Show current cache status"
@@ -23,8 +48,8 @@ function show_usage() {
     echo "  list-datasets - List all cached datasets"
     echo ""
     echo "Examples:"
-    echo "  ./cache_manager.sh status"
-    echo "  ./cache_manager.sh clear-dataset /home/ramanlab/Documents/cole/Data/flys/opto_EB"
+    echo "  scripts/dev/cache_manager.sh status"
+    echo "  scripts/dev/cache_manager.sh clear-dataset /path/to/dataset"
 }
 
 function show_status() {
@@ -91,8 +116,8 @@ function show_status() {
     echo ""
     echo -e "${GREEN}Next make run will:${NC}"
 
-    # Check force flags in config.yaml
-    local config="config.yaml"
+    # Check force flags in config/config.yaml
+    local config="${CONFIG_PATH}"
     if [ -f "$config" ]; then
         local force_pipeline=$(grep -A 5 "^force:" "$config" | grep "pipeline:" | awk '{print $2}')
         local force_combined=$(grep -A 5 "^force:" "$config" | grep "combined:" | awk '{print $2}')

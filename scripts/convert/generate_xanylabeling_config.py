@@ -9,6 +9,7 @@ Author: Auto-generated
 Date: 2025-01-07
 """
 
+import argparse
 import os
 import sys
 from pathlib import Path
@@ -267,6 +268,15 @@ def display_config_preview(yaml_path: Path):
     print("="*70)
 
 
+REPO_ROOT = Path(__file__).resolve().parents[2]
+SRC_ROOT = REPO_ROOT / "src"
+for path in (str(REPO_ROOT), str(SRC_ROOT)):
+    if path not in sys.path:
+        sys.path.insert(0, path)
+
+from fbpipe.config import load_raw_config
+
+
 def main():
     """Main execution function."""
     print("="*70)
@@ -274,17 +284,44 @@ def main():
     print("YOLO11 OBB Model - Eye & Proboscis Classes")
     print("="*70 + "\n")
 
-    # Configuration
-    MODEL_PATH = "/home/ramanlab/Documents/cole/sam2/notebooks/YOLOProjectProboscisLegs/runs/obb/train5/weights/best.pt"
-    OUTPUT_DIR = "/home/ramanlab/Documents/cole/sam2/notebooks/YOLOProjectProboscisLegs/runs/obb/train5/x-anylabeling-model"
-    TARGET_CLASS_INDICES = [2, 8]  # eye, proboscis
-    IOU_THRESHOLD = 0.45
-    CONF_THRESHOLD = 0.25
+    parser = argparse.ArgumentParser(description="Generate X-AnyLabeling YAML config.")
+    parser.add_argument(
+        "--config",
+        default=str(Path("config") / "config.yaml"),
+        help="Path to pipeline configuration YAML.",
+    )
+    parser.add_argument("--model-path", default=None, help="Path to the YOLO model file.")
+    parser.add_argument("--output-dir", default=None, help="Directory to save the ONNX+YAML outputs.")
+    parser.add_argument(
+        "--class-ids",
+        nargs="*",
+        type=int,
+        default=None,
+        help="Target class indices to include (default: 2 8).",
+    )
+    parser.add_argument("--iou-threshold", type=float, default=None, help="IoU threshold for NMS.")
+    parser.add_argument("--conf-threshold", type=float, default=None, help="Confidence threshold.")
+    args = parser.parse_args()
+
+    config_data = load_raw_config(args.config)
+    tool_cfg = config_data.get("tools", {}).get("xanylabeling", {})
+    if not isinstance(tool_cfg, dict):
+        tool_cfg = {}
+
+    model_path_value = args.model_path or tool_cfg.get("model_path") or config_data.get("model_path", "")
+    output_dir_value = args.output_dir or tool_cfg.get("output_dir", "")
+    target_class_indices = args.class_ids or tool_cfg.get("target_class_indices", [2, 8])
+    iou_threshold = args.iou_threshold or tool_cfg.get("iou_threshold", 0.45)
+    conf_threshold = args.conf_threshold or tool_cfg.get("conf_threshold", 0.25)
 
     try:
         # Step 1: Validate model path
         print("Step 1: Validating model path...")
-        model_path = validate_model_path(MODEL_PATH)
+        if not model_path_value:
+            raise ValueError(
+                "Model path not configured. Provide --model-path or set tools.xanylabeling.model_path."
+            )
+        model_path = validate_model_path(model_path_value)
 
         # Step 2: Load YOLO model
         print("\nStep 2: Loading YOLO model...")
@@ -292,11 +329,18 @@ def main():
 
         # Step 3: Extract class names
         print("\nStep 3: Extracting class names...")
-        all_class_names, target_class_names = extract_class_names(model, TARGET_CLASS_INDICES)
+        all_class_names, target_class_names = extract_class_names(
+            model,
+            [int(idx) for idx in target_class_indices],
+        )
 
         # Step 4: Export model to ONNX format
         print("\nStep 4: Exporting model to ONNX format...")
-        output_dir = Path(OUTPUT_DIR)
+        if not output_dir_value:
+            raise ValueError(
+                "Output directory not configured. Provide --output-dir or set tools.xanylabeling.output_dir."
+            )
+        output_dir = Path(output_dir_value)
         onnx_model_path = export_model_to_onnx(
             model=model,
             output_dir=output_dir,
@@ -310,8 +354,8 @@ def main():
             all_class_names=all_class_names,
             target_class_names=target_class_names,
             output_dir=output_dir,
-            iou_threshold=IOU_THRESHOLD,
-            conf_threshold=CONF_THRESHOLD
+            iou_threshold=float(iou_threshold),
+            conf_threshold=float(conf_threshold),
         )
 
         # Step 6: Display preview

@@ -4,4 +4,4 @@ set -euo pipefail
 pip -q install --upgrade pip
 pip -q install -r requirements.txt
 
-python -m fbpipe.pipeline --config config.yaml all
+python -m fbpipe.pipeline --config config/config.yaml all
