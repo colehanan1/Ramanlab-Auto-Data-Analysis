@@ -204,7 +204,8 @@ def run(
     overwrite: bool,
 ) -> None:
     log.info("Discovering videos under %d roots...", len(roots))
-    videos = discover_videos(roots)
+    # Only process "testing" videos for pseudolabel mining (R3)
+    videos = discover_videos(roots, filename_contains="testing")
     if not videos:
         fallback = []
         yolo_curation_dirs = getattr(getattr(cfg, "yolo_curation", None), "video_source_dirs", ()) or ()
@@ -220,7 +221,7 @@ def run(
                 "Discovered 0 videos under main roots; retrying with yolo_curation.video_source_dirs (%d dirs).",
                 len(fallback),
             )
-            videos = discover_videos(fallback)
+            videos = discover_videos(fallback, filename_contains="testing")
             roots = fallback
 
     log.info("Discovered %d videos", len(videos))
@@ -386,7 +387,8 @@ def cli(argv: Optional[Sequence[str]] = None) -> None:
     )
     if args.scan_only:
         log.info("Discovering videos under %d roots...", len(roots))
-        videos = discover_videos(roots)
+        # Only process "testing" videos for pseudolabel mining (R3)
+        videos = discover_videos(roots, filename_contains="testing")
         if not videos:
             yolo_curation_dirs = getattr(getattr(cfg, "yolo_curation", None), "video_source_dirs", ()) or ()
             fallback = [Path(p) for p in yolo_curation_dirs] if yolo_curation_dirs else []
@@ -395,7 +397,7 @@ def cli(argv: Optional[Sequence[str]] = None) -> None:
                     "Discovered 0 videos under main roots; retrying with yolo_curation.video_source_dirs (%d dirs).",
                     len(fallback),
                 )
-                videos = discover_videos(fallback)
+                videos = discover_videos(fallback, filename_contains="testing")
         log.info("Discovered %d videos", len(videos))
         for video in videos[:10]:
             log.info("Video: %s", video)

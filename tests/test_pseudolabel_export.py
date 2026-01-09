@@ -9,11 +9,17 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from fbpipe.utils.pseudolabel import (
+    GATE_MIN_CONF,
+    TAINTED_FLY_IDS_FILE,
+    _load_tainted_fly_ids,
+    _save_tainted_fly_id,
+    discover_videos,
     mine_top_confidence_frames,
     write_yolo_bbox_label_file,
     xyxy_to_yolo_norm,
 )
 from fbpipe.utils.columns import EYE_CLASS, PROBOSCIS_CLASS
+import fbpipe.utils.pseudolabel as pseudolabel_module
 
 
 def test_xyxy_to_yolo_norm_known_box() -> None:
@@ -33,7 +39,11 @@ def _write_test_mp4(video_path: Path, *, n_frames: int = 6, w: int = 64, h: int 
     writer.release()
 
 
-def test_mine_top_confidence_frames_deterministic(tmp_path: Path) -> None:
+def test_mine_top_confidence_frames_deterministic(tmp_path: Path, monkeypatch) -> None:
+    # Set up taint file path to use tmp_path to avoid interference
+    taint_file = tmp_path / "logs" / "tainted_fly_ids.txt"
+    monkeypatch.setattr(pseudolabel_module, "TAINTED_FLY_IDS_FILE", taint_file)
+
     fly_dir = tmp_path / "fly1"
     fly_dir.mkdir(parents=True, exist_ok=True)
     video_path = fly_dir / "toy.avi"
@@ -103,7 +113,11 @@ def test_mine_top_confidence_frames_deterministic(tmp_path: Path) -> None:
     assert scores == sorted(scores, reverse=True)
 
 
-def test_reject_multi_eye_first_frames_skips_video(tmp_path: Path) -> None:
+def test_reject_multi_eye_first_frames_skips_video(tmp_path: Path, monkeypatch) -> None:
+    # Set up taint file path to use tmp_path to avoid interference
+    taint_file = tmp_path / "logs" / "tainted_fly_ids.txt"
+    monkeypatch.setattr(pseudolabel_module, "TAINTED_FLY_IDS_FILE", taint_file)
+
     fly_dir = tmp_path / "fly1"
     fly_dir.mkdir(parents=True, exist_ok=True)
     video_path = fly_dir / "multi_eye.mp4"
@@ -157,7 +171,11 @@ def test_reject_multi_eye_first_frames_skips_video(tmp_path: Path) -> None:
     assert stats["videos_skipped_multi_eye"] == 1
 
 
-def test_reject_disabled_preserves_behavior(tmp_path: Path) -> None:
+def test_reject_disabled_preserves_behavior(tmp_path: Path, monkeypatch) -> None:
+    # Set up taint file path to use tmp_path to avoid interference
+    taint_file = tmp_path / "logs" / "tainted_fly_ids.txt"
+    monkeypatch.setattr(pseudolabel_module, "TAINTED_FLY_IDS_FILE", taint_file)
+
     fly_dir = tmp_path / "fly1"
     fly_dir.mkdir(parents=True, exist_ok=True)
     video_path = fly_dir / "multi_eye.mp4"
@@ -226,3 +244,213 @@ def test_write_yolo_bbox_label_file_emits_expected_format(tmp_path: Path) -> Non
         "0 0.250000 0.250000 0.500000 0.500000",
         "1 0.500000 0.500000 0.500000 0.500000",
     ]
+
+
+def test_multi_eye_taints_folder_level(tmp_path: Path, monkeypatch) -> None:
+    """Verify multi-eye detection taints fly_id and skips other videos in same folder."""
+    # Set up taint file path to use tmp_path
+    taint_file = tmp_path / "logs" / "tainted_fly_ids.txt"
+    monkeypatch.setattr(pseudolabel_module, "TAINTED_FLY_IDS_FILE", taint_file)
+
+    fly_dir = tmp_path / "fly1"
+    fly_dir.mkdir(parents=True, exist_ok=True)
+    video1 = fly_dir / "video1.mp4"
+    video2 = fly_dir / "video2.mp4"
+    _write_test_mp4(video1, n_frames=6)
+    _write_test_mp4(video2, n_frames=6)
+
+    class FakeBoxes:
+        def __init__(self, xyxy: np.ndarray, cls: np.ndarray, conf: np.ndarray):
+            self.xyxy = xyxy
+            self.cls = cls
+            self.conf = conf
+
+        def __len__(self) -> int:
+            return int(self.xyxy.shape[0])
+
+    class FakeResult:
+        def __init__(self, boxes: FakeBoxes):
+            self.boxes = boxes
+            self.obb = None
+
+    def predict_fn(frames, conf_thres: float):
+        """Return 2 eyes with conf >= GATE_MIN_CONF to trigger multi-eye."""
+        out = []
+        for frame in frames:
+            xyxy = np.array(
+                [
+                    [0, 0, 10, 10],      # eye 1
+                    [40, 40, 50, 50],    # eye 2
+                    [20, 20, 30, 30],    # proboscis
+                ],
+                dtype=np.float32,
+            )
+            cls = np.array([EYE_CLASS, EYE_CLASS, PROBOSCIS_CLASS], dtype=np.float32)
+            # Both eyes above GATE_MIN_CONF (0.4)
+            conf = np.array([0.5, 0.45, 0.9], dtype=np.float32)
+            out.append(FakeResult(FakeBoxes(xyxy=xyxy, cls=cls, conf=conf)))
+        return out
+
+    selected, stats = mine_top_confidence_frames(
+        [video1, video2],
+        predict_fn,
+        stride=1,
+        random_sample_per_video=0,
+        batch_size=2,
+        target_total=10,
+        per_video_cap=10,
+        min_conf_keep=0.5,
+        reject_multi_eye_first_n_frames=5,
+    )
+
+    # Both videos should be skipped
+    assert selected == []
+    # First video triggers multi-eye, second is skipped due to already-tainted
+    assert stats["videos_skipped_multi_eye"] == 1
+    assert stats["videos_skipped_already_tainted"] == 1
+
+    # Taint file should exist and contain fly1
+    assert taint_file.exists()
+    content = taint_file.read_text(encoding="utf-8").strip()
+    assert "fly1" in content
+
+
+def test_tainted_file_persistence(tmp_path: Path, monkeypatch) -> None:
+    """Verify pre-existing taint file causes immediate skip on future runs."""
+    # Set up taint file path to use tmp_path
+    taint_file = tmp_path / "logs" / "tainted_fly_ids.txt"
+    taint_file.parent.mkdir(parents=True, exist_ok=True)
+    # Pre-populate taint file with fly1
+    taint_file.write_text("fly1\n", encoding="utf-8")
+    monkeypatch.setattr(pseudolabel_module, "TAINTED_FLY_IDS_FILE", taint_file)
+
+    fly_dir = tmp_path / "fly1"
+    fly_dir.mkdir(parents=True, exist_ok=True)
+    video_path = fly_dir / "video.mp4"
+    _write_test_mp4(video_path, n_frames=6)
+
+    class FakeBoxes:
+        def __init__(self, xyxy: np.ndarray, cls: np.ndarray, conf: np.ndarray):
+            self.xyxy = xyxy
+            self.cls = cls
+            self.conf = conf
+
+        def __len__(self) -> int:
+            return int(self.xyxy.shape[0])
+
+    class FakeResult:
+        def __init__(self, boxes: FakeBoxes):
+            self.boxes = boxes
+            self.obb = None
+
+    def predict_fn(frames, conf_thres: float):
+        """Return single eye (should not be called due to early skip)."""
+        out = []
+        for frame in frames:
+            xyxy = np.array([[0, 0, 10, 10], [5, 5, 15, 15]], dtype=np.float32)
+            cls = np.array([EYE_CLASS, PROBOSCIS_CLASS], dtype=np.float32)
+            conf = np.array([0.9, 0.9], dtype=np.float32)
+            out.append(FakeResult(FakeBoxes(xyxy=xyxy, cls=cls, conf=conf)))
+        return out
+
+    selected, stats = mine_top_confidence_frames(
+        [video_path],
+        predict_fn,
+        stride=1,
+        random_sample_per_video=0,
+        batch_size=2,
+        target_total=10,
+        per_video_cap=10,
+        min_conf_keep=0.5,
+        reject_multi_eye_first_n_frames=5,
+    )
+
+    # Video should be skipped immediately due to pre-existing taint
+    assert selected == []
+    assert stats["videos_skipped_already_tainted"] == 1
+    assert stats["videos_skipped_multi_eye"] == 0
+
+
+def test_discover_videos_filename_filter(tmp_path: Path) -> None:
+    """Verify discover_videos filters by filename_contains."""
+    fly_dir = tmp_path / "fly1"
+    fly_dir.mkdir(parents=True, exist_ok=True)
+
+    # Create videos with different names
+    testing_video = fly_dir / "fly1_testing_001.mp4"
+    training_video = fly_dir / "fly1_training_001.mp4"
+    other_video = fly_dir / "fly1_other_001.mp4"
+    _write_test_mp4(testing_video, n_frames=2)
+    _write_test_mp4(training_video, n_frames=2)
+    _write_test_mp4(other_video, n_frames=2)
+
+    # Without filter - should find all 3
+    all_videos = discover_videos([tmp_path])
+    assert len(all_videos) == 3
+
+    # With "testing" filter - should find only 1
+    testing_videos = discover_videos([tmp_path], filename_contains="testing")
+    assert len(testing_videos) == 1
+    assert "testing" in testing_videos[0].stem
+
+
+def test_multi_eye_gate_uses_gate_min_conf(tmp_path: Path, monkeypatch) -> None:
+    """Verify multi-eye gate uses GATE_MIN_CONF threshold, not min_conf_keep."""
+    taint_file = tmp_path / "logs" / "tainted_fly_ids.txt"
+    monkeypatch.setattr(pseudolabel_module, "TAINTED_FLY_IDS_FILE", taint_file)
+
+    fly_dir = tmp_path / "fly1"
+    fly_dir.mkdir(parents=True, exist_ok=True)
+    video_path = fly_dir / "video.mp4"
+    _write_test_mp4(video_path, n_frames=6)
+
+    class FakeBoxes:
+        def __init__(self, xyxy: np.ndarray, cls: np.ndarray, conf: np.ndarray):
+            self.xyxy = xyxy
+            self.cls = cls
+            self.conf = conf
+
+        def __len__(self) -> int:
+            return int(self.xyxy.shape[0])
+
+    class FakeResult:
+        def __init__(self, boxes: FakeBoxes):
+            self.boxes = boxes
+            self.obb = None
+
+    def predict_fn(frames, conf_thres: float):
+        """Return 2 eyes: one above GATE_MIN_CONF, one below."""
+        out = []
+        for frame in frames:
+            xyxy = np.array(
+                [
+                    [0, 0, 10, 10],      # eye 1
+                    [40, 40, 50, 50],    # eye 2
+                    [20, 20, 30, 30],    # proboscis
+                ],
+                dtype=np.float32,
+            )
+            cls = np.array([EYE_CLASS, EYE_CLASS, PROBOSCIS_CLASS], dtype=np.float32)
+            # One eye above GATE_MIN_CONF (0.4), one below
+            # This should NOT trigger multi-eye since only 1 eye >= 0.4
+            conf = np.array([0.5, 0.35, 0.9], dtype=np.float32)
+            out.append(FakeResult(FakeBoxes(xyxy=xyxy, cls=cls, conf=conf)))
+        return out
+
+    selected, stats = mine_top_confidence_frames(
+        [video_path],
+        predict_fn,
+        stride=1,
+        random_sample_per_video=0,
+        batch_size=2,
+        target_total=10,
+        per_video_cap=10,
+        min_conf_keep=0.3,  # Lower than GATE_MIN_CONF
+        reject_multi_eye_first_n_frames=5,
+    )
+
+    # Video should NOT be skipped since only 1 eye >= GATE_MIN_CONF
+    assert stats["videos_skipped_multi_eye"] == 0
+    assert stats["videos_skipped_already_tainted"] == 0
+    # Should have some candidates (single eye + proboscis)
+    assert len(selected) > 0

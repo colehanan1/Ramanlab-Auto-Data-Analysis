@@ -23,6 +23,50 @@ log = logging.getLogger("fbpipe.pseudolabel")
 
 VIDEO_EXTS = {".mp4", ".avi", ".mov", ".mkv", ".mpg", ".mpeg", ".m4v"}
 
+# Multi-eye gate constants for folder-level tainting (R2, R5)
+# Used to detect multi-fly videos and taint entire fly_id folders.
+GATE_MIN_CONF = 0.4   # Confidence threshold for multi-eye gate (separate from mining)
+GATE_FRAMES = 50      # Number of frames to scan for multi-eye detection
+TAINTED_FLY_IDS_FILE = Path("logs/tainted_fly_ids.txt")
+
+
+def _load_tainted_fly_ids() -> set:
+    """Load tainted fly_ids from persistent file.
+
+    Returns empty set if file doesn't exist.
+    """
+    if not TAINTED_FLY_IDS_FILE.exists():
+        return set()
+    try:
+        text = TAINTED_FLY_IDS_FILE.read_text(encoding="utf-8")
+        return {line.strip() for line in text.splitlines() if line.strip()}
+    except OSError:
+        return set()
+
+
+def _save_tainted_fly_id(fly_id: str, already_loaded: set) -> None:
+    """Atomically append fly_id to taint file if not already present.
+
+    Args:
+        fly_id: The fly_id to save.
+        already_loaded: Set of fly_ids already loaded at startup (to avoid re-reading).
+    """
+    if fly_id in already_loaded:
+        return
+    # Ensure logs directory exists
+    TAINTED_FLY_IDS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    # Re-read current file state to avoid duplicates from concurrent runs
+    current = set()
+    if TAINTED_FLY_IDS_FILE.exists():
+        try:
+            text = TAINTED_FLY_IDS_FILE.read_text(encoding="utf-8")
+            current = {line.strip() for line in text.splitlines() if line.strip()}
+        except OSError:
+            pass
+    if fly_id not in current:
+        with open(TAINTED_FLY_IDS_FILE, "a", encoding="utf-8") as f:
+            f.write(f"{fly_id}\n")
+
 
 def _slugify(text: str, *, max_len: int = 120) -> str:
     slug = re.sub(r"[^A-Za-z0-9]+", "_", text).strip("_")
@@ -94,12 +138,26 @@ def write_yolo_obb_label_file(
             )
 
 
-def discover_videos(roots: Sequence[Path]) -> List[Path]:
+def discover_videos(
+    roots: Sequence[Path],
+    *,
+    filename_contains: Optional[str] = None,
+) -> List[Path]:
     """Discover videos under dataset roots.
 
     The pipeline convention is: ``root/<fly_dir>/*.mp4``. If a root itself
     contains videos, it is treated as a fly directory.
+
+    Args:
+        roots: Sequence of root directories to search.
+        filename_contains: Optional substring filter. If provided, only videos
+            whose filename (stem) contains this substring are returned.
     """
+
+    def _matches_filter(p: Path) -> bool:
+        if filename_contains is None:
+            return True
+        return filename_contains in p.stem
 
     seen: set[Path] = set()
     videos: List[Path] = []
@@ -112,6 +170,8 @@ def discover_videos(roots: Sequence[Path]) -> List[Path]:
         root_videos = [p for p in root.iterdir() if p.is_file() and p.suffix.lower() in VIDEO_EXTS]
         if root_videos:
             for p in root_videos:
+                if not _matches_filter(p):
+                    continue
                 resolved = p.resolve()
                 if resolved in seen:
                     continue
@@ -126,6 +186,8 @@ def discover_videos(roots: Sequence[Path]) -> List[Path]:
                 if not p.is_file():
                     continue
                 if p.suffix.lower() not in VIDEO_EXTS:
+                    continue
+                if not _matches_filter(p):
                     continue
                 resolved = p.resolve()
                 if resolved in seen:
@@ -285,46 +347,46 @@ def mine_top_confidence_frames(
         "videos_total": len(video_paths),
         "videos_open_failed": 0,
         "videos_skipped_multi_eye": 0,
+        "videos_skipped_already_tainted": 0,
         "frames_sampled": 0,
         "frames_rejected": 0,
         "frames_kept": 0,
     }
     rejection_counts: Dict[str, int] = {}
 
+    # Load persistent tainted fly_ids for folder-level rejection
+    tainted_fly_ids: set = _load_tainted_fly_ids()
+    tainted_fly_ids_at_startup = set(tainted_fly_ids)  # For atomic save check
+
     global_heap: List[Tuple[float, str, FrameCandidate]] = []
     bins: Dict[Tuple[int, int, int], List[Tuple[float, str, FrameCandidate]]] = {}
     use_bins = diversity_bins is not None and len(diversity_bins) == 4 and diversity_bins[3] > 0
     collect_classes = tuple(sorted(set(int(c) for c in export_classes) | {EYE_CLASS, PROBOSCIS_CLASS}))
 
-    def _result_has_disjoint_multi_eye(result: object) -> bool:
+    def _frame_has_multi_eye(result: object) -> bool:
+        """Check if frame has >= 2 eye detections at GATE_MIN_CONF (no IoU).
+
+        Used for folder-level tainting. Assumes eyes never overlap.
+        """
         dets = collect_detections(result, collect_classes)
         eye_data = dets.get(EYE_CLASS)
         if not eye_data:
             return False
-        boxes = np.asarray(eye_data.get("boxes"))
         scores = np.asarray(eye_data.get("scores"))
-        if boxes.size == 0 or scores.size == 0:
+        if scores.size == 0:
             return False
-        keep = scores >= float(min_conf_keep)
-        if int(np.count_nonzero(keep)) < 2:
-            return False
-        kept_boxes = boxes[keep]
-        kept_scores = scores[keep]
-        kept_boxes, _ = enforce_zero_iou_and_topk(
-            kept_boxes,
-            kept_scores,
-            k=2,
-            eps=float(reject_multi_eye_zero_iou_eps),
-        )
-        return bool(kept_boxes.shape[0] >= 2)
+        count = int(np.count_nonzero(scores >= GATE_MIN_CONF))
+        return count >= 2
 
-    def _batch_has_disjoint_multi_eye(frames: Sequence[np.ndarray]) -> bool:
+    def _batch_has_multi_eye(frames: Sequence[np.ndarray]) -> bool:
+        """Check batch of frames for multi-eye using GATE_MIN_CONF threshold."""
         if not frames:
             return False
-        results = list(predict_fn(frames, float(min_conf_keep)))
+        # Use GATE_MIN_CONF for prediction threshold in multi-eye check
+        results = list(predict_fn(frames, GATE_MIN_CONF))
         if len(results) != len(frames):
             raise RuntimeError(f"predict_fn returned {len(results)} results for {len(frames)} frames")
-        return any(_result_has_disjoint_multi_eye(result) for result in results)
+        return any(_frame_has_multi_eye(result) for result in results)
 
     for vid_idx, video_path in enumerate(video_paths, start=1):
         cap = cv2.VideoCapture(str(video_path))
@@ -341,8 +403,20 @@ def mine_top_confidence_frames(
             width_px = 1080
             height_px = 1080
 
+        # Early skip for already-tainted fly_ids (folder-level rejection)
+        if fly_id in tainted_fly_ids:
+            stats["videos_skipped_already_tainted"] += 1
+            log.warning(
+                "Skipping video due to disjoint multi-eye; already tainted fly_id=%s",
+                fly_id,
+            )
+            cap.release()
+            continue
+
+        # Multi-eye gate: scan first GATE_FRAMES frames for >= 2 eyes at GATE_MIN_CONF
+        # If enabled (reject_multi_eye_first_n_frames > 0), use hardcoded GATE_FRAMES
         if reject_multi_eye_first_n_frames > 0:
-            max_check_frames = int(reject_multi_eye_first_n_frames)
+            max_check_frames = GATE_FRAMES
             if total_frames > 0:
                 max_check_frames = min(max_check_frames, int(total_frames))
             if max_check_frames > 0:
@@ -357,19 +431,21 @@ def mine_top_confidence_frames(
                     check_batch.append(frame)
                     checked += 1
                     if len(check_batch) >= batch_size:
-                        if _batch_has_disjoint_multi_eye(check_batch):
+                        if _batch_has_multi_eye(check_batch):
                             skip_video = True
                             break
                         check_batch = []
                 if not skip_video and check_batch:
-                    if _batch_has_disjoint_multi_eye(check_batch):
+                    if _batch_has_multi_eye(check_batch):
                         skip_video = True
                 if skip_video:
+                    # Taint the fly_id and persist to file
+                    tainted_fly_ids.add(fly_id)
+                    _save_tainted_fly_id(fly_id, tainted_fly_ids_at_startup)
                     stats["videos_skipped_multi_eye"] += 1
                     log.warning(
-                        "Skipping video due to disjoint multi-eye in first %d frames: %s",
-                        max_check_frames,
-                        video_path,
+                        "Skipping video due to disjoint multi-eye; tainting fly_id=%s",
+                        fly_id,
                     )
                     cap.release()
                     continue
