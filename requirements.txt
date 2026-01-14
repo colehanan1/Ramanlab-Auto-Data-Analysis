@@ -16,7 +16,10 @@ opencv-python>=4.9
 ultralytics>=8.3.0,<9
 
 # Video composition (2.x removed moviepy.editor; keep 1.x for backwards compatibility)
+# NOTE: decorator>=5 breaks moviepy 1.x's internal decorators, causing fps kwarg
+# to be lost during write_videofile(). Pin decorator<5 to avoid this pitfall.
 moviepy>=1.0.3,<2
+decorator>=4.3,<5
 Pillow>=10.0
 
 pandas-stubs==2.2.3.250308

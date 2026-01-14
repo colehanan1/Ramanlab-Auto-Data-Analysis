@@ -1517,9 +1517,16 @@ def combine_distance_angle(cfg: CombineConfig) -> None:
                     print(
                         f"[DEBUG] {fly_name}: distance columns={list(dist_df.columns)} selected={dist_col}"
                     )
+                    # Load distance percentages and check for anomalies > 200
+                    dist_numeric = pd.to_numeric(dist_df[dist_col], errors="coerce").fillna(0.0)
+                    invalid_frames = dist_numeric > 200.0
+                    if invalid_frames.any():
+                        invalid_count = invalid_frames.sum()
+                        print(
+                            f"[WARN] {fly_name} {trial_id}: {invalid_count} frames with distance_percentage > 200 (max valid: 200)"
+                        )
                     dist_pct = (
-                        pd.to_numeric(dist_df[dist_col], errors="coerce")
-                        .fillna(0.0)
+                        dist_numeric
                         .clip(lower=0.0, upper=100.0)
                         .to_numpy()
                     )
@@ -1563,6 +1570,7 @@ def combine_distance_angle(cfg: CombineConfig) -> None:
                             "combined_base": combined,
                             "rolling_rms": combined_rms,
                             "envelope_of_rms": envelope,
+                            "invalid_distance_flag": invalid_frames.to_numpy(),
                             "fly_number": fly_number_label,
                         }
                     )

@@ -695,6 +695,133 @@ def _run_combined(cfg: Mapping[str, Any] | None, settings: Settings | None) -> N
             )
             wide_to_matrix(export_csv, matrix_dir)
 
+    combined_base_cfg = cfg.get("combined_base")
+    if combined_base_cfg:
+        base_wide_cfg = combined_base_cfg.get("wide")
+        if base_wide_cfg:
+            roots_cfg = base_wide_cfg.get("roots")
+            if roots_cfg:
+                roots_iter = (
+                    roots_cfg
+                    if isinstance(roots_cfg, Sequence)
+                    and not isinstance(roots_cfg, (str, bytes, Path))
+                    else [roots_cfg]
+                )
+                base_root_paths = [
+                    _ensure_path(root, "combined_base.wide.roots")
+                    for root in roots_iter
+                ]
+            elif wide_root_paths:
+                base_root_paths = list(wide_root_paths)
+            else:
+                raise ValueError(
+                    "combined.combined_base.wide.roots must list at least one directory."
+                )
+
+            roots = [str(path) for path in base_root_paths]
+            output_csv = _ensure_path(
+                base_wide_cfg.get("output_csv"),
+                "combined_base.wide.output_csv",
+            )
+            base_measure_cols = base_wide_cfg.get("measure_cols") or ["combined_base"]
+            base_fps_fallback = float(
+                base_wide_cfg.get("fps_fallback", wide_fps_fallback)
+            )
+            if "exclude_roots" in base_wide_cfg:
+                base_exclude_cfg = [
+                    str(_ensure_path(path, "combined_base.wide.exclude_roots"))
+                    for path in base_wide_cfg.get("exclude_roots", [])
+                ]
+            else:
+                base_exclude_cfg = list(wide_exclude_cfg)
+
+            trial_type_filter = base_wide_cfg.get("trial_type_filter")
+            if trial_type_filter is None and wide_cfg:
+                trial_type_filter = wide_cfg.get("trial_type_filter")
+
+            extra_exports_cfg = base_wide_cfg.get("trial_type_exports", [])
+            extra_exports: dict[str, str] = {}
+            extra_matrix_dirs: dict[str, str] = {}
+            if extra_exports_cfg:
+                entries = (
+                    extra_exports_cfg
+                    if isinstance(extra_exports_cfg, Sequence)
+                    and not isinstance(extra_exports_cfg, (str, bytes))
+                    else [extra_exports_cfg]
+                )
+                for entry in entries:
+                    if not isinstance(entry, Mapping):
+                        raise ValueError("trial_type_exports entries must be mappings.")
+                    trial_type = entry.get("trial_type")
+                    export_csv = entry.get("output_csv")
+                    if not trial_type or not export_csv:
+                        raise ValueError(
+                            "trial_type_exports entries require 'trial_type' and 'output_csv'."
+                        )
+                    export_path = _ensure_path(
+                        export_csv, "trial_type_exports.output_csv"
+                    )
+                    trial_key = str(trial_type).strip().lower()
+                    extra_exports[trial_key] = str(export_path)
+                    matrix_dir = entry.get("matrix_out_dir")
+                    if matrix_dir:
+                        matrix_path = _ensure_path(
+                            matrix_dir, "trial_type_exports.matrix_out_dir"
+                        )
+                        extra_matrix_dirs[trial_key] = str(matrix_path)
+
+            print(f"[analysis] combined_base.wide → {output_csv}")
+            build_wide_csv(
+                roots,
+                str(output_csv),
+                measure_cols=base_measure_cols,
+                fps_fallback=base_fps_fallback,
+                exclude_roots=base_exclude_cfg,
+                distance_limits=limits,
+                trial_type_filter=trial_type_filter,
+                extra_trial_exports=extra_exports or None,
+                non_reactive_threshold=non_reactive_threshold,
+            )
+
+            for trial_key, matrix_dir in extra_matrix_dirs.items():
+                export_csv = extra_exports.get(trial_key)
+                if not export_csv:
+                    continue
+                print(
+                    "[analysis] combined_base.wide.trial_type_matrix[{}] → {}".format(
+                        trial_key, matrix_dir
+                    )
+                )
+                wide_to_matrix(export_csv, matrix_dir)
+
+        base_matrix_cfg = combined_base_cfg.get("matrix")
+        if base_matrix_cfg:
+            input_csv = _ensure_path(
+                base_matrix_cfg.get("input_csv"),
+                "combined_base.matrix.input_csv",
+            )
+            out_dir = _ensure_path(
+                base_matrix_cfg.get("out_dir"),
+                "combined_base.matrix.out_dir",
+            )
+            print(f"[analysis] combined_base.matrix → {out_dir}")
+            wide_to_matrix(str(input_csv), str(out_dir))
+
+        base_envelopes_cfg = combined_base_cfg.get("envelopes")
+        if base_envelopes_cfg:
+            entries = (
+                base_envelopes_cfg
+                if isinstance(base_envelopes_cfg, Sequence)
+                and not isinstance(base_envelopes_cfg, (str, bytes))
+                else [base_envelopes_cfg]
+            )
+            for entry in entries:
+                if not isinstance(entry, Mapping):
+                    raise ValueError("combined_base.envelopes entries must be mappings.")
+                config = _envelope_plot_config(entry)
+                print(f"[analysis] combined_base.envelopes → {config.out_dir}")
+                generate_envelope_plots(config)
+
     pair_groups_cfg = cfg.get("pair_groups") or []
     if pair_groups_cfg:
         if not wide_root_paths:

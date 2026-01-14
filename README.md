@@ -425,6 +425,48 @@ Pseudo-labels need spot-checking; treat them as a starting point, not ground tru
 
 The pipeline expects a CUDA-capable GPU for production workloads. Setting `allow_cpu: true` (or `ALLOW_CPU=true` via environment) now **forces** the YOLO step to run entirely on CPU, which is useful for smoke tests or when the local CUDA stack is unstable. If CUDA initialisation or inference fails while GPU mode is requested and `allow_cpu` is enabled, the step logs a warning and permanently switches to CPU for the rest of the run. CPU mode is significantly slower and should only be used for debugging.
 
+## Troubleshooting
+
+### MoviePy `fps=None` error during video composition
+
+If the `compose_videos_rms` step fails with:
+
+```text
+TypeError: must be real number, not NoneType
+'-r', '%.02f' % fps,
+```
+
+This indicates MoviePy cannot read the fps metadata from the source video. Common causes and fixes:
+
+1. **Verify ffprobe is installed and on PATH**:
+
+   ```bash
+   ffprobe -version
+   ```
+
+   If missing, install via `conda install ffmpeg` or `apt install ffmpeg`.
+
+2. **Check dependency versions** (tested combination):
+
+   ```bash
+   python -c "import moviepy, decorator; print('moviepy:', moviepy.__version__, 'decorator:', decorator.__version__)"
+   # Expected: moviepy: 1.0.3  decorator: 4.x (NOT 5.x)
+   ```
+
+   If decorator is 5.x, reinstall dependencies: `pip install -r requirements.txt`
+
+3. **Corrupted video metadata**: Some videos lack fps in their container metadata. Use ffprobe to check:
+
+   ```bash
+   ffprobe -v error -select_streams v:0 -show_entries stream=r_frame_rate -of csv=p=0 /path/to/video.mp4
+   ```
+
+   If this returns nothing or `0/0`, the video needs re-encoding:
+
+   ```bash
+   ffmpeg -i input.mp4 -c copy -r 40 output.mp4
+   ```
+
 ## Notes
 
 - The pipeline is resilient to missing files/columns; steps skip gracefully when inputs are absent.

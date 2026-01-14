@@ -17,7 +17,7 @@ if USE_GPU:
     print("[PIPELINE] ⚡ Using BATCH processing (12-15x speedup)")
     from .steps import (
         calculate_acceleration_gpu as calculate_acceleration,
-        compose_videos_rms,
+        # compose_videos_rms,  # DISABLED - uncomment to re-enable
         curate_yolo_dataset,
         detect_dropped_frames,
         distance_normalize_ultra as distance_normalize,  # ULTRA: Batch processing
@@ -31,7 +31,7 @@ else:
     print("[PIPELINE] ⚠️  GPU acceleration DISABLED (CUDA not available, using CPU)")
     from .steps import (
         calculate_acceleration,
-        compose_videos_rms,
+        # compose_videos_rms,  # DISABLED - uncomment to re-enable
         curate_yolo_dataset,
         detect_dropped_frames,
         distance_normalize,
@@ -66,7 +66,8 @@ ORDERED_STEPS: tuple[Step, ...] = (
     Step("rms_copy_filter", rms_copy_filter.main, "Copy curated columns into RMS_calculations"),
     Step("update_ofm_state", update_ofm_state.main, "Annotate RMS tables with OFM state transitions"),
     Step("move_videos", move_videos.main, "Stage annotated videos into the delivery directory"),
-    Step("compose_videos_rms", compose_videos_rms.main, "Render RMS overlays onto exported videos"),
+    # DISABLED: compose_videos_rms step (uncomment line below to re-enable)
+    # Step("compose_videos_rms", compose_videos_rms.main, "Render RMS overlays onto exported videos (set DISABLE_COMPOSE_RMS=1 to skip)"),
     Step("calculate_acceleration", calculate_acceleration.main, "Calculate frame-to-frame acceleration metrics"),
 )
 

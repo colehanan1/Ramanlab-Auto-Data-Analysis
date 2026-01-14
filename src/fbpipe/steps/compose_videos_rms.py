@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 import io
+import math
+import os
 import re
+import subprocess
+import tempfile
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -10,6 +14,11 @@ import pandas as pd
 import matplotlib.pyplot as plt
 from PIL import Image
 from moviepy.editor import CompositeVideoClip, VideoClip, VideoFileClip
+
+# Environment variable flags for debugging and fallback control
+_DEBUG_COMPOSE = os.environ.get("COMPOSE_RMS_DEBUG", "").lower() in ("1", "true", "yes")
+_USE_FFMPEG_FALLBACK = os.environ.get("COMPOSE_RMS_USE_FFMPEG", "").lower() in ("1", "true", "yes")
+_DEBUG_PRINTED = False  # Track if version info was printed
 
 from ..config import Settings, get_main_directories
 from ..utils.columns import (
@@ -440,6 +449,39 @@ def _find_video_for_trial(fly_dir: Path, category: str, tri: int) -> Optional[Pa
     return None
 
 
+def _derive_fly_label(token: str, slot_idx: int) -> str:
+    """
+    Derive human-readable label from token.
+    Used for legend in multi-fly RMS plots.
+
+    Examples:
+        "fly_0_slot1_distances" → "Fly 0 Slot 1"
+        "slot2_distances" → "Slot 2"
+        "unknown_token" → "Series 0"
+    """
+    # Remove "_distances" suffix
+    clean = token.replace("_distances", "")
+
+    # Extract fly and slot numbers if present
+    parts = []
+    if "fly_" in clean or "fly" in clean.lower():
+        # Extract fly number
+        match = re.search(r'fly[_\s]*(\d+)', clean, re.IGNORECASE)
+        if match:
+            parts.append(f"Fly {match.group(1)}")
+
+    if "slot" in clean.lower():
+        match = re.search(r'slot[_\s]*(\d+)', clean, re.IGNORECASE)
+        if match:
+            parts.append(f"Slot {match.group(1)}")
+
+    if not parts:
+        # Fallback: use slot_idx
+        parts.append(f"Series {slot_idx}")
+
+    return " ".join(parts)
+
+
 def _render_line_panel_png(
     series_list: List[dict],
     width_px: int,
@@ -453,7 +495,11 @@ def _render_line_panel_png(
     fig, ax = plt.subplots(figsize=(width_px / 100, height_px / 100), dpi=100)
 
     for series in series_list:
-        ax.plot(series["t"], series["y"], label=series.get("label", "RMS"), linewidth=1.2, color=series.get("color", "blue"))
+        # Use explicit color if provided, otherwise let matplotlib auto-cycle through default colors
+        if "color" in series:
+            ax.plot(series["t"], series["y"], label=series.get("label", "RMS"), linewidth=1.2, color=series["color"])
+        else:
+            ax.plot(series["t"], series["y"], label=series.get("label", "RMS"), linewidth=1.2)
 
     if threshold is not None and np.isfinite(threshold):
         ax.axhline(threshold, color="red", linewidth=1.2, label="Threshold")
@@ -488,6 +534,86 @@ def _render_line_panel_png(
     return np.array(Image.fromarray(array).resize((width_px, height_px), resample=Image.BILINEAR))
 
 
+def _validate_fps(fps_value: float | None, fallback: float = 40.0) -> float:
+    """Validate fps is a finite positive number, return fallback if not."""
+    if fps_value is None:
+        return fallback
+    try:
+        fps_float = float(fps_value)
+        if not math.isfinite(fps_float) or fps_float <= 0:
+            return fallback
+        return fps_float
+    except (TypeError, ValueError):
+        return fallback
+
+
+def _print_debug_info(output_fps: float, clip: VideoFileClip, panel_clip: VideoClip, composite: CompositeVideoClip) -> None:
+    """Print debug information about fps values (gated by COMPOSE_RMS_DEBUG env var)."""
+    global _DEBUG_PRINTED
+    if not _DEBUG_COMPOSE:
+        return
+
+    # Print version info once per run
+    if not _DEBUG_PRINTED:
+        import moviepy
+        import decorator
+        print("[COMPOSE_RMS_DEBUG] === Version Info ===")
+        print(f"  moviepy version: {moviepy.__version__}")
+        print(f"  decorator version: {decorator.__version__}")
+        _DEBUG_PRINTED = True
+
+    print("[COMPOSE_RMS_DEBUG] === FPS Debug Block ===")
+    print(f"  output_fps: {output_fps} (type: {type(output_fps).__name__})")
+    print(f"  source clip.fps: {clip.fps} (type: {type(clip.fps).__name__ if clip.fps is not None else 'NoneType'})")
+    print(f"  panel_clip.fps: {panel_clip.fps} (type: {type(panel_clip.fps).__name__ if panel_clip.fps is not None else 'NoneType'})")
+    print(f"  composite.fps: {composite.fps} (type: {type(composite.fps).__name__ if composite.fps is not None else 'NoneType'})")
+    print("[COMPOSE_RMS_DEBUG] ======================")
+
+
+def _compose_via_ffmpeg(
+    video_path: Path,
+    panel_png_path: Path,
+    out_mp4: Path,
+    output_fps: float,
+    duration: float,
+    video_height: int,
+    panel_height: int,
+) -> bool:
+    """
+    Compose video using direct ffmpeg instead of MoviePy.
+    This is a fallback for when MoviePy's decorator chain loses fps.
+    """
+    try:
+        # Build ffmpeg command to vstack original video with panel image
+        # The panel is converted to a video stream at the same fps and duration
+        cmd = [
+            "ffmpeg", "-y",
+            "-i", str(video_path),
+            "-loop", "1", "-t", str(duration), "-framerate", str(output_fps),
+            "-i", str(panel_png_path),
+            "-filter_complex",
+            f"[0:v]fps={output_fps}[v0];[1:v]scale=-1:{panel_height}[v1];[v0][v1]vstack=inputs=2",
+            "-c:v", "libx264",
+            "-preset", "ultrafast",
+            "-an",  # No audio
+            "-r", str(output_fps),
+            str(out_mp4),
+        ]
+
+        if _DEBUG_COMPOSE:
+            print(f"[COMPOSE_RMS_DEBUG] ffmpeg command: {' '.join(cmd)}")
+
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.returncode != 0:
+            print(f"[COMPOSE_RMS] ffmpeg failed: {result.stderr}")
+            return False
+
+        return out_mp4.exists() and out_mp4.stat().st_size > 0
+    except Exception as e:
+        print(f"[COMPOSE_RMS] ffmpeg fallback error: {e}")
+        return False
+
+
 def _compose_lineplot_video(
     video_path: Path,
     series_list: List[dict],
@@ -505,6 +631,40 @@ def _compose_lineplot_video(
     panel_height = max(1, int(vh * panel_height_fraction))
     background = _render_line_panel_png(series_list, vw, panel_height, xlim, ylim, odor_on, odor_off, threshold)
 
+    # Determine output fps with defensive validation
+    raw_fps = clip.fps
+    output_fps = _validate_fps(raw_fps, fallback=40.0)
+
+    if _DEBUG_COMPOSE:
+        print(f"[COMPOSE_RMS_DEBUG] raw clip.fps={raw_fps}, validated output_fps={output_fps}")
+
+    # Use ffmpeg fallback if enabled
+    if _USE_FFMPEG_FALLBACK:
+        clip.close()
+        out_mp4.parent.mkdir(parents=True, exist_ok=True)
+
+        # Save panel as temporary PNG for ffmpeg
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
+            panel_png_path = Path(tmp.name)
+            Image.fromarray(background).save(panel_png_path)
+
+        try:
+            # Get duration before closing clip
+            clip = VideoFileClip(str(video_path))
+            duration = clip.duration
+            clip.close()
+
+            return _compose_via_ffmpeg(
+                video_path, panel_png_path, out_mp4,
+                output_fps, duration, vh, panel_height
+            )
+        finally:
+            try:
+                panel_png_path.unlink()
+            except Exception:
+                pass
+
+    # MoviePy path with enforced fps via set_fps() API
     def _add_cursor(img: np.ndarray, current_time: float, x_range: Tuple[float, float]) -> np.ndarray:
         output = img.copy()
         start, end = x_range
@@ -519,14 +679,33 @@ def _compose_lineplot_video(
     def panel_frame(t_cur: float) -> np.ndarray:
         return _add_cursor(background, t_cur, xlim)
 
+    # Apply fps using MoviePy's set_fps() API (returns new clip object)
+    clip = clip.set_fps(output_fps)
+
     panel_clip = VideoClip(panel_frame, duration=clip.duration)
+    panel_clip = panel_clip.set_fps(output_fps)
+
     composite = CompositeVideoClip(
         [clip.set_position(("center", 0)), panel_clip.set_position(("center", vh))],
         size=(vw, vh + panel_height),
     )
+    composite = composite.set_fps(output_fps)
+
+    # Print debug info before writing
+    _print_debug_info(output_fps, clip, panel_clip, composite)
+
+    # Final defensive check: abort if fps is still None
+    if composite.fps is None or not math.isfinite(composite.fps) or composite.fps <= 0:
+        print(f"[COMPOSE_RMS] ERROR: composite.fps is invalid ({composite.fps}) despite set_fps(). Aborting write.")
+        for obj in (clip, panel_clip, composite):
+            try:
+                obj.close()
+            except Exception:
+                pass
+        return False
 
     out_mp4.parent.mkdir(parents=True, exist_ok=True)
-    composite.write_videofile(str(out_mp4), fps=clip.fps, codec="libx264", audio=False, preset="ultrafast")
+    composite.write_videofile(str(out_mp4), fps=output_fps, codec="libx264", audio=False, preset="ultrafast")
 
     for obj in (clip, panel_clip, composite):
         try:
@@ -644,6 +823,11 @@ def _process_fly_angles(fly_dir: Path) -> None:
 
 
 def main(cfg: Settings) -> None:
+    # Kill-switch: skip entire step if DISABLE_COMPOSE_RMS is set
+    if os.environ.get("DISABLE_COMPOSE_RMS", "").lower() in ("1", "true", "yes"):
+        print("[RMS] compose_videos_rms step SKIPPED (DISABLE_COMPOSE_RMS=1)")
+        return
+
     roots = get_main_directories(cfg)
     print(f"[RMS] Starting RMS composition in {len(roots)} directories")
 
@@ -682,9 +866,12 @@ def main(cfg: Settings) -> None:
                         print(f"  [{category} {tri}] ⤫ No matching video in {VIDEO_INPUT_DIR}/{category}/")
                         continue
 
-                    slot_success = False
-                    for token, _slot_idx, csv_path in slot_entries:
-                        slot_label = token.replace("_distances", "")
+                    # Build series_list for ALL flies/slots in this trial (multi-fly plotting)
+                    series_list = []
+                    global_xlim = [float('inf'), float('-inf')]
+                    first_odor_on, first_odor_off, first_threshold = None, None, None
+
+                    for token, slot_idx, csv_path in slot_entries:
                         series = _series_rms_from_rmscalc(
                             csv_path,
                             cfg.fps_default,
@@ -694,41 +881,62 @@ def main(cfg: Settings) -> None:
                             odor_latency,
                         )
                         if series is None:
+                            slot_label = token.replace("_distances", "")
                             print(f"  [{category} {tri} {slot_label}] ⤫ No RMS series; skipping.")
                             continue
 
                         t, rms, odor_on, odor_off, threshold = series
-                        xlim = (float(np.nanmin(t)), float(np.nanmax(t)))
 
-                        out_mp4 = out_root / f"{fly_name}_{slot_label}_{category}_{tri}_LINES_rms.mp4"
-                        if out_mp4.exists():
-                            print(f"  [{category} {tri} {slot_label}] ⤫ Exists, skipping: {out_mp4.name}")
-                            slot_success = True
-                            continue
+                        # Derive label for legend (e.g., "Fly 0 Slot 1")
+                        label = _derive_fly_label(token, slot_idx)
+                        series_list.append({"t": t, "y": rms, "label": label})
 
-                        print(
-                            f"  [{category} {tri} {slot_label}] ✓ Video: {video_path.name} → {out_mp4.name}"
-                        )
-                        ok = _compose_lineplot_video(
-                            video_path,
-                            [{"t": t, "y": rms, "label": "RMS", "color": "blue"}],
-                            xlim,
-                            odor_on,
-                            odor_off,
-                            out_mp4,
-                            panel_height_fraction=PANEL_HEIGHT_FRACTION,
-                            ylim=YLIM,
-                            threshold=threshold,
-                        )
+                        # Update global xlim (across all series)
+                        global_xlim[0] = min(global_xlim[0], float(np.nanmin(t)))
+                        global_xlim[1] = max(global_xlim[1], float(np.nanmax(t)))
 
-                        if ok:
-                            slot_success = True
-                            print(f"  [{category} {tri} {slot_label}] [SAVED] {out_mp4.name}")
-                        else:
-                            print(f"  [{category} {tri} {slot_label}] ⤫ Render failed; source retained.")
+                        # Capture first non-None overlays
+                        if first_odor_on is None and odor_on is not None and np.isfinite(odor_on):
+                            first_odor_on = odor_on
+                        if first_odor_off is None and odor_off is not None and np.isfinite(odor_off):
+                            first_odor_off = odor_off
+                        if first_threshold is None and threshold is not None and np.isfinite(threshold):
+                            first_threshold = threshold
 
-                    if delete_source_after and slot_success:
-                        _safe_unlink(video_path)
+                    # Skip trial if no valid series found
+                    if not series_list:
+                        print(f"  [{category} {tri}] ⤫ No valid RMS series found; skipping trial.")
+                        continue
+
+                    # Single output mp4 per trial with all flies' RMS lines
+                    out_mp4 = out_root / f"{fly_name}_{category}_{tri}_ALLFLIES_rms.mp4"
+                    if out_mp4.exists():
+                        print(f"  [{category} {tri}] ⤫ Exists, skipping: {out_mp4.name}")
+                        if delete_source_after:
+                            _safe_unlink(video_path)
+                        continue
+
+                    print(
+                        f"  [{category} {tri}] ✓ Multi-fly Video: {video_path.name} ({len(series_list)} flies) → {out_mp4.name}"
+                    )
+                    ok = _compose_lineplot_video(
+                        video_path,
+                        series_list,  # All series for this trial
+                        tuple(global_xlim),
+                        first_odor_on,
+                        first_odor_off,
+                        out_mp4,
+                        panel_height_fraction=PANEL_HEIGHT_FRACTION,
+                        ylim=YLIM,
+                        threshold=first_threshold,
+                    )
+
+                    if ok:
+                        print(f"  [{category} {tri}] [SAVED] {out_mp4.name}")
+                        if delete_source_after:
+                            _safe_unlink(video_path)
+                    else:
+                        print(f"  [{category} {tri}] ⤫ Render failed; source retained.")
 
                 if delete_source_after:
                     category_dir = fly_dir / VIDEO_INPUT_DIR / category
