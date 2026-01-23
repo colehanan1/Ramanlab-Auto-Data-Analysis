@@ -1,0 +1,170 @@
+╔═══════════════════════════════════════════════════════════════════════════╗
+║                     BACKUP QUICK REFERENCE CARD                           ║
+║                                                                           ║
+║  All backup files are in scripts/ and docs/ folders                      ║
+║  All commands below can be run from project root directory               ║
+╚═══════════════════════════════════════════════════════════════════════════╝
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+📌 MOST COMMON COMMANDS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+1. RUN PIPELINE + AUTO-BACKUP (includes CSV backups before & after)
+   $ make run
+
+2. QUICK CSV BACKUP (1-2 minutes)
+   $ make backup-csvs
+
+3. FULL BACKUP (2-5 minutes)
+   $ make backup
+
+4. COMPRESSED EMERGENCY ARCHIVE (10-20 minutes, 60-96% smaller)
+   $ make backup-compressed
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+⚙️  MAKE TARGETS (Makefile)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+make run                    Pipeline + auto CSV backup
+make backup                 Full incremental backup
+make backup-csvs            CSV backup only (fastest)
+make backup-compressed      Compressed emergency archive
+make clean-backups          Delete old archives (>30 days)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🔧 DIRECT SCRIPT COMMANDS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+INCREMENTAL BACKUP (to Box):
+  python scripts/backup_to_box.py                    Full backup
+  python scripts/backup_to_box.py --csvs-only        CSV only
+  python scripts/backup_to_box.py --dry-run          Preview only
+
+COMPRESSED BACKUP (to SMB + Box):
+  python scripts/compress_and_backup.py              Full archive
+  python scripts/compress_and_backup.py --csvs-only  CSV archive only
+  python scripts/compress_and_backup.py --dry-run    Preview only
+
+MASTER RUNNER:
+  ./scripts/run_all_backups.sh                       Incremental backup
+  ./scripts/run_all_backups.sh --compressed-only     Compressed only
+  ./scripts/run_all_backups.sh --full                Both types
+
+AUTO-SCHEDULING:
+  ./scripts/setup_backup_cron.sh                     Install cron jobs
+  crontab -l                                         View cron schedule
+  crontab -e                                         Edit cron jobs
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+📚 DOCUMENTATION FILES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+START HERE:
+  docs/BACKUPS_README.md              Complete overview & quick start
+
+SETUP:
+  docs/BACKUP_SETUP.md                Initial configuration guide
+
+COMMANDS:
+  docs/BACKUP_USAGE_GUIDE.md          All backup commands & options
+
+DETAILS:
+  docs/COMPRESSION_BACKUP_GUIDE.md    Compression & recovery options
+  docs/DATA_SAFETY_SUMMARY.md         System architecture overview
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+📁 FOLDER STRUCTURE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+scripts/
+  ├── backup_to_box.py                Incremental backup script
+  ├── compress_and_backup.py           Compressed backup script
+  ├── run_all_backups.sh               Master backup runner
+  ├── run_backup.sh                    Legacy wrapper
+  └── setup_backup_cron.sh             Auto-schedule setup
+
+docs/
+  ├── BACKUPS_README.md                Main guide
+  ├── BACKUP_SETUP.md                  Setup instructions
+  ├── BACKUP_USAGE_GUIDE.md            Commands reference
+  ├── COMPRESSION_BACKUP_GUIDE.md      Compression details
+  └── DATA_SAFETY_SUMMARY.md           System overview
+
+logs/
+  └── [backup logs created here]
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+⏰ AUTOMATIC SCHEDULING
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+INSTALL AUTOMATIC BACKUPS:
+  $ ./scripts/setup_backup_cron.sh
+
+This sets up:
+  ✓ Daily at 2:00 AM  - CSV backup
+  ✓ Weekly at 3:00 AM - Compressed archive
+
+MANAGE CRON JOBS:
+  View:    crontab -l
+  Edit:    crontab -e
+  Delete:  crontab -e (remove entries)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🔍 MONITORING
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+CHECK LOGS:
+  tail -f logs/backup_*.log              View backup logs
+  tail -f backup.log                     View incremental logs
+  tail -f compress_backup.log            View compressed logs
+
+VERIFY BACKUPS:
+  rclone ls Box-Folder:Ramanlab-Backups/ List Box contents
+  rclone about Box-Folder:               Check Box storage
+  ls -lh backups_compressed/             List local archives
+  mount | grep ramanfiles                Check SMB mount
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🚨 TROUBLESHOOTING
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Box not working?
+  $ rclone config              Reconfigure Box
+  $ rclone listremotes         Verify Box remote exists
+
+SMB not accessible?
+  $ mount | grep ramanfiles    Check if mounted
+  $ ls /path/to/smb/...        Verify path exists
+
+Slow backups?
+  $ make backup-csvs           Try CSV-only backup
+  $ tail -f logs/backup_*.log  Check log for status
+
+Low disk space?
+  $ make clean-backups         Delete old archives
+  $ du -sh backups_compressed/ Check archive size
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+💡 TIPS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+✓ Normal work: Just use `make run` (includes auto-backup)
+✓ Quick backup: `make backup-csvs` (1-2 minutes)
+✓ Emergency: `make backup-compressed` (creates ZIP)
+✓ Automation: `./scripts/setup_backup_cron.sh` (daily+weekly)
+✓ Preview: Add `--dry-run` to see what would upload without uploading
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+✨ YOUR BACKUP SYSTEM IS READY!
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  Start with: make run
+  Learn more: docs/BACKUPS_README.md
+  Auto-schedule: ./scripts/setup_backup_cron.sh
+
+Your data is protected by:
+  • Incremental backups to Box
+  • SMB network access
+  • Compressed emergency archives
+
+All configured and ready to use! 🛡️
