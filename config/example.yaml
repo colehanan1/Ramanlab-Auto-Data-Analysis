@@ -121,7 +121,7 @@ pseudolabel:
   seed: 1337
   per_video_cap: 400
   require_both: true
-  export_classes: [2, 8]  # eye=2, proboscis=8
+  export_classes: [0, 1]  # eye=0, proboscis=1
   # Optional sanity checks (0/1 disables)
   max_eye_prob_center_dist_px: 0
   min_box_area_px: 0
@@ -334,24 +334,17 @@ tools:
   xanylabeling:
     model_path: "/path/to/sam2/notebooks/YOLOProjectProboscisLegs/runs/obb/train5/weights/best.pt"
     output_dir: "/path/to/sam2/notebooks/YOLOProjectProboscisLegs/runs/obb/train5/x-anylabeling-model"
-    target_class_indices: [2, 8]
+    target_class_indices: [0, 1]
     iou_threshold: 0.45
     conf_threshold: 0.25
   onnx_filter:
     input_onnx_path: "/path/to/sam2/notebooks/YOLOProjectProboscisLegs/runs/obb/train5/x-anylabeling-model/best.onnx"
     output_dir: "/path/to/sam2/notebooks/YOLOProjectProboscisLegs/runs/obb/train5/x-anylabeling-model"
     output_name: "best_eye_proboscis_only.onnx"
-    target_class_indices: [2, 8]
+    target_class_indices: [0, 1]
     class_names:
-      0: abdomen
-      1: antenna
-      2: eye
-      3: frontLegs
-      4: glue
-      5: head
-      6: needle-glue
-      7: pipette
-      8: proboscis
+      0: eye
+      1: proboscis
   collect_to_label_images:
     source_root: "/path/to/secure/storage"
     dest_dir: "/path/to/model/to-be-labelled"

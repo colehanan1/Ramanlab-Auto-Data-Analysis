@@ -44,6 +44,7 @@ for path in (str(REPO_ROOT), str(SRC_ROOT)):
         sys.path.insert(0, path)
 
 from fbpipe.config import load_settings, resolve_config_path, load_raw_config
+from fbpipe.utils.columns import EYE_CLASS, PROBOSCIS_CLASS, PROBOSCIS_DISTANCE_PCT_COL
 
 
 AUC_COLUMNS = (
@@ -115,6 +116,7 @@ TESTING_HINT_PREFIXES = (
 
 ANGLE_COLS = ["angle_centered_pct", "angle_centered_percentage", "angle_pct"]
 DIST_COLS = [
+    PROBOSCIS_DISTANCE_PCT_COL,
     "distance_percentage_2_8",
     "distance_percentage",
     "distance_percent",
@@ -226,12 +228,14 @@ def compute_tracking_quality_per_trial(
 
 
 def _load_distance_stats(fly_dir: Path, slot_label: str | None) -> tuple[float, float] | None:
-    """Return pixel min/max from the cached class-2 stats JSON for the slot."""
+    """Return pixel min/max from the cached eye stats JSON for the slot."""
 
     candidates: list[Path] = []
     slot_token = (slot_label or "").strip().lower()
     if slot_token:
+        candidates.append(fly_dir / f"{slot_token}_global_distance_stats_class_{EYE_CLASS}.json")
         candidates.append(fly_dir / f"{slot_token}_global_distance_stats_class_2.json")
+    candidates.append(fly_dir / f"global_distance_stats_class_{EYE_CLASS}.json")
     candidates.append(fly_dir / "global_distance_stats_class_2.json")
 
     for path in candidates:
@@ -255,7 +259,7 @@ def _load_distance_stats(fly_dir: Path, slot_label: str | None) -> tuple[float, 
 
 
 def _iter_slot_distance_csvs(fly_dir: Path, slot_label: str | None) -> Iterator[Path]:
-    """Yield testing/training class-2 distance CSVs for the provided slot."""
+    """Yield testing/training eye-proboscis distance CSVs for the provided slot."""
 
     rms_dir = fly_dir / "RMS_calculations"
     if not rms_dir.is_dir():
@@ -271,26 +275,67 @@ def _iter_slot_distance_csvs(fly_dir: Path, slot_label: str | None) -> Iterator[
 
 
 def _class2_distances(csv_path: Path) -> np.ndarray:
-    """Compute pixel distances between class-2 and class-8 detections."""
+    """Compute pixel distances between eye and proboscis detections."""
 
-    required = ["x_class2", "y_class2", "x_class8", "y_class8"]
     try:
-        df = pd.read_csv(csv_path, usecols=required)
-    except ValueError:
-        try:
-            df = pd.read_csv(csv_path)
-        except Exception as exc:
-            print(f"[WARN] Could not read raw distance columns from {csv_path.name}: {exc}")
-            return np.empty(0, dtype=float)
-    missing = [col for col in required if col not in df.columns]
-    if missing:
-        print(f"[WARN] {csv_path.name} missing class-2 columns: {missing}")
+        df = pd.read_csv(csv_path)
+    except Exception as exc:
+        print(f"[WARN] Could not read raw distance columns from {csv_path.name}: {exc}")
         return np.empty(0, dtype=float)
 
-    x2 = pd.to_numeric(df["x_class2"], errors="coerce").to_numpy(dtype=float, copy=False)
-    y2 = pd.to_numeric(df["y_class2"], errors="coerce").to_numpy(dtype=float, copy=False)
-    x8 = pd.to_numeric(df["x_class8"], errors="coerce").to_numpy(dtype=float, copy=False)
-    y8 = pd.to_numeric(df["y_class8"], errors="coerce").to_numpy(dtype=float, copy=False)
+    x2_col = _resolve_column_alias(
+        df,
+        f"x_class{EYE_CLASS}",
+        f"x_class_{EYE_CLASS}",
+        f"class{EYE_CLASS}_x",
+        "x_class2",
+        "x_class_2",
+        "class2_x",
+    )
+    y2_col = _resolve_column_alias(
+        df,
+        f"y_class{EYE_CLASS}",
+        f"y_class_{EYE_CLASS}",
+        f"class{EYE_CLASS}_y",
+        "y_class2",
+        "y_class_2",
+        "class2_y",
+    )
+    x8_col = _resolve_column_alias(
+        df,
+        f"x_class{PROBOSCIS_CLASS}",
+        f"x_class_{PROBOSCIS_CLASS}",
+        f"class{PROBOSCIS_CLASS}_x",
+        "x_class8",
+        "x_class_8",
+        "class8_x",
+        "x_proboscis",
+        "x_class6",
+        "x_class_6",
+        "class6_x",
+    )
+    y8_col = _resolve_column_alias(
+        df,
+        f"y_class{PROBOSCIS_CLASS}",
+        f"y_class_{PROBOSCIS_CLASS}",
+        f"class{PROBOSCIS_CLASS}_y",
+        "y_class8",
+        "y_class_8",
+        "class8_y",
+        "y_proboscis",
+        "y_class6",
+        "y_class_6",
+        "class6_y",
+    )
+
+    if not all((x2_col, y2_col, x8_col, y8_col)):
+        print(f"[WARN] {csv_path.name} missing eye/proboscis columns")
+        return np.empty(0, dtype=float)
+
+    x2 = pd.to_numeric(df[x2_col], errors="coerce").to_numpy(dtype=float, copy=False)
+    y2 = pd.to_numeric(df[y2_col], errors="coerce").to_numpy(dtype=float, copy=False)
+    x8 = pd.to_numeric(df[x8_col], errors="coerce").to_numpy(dtype=float, copy=False)
+    y8 = pd.to_numeric(df[y8_col], errors="coerce").to_numpy(dtype=float, copy=False)
     distances = np.sqrt((x2 - x8) ** 2 + (y2 - y8) ** 2)
     return distances.astype(float, copy=False)
 
@@ -972,10 +1017,29 @@ def _resolve_column_alias(df: pd.DataFrame, *aliases: str) -> str | None:
 
 
 def _compute_angle_deg(df: pd.DataFrame) -> pd.Series:
-    x2_col = _resolve_column_alias(df, "x_class2", "x_class_2", "class2_x")
-    y2_col = _resolve_column_alias(df, "y_class2", "y_class_2", "class2_y")
+    x2_col = _resolve_column_alias(
+        df,
+        f"x_class{EYE_CLASS}",
+        f"x_class_{EYE_CLASS}",
+        f"class{EYE_CLASS}_x",
+        "x_class2",
+        "x_class_2",
+        "class2_x",
+    )
+    y2_col = _resolve_column_alias(
+        df,
+        f"y_class{EYE_CLASS}",
+        f"y_class_{EYE_CLASS}",
+        f"class{EYE_CLASS}_y",
+        "y_class2",
+        "y_class_2",
+        "class2_y",
+    )
     x_prob_col = _resolve_column_alias(
         df,
+        f"x_class{PROBOSCIS_CLASS}",
+        f"x_class_{PROBOSCIS_CLASS}",
+        f"class{PROBOSCIS_CLASS}_x",
         "x_class8",
         "x_class_8",
         "class8_x",
@@ -986,6 +1050,9 @@ def _compute_angle_deg(df: pd.DataFrame) -> pd.Series:
     )
     y_prob_col = _resolve_column_alias(
         df,
+        f"y_class{PROBOSCIS_CLASS}",
+        f"y_class_{PROBOSCIS_CLASS}",
+        f"class{PROBOSCIS_CLASS}_y",
         "y_class8",
         "y_class_8",
         "class8_y",
@@ -995,7 +1062,7 @@ def _compute_angle_deg(df: pd.DataFrame) -> pd.Series:
         "class6_y",
     )
     if not all((x2_col, y2_col, x_prob_col, y_prob_col)):
-        raise ValueError("Missing class2/proboscis coordinate columns for angle computation.")
+        raise ValueError("Missing eye/proboscis coordinate columns for angle computation.")
 
     p2x = pd.to_numeric(df[x2_col], errors="coerce").astype(float)
     p2y = pd.to_numeric(df[y2_col], errors="coerce").astype(float)

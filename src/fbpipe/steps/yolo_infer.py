@@ -33,7 +33,7 @@ from ..utils.columns import (
 log = logging.getLogger("fbpipe.yolo")
 logging.getLogger("ultralytics").setLevel(logging.WARNING)
 
-SINGLE_TRACK_CLASSES = (1,)
+SINGLE_TRACK_CLASSES = tuple(c for c in (1,) if c not in (EYE_CLASS, PROBOSCIS_CLASS))
 ALL_TRACKED_CLASSES = SINGLE_TRACK_CLASSES + (EYE_CLASS, PROBOSCIS_CLASS)
 
 def _flow_nudge(prev_gray, gray, box_xyxy, flow_skip_edge: int, flow_params: dict):
@@ -184,7 +184,7 @@ def _process_frame(
         cx, cy, _, _ = xyxy_to_cxcywh(track.box_xyxy)
         cv2.putText(
             frame,
-            f"c8 id={track.id}",
+            f"c{PROBOSCIS_CLASS} id={track.id}",
             (x1, max(0, y1 - 8)),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.6,
@@ -202,15 +202,18 @@ def _process_frame(
         "y_anchor": anchor[1],
     }
 
-    det_class1 = single_outputs.get(1, {"track_id": np.nan, "x": np.nan, "y": np.nan, "corners": np.nan})
-    row.update(
-        {
-            "track_id_class1": det_class1["track_id"],
-            "x_class1": det_class1["x"],
-            "y_class1": det_class1["y"],
-            "corners_class1": str(det_class1["corners"]),
-        }
-    )
+    single_track_class = SINGLE_TRACK_CLASSES[0] if SINGLE_TRACK_CLASSES else None
+    det_single = {"track_id": np.nan, "x": np.nan, "y": np.nan, "corners": np.nan}
+    if single_track_class is not None:
+        det_single = single_outputs.get(single_track_class, det_single)
+        row.update(
+            {
+                f"track_id_class{single_track_class}": det_single["track_id"],
+                f"x_class{single_track_class}": det_single["x"],
+                f"y_class{single_track_class}": det_single["y"],
+                f"corners_class{single_track_class}": str(det_single["corners"]),
+            }
+        )
 
     AX, AY = anchor
     for idx in range(settings.max_flies):
@@ -240,12 +243,13 @@ def _process_frame(
                 row[f"dist_eye_{idx}_cls8_{idx}"] = np.nan
                 row[f"angle_eye_{idx}_cls8_vs_anchor"] = np.nan
 
-            if not np.isnan(det_class1["x"]):
-                row[f"distance_class1_eye_{idx}"] = float(
-                    np.hypot(det_class1["x"] - ex, det_class1["y"] - ey)
-                )
-            else:
-                row[f"distance_class1_eye_{idx}"] = np.nan
+            if single_track_class is not None:
+                if not np.isnan(det_single["x"]):
+                    row[f"distance_class{single_track_class}_eye_{idx}"] = float(
+                        np.hypot(det_single["x"] - ex, det_single["y"] - ey)
+                    )
+                else:
+                    row[f"distance_class{single_track_class}_eye_{idx}"] = np.nan
 
             cv2.line(frame, (int(ex), int(ey)), (int(AX), int(AY)), (0, 165, 255), 2)
         else:
@@ -258,7 +262,8 @@ def _process_frame(
             row[f"dist_eye_{idx}_cls8_{idx}"] = np.nan
             row[f"angle_eye_{idx}_cls8_vs_anchor"] = np.nan
             row[f"dist_eye_{idx}_anchor"] = np.nan
-            row[f"distance_class1_eye_{idx}"] = np.nan
+            if single_track_class is not None:
+                row[f"distance_class{single_track_class}_eye_{idx}"] = np.nan
 
     return frame, row, gray
 
@@ -276,32 +281,50 @@ def _export_per_fly_csvs(
         if eye_x_col not in df.columns or df[eye_x_col].notna().sum() == 0:
             continue
 
-        slot_df = pd.DataFrame(
-            {
-                "frame": df["frame"],
-                "timestamp": df["timestamp"],
-                "track_id_class1": df.get("track_id_class1", np.nan),
-                "x_class1": df.get("x_class1", np.nan),
-                "y_class1": df.get("y_class1", np.nan),
-                "corners_class1": df.get("corners_class1", np.nan),
-                "track_id_class2": df[f"eye_{idx}_track_id"],
-                "x_class2": df[eye_x_col],
-                "y_class2": df[f"eye_{idx}_y"],
-                "corners_class2": np.nan,
-                PROBOSCIS_TRACK_COL: df[f"cls8_{idx}_track_id"],
-                PROBOSCIS_X_COL: df[f"cls8_{idx}_x"],
-                PROBOSCIS_Y_COL: df[f"cls8_{idx}_y"],
-                PROBOSCIS_CORNERS_COL: np.nan,
-                "x_anchor": df["x_anchor"],
-                "y_anchor": df["y_anchor"],
-                "distance_1_2": df[f"distance_class1_eye_{idx}"],
-                PROBOSCIS_DISTANCE_COL: df[f"dist_eye_{idx}_cls8_{idx}"],
-                "distance_2_anchor": df[f"dist_eye_{idx}_anchor"],
-                "angle_deg_c2_26_vs_anchor": df[f"angle_eye_{idx}_cls8_vs_anchor"],
-            }
-        )
+        single_track_class = SINGLE_TRACK_CLASSES[0] if SINGLE_TRACK_CLASSES else None
+        eye_track_col = f"track_id_class{EYE_CLASS}"
+        eye_x_out_col = f"x_class{EYE_CLASS}"
+        eye_y_out_col = f"y_class{EYE_CLASS}"
+        eye_corners_col = f"corners_class{EYE_CLASS}"
+        distance_eye_anchor_col = f"distance_{EYE_CLASS}_anchor"
+        angle_eye_prob_anchor_col = f"angle_deg_c{EYE_CLASS}_c{PROBOSCIS_CLASS}_vs_anchor"
 
-        if slot_df[["track_id_class2", "x_class2", "y_class2"]].notna().sum().sum() == 0:
+        slot_data = {
+            "frame": df["frame"],
+            "timestamp": df["timestamp"],
+            eye_track_col: df[f"eye_{idx}_track_id"],
+            eye_x_out_col: df[eye_x_col],
+            eye_y_out_col: df[f"eye_{idx}_y"],
+            eye_corners_col: np.nan,
+            PROBOSCIS_TRACK_COL: df[f"cls8_{idx}_track_id"],
+            PROBOSCIS_X_COL: df[f"cls8_{idx}_x"],
+            PROBOSCIS_Y_COL: df[f"cls8_{idx}_y"],
+            PROBOSCIS_CORNERS_COL: np.nan,
+            "x_anchor": df["x_anchor"],
+            "y_anchor": df["y_anchor"],
+            PROBOSCIS_DISTANCE_COL: df[f"dist_eye_{idx}_cls8_{idx}"],
+            distance_eye_anchor_col: df[f"dist_eye_{idx}_anchor"],
+            angle_eye_prob_anchor_col: df[f"angle_eye_{idx}_cls8_vs_anchor"],
+        }
+
+        if single_track_class is not None:
+            slot_data.update(
+                {
+                    f"track_id_class{single_track_class}": df.get(f"track_id_class{single_track_class}", np.nan),
+                    f"x_class{single_track_class}": df.get(f"x_class{single_track_class}", np.nan),
+                    f"y_class{single_track_class}": df.get(f"y_class{single_track_class}", np.nan),
+                    f"corners_class{single_track_class}": df.get(
+                        f"corners_class{single_track_class}", np.nan
+                    ),
+                }
+            )
+            distance_single_eye_out = f"distance_{single_track_class}_{EYE_CLASS}"
+            distance_single_eye_in = f"distance_class{single_track_class}_eye_{idx}"
+            slot_data[distance_single_eye_out] = df.get(distance_single_eye_in, np.nan)
+
+        slot_df = pd.DataFrame(slot_data)
+
+        if slot_df[[eye_track_col, eye_x_out_col, eye_y_out_col]].notna().sum().sum() == 0:
             continue
 
         csv_path = out_dir / f"{folder_name}_fly{idx + 1}_distances.csv"

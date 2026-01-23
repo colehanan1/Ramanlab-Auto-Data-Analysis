@@ -5,17 +5,19 @@ from typing import Iterable, Optional, Tuple
 
 import pandas as pd
 
-EYE_CLASS = 2
-PROBOSCIS_CLASS = 8
+EYE_CLASS = 0
+PROBOSCIS_CLASS = 1
+LEGACY_EYE_CLASS = 2
+LEGACY_PROBOSCIS_CLASS = 8
 
 PROBOSCIS_X_COL = f"x_class{PROBOSCIS_CLASS}"
 PROBOSCIS_Y_COL = f"y_class{PROBOSCIS_CLASS}"
 PROBOSCIS_TRACK_COL = f"track_id_class{PROBOSCIS_CLASS}"
 PROBOSCIS_CORNERS_COL = f"corners_class{PROBOSCIS_CLASS}"
-PROBOSCIS_DISTANCE_COL = f"distance_2_{PROBOSCIS_CLASS}"
-PROBOSCIS_DISTANCE_PCT_COL = f"distance_percentage_2_{PROBOSCIS_CLASS}"
-PROBOSCIS_MIN_DISTANCE_COL = f"min_distance_2_{PROBOSCIS_CLASS}"
-PROBOSCIS_MAX_DISTANCE_COL = f"max_distance_2_{PROBOSCIS_CLASS}"
+PROBOSCIS_DISTANCE_COL = f"distance_{EYE_CLASS}_{PROBOSCIS_CLASS}"
+PROBOSCIS_DISTANCE_PCT_COL = f"distance_percentage_{EYE_CLASS}_{PROBOSCIS_CLASS}"
+PROBOSCIS_MIN_DISTANCE_COL = f"min_distance_{EYE_CLASS}_{PROBOSCIS_CLASS}"
+PROBOSCIS_MAX_DISTANCE_COL = f"max_distance_{EYE_CLASS}_{PROBOSCIS_CLASS}"
 
 _PROBOSCIS_X_ALIASES = (
     PROBOSCIS_X_COL,
@@ -27,6 +29,9 @@ _PROBOSCIS_X_ALIASES = (
     "xclassproboscis",
     "xclassprob",
     # legacy
+    f"x_class{LEGACY_PROBOSCIS_CLASS}",
+    f"x_class_{LEGACY_PROBOSCIS_CLASS}",
+    f"class{LEGACY_PROBOSCIS_CLASS}_x",
     "x_class6",
     "x_class_6",
     "class6_x",
@@ -42,6 +47,9 @@ _PROBOSCIS_Y_ALIASES = (
     "yclassproboscis",
     "yclassprob",
     # legacy
+    f"y_class{LEGACY_PROBOSCIS_CLASS}",
+    f"y_class_{LEGACY_PROBOSCIS_CLASS}",
+    f"class{LEGACY_PROBOSCIS_CLASS}_y",
     "y_class6",
     "y_class_6",
     "class6_y",
@@ -49,13 +57,16 @@ _PROBOSCIS_Y_ALIASES = (
 
 _PROBOSCIS_DISTANCE_ALIASES = (
     PROBOSCIS_DISTANCE_COL,
-    f"distance_class2_class{PROBOSCIS_CLASS}",
-    f"distance_class_2_{PROBOSCIS_CLASS}",
+    f"distance_class{EYE_CLASS}_class{PROBOSCIS_CLASS}",
+    f"distance_class_{EYE_CLASS}_{PROBOSCIS_CLASS}",
     "distance_proboscis",
     "proboscis_distance",
     "distance_prob",
     "distance",
     # legacy
+    f"distance_{LEGACY_EYE_CLASS}_{LEGACY_PROBOSCIS_CLASS}",
+    f"distance_class{LEGACY_EYE_CLASS}_class{LEGACY_PROBOSCIS_CLASS}",
+    f"distance_class_{LEGACY_EYE_CLASS}_{LEGACY_PROBOSCIS_CLASS}",
     "distance_2_6",
     "distance_class2_class6",
     "distance_class_2_6",
@@ -63,14 +74,18 @@ _PROBOSCIS_DISTANCE_ALIASES = (
 
 _PROBOSCIS_DISTANCE_PCT_ALIASES = (
     PROBOSCIS_DISTANCE_PCT_COL,
-    f"distance_percentage_class2_class{PROBOSCIS_CLASS}",
-    f"distance_pct_class2_class{PROBOSCIS_CLASS}",
+    f"distance_percentage_class{EYE_CLASS}_class{PROBOSCIS_CLASS}",
+    f"distance_pct_class{EYE_CLASS}_class{PROBOSCIS_CLASS}",
     "distance_percentage",
     "distance_percent",
     "distance_pct",
     "distance_proboscis_pct",
     "proboscis_distance_pct",
     # legacy
+    f"distance_percentage_class{LEGACY_EYE_CLASS}_class{LEGACY_PROBOSCIS_CLASS}",
+    f"distance_pct_class{LEGACY_EYE_CLASS}_class{LEGACY_PROBOSCIS_CLASS}",
+    f"distance_percentage_{LEGACY_EYE_CLASS}_{LEGACY_PROBOSCIS_CLASS}",
+    f"distance_pct_{LEGACY_EYE_CLASS}_{LEGACY_PROBOSCIS_CLASS}",
     "distance_percentage_2_6",
     "distance_pct_2_6",
 )
@@ -79,6 +94,7 @@ _PROBOSCIS_MIN_DISTANCE_ALIASES = (
     PROBOSCIS_MIN_DISTANCE_COL,
     "min_distance_proboscis",
     # legacy
+    f"min_distance_{LEGACY_EYE_CLASS}_{LEGACY_PROBOSCIS_CLASS}",
     "min_distance_2_6",
 )
 
@@ -86,6 +102,7 @@ _PROBOSCIS_MAX_DISTANCE_ALIASES = (
     PROBOSCIS_MAX_DISTANCE_COL,
     "max_distance_proboscis",
     # legacy
+    f"max_distance_{LEGACY_EYE_CLASS}_{LEGACY_PROBOSCIS_CLASS}",
     "max_distance_2_6",
 )
 

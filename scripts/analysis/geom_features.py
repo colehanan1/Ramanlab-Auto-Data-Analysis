@@ -26,6 +26,7 @@ from typing import Dict, List, Optional, Sequence, Tuple
 import numpy as np
 import pandas as pd
 
+from fbpipe.utils.columns import EYE_CLASS, PROBOSCIS_CLASS
 
 LOGGER = logging.getLogger(__name__)
 
@@ -468,11 +469,39 @@ def extract_coordinates(df: pd.DataFrame) -> Optional[pd.DataFrame]:
         selected.columns = long_columns
         return selected
 
-    # YOLO post-processing schema where eye is class2 and proboscis is class8
-    yolo_eye_candidates = ["x_class2", "x_class_2", "class2_x"]
-    yolo_eye_y_candidates = ["y_class2", "y_class_2", "class2_y"]
-    yolo_prob_x_candidates = ["x_class8", "x_class_8", "class8_x"]
-    yolo_prob_y_candidates = ["y_class8", "y_class_8", "class8_y"]
+    # YOLO post-processing schema where eye/proboscis are class-based columns.
+    yolo_eye_candidates = [
+        f"x_class{EYE_CLASS}",
+        f"x_class_{EYE_CLASS}",
+        f"class{EYE_CLASS}_x",
+        "x_class2",
+        "x_class_2",
+        "class2_x",
+    ]
+    yolo_eye_y_candidates = [
+        f"y_class{EYE_CLASS}",
+        f"y_class_{EYE_CLASS}",
+        f"class{EYE_CLASS}_y",
+        "y_class2",
+        "y_class_2",
+        "class2_y",
+    ]
+    yolo_prob_x_candidates = [
+        f"x_class{PROBOSCIS_CLASS}",
+        f"x_class_{PROBOSCIS_CLASS}",
+        f"class{PROBOSCIS_CLASS}_x",
+        "x_class8",
+        "x_class_8",
+        "class8_x",
+    ]
+    yolo_prob_y_candidates = [
+        f"y_class{PROBOSCIS_CLASS}",
+        f"y_class_{PROBOSCIS_CLASS}",
+        f"class{PROBOSCIS_CLASS}_y",
+        "y_class8",
+        "y_class_8",
+        "class8_y",
+    ]
 
     def _resolve(candidates: Sequence[str]) -> Optional[str]:
         for candidate in candidates:
@@ -1232,4 +1261,3 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
 
 if __name__ == "__main__":
     main()
-

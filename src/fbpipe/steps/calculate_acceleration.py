@@ -14,13 +14,14 @@ import numpy as np
 import pandas as pd
 
 from ..config import Settings, get_main_directories
+from ..utils.columns import PROBOSCIS_DISTANCE_PCT_COL
 from ..utils.fly_files import iter_fly_distance_csvs
 
 # Acceleration threshold for flagging suspicious frames (% per frame)
 ACCELERATION_THRESHOLD = 20.0
 
 # Required column names
-DISTANCE_PCT_COL = "distance_percentage_2_8"
+DISTANCE_PCT_COL = PROBOSCIS_DISTANCE_PCT_COL
 ANGLE_MULT_COL = "angle_multiplier"
 FRAME_COL = "frame"
 
@@ -43,7 +44,14 @@ def calculate_acceleration_for_csv(csv_path: Path) -> Optional[pd.DataFrame]:
 
     # Check for required columns (with fallback aliases)
     dist_col = None
-    for col in [DISTANCE_PCT_COL, "distance_percentage", "distance_pct", "distance_class1_class2_pct"]:
+    for col in [
+        DISTANCE_PCT_COL,
+        "distance_percentage",
+        "distance_pct",
+        "distance_class1_class2_pct",
+        "distance_percentage_2_8",
+        "distance_pct_2_8",
+    ]:
         if col in df.columns:
             dist_col = col
             break

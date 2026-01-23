@@ -14,6 +14,7 @@ if root_str not in sys.path:
 from scripts import envelope_combined as ec  # noqa: E402
 from scripts import envelope_visuals as ev  # noqa: E402
 from scripts import run_workflows as rw  # noqa: E402
+from fbpipe.utils.columns import EYE_CLASS, PROBOSCIS_CLASS  # noqa: E402
 
 
 def test_angle_multiplier_never_below_unity():
@@ -272,17 +273,19 @@ def test_fly_max_centered_skips_empty_csv(tmp_path):
     """Empty per-trial CSVs should be ignored when computing the max angle delta."""
 
     empty_csv = tmp_path / "empty.csv"
-    pd.DataFrame(columns=["x_class2", "y_class2", "x_class8", "y_class8"]).to_csv(
-        empty_csv, index=False
-    )
+    eye_x = f"x_class{EYE_CLASS}"
+    eye_y = f"y_class{EYE_CLASS}"
+    prob_x = f"x_class{PROBOSCIS_CLASS}"
+    prob_y = f"y_class{PROBOSCIS_CLASS}"
+    pd.DataFrame(columns=[eye_x, eye_y, prob_x, prob_y]).to_csv(empty_csv, index=False)
 
     valid_csv = tmp_path / "valid.csv"
     valid_df = pd.DataFrame(
         {
-            "x_class2": [1000.0, 1000.0],
-            "y_class2": [500.0, 500.0],
-            "x_class8": [1100.0, 1120.0],
-            "y_class8": [500.0, 540.0],
+            eye_x: [1000.0, 1000.0],
+            eye_y: [500.0, 500.0],
+            prob_x: [1100.0, 1120.0],
+            prob_y: [500.0, 540.0],
         }
     )
     valid_df.to_csv(valid_csv, index=False)

@@ -33,6 +33,7 @@ for path in (str(REPO_ROOT), str(SRC_ROOT)):
         sys.path.insert(0, path)
 
 from fbpipe.config import load_raw_config
+from fbpipe.utils.columns import EYE_CLASS, PROBOSCIS_CLASS
 
 
 LOGGER_NAME = "collect_eye_prob_coords"
@@ -43,12 +44,40 @@ CSV_PATTERN = re.compile(
     r"^(?P<date>[a-z]+_\d{2})_fly_(?P<flynum>\d+)_testing_(?P<trial>\d+)_fly(?P<slot>[1-4])_distances\.csv$"
 )
 
-REQUIRED_COLUMNS = [
-    "x_class2",
-    "y_class2",
-    "x_class8",
-    "y_class8",
-]
+REQUIRED_COLUMNS = {
+    "eye_x": (
+        f"x_class{EYE_CLASS}",
+        f"x_class_{EYE_CLASS}",
+        f"class{EYE_CLASS}_x",
+        "x_class2",
+        "x_class_2",
+        "class2_x",
+    ),
+    "eye_y": (
+        f"y_class{EYE_CLASS}",
+        f"y_class_{EYE_CLASS}",
+        f"class{EYE_CLASS}_y",
+        "y_class2",
+        "y_class_2",
+        "class2_y",
+    ),
+    "prob_x": (
+        f"x_class{PROBOSCIS_CLASS}",
+        f"x_class_{PROBOSCIS_CLASS}",
+        f"class{PROBOSCIS_CLASS}_x",
+        "x_class8",
+        "x_class_8",
+        "class8_x",
+    ),
+    "prob_y": (
+        f"y_class{PROBOSCIS_CLASS}",
+        f"y_class_{PROBOSCIS_CLASS}",
+        f"class{PROBOSCIS_CLASS}_y",
+        "y_class8",
+        "y_class_8",
+        "class8_y",
+    ),
+}
 
 FPS_VALUE = 40
 MAX_FRAMES = 3600
@@ -243,14 +272,26 @@ def process_files(
                 skipped.append(message)
                 continue
 
-            missing = [col for col in REQUIRED_COLUMNS if col not in df.columns]
+            resolved_cols: Dict[str, str] = {}
+            for key_name, candidates in REQUIRED_COLUMNS.items():
+                match = next((col for col in candidates if col in df.columns), None)
+                if match:
+                    resolved_cols[key_name] = match
+            missing = [key_name for key_name in REQUIRED_COLUMNS.keys() if key_name not in resolved_cols]
             if missing:
                 message = f"Missing required columns {missing} in {path}; skipping"
                 logger.warning(message)
                 skipped.append(message)
                 continue
 
-            numeric_df = df[REQUIRED_COLUMNS].apply(pd.to_numeric, errors="coerce")
+            numeric_df = df[
+                [
+                    resolved_cols["eye_x"],
+                    resolved_cols["eye_y"],
+                    resolved_cols["prob_x"],
+                    resolved_cols["prob_y"],
+                ]
+            ].apply(pd.to_numeric, errors="coerce")
             original_frame_count = len(numeric_df)
             if original_frame_count > MAX_FRAMES:
                 logger.info(

@@ -6,6 +6,7 @@ import pandas as pd
 
 from ..config import Settings
 from ..utils.columns import (
+    EYE_CLASS,
     find_proboscis_distance_percentage_column,
     find_proboscis_xy_columns,
 )
@@ -27,7 +28,31 @@ def main(cfg: Settings) -> None:
                 print(f"[RMS] Skip {csv_path}: {exc}")
                 continue
 
-            cols = [c for c in ("frame", "timestamp", "x_class2", "y_class2") if c in df.columns]
+            cols = [c for c in ("frame", "timestamp") if c in df.columns]
+            eye_x_candidates = (
+                f"x_class{EYE_CLASS}",
+                f"x_class_{EYE_CLASS}",
+                f"class{EYE_CLASS}_x",
+                "x_class2",
+                "x_class_2",
+                "class2_x",
+            )
+            eye_y_candidates = (
+                f"y_class{EYE_CLASS}",
+                f"y_class_{EYE_CLASS}",
+                f"class{EYE_CLASS}_y",
+                "y_class2",
+                "y_class_2",
+                "class2_y",
+            )
+            for candidate in eye_x_candidates:
+                if candidate in df.columns:
+                    cols.append(candidate)
+                    break
+            for candidate in eye_y_candidates:
+                if candidate in df.columns:
+                    cols.append(candidate)
+                    break
             x_prob, y_prob = find_proboscis_xy_columns(df)
             if x_prob and x_prob not in cols:
                 cols.append(x_prob)

@@ -20,18 +20,21 @@ from envelope_combined import (
 from envelope_exports import CollectConfig, ConvertConfig, collect_envelopes, convert_wide_csv
 from fbpipe.config import Settings
 from fbpipe.steps import detect_dropped_frames, distance_normalize, distance_stats
+from fbpipe.utils.columns import EYE_CLASS, PROBOSCIS_CLASS
 from fbpipe.utils.fly_files import iter_fly_distance_csvs
 
 
 def _write_dummy_csv(path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
+    min_col = f"min_distance_{EYE_CLASS}_{PROBOSCIS_CLASS}"
+    max_col = f"max_distance_{EYE_CLASS}_{PROBOSCIS_CLASS}"
     df = pd.DataFrame(
         {
             "frame": [0, 1, 2, 3],
             "proboscis_distance": [75.0, 100.0, np.nan, 140.0],
             "distance_percentage": [0.0, 0.0, 0.0, 0.0],
-            "min_distance_2_8": [0.0, 0.0, 0.0, 0.0],
-            "max_distance_2_8": [0.0, 0.0, 0.0, 0.0],
+            min_col: [0.0, 0.0, 0.0, 0.0],
+            max_col: [0.0, 0.0, 0.0, 0.0],
         }
     )
     df.to_csv(path, index=False)
@@ -65,7 +68,7 @@ def test_distance_pipeline_creates_stats_and_normalizes(tmp_path):
 
     distance_stats.main(settings)
 
-    stats_path = fly_dir / "fly1_global_distance_stats_class_2.json"
+    stats_path = fly_dir / f"fly1_global_distance_stats_class_{EYE_CLASS}.json"
     assert stats_path.exists()
     stats = json.loads(stats_path.read_text())
     assert stats["global_min"] == 75.0
@@ -74,14 +77,18 @@ def test_distance_pipeline_creates_stats_and_normalizes(tmp_path):
     distance_normalize.main(settings)
 
     df = pd.read_csv(csv_path)
-    assert "distance_percentage_2_8" in df.columns
-    assert "distance_2_8" in df.columns
-    assert df["min_distance_2_8"].iloc[0] == 75.0
-    assert df["max_distance_2_8"].iloc[0] == 140.0
+    dist_pct_col = f"distance_percentage_{EYE_CLASS}_{PROBOSCIS_CLASS}"
+    dist_col = f"distance_{EYE_CLASS}_{PROBOSCIS_CLASS}"
+    min_col = f"min_distance_{EYE_CLASS}_{PROBOSCIS_CLASS}"
+    max_col = f"max_distance_{EYE_CLASS}_{PROBOSCIS_CLASS}"
+    assert dist_pct_col in df.columns
+    assert dist_col in df.columns
+    assert df[min_col].iloc[0] == 75.0
+    assert df[max_col].iloc[0] == 140.0
 
     expected = 100.0 * (df["proboscis_distance"] - 75.0) / (140.0 - 75.0)
     np.testing.assert_allclose(
-        df.loc[[0, 1, 3], "distance_percentage_2_8"],
+        df.loc[[0, 1, 3], dist_pct_col],
         expected.loc[[0, 1, 3]],
         atol=1e-6,
         equal_nan=True,

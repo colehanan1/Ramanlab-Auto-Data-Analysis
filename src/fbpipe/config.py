@@ -196,7 +196,7 @@ class PseudolabelSettings:
 
     # Label quality controls
     require_both: bool = True
-    export_classes: Tuple[int, ...] = (2, 8)
+    export_classes: Tuple[int, ...] = (0, 1)
     max_eye_prob_center_dist_px: float = 0.0  # 0 disables the sanity check
     min_box_area_px: float = 0.0  # 0 disables the sanity check
     max_box_area_frac: float = 1.0  # 1 disables the sanity check

@@ -22,6 +22,7 @@ _DEBUG_PRINTED = False  # Track if version info was printed
 
 from ..config import Settings, get_main_directories
 from ..utils.columns import (
+    EYE_CLASS,
     find_proboscis_distance_percentage_column,
     find_proboscis_xy_columns,
 )
@@ -52,8 +53,8 @@ YLIM = (-100, 100)
 RMS_WINDOW_S = 1.0
 THRESH_K = 4.0
 ANCHOR_X, ANCHOR_Y = 1080.0, 540.0
-PCT_COL_ROBUST = "distance_class1_class2_pct"
-DIST_COL_ROBUST = "distance_class1_class2"
+PCT_COL_ROBUST = f"distance_class1_class{EYE_CLASS}_pct"
+DIST_COL_ROBUST = f"distance_class1_class{EYE_CLASS}"
 # Modification #2: Increased from 0.05 (5%) to 0.10 (10%) for more aggressive outlier filtering
 TRIM_FRAC = 0.10
 VIDEO_EXTS_CHECK = VIDEO_EXTS  # alias for clarity
@@ -209,8 +210,28 @@ def odor_window_from_ofm(df: pd.DataFrame, time_col: str) -> Optional[Tuple[floa
 
 
 def compute_angle_deg_at_point2(df: pd.DataFrame) -> pd.Series:
-    x2_col = find_col(df, ["x_class2", "x_class_2", "class2_x"])
-    y2_col = find_col(df, ["y_class2", "y_class_2", "class2_y"])
+    x2_col = find_col(
+        df,
+        [
+            f"x_class{EYE_CLASS}",
+            f"x_class_{EYE_CLASS}",
+            f"class{EYE_CLASS}_x",
+            "x_class2",
+            "x_class_2",
+            "class2_x",
+        ],
+    )
+    y2_col = find_col(
+        df,
+        [
+            f"y_class{EYE_CLASS}",
+            f"y_class_{EYE_CLASS}",
+            f"class{EYE_CLASS}_y",
+            "y_class2",
+            "y_class_2",
+            "class2_y",
+        ],
+    )
     x_prob, y_prob = find_proboscis_xy_columns(df)
     if not all((x2_col, y2_col, x_prob, y_prob)):
         raise ValueError("Missing columns for angle computation")
@@ -332,6 +353,7 @@ def find_fly_reference_angle(csvs_raw: List[Path], trimmed_min: Optional[float] 
             dist_col = find_col(
                 df,
                 [
+                    PCT_COL_ROBUST,
                     "distance_percentage_2_8",
                     "distance_percentage",
                     "distance_percent",
@@ -731,7 +753,17 @@ def _ead_compute_trim_min_max(fly_dir: Path) -> Optional[Tuple[float, float]]:
             dist_col = find_proboscis_distance_percentage_column(df)
             if dist_col is None:
                 # Fallback to old column name
-                dist_col = find_col(df, [DIST_COL_ROBUST, PCT_COL_ROBUST, "distance_percentage"])
+                dist_col = find_col(
+                    df,
+                    [
+                        DIST_COL_ROBUST,
+                        PCT_COL_ROBUST,
+                        "distance_percentage_2_8",
+                        "distance_percentage",
+                        "distance_pct",
+                        "distance_class1_class2_pct",
+                    ],
+                )
             if dist_col is None:
                 continue
             arr = pd.to_numeric(df[dist_col], errors="coerce").to_numpy()
@@ -998,7 +1030,7 @@ def _series_rms_from_rmscalc(
 
         pct_col = find_proboscis_distance_percentage_column(df)
         if pct_col is None:
-            pct_col = find_col(df, ["distance_class1_class2_pct"])
+            pct_col = find_col(df, [PCT_COL_ROBUST, "distance_class1_class2_pct"])
         if pct_col is None:
             return None
 

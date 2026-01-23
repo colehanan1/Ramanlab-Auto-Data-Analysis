@@ -7,7 +7,7 @@ from typing import Dict, Tuple
 import pandas as pd
 
 from ..config import Settings, get_main_directories
-from ..utils.columns import find_proboscis_distance_column
+from ..utils.columns import EYE_CLASS, PROBOSCIS_DISTANCE_COL, find_proboscis_distance_column
 from ..utils.fly_files import iter_fly_distance_csvs
 
 
@@ -35,7 +35,7 @@ def main(cfg: Settings) -> None:
                 if dist_col is None:
                     print(
                         f"[DIST] No proboscis distance column found in {csv_path.name};"
-                        " expected aliases such as 'distance_2_8' or 'proboscis_distance'."
+                        f" expected aliases such as '{PROBOSCIS_DISTANCE_COL}' or 'proboscis_distance'."
                     )
                     continue
 
@@ -73,7 +73,7 @@ def main(cfg: Settings) -> None:
                     "fly_max_distance": gmax,  # Actual max before 95px floor
                     "effective_max_threshold": 95.0  # Minimum threshold for normalization
                 }
-                stats_path = fly_dir / f"{slot_label}_global_distance_stats_class_2.json"
+                stats_path = fly_dir / f"{slot_label}_global_distance_stats_class_{EYE_CLASS}.json"
                 with open(stats_path, "w", encoding="utf-8") as fp:
                     json.dump(stats, fp)
                 print(f"[DIST] {fly_dir.name}/{slot_label}: min={gmin:.3f} max={gmax:.3f} fly_max={gmax:.3f}")

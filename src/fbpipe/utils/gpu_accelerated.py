@@ -30,6 +30,15 @@ import numpy as np
 import pandas as pd
 import torch
 
+from .columns import (
+    EYE_CLASS,
+    PROBOSCIS_CLASS,
+    PROBOSCIS_DISTANCE_COL,
+    PROBOSCIS_DISTANCE_PCT_COL,
+    PROBOSCIS_MAX_DISTANCE_COL,
+    PROBOSCIS_MIN_DISTANCE_COL,
+)
+
 
 class GPUBatchProcessor:
     """
@@ -199,11 +208,16 @@ class GPUBatchProcessor:
         perc = self.normalize_distances_batch(d, gmin, gmax, effective_max)
 
         # Update dataframe
-        df[output_cols.get('distance', 'proboscis_distance_2_8')] = d
-        df[output_cols.get('percentage', 'distance_percentage_2_8')] = perc
-        df[output_cols.get('min', 'min_distance_2_8')] = gmin
-        df[output_cols.get('max', 'max_distance_2_8')] = gmax
-        df[output_cols.get('effective_max', 'effective_max_distance_2_8')] = effective_max
+        df[output_cols.get("distance", PROBOSCIS_DISTANCE_COL)] = d
+        df[output_cols.get("percentage", PROBOSCIS_DISTANCE_PCT_COL)] = perc
+        df[output_cols.get("min", PROBOSCIS_MIN_DISTANCE_COL)] = gmin
+        df[output_cols.get("max", PROBOSCIS_MAX_DISTANCE_COL)] = gmax
+        df[
+            output_cols.get(
+                "effective_max",
+                f"effective_max_distance_{EYE_CLASS}_{PROBOSCIS_CLASS}",
+            )
+        ] = effective_max
 
         return df
 

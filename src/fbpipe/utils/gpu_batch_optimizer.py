@@ -23,6 +23,14 @@ import numpy as np
 import pandas as pd
 import torch
 
+from .columns import (
+    EYE_CLASS,
+    PROBOSCIS_CLASS,
+    PROBOSCIS_DISTANCE_COL,
+    PROBOSCIS_DISTANCE_PCT_COL,
+    PROBOSCIS_MAX_DISTANCE_COL,
+    PROBOSCIS_MIN_DISTANCE_COL,
+)
 
 class BatchFileProcessor:
     """
@@ -53,7 +61,7 @@ class BatchFileProcessor:
         self,
         csv_paths: List[Path],
         stats: List[Tuple[float, float, float]],  # [(gmin, gmax, effective_max), ...]
-        dist_col: str = 'distance_2_8'
+        dist_col: str = PROBOSCIS_DISTANCE_COL
     ) -> int:
         """
         Process multiple CSV files in optimized batches.
@@ -104,10 +112,10 @@ class BatchFileProcessor:
                     gmin, gmax, effective_max = batch_stats[idx]
 
                     # Update dataframe
-                    df['distance_percentage_2_8'] = percentages
-                    df['min_distance_2_8'] = gmin
-                    df['max_distance_2_8'] = gmax
-                    df['effective_max_distance_2_8'] = effective_max
+                    df[PROBOSCIS_DISTANCE_PCT_COL] = percentages
+                    df[PROBOSCIS_MIN_DISTANCE_COL] = gmin
+                    df[PROBOSCIS_MAX_DISTANCE_COL] = gmax
+                    df[f"effective_max_distance_{EYE_CLASS}_{PROBOSCIS_CLASS}"] = effective_max
 
                     # Save
                     df.to_csv(csv_path, index=False)

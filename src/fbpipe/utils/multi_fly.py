@@ -47,7 +47,7 @@ def enforce_zero_iou_and_topk(
 
 
 class EyeAnchorManager:
-    """Lock the positions of up to ``max_eyes`` class-2 detections."""
+    """Lock the positions of up to ``max_eyes`` eye detections."""
 
     def __init__(self, max_eyes: int = 4, zero_iou_eps: float = ZERO_IOU_EPS):
         self.max_eyes = max_eyes
@@ -165,4 +165,3 @@ class StablePairing:
             if best_id is not None and best_dist is not None and best_dist <= self.rebind_max_dist_px:
                 self.eye_to_cls8[eye_id] = best_id
                 used_this_step.add(best_id)
-

@@ -13,16 +13,19 @@ from fbpipe.steps.curate_yolo_dataset import (
     compute_quality_metrics,
     is_bad_tracking,
 )
+from fbpipe.utils.columns import PROBOSCIS_CLASS
 
 def test_compute_jitter():
     """Test jitter computation."""
     print("Testing jitter computation...")
+    prob_x = f"x_class{PROBOSCIS_CLASS}"
+    prob_y = f"y_class{PROBOSCIS_CLASS}"
     df = pd.DataFrame({
-        "x_class8": [100, 105, 110, 115, 120],
-        "y_class8": [200, 200, 200, 200, 200],
+        prob_x: [100, 105, 110, 115, 120],
+        prob_y: [200, 200, 200, 200, 200],
     })
 
-    jitter = compute_jitter(df, "x_class8", "y_class8")
+    jitter = compute_jitter(df, prob_x, prob_y)
 
     assert len(jitter) == 5
     assert jitter[0] == 0.0
@@ -34,9 +37,11 @@ def test_quality_metrics():
     print("Testing quality metrics...")
 
     # Create synthetic data with correct column names
+    prob_x = f"x_class{PROBOSCIS_CLASS}"
+    prob_y = f"y_class{PROBOSCIS_CLASS}"
     df = pd.DataFrame({
-        "x_class8": np.arange(100, 200, 1),
-        "y_class8": np.ones(100) * 200,
+        prob_x: np.arange(100, 200, 1),
+        prob_y: np.ones(100) * 200,
     })
 
     video_path = Path("/tmp/test.mp4")

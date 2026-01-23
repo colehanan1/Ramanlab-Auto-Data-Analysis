@@ -37,6 +37,7 @@ for path in (str(REPO_ROOT), str(SRC_ROOT)):
         sys.path.insert(0, path)
 
 from fbpipe.config import load_raw_config
+from fbpipe.utils.columns import PROBOSCIS_DISTANCE_PCT_COL
 
 
 # ---------------------------------------------------------------------------
@@ -651,7 +652,7 @@ def _parse_collect_args(subparser: argparse.ArgumentParser) -> None:
     subparser.add_argument(
         "--measure-cols",
         nargs="+",
-        default=["distance_percentage_2_8", "distance_percentage", "distance_percentage_2_6"],
+        default=[PROBOSCIS_DISTANCE_PCT_COL, "distance_percentage_2_8", "distance_percentage", "distance_percentage_2_6"],
         help="Ordered list of candidate measurement columns.",
     )
     subparser.add_argument(

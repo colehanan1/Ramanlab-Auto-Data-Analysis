@@ -8,6 +8,8 @@ import pandas as pd
 
 from ..config import Settings, get_main_directories
 from ..utils.columns import (
+    EYE_CLASS,
+    PROBOSCIS_CLASS,
     PROBOSCIS_DISTANCE_COL,
     PROBOSCIS_DISTANCE_PCT_COL,
     PROBOSCIS_MAX_DISTANCE_COL,
@@ -26,21 +28,23 @@ def main(cfg: Settings) -> None:
             print(f"[NORM] Processing fly directory: {fly_dir.name}")
             for csv_path, token, _ in iter_fly_distance_csvs(fly_dir, recursive=True):
                 slot_label = token.replace("_distances", "")
-                stats_path = fly_dir / f"{slot_label}_global_distance_stats_class_2.json"
-                if not stats_path.exists():
-                    legacy_path = fly_dir / "global_distance_stats_class_2.json"
-                    if not legacy_path.exists():
-                        print(
-                            f"[NORM] Missing stats JSON for {fly_dir.name}/{slot_label}; "
-                            f"expected {stats_path.name} or legacy file."
-                        )
-                        print(
-                            f"[NORM] Skipping normalization for CSV {csv_path.name} due to missing stats."
-                        )
-                        continue
-                    stats = json.loads(legacy_path.read_text(encoding="utf-8"))
-                else:
-                    stats = json.loads(stats_path.read_text(encoding="utf-8"))
+                stats_candidates = [
+                    fly_dir / f"{slot_label}_global_distance_stats_class_{EYE_CLASS}.json",
+                    fly_dir / f"{slot_label}_global_distance_stats_class_2.json",
+                    fly_dir / f"global_distance_stats_class_{EYE_CLASS}.json",
+                    fly_dir / "global_distance_stats_class_2.json",
+                ]
+                stats_path = next((path for path in stats_candidates if path.exists()), None)
+                if stats_path is None:
+                    print(
+                        f"[NORM] Missing stats JSON for {fly_dir.name}/{slot_label}; "
+                        f"expected {stats_candidates[0].name} or legacy file."
+                    )
+                    print(
+                        f"[NORM] Skipping normalization for CSV {csv_path.name} due to missing stats."
+                    )
+                    continue
+                stats = json.loads(stats_path.read_text(encoding="utf-8"))
                 print(
                     f"[NORM] Loaded stats for {fly_dir.name}/{slot_label}: "
                     f"min={stats['global_min']}, max={stats['global_max']}"
@@ -63,7 +67,7 @@ def main(cfg: Settings) -> None:
                 if dist_col is None:
                     print(
                         f"[NORM] No proboscis distance column found in {csv_path.name};"
-                        " expected aliases such as 'distance_2_8' or 'proboscis_distance'."
+                        f" expected aliases such as '{PROBOSCIS_DISTANCE_COL}' or 'proboscis_distance'."
                     )
                     continue
 
@@ -99,7 +103,7 @@ def main(cfg: Settings) -> None:
                 df[PROBOSCIS_MIN_DISTANCE_COL] = gmin
                 df[PROBOSCIS_MAX_DISTANCE_COL] = gmax
                 # Add effective_max column for reference
-                df["effective_max_distance_2_8"] = effective_max
+                df[f"effective_max_distance_{EYE_CLASS}_{PROBOSCIS_CLASS}"] = effective_max
                 if "min_distance_2_6" in df.columns:
                     df["min_distance_2_6"] = gmin
                 if "max_distance_2_6" in df.columns:
