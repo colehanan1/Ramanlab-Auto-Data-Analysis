@@ -1,0 +1,263 @@
+╔═══════════════════════════════════════════════════════════════════════════╗
+║                  UNIFIED BACKUP SYSTEM - QUICK START                      ║
+║                                                                           ║
+║  Default: NO COMPRESSION - direct copy to SMB/Box/Secured                ║
+║  rsync for SMB & Secured | rclone for Box                                ║
+║  NO automatic schedules - only backup when you run commands              ║
+╚═══════════════════════════════════════════════════════════════════════════╝
+
+BASIC USAGE
+═══════════════════════════════════════════════════════════════════════════
+
+Run full pipeline WITH automatic backups:
+  $ make run
+
+Run backups only (no pipeline):
+  $ make backup
+
+Dry-run (see what would be backed up):
+  $ python scripts/backup_system.py --dry-run
+
+
+CONFIGURATION
+═══════════════════════════════════════════════════════════════════════════
+
+Edit: config/config.yaml
+
+Key settings:
+
+  backups:
+    compression:
+      enabled: false  ← DEFAULT: no compression, direct copy
+
+    destinations:
+      smb:
+        enabled: true           ← Backup to SMB network share
+      box:
+        enabled: true           ← Backup to Box cloud
+      secured:
+        enabled: true           ← Backup to secured storage
+
+
+ENABLE COMPRESSION (Optional)
+═══════════════════════════════════════════════════════════════════════════
+
+In config/config.yaml, change:
+
+  backups:
+    compression:
+      enabled: true  ← Enable compression for all destinations
+
+Results:
+  • CSVs: 96% smaller (50 MB → 2 MB)
+  • Results: 60% smaller (100 MB → 40 MB)
+  • Stored in: backups_compressed/
+  • Takes 5-15 minutes to compress
+
+
+BACKUP METHODS
+═══════════════════════════════════════════════════════════════════════════
+
+SMB (rsync):
+  ✓ rsync --update (only syncs changed files)
+  ✓ Fast on local network
+  ✓ Direct copy by default
+  ✓ Optional compression: CSVs_archive_*.zip + Results_archive_*.zip
+
+Box (rclone):
+  ✓ rclone sync with --update (only syncs changed files)
+  ✓ Cloud-optimized
+  ✓ Direct copy by default
+  ✓ Optional compression: uploaded as .zip files
+
+Secured Storage (rsync):
+  ✓ rsync --update (only syncs changed files)
+  ✓ Secure and fast
+  ✓ Direct copy by default
+  ✓ Optional compression: stored in backups/ folder
+
+
+WHAT GETS BACKED UP
+═══════════════════════════════════════════════════════════════════════════
+
+CSVs:
+  • all_envelope_rows_wide.csv
+  • all_envelope_rows_wide_training.csv
+  • all_envelope_rows_wide_combined_base.csv
+  • all_envelope_rows_wide_combined_base_training.csv
+  • model_predictions.csv
+  • all_eye_prob_coords_wide.csv
+
+Results/Figures:
+  • Reaction_Matrices/
+  • Reaction_Matrices/Overlay/
+  • PER-Envelopes/
+  • Training-PER-Envelopes/
+  • Reaction_Predictions(Strictest)/
+  • CombinedBase-PER-Envelopes/
+  • CombinedBase-Training-PER-Envelopes/
+  • Weekly-Training-Envelopes/
+
+
+BACKUP DESTINATIONS
+═══════════════════════════════════════════════════════════════════════════
+
+SMB Network Share:
+  CSVs:    smb://ramanfile.local/ramanfiles/cole/flyTrackingData/
+  Results: smb://ramanfile.local/ramanfiles/cole/Figures/
+
+Box Cloud:
+  CSVs:    Box-Folder:Ramanlab-Backups/CSVs/
+  Results: Box-Folder:Ramanlab-Backups/Results/
+
+Secured Storage:
+  CSVs:    /securedstorage/DATAsec/cole/Data-secured/CSVs/
+  Backups: /securedstorage/DATAsec/cole/Data-secured/backups/
+
+
+MONITORING
+═══════════════════════════════════════════════════════════════════════════
+
+Watch backups in real-time:
+  $ tail -f backup.log
+
+Check SMB access:
+  $ ls smb://ramanfile.local/ramanfiles/cole/
+
+Check Box:
+  $ rclone ls Box-Folder:Ramanlab-Backups/
+
+Check Secured Storage:
+  $ ls /securedstorage/DATAsec/cole/Data-secured/
+
+
+ADVANCED COMMANDS
+═══════════════════════════════════════════════════════════════════════════
+
+Backup to specific destination only:
+  $ python scripts/backup_system.py --smb-only
+  $ python scripts/backup_system.py --box-only
+  $ python scripts/backup_system.py --secured-only
+
+Dry-run (no actual backup):
+  $ python scripts/backup_system.py --dry-run
+
+Use custom config:
+  $ python scripts/backup_system.py --config /path/to/config.yaml
+
+
+PIPELINE INTEGRATION
+═══════════════════════════════════════════════════════════════════════════
+
+When you run: make run
+
+Execution order:
+  1. Backup to SMB/Box/Secured (BEFORE pipeline)
+  2. Run full analysis pipeline
+  3. Backup to SMB/Box/Secured (AFTER pipeline)
+
+This ensures:
+  ✓ Data is backed up before processing
+  ✓ Results are backed up immediately after completion
+
+
+DISABLE/ENABLE BACKUPS
+═══════════════════════════════════════════════════════════════════════════
+
+Disable specific destination in config/config.yaml:
+
+  destinations:
+    smb:
+      enabled: false  ← Skip SMB backups
+    box:
+      enabled: false  ← Skip Box backups
+    secured:
+      enabled: true   ← Still backup to secured
+
+Or disable all:
+
+  backups:
+    enabled: false  ← No backups at all
+
+
+NO AUTOMATIC SCHEDULES
+═══════════════════════════════════════════════════════════════════════════
+
+✓ NO cron jobs - no automatic scheduled backups
+✓ NO nightly runs - backups only happen when YOU run commands
+✓ Manual control - decide when to backup
+✓ Pipeline integration - automatic during "make run"
+
+
+TROUBLESHOOTING
+═══════════════════════════════════════════════════════════════════════════
+
+SMB not accessible?
+  $ mount | grep smb
+  $ ls smb://ramanfile.local/ramanfiles/cole/
+
+Box not connecting?
+  $ rclone listremotes
+  $ rclone ls Box-Folder:Ramanlab-Backups/
+
+Secured storage issues?
+  $ ls -l /securedstorage/DATAsec/cole/Data-secured/
+  $ touch /securedstorage/DATAsec/cole/Data-secured/test.txt
+
+View full backup logs:
+  $ cat backup.log
+
+
+KEY CHANGES FROM OLD SYSTEM
+═══════════════════════════════════════════════════════════════════════════
+
+OLD: Automatic compression enabled
+NEW: Compression disabled by default (direct copy)
+
+OLD: Weekly and nightly cron schedules
+NEW: NO automatic schedules - manual control only
+
+OLD: Used cp for SMB
+NEW: Uses rsync for SMB (more efficient)
+
+OLD: Multiple scripts (backup_to_box.py, compress_and_backup.py, etc.)
+NEW: Single unified backup_system.py
+
+OLD: Config not used for backups
+NEW: All backup settings in config/config.yaml
+
+
+QUICK REFERENCE
+═══════════════════════════════════════════════════════════════════════════
+
+Most common tasks:
+
+  # Run pipeline with backups
+  make run
+
+  # Backup manually
+  make backup
+
+  # Enable compression
+  Edit config/config.yaml: backups.compression.enabled = true
+
+  # Disable SMB backups
+  Edit config/config.yaml: destinations.smb.enabled = false
+
+  # Watch backup progress
+  tail -f backup.log
+
+
+For detailed documentation:
+  See: docs/BACKUP_SYSTEM_GUIDE.md
+
+═══════════════════════════════════════════════════════════════════════════
+
+Your backup system is under your complete control!
+
+✓ Default: Fast direct copy (no compression)
+✓ rsync for SMB (efficient local network)
+✓ rclone for Box (cloud optimized)
+✓ rsync for Secured (secure storage)
+✓ Manual control (no automatic schedules)
+✓ Optional compression (enable in config)
