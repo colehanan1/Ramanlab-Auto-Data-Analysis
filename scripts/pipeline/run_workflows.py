@@ -465,14 +465,12 @@ def _run_envelope_visuals(cfg: Mapping[str, Any] | None) -> None:
         config, smb_path = _matrix_plot_config(matrices_cfg)
         print(f"[analysis] envelope_visuals.matrices → {config.out_dir}")
         generate_reaction_matrices(config)
-        _copy_output_to_smb(config.out_dir, smb_path)
 
     envelopes_cfg = cfg.get("envelopes")
     if envelopes_cfg:
         config, smb_path = _envelope_plot_config(envelopes_cfg)
         print(f"[analysis] envelope_visuals.envelopes → {config.out_dir}")
         generate_envelope_plots(config)
-        _copy_output_to_smb(config.out_dir, smb_path)
 
 
 def _run_training(cfg: Mapping[str, Any] | None) -> None:
@@ -486,7 +484,6 @@ def _run_training(cfg: Mapping[str, Any] | None) -> None:
         config, smb_path = _envelope_plot_config(opts)
         print(f"[analysis] training.envelopes → {config.out_dir}")
         generate_envelope_plots(config)
-        _copy_output_to_smb(config.out_dir, smb_path)
 
     latency_cfg = cfg.get("latency")
     if latency_cfg:
@@ -850,7 +847,6 @@ def _run_combined(cfg: Mapping[str, Any] | None, settings: Settings | None) -> N
                 config, smb_path = _envelope_plot_config(entry)
                 print(f"[analysis] combined_base.envelopes → {config.out_dir}")
                 generate_envelope_plots(config)
-                _copy_output_to_smb(config.out_dir, smb_path)
 
     pair_groups_cfg = cfg.get("pair_groups") or []
     if pair_groups_cfg:
@@ -962,7 +958,6 @@ def _run_combined(cfg: Mapping[str, Any] | None, settings: Settings | None) -> N
         config, smb_path = _matrix_plot_config(matrices_cfg)
         print(f"[analysis] combined.matrices → {config.out_dir}")
         generate_reaction_matrices(config)
-        _copy_output_to_smb(config.out_dir, smb_path)
 
     envelopes_cfg = cfg.get("envelopes")
     if envelopes_cfg:
@@ -978,7 +973,6 @@ def _run_combined(cfg: Mapping[str, Any] | None, settings: Settings | None) -> N
             config, smb_path = _envelope_plot_config(entry)
             print(f"[analysis] combined.envelopes → {config.out_dir}")
             generate_envelope_plots(config)
-            _copy_output_to_smb(config.out_dir, smb_path)
 
     overlay_cfg = cfg.get("overlay")
     if overlay_cfg:
@@ -1339,6 +1333,112 @@ def main(argv: Sequence[str] | None = None) -> None:
     _run_envelope_visuals(analysis_cfg.get("envelope_visuals"))
     _run_training(analysis_cfg.get("training"))
     _run_reactions(settings)
+
+    # Copy all analysis outputs to SMB at the end
+    LOGGER.info("\n" + "=" * 70)
+    LOGGER.info("Starting batch copy of all analysis outputs to SMB...")
+    LOGGER.info("=" * 70)
+    _batch_copy_to_smb(raw_cfg)
+    LOGGER.info("=" * 70)
+    LOGGER.info("✓ Batch copy complete!")
+    LOGGER.info("=" * 70 + "\n")
+
+
+def _batch_copy_to_smb(raw_cfg: Dict[str, Any]) -> None:
+    """Copy all analysis outputs to SMB at the end of the pipeline."""
+    analysis_cfg = raw_cfg.get("analysis", {})
+
+    # List of (local_path, smb_path) tuples to copy
+    copies_to_make: List[Tuple[Path, str]] = []
+
+    # Collect envelope_visuals outputs
+    env_vis_cfg = analysis_cfg.get("envelope_visuals", {})
+    if env_vis_cfg:
+        matrices_cfg = env_vis_cfg.get("matrices")
+        if matrices_cfg:
+            out_dir = Path(matrices_cfg.get("out_dir", ""))
+            smb_path = matrices_cfg.get("out_dir_smb")
+            if out_dir.exists() and smb_path:
+                copies_to_make.append((out_dir, smb_path))
+
+        envelopes_cfg = env_vis_cfg.get("envelopes")
+        if envelopes_cfg:
+            out_dir = Path(envelopes_cfg.get("out_dir", ""))
+            smb_path = envelopes_cfg.get("out_dir_smb")
+            if out_dir.exists() and smb_path:
+                copies_to_make.append((out_dir, smb_path))
+
+    # Collect training outputs
+    training_cfg = analysis_cfg.get("training", {})
+    if training_cfg:
+        envelopes_cfg = training_cfg.get("envelopes")
+        if envelopes_cfg:
+            out_dir = Path(envelopes_cfg.get("out_dir", ""))
+            smb_path = envelopes_cfg.get("out_dir_smb")
+            if out_dir.exists() and smb_path:
+                copies_to_make.append((out_dir, smb_path))
+
+    # Collect combined outputs
+    combined_cfg = analysis_cfg.get("combined", {})
+    if combined_cfg:
+        matrices_cfg = combined_cfg.get("matrices")
+        if matrices_cfg:
+            out_dir = Path(matrices_cfg.get("out_dir", ""))
+            smb_path = matrices_cfg.get("out_dir_smb")
+            if out_dir.exists() and smb_path:
+                copies_to_make.append((out_dir, smb_path))
+
+        envelopes_list = combined_cfg.get("envelopes", [])
+        if not isinstance(envelopes_list, list):
+            envelopes_list = [envelopes_list]
+        for env_cfg in envelopes_list:
+            out_dir = Path(env_cfg.get("out_dir", ""))
+            smb_path = env_cfg.get("out_dir_smb")
+            if out_dir.exists() and smb_path:
+                copies_to_make.append((out_dir, smb_path))
+
+        overlay_cfg = combined_cfg.get("overlay")
+        if overlay_cfg:
+            out_dir = Path(overlay_cfg.get("out_dir", ""))
+            smb_path = overlay_cfg.get("out_dir_smb")
+            if out_dir.exists() and smb_path:
+                copies_to_make.append((out_dir, smb_path))
+
+        combined_base_cfg = combined_cfg.get("combined_base", {})
+        base_envelopes = combined_base_cfg.get("envelopes", [])
+        if not isinstance(base_envelopes, list):
+            base_envelopes = [base_envelopes]
+        for env_cfg in base_envelopes:
+            out_dir = Path(env_cfg.get("out_dir", ""))
+            smb_path = env_cfg.get("out_dir_smb")
+            if out_dir.exists() and smb_path:
+                copies_to_make.append((out_dir, smb_path))
+
+    # Collect reaction prediction CSV
+    reaction_cfg = raw_cfg.get("reaction_prediction", {})
+    if reaction_cfg:
+        output_csv = reaction_cfg.get("output_csv")
+        output_csv_smb = reaction_cfg.get("output_csv_smb")
+        if output_csv and output_csv_smb:
+            csv_path = Path(output_csv)
+            if csv_path.exists():
+                copies_to_make.append((csv_path, output_csv_smb))
+
+    # Execute all copies
+    if copies_to_make:
+        LOGGER.info(f"Found {len(copies_to_make)} items to copy to SMB")
+        for local_path, smb_path in copies_to_make:
+            try:
+                item_name = local_path.name if local_path.is_file() else f"{local_path.name}/"
+                LOGGER.info(f"Copying: {item_name} → {smb_path}")
+                if copy_to_smb(local_path, smb_path):
+                    LOGGER.info(f"✓ Success: {item_name}")
+                else:
+                    LOGGER.warning(f"⚠ Failed: {item_name}")
+            except Exception as e:
+                LOGGER.error(f"Error copying {local_path.name}: {e}")
+    else:
+        LOGGER.info("No items configured for SMB copy (out_dir_smb/output_csv_smb not set)")
 
 
 if __name__ == "__main__":  # pragma: no cover
