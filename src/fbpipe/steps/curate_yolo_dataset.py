@@ -460,7 +460,23 @@ def main(cfg: Settings) -> None:
     if curation_cfg.video_source_dirs:
         log.info(f"[CURATION] Searching for videos in {len(curation_cfg.video_source_dirs)} additional source directories")
 
-    roots = get_main_directories(cfg)
+    if curation_cfg.video_source_dirs:
+        roots = [
+            Path(d).expanduser().resolve()
+            for d in curation_cfg.video_source_dirs
+            if Path(d).expanduser().resolve().exists()
+        ]
+        if roots:
+            log.info(
+                f"[CURATION] Using video_source_dirs as roots ({len(roots)} directories)"
+            )
+        else:
+            log.warning(
+                "[CURATION] No valid video_source_dirs found; falling back to main_directories"
+            )
+            roots = get_main_directories(cfg)
+    else:
+        roots = get_main_directories(cfg)
 
     # Load global cache to track processed flies
     cache_root = (

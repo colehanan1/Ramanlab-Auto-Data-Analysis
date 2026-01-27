@@ -69,7 +69,7 @@ def load_raw_config(config_path: str | Path) -> Dict[str, Any]:
 
 def get_main_directories(cfg: Settings) -> list[Path]:
     """
-    Normalize main_directory to always return a list of Path objects.
+    Normalize main_directories to always return a list of Path objects.
 
     Handles both single string and list of strings from config.
 
@@ -79,10 +79,9 @@ def get_main_directories(cfg: Settings) -> list[Path]:
     Returns:
         List of Path objects for all main directories
     """
-    if isinstance(cfg.main_directory, list):
-        return [Path(d).expanduser().resolve() for d in cfg.main_directory]
-    else:
-        return [Path(cfg.main_directory).expanduser().resolve()]
+    if isinstance(cfg.main_directories, list):
+        return [Path(d).expanduser().resolve() for d in cfg.main_directories]
+    return [Path(cfg.main_directories).expanduser().resolve()]
 
 
 @dataclass
@@ -103,6 +102,7 @@ class ReactionPredictionSettings:
     data_csv: str = ""
     model_path: str = ""
     output_csv: str = ""
+    output_csv_smb: str = ""  # SMB path for CSV export
     python: str = ""
     threshold: float | None = None
     run_prediction: bool = True
@@ -223,7 +223,7 @@ class ForceSettings:
 @dataclass
 class Settings:
     model_path: str
-    main_directory: str | list[str]  # Can be single path or list of paths
+    main_directories: str | list[str]  # Can be single path or list of paths
     cache_dir: str = ""
     allow_cpu: bool = False
     cuda_allow_tf32: bool = True
@@ -269,6 +269,17 @@ class Settings:
 def _get(d: Dict[str, Any], key: str, default: Any):
     return d.get(key, default)
 
+def _parse_env_paths(raw_value: str) -> str | list[str]:
+    value = raw_value.strip()
+    if not value:
+        return ""
+    if "," in value:
+        return [p.strip() for p in value.split(",") if p.strip()]
+    if os.pathsep in value:
+        return [p.strip() for p in value.split(os.pathsep) if p.strip()]
+    return value
+
+
 def load_settings(config_path: str | Path) -> Settings:
     env_path = resolve_env_path(config_path)
     if env_path.exists():
@@ -281,7 +292,20 @@ def load_settings(config_path: str | Path) -> Settings:
 
     # env overrides
     model_path = os.getenv("MODEL_PATH", _get(data, "model_path", ""))
-    main_directory = os.getenv("MAIN_DIRECTORY", _get(data, "main_directory", ""))
+
+    main_dirs_cfg = data.get("main_directories", None)
+    if main_dirs_cfg is None:
+        main_dirs_cfg = _get(data, "main_directory", "")
+
+    main_dirs_env = os.getenv("MAIN_DIRECTORIES")
+    if main_dirs_env is not None:
+        main_directories = _parse_env_paths(main_dirs_env)
+    else:
+        main_dir_env = os.getenv("MAIN_DIRECTORY")
+        if main_dir_env is not None:
+            main_directories = _parse_env_paths(main_dir_env)
+        else:
+            main_directories = main_dirs_cfg
 
     allow_cpu = os.getenv("ALLOW_CPU", str(_get(data, "allow_cpu", False))).lower() == "true"
     cuda_allow_tf32 = os.getenv("CUDA_ALLOW_TF32", str(_get(data, "cuda_allow_tf32", True))).lower() == "true"
@@ -519,7 +543,7 @@ def load_settings(config_path: str | Path) -> Settings:
 
     return Settings(
         model_path=model_path,
-        main_directory=main_directory,
+        main_directories=main_directories,
         cache_dir=str(Path(cache_dir).expanduser()),
         allow_cpu=allow_cpu,
         cuda_allow_tf32=cuda_allow_tf32,

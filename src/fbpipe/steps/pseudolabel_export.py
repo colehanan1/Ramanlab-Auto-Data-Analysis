@@ -147,7 +147,7 @@ def _parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         help="Path to config/config.yaml",
     )
     p.add_argument("--dataset-out", help="Output dataset directory (default: cfg.pseudolabel.dataset_out)")
-    p.add_argument("--roots", nargs="*", help="Override input roots (default: cfg.main_directory)")
+    p.add_argument("--roots", nargs="*", help="Override input roots (default: cfg.main_directories)")
 
     p.add_argument("--target-total", type=int, help="Global top-K target (default: cfg.pseudolabel.target_total)")
     p.add_argument("--per-video-cap", type=int, help="Per-video top-K cap (default: cfg.pseudolabel.per_video_cap)")

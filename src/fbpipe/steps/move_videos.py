@@ -2,7 +2,7 @@
 from __future__ import annotations
 from pathlib import Path
 import shutil, re
-from ..config import Settings
+from ..config import Settings, get_main_directories
 
 DEST_FOLDER = "videos_with_rms"
 VIDEO_EXTS = {".mp4",".mov",".avi",".mkv",".mpg",".mpeg",".m4v"}
@@ -31,16 +31,21 @@ def move_videos_from_trial(trial_dir: Path, fly_dir: Path, phase: str, dry_run=F
     return moved
 
 def main(cfg: Settings):
-    root = Path(cfg.main_directory).expanduser().resolve()
-    for fly in [p for p in root.iterdir() if p.is_dir()]:
-        name = fly.name
-        if "_fly_" not in name: continue
-        for sub in [p for p in fly.iterdir() if p.is_dir()]:
-            if sub.name.lower().startswith(DEST_FOLDER.lower()): continue
-            m = TRIAL_DIR_RE.match(sub.name)
-            if not m: continue
-            phase = m.group("phase").lower()
-            if m.group("fly") != name: continue
-            moved = move_videos_from_trial(sub, fly, phase, dry_run=False)
-            if moved==0:
-                print(f"[VIDS] No videos in {sub}")
+    roots = get_main_directories(cfg)
+    for root in roots:
+        for fly in [p for p in root.iterdir() if p.is_dir()]:
+            name = fly.name
+            if "_fly_" not in name:
+                continue
+            for sub in [p for p in fly.iterdir() if p.is_dir()]:
+                if sub.name.lower().startswith(DEST_FOLDER.lower()):
+                    continue
+                m = TRIAL_DIR_RE.match(sub.name)
+                if not m:
+                    continue
+                phase = m.group("phase").lower()
+                if m.group("fly") != name:
+                    continue
+                moved = move_videos_from_trial(sub, fly, phase, dry_run=False)
+                if moved==0:
+                    print(f"[VIDS] No videos in {sub}")

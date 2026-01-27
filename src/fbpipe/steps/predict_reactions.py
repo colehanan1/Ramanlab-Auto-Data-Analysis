@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import subprocess
 import tempfile
@@ -11,6 +12,9 @@ from typing import Iterable, Sequence, Set, Tuple
 import pandas as pd
 
 from ..config import Settings
+from ..utils.smb_copy import copy_to_smb
+
+logger = logging.getLogger(__name__)
 
 
 NON_REACTIVE_SPAN_PX = 5.0
@@ -264,3 +268,13 @@ def main(cfg: Settings) -> None:
 
     _augment_prediction_csv(output_csv, model_input_df, threshold=span_threshold)
     print(f"[REACTION] Wrote predictions to {output_csv}")
+
+    # Copy to SMB if configured
+    if settings.output_csv_smb:
+        try:
+            if copy_to_smb(output_csv, settings.output_csv_smb):
+                logger.info(f"✓ Copied predictions to SMB: {settings.output_csv_smb}")
+            else:
+                logger.warning(f"⚠ Failed to copy predictions to SMB: {settings.output_csv_smb}")
+        except Exception as e:
+            logger.error(f"Error copying predictions to SMB: {e}")

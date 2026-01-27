@@ -51,7 +51,7 @@ def main(cfg: Settings) -> None:
         3. Save normalized distances with percentage columns
 
     Args:
-        cfg: Settings object with main_directory and allow_cpu flags
+        cfg: Settings object with main_directories and allow_cpu flags
     """
     # Initialize GPU processor (auto-detects device)
     force_cpu = getattr(cfg, 'allow_cpu', False)

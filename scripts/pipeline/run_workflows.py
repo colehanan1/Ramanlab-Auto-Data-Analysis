@@ -44,6 +44,7 @@ STATE_VERSION = 1
 from fbpipe.config import Settings, load_settings, resolve_config_path
 from fbpipe.pipeline import ORDERED_STEPS
 from fbpipe.steps import predict_reactions
+from fbpipe.utils.smb_copy import copy_to_smb
 
 from scripts.analysis.envelope_visuals import (
     EnvelopePlotConfig,
@@ -413,21 +414,46 @@ def _should_skip(settings: Settings, category: str, key: str, expected: dict[str
     return True
 
 
-def _matrix_plot_config(data: Mapping[str, Any]) -> MatrixPlotConfig:
+def _matrix_plot_config(data: Mapping[str, Any]) -> tuple[MatrixPlotConfig, str | None]:
+    """Parse matrix plot config and return config plus SMB path."""
     opts = dict(data)
     for key in ("matrix_npy", "codes_json", "out_dir"):
         opts[key] = _ensure_path(opts.get(key), key)
     opts["overwrite"] = True
     if "trial_orders" in opts and opts["trial_orders"] is not None:
         opts["trial_orders"] = tuple(opts["trial_orders"])
-    return MatrixPlotConfig(**opts)  # type: ignore[arg-type]
+    # Extract SMB path for later use
+    smb_path = opts.pop("out_dir_smb", None)
+    return MatrixPlotConfig(**opts), smb_path  # type: ignore[arg-type]
 
 
-def _envelope_plot_config(data: Mapping[str, Any]) -> EnvelopePlotConfig:
+def _envelope_plot_config(data: Mapping[str, Any]) -> tuple[EnvelopePlotConfig, str | None]:
+    """Parse envelope plot config and return config plus SMB path."""
     opts = dict(data)
     for key in ("matrix_npy", "codes_json", "out_dir"):
         opts[key] = _ensure_path(opts.get(key), key)
-    return EnvelopePlotConfig(**opts)  # type: ignore[arg-type]
+    # Extract SMB path for later use
+    smb_path = opts.pop("out_dir_smb", None)
+    return EnvelopePlotConfig(**opts), smb_path  # type: ignore[arg-type]
+
+
+def _copy_output_to_smb(local_path: Path | str, smb_path: str | None) -> None:
+    """Copy output directory to SMB if configured."""
+    if not smb_path:
+        return
+
+    try:
+        local_path = Path(local_path)
+        if not local_path.exists():
+            LOGGER.warning(f"Output directory not found: {local_path}")
+            return
+
+        if copy_to_smb(local_path, smb_path):
+            LOGGER.info(f"✓ Copied to SMB: {local_path.name} → {smb_path}")
+        else:
+            LOGGER.warning(f"⚠ Failed to copy to SMB: {smb_path}")
+    except Exception as e:
+        LOGGER.error(f"Error copying to SMB: {e}")
 
 
 def _run_envelope_visuals(cfg: Mapping[str, Any] | None) -> None:
@@ -436,15 +462,17 @@ def _run_envelope_visuals(cfg: Mapping[str, Any] | None) -> None:
 
     matrices_cfg = cfg.get("matrices")
     if matrices_cfg:
-        config = _matrix_plot_config(matrices_cfg)
+        config, smb_path = _matrix_plot_config(matrices_cfg)
         print(f"[analysis] envelope_visuals.matrices → {config.out_dir}")
         generate_reaction_matrices(config)
+        _copy_output_to_smb(config.out_dir, smb_path)
 
     envelopes_cfg = cfg.get("envelopes")
     if envelopes_cfg:
-        config = _envelope_plot_config(envelopes_cfg)
+        config, smb_path = _envelope_plot_config(envelopes_cfg)
         print(f"[analysis] envelope_visuals.envelopes → {config.out_dir}")
         generate_envelope_plots(config)
+        _copy_output_to_smb(config.out_dir, smb_path)
 
 
 def _run_training(cfg: Mapping[str, Any] | None) -> None:
@@ -455,9 +483,10 @@ def _run_training(cfg: Mapping[str, Any] | None) -> None:
     if envelopes_cfg:
         opts = dict(envelopes_cfg)
         opts.setdefault("trial_type", "training")
-        config = _envelope_plot_config(opts)
+        config, smb_path = _envelope_plot_config(opts)
         print(f"[analysis] training.envelopes → {config.out_dir}")
         generate_envelope_plots(config)
+        _copy_output_to_smb(config.out_dir, smb_path)
 
     latency_cfg = cfg.get("latency")
     if latency_cfg:
@@ -818,9 +847,10 @@ def _run_combined(cfg: Mapping[str, Any] | None, settings: Settings | None) -> N
             for entry in entries:
                 if not isinstance(entry, Mapping):
                     raise ValueError("combined_base.envelopes entries must be mappings.")
-                config = _envelope_plot_config(entry)
+                config, smb_path = _envelope_plot_config(entry)
                 print(f"[analysis] combined_base.envelopes → {config.out_dir}")
                 generate_envelope_plots(config)
+                _copy_output_to_smb(config.out_dir, smb_path)
 
     pair_groups_cfg = cfg.get("pair_groups") or []
     if pair_groups_cfg:
@@ -831,7 +861,9 @@ def _run_combined(cfg: Mapping[str, Any] | None, settings: Settings | None) -> N
         dataset_lookup.update({path.name: path for path in combine_roots.values()})
 
         matrices_cfg = cfg.get("matrices")
-        matrices_template = _matrix_plot_config(matrices_cfg) if matrices_cfg else None
+        matrices_template = None
+        if matrices_cfg:
+            matrices_template, _ = _matrix_plot_config(matrices_cfg)
 
         envelopes_cfg = cfg.get("envelopes")
         envelope_templates: list[EnvelopePlotConfig] = []
@@ -845,7 +877,8 @@ def _run_combined(cfg: Mapping[str, Any] | None, settings: Settings | None) -> N
             for entry in entries:
                 if not isinstance(entry, Mapping):
                     raise ValueError("combined.envelopes entries must be mappings.")
-                envelope_templates.append(_envelope_plot_config(entry))
+                config, _ = _envelope_plot_config(entry)
+                envelope_templates.append(config)
 
         entries = (
             pair_groups_cfg
@@ -926,9 +959,10 @@ def _run_combined(cfg: Mapping[str, Any] | None, settings: Settings | None) -> N
 
     matrices_cfg = cfg.get("matrices")
     if matrices_cfg:
-        config = _matrix_plot_config(matrices_cfg)
+        config, smb_path = _matrix_plot_config(matrices_cfg)
         print(f"[analysis] combined.matrices → {config.out_dir}")
         generate_reaction_matrices(config)
+        _copy_output_to_smb(config.out_dir, smb_path)
 
     envelopes_cfg = cfg.get("envelopes")
     if envelopes_cfg:
@@ -941,9 +975,10 @@ def _run_combined(cfg: Mapping[str, Any] | None, settings: Settings | None) -> N
         for entry in entries:
             if not isinstance(entry, Mapping):
                 raise ValueError("combined.envelopes entries must be mappings.")
-            config = _envelope_plot_config(entry)
+            config, smb_path = _envelope_plot_config(entry)
             print(f"[analysis] combined.envelopes → {config.out_dir}")
             generate_envelope_plots(config)
+            _copy_output_to_smb(config.out_dir, smb_path)
 
     overlay_cfg = cfg.get("overlay")
     if overlay_cfg:

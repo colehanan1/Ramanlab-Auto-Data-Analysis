@@ -14,7 +14,7 @@ from ultralytics import YOLO
 import torch
 import gc  # Add this import
 
-from ..config import Settings
+from ..config import Settings, get_main_directories
 from ..utils.timestamps import pick_timestamp_column, pick_frame_column, to_seconds_series
 from ..utils.vision import xyxy_to_cxcywh
 from ..utils.yolo_results import collect_detections
@@ -403,13 +403,10 @@ def main(cfg: Settings):
 
     AX, AY = cfg.anchor_x, cfg.anchor_y
 
-    # Handle main_directory as either string or list
-    directories = cfg.main_directory if isinstance(cfg.main_directory, list) else [cfg.main_directory]
-
-    for main_dir in directories:
-        root = Path(main_dir).expanduser().resolve()
+    roots = get_main_directories(cfg)
+    for root in roots:
         if not root.is_dir():
-            print(f"[YOLO] main_directory does not exist: {root}")
+            print(f"[YOLO] main_directories entry does not exist: {root}")
             continue
 
         for fly in [p for p in root.iterdir() if p.is_dir()]:

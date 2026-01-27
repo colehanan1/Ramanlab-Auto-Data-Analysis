@@ -2,7 +2,7 @@
 """
 Unified backup system for project data.
 Supports direct syncing (default) and optional compression.
-Uses rsync for SMB and rclone for Box/cloud storage.
+Uses rclone for SMB (recommended) or rsync (fallback) and rclone for Box/cloud storage.
 """
 
 import os
@@ -10,6 +10,7 @@ import subprocess
 import sys
 from pathlib import Path
 from datetime import datetime
+from typing import Dict
 import zipfile
 import logging
 import yaml
@@ -148,29 +149,67 @@ class BackupSystem:
             logger.error(f"Error compressing results: {e}")
             return None
 
-    def backup_to_smb(self, dry_run=False):
-        """Backup to SMB using rsync."""
+    def backup_to_smb(self, dry_run=False, use_rclone=True):
+        """Backup to SMB using rclone (recommended) or rsync."""
         if not self.should_backup('smb'):
             logger.info("SMB backup disabled, skipping")
             return True
 
         use_compression = self.should_use_compression('smb')
         smb_config = self.backup_config.get('destinations', {}).get('smb', {})
+
+        logger.info(f"Starting SMB backup via {'rclone' if use_rclone else 'rsync'}...")
+
+        if use_rclone:
+            return self._backup_to_smb_rclone(smb_config, use_compression, dry_run)
+        else:
+            return self._backup_to_smb_rsync(smb_config, use_compression, dry_run)
+
+    def _backup_to_smb_rclone(self, smb_config: Dict, use_compression: bool, dry_run: bool) -> bool:
+        """Backup to SMB using rclone."""
+        try:
+            from pathlib import Path
+            sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+            from fbpipe.utils.smb_copy import get_smb_copier
+
+            copier = get_smb_copier()
+
+            # Backup CSVs
+            csv_files = self.get_csv_files()
+            if use_compression:
+                zip_file = self.compress_csvs()
+                if zip_file:
+                    copier.copy_to_csv_path(zip_file, dry_run=dry_run)
+            else:
+                for csv_file in csv_files:
+                    copier.copy_to_csv_path(csv_file, dry_run=dry_run)
+
+            # Backup Results
+            results_dirs = self.get_results_dirs()
+            if use_compression:
+                zip_file = self.compress_results()
+                if zip_file:
+                    copier.copy_file(zip_file, "ramanfiles/cole/Figures/", dry_run=dry_run)
+            else:
+                for results_dir in results_dirs:
+                    copier.sync_directory(results_dir, f"ramanfiles/cole/Figures/{results_dir.name}/", dry_run=dry_run)
+
+            return True
+        except Exception as e:
+            logger.error(f"Error with rclone backup: {e}")
+            logger.warning("Falling back to rsync...")
+            smb_base = smb_config.get('base_path', 'smb://ramanfile.local/ramanfiles/cole')
+            return self._backup_to_smb_rsync(smb_config, use_compression, dry_run)
+
+    def _backup_to_smb_rsync(self, smb_config: Dict, use_compression: bool, dry_run: bool) -> bool:
+        """Backup to SMB using rsync (fallback)."""
         smb_base = smb_config.get('base_path', 'smb://ramanfile.local/ramanfiles/cole')
-
-        logger.info("Starting SMB backup via rsync...")
-
-        success = True
-
-        # Backup CSVs
         csv_dest = smb_config.get('csvs_path', f"{smb_base}/flyTrackingData")
-        self._rsync_csvs_to_smb(csv_dest, use_compression, dry_run)
-
-        # Backup Results
         results_dest = smb_config.get('results_path', f"{smb_base}/Figures")
-        self._rsync_results_to_smb(results_dest, use_compression, dry_run)
 
-        return success
+        self._rsync_csvs_to_smb(csv_dest, use_compression, dry_run)
+        self._rsync_results_to_smb(results_dest, use_compression, dry_run)
+        return True
 
     def _rsync_csvs_to_smb(self, dest, use_compression, dry_run):
         """Rsync CSVs to SMB."""
