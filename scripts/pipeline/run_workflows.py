@@ -1338,7 +1338,7 @@ def main(argv: Sequence[str] | None = None) -> None:
     LOGGER.info("\n" + "=" * 70)
     LOGGER.info("Starting batch copy of all analysis outputs to SMB...")
     LOGGER.info("=" * 70)
-    _batch_copy_to_smb(raw_cfg)
+    _batch_copy_to_smb(data)
     LOGGER.info("=" * 70)
     LOGGER.info("✓ Batch copy complete!")
     LOGGER.info("=" * 70 + "\n")
