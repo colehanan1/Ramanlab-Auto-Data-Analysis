@@ -1109,6 +1109,7 @@ def _run_reactions(settings: Settings) -> None:
 
     matrix_expected = {
         "non_reactive_span_px": settings.non_reactive_span_px,
+        "flagged_flies_csv": str(getattr(settings, "flagged_flies_csv", "") or ""),
         "csv_mtime": csv_path.stat().st_mtime,
         "latency_sec": matrix_cfg.latency_sec,
         "after_window_sec": matrix_cfg.after_window_sec,
@@ -1153,6 +1154,10 @@ def _run_reactions(settings: Settings) -> None:
         "--non-reactive-threshold",
         str(settings.non_reactive_span_px),
     ]
+
+    flagged_csv = str(getattr(settings, "flagged_flies_csv", "") or "")
+    if flagged_csv:
+        cmd.extend(["--flagged-flies-csv", flagged_csv])
 
     for trial_order in matrix_cfg.trial_orders:
         cmd.extend(["--trial-order", trial_order])

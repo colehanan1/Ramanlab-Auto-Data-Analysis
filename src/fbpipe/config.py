@@ -24,6 +24,46 @@ def _as_bool(value, default: bool) -> bool:
     return bool(value)
 
 
+def load_flagged_fly_exclusions(csv_path: str | Path) -> set[tuple[str, str, str]]:
+    """Load the flagged-flies truth CSV and return (dataset, fly, fly_number) tuples to EXCLUDE.
+
+    Flies with ``FLY-State`` == 1 are alive and kept; flies with 0 or -1 are
+    excluded.  Flies not present in the CSV at all are *not* excluded.
+    """
+    import pandas as pd
+
+    path = Path(csv_path).expanduser().resolve()
+    if not path.exists():
+        print(f"[WARNING] Flagged flies CSV not found: {path}")
+        return set()
+
+    df = pd.read_csv(path)
+
+    # Find the FLY-State column (header may contain extra text)
+    state_col = None
+    for col in df.columns:
+        if "fly-state" in col.lower() or "fly_state" in col.lower():
+            state_col = col
+            break
+    if state_col is None:
+        print(f"[WARNING] No FLY-State column found in {path}")
+        return set()
+
+    df[state_col] = pd.to_numeric(df[state_col], errors="coerce")
+    exclude_mask = df[state_col] != 1
+
+    excluded: set[tuple[str, str, str]] = set()
+    for _, row in df[exclude_mask].iterrows():
+        dataset = str(row.get("dataset", "")).strip()
+        fly = str(row.get("fly", "")).strip()
+        fly_number = str(row.get("fly_number", "")).strip()
+        excluded.add((dataset, fly, fly_number))
+
+    if excluded:
+        print(f"[INFO] Flagged flies CSV: {len(excluded)} flies marked for exclusion (state != 1)")
+    return excluded
+
+
 def resolve_config_path(config_path: str | Path) -> Path:
     candidate = Path(config_path)
     if candidate.is_absolute():
@@ -228,6 +268,7 @@ class Settings:
     allow_cpu: bool = False
     cuda_allow_tf32: bool = True
     non_reactive_span_px: float = 5.0
+    flagged_flies_csv: str = ""
     anchor_x: float = 1079.0
     anchor_y: float = 540.0
     fps_default: float = 40.0
@@ -426,6 +467,10 @@ def load_settings(config_path: str | Path) -> Settings:
         os.getenv("NON_REACTIVE_SPAN_PX", _get(data, "non_reactive_span_px", 5.0))
     )
 
+    flagged_flies_csv = str(
+        os.getenv("FLAGGED_FLIES_CSV", _get(data, "flagged_flies_csv", ""))
+    )
+
     # tracking quality config
     tracking_cfg = data.get("tracking", {})
     tracking = TrackingConfig(
@@ -548,6 +593,7 @@ def load_settings(config_path: str | Path) -> Settings:
         allow_cpu=allow_cpu,
         cuda_allow_tf32=cuda_allow_tf32,
         non_reactive_span_px=non_reactive_span_px,
+        flagged_flies_csv=flagged_flies_csv,
         anchor_x=float(os.getenv("ANCHOR_X", _get(data, "anchor_x", 1079.0))),
         anchor_y=float(os.getenv("ANCHOR_Y", _get(data, "anchor_y", 540.0))),
         fps_default=float(os.getenv("FPS_DEFAULT", _get(data, "fps_default", 40.0))),

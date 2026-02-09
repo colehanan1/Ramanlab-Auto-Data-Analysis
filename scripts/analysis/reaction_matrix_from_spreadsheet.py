@@ -76,6 +76,7 @@ class SpreadsheetMatrixConfig:
     include_hexanol: bool = True
     overwrite: bool = True
     non_reactive_threshold: float | None = None
+    flagged_flies_csv: str = ""
 
 
 def _filter_trial_types(
@@ -98,7 +99,9 @@ def _filter_trial_types(
     return df.loc[mask].copy()
 
 
-def _load_predictions(csv_path: Path, *, threshold: float) -> pd.DataFrame:
+def _load_predictions(
+    csv_path: Path, *, threshold: float, flagged_flies_csv: str = ""
+) -> pd.DataFrame:
     df = pd.read_csv(csv_path)
     required = {"dataset", "fly", "fly_number", "trial_label", "prediction"}
     missing = required.difference(df.columns)
@@ -115,7 +118,9 @@ def _load_predictions(csv_path: Path, *, threshold: float) -> pd.DataFrame:
     df["trial_label"] = df["trial_label"].astype(str).str.strip()
     df["prediction"] = pd.to_numeric(df["prediction"], errors="coerce")
     df = _normalise_fly_columns(df)
-    df["_non_reactive"] = compute_non_reactive_flags(df, threshold=threshold)
+    df["_non_reactive"] = compute_non_reactive_flags(
+        df, threshold=threshold, flagged_flies_csv=flagged_flies_csv
+    )
 
     flagged_mask = df["_non_reactive"].astype(bool)
     if flagged_mask.any():
@@ -124,8 +129,9 @@ def _load_predictions(csv_path: Path, *, threshold: float) -> pd.DataFrame:
             f"{row.dataset}::{row.fly}::{row.fly_number}"
             for row in flagged.itertuples(index=False)
         )
+        source = "flagged-flies CSV" if flagged_flies_csv else f"span ≤ {threshold:g}px"
         print(
-            f"[INFO] reaction_matrix_csv: excluding non-reactive flies (span ≤ {threshold:g}px): {summaries}"
+            f"[INFO] reaction_matrix_csv: excluding non-reactive flies ({source}): {summaries}"
         )
         df = df.loc[~flagged_mask].copy()
         if df.empty:
@@ -148,7 +154,9 @@ def _load_predictions(csv_path: Path, *, threshold: float) -> pd.DataFrame:
 
 def generate_reaction_matrices_from_csv(cfg: SpreadsheetMatrixConfig) -> None:
     span_threshold = float(cfg.non_reactive_threshold) if cfg.non_reactive_threshold is not None else float(NON_REACTIVE_SPAN_PX)
-    df = _load_predictions(cfg.csv_path, threshold=span_threshold)
+    df = _load_predictions(
+        cfg.csv_path, threshold=span_threshold, flagged_flies_csv=cfg.flagged_flies_csv
+    )
     if df.empty:
         raise RuntimeError("Spreadsheet did not contain any rows to plot.")
 
@@ -429,6 +437,12 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         default=None,
         help="Override non-reactive span threshold in pixels.",
     )
+    parser.add_argument(
+        "--flagged-flies-csv",
+        type=str,
+        default="",
+        help="Path to flagged-flies truth CSV for CSV-based exclusion.",
+    )
     parser.set_defaults(overwrite=True)
     return parser.parse_args(argv)
 
@@ -448,6 +462,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         include_hexanol=not args.exclude_hexanol,
         overwrite=args.overwrite,
         non_reactive_threshold=args.non_reactive_threshold,
+        flagged_flies_csv=args.flagged_flies_csv or "",
     )
     generate_reaction_matrices_from_csv(cfg)
 

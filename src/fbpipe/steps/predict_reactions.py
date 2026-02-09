@@ -11,7 +11,7 @@ from typing import Iterable, Sequence, Set, Tuple
 
 import pandas as pd
 
-from ..config import Settings
+from ..config import Settings, load_flagged_fly_exclusions
 from ..utils.smb_copy import copy_to_smb
 
 logger = logging.getLogger(__name__)
@@ -72,8 +72,24 @@ def _fly_keys(df: pd.DataFrame) -> pd.Series:
 
 
 def _drop_flagged_flies(
-    df: pd.DataFrame, *, threshold: float = NON_REACTIVE_SPAN_PX
+    df: pd.DataFrame,
+    *,
+    threshold: float = NON_REACTIVE_SPAN_PX,
+    flagged_flies_csv: str = "",
 ) -> tuple[pd.DataFrame, Set[Tuple[str, str, str]]]:
+    if flagged_flies_csv:
+        exclusions = load_flagged_fly_exclusions(flagged_flies_csv)
+        if exclusions:
+            keys = _fly_keys(df)
+            flagged_pairs = {k for k in set(keys) if k in exclusions}
+            if not flagged_pairs:
+                return df.copy(), set()
+            keep_mask = ~keys.isin(flagged_pairs)
+            filtered = df.loc[keep_mask].copy()
+            return filtered, flagged_pairs
+        return df.copy(), set()
+
+    # Fallback: original span-threshold approach
     mask = _non_reactive_mask(df, threshold=threshold)
     keys = _fly_keys(df)
     flagged_pairs = set(keys[mask])
@@ -115,7 +131,11 @@ def _write_empty_predictions(output_csv: Path, columns: Sequence[str]) -> None:
 
 
 def _augment_prediction_csv(
-    output_csv: Path, source_df: pd.DataFrame, *, threshold: float
+    output_csv: Path,
+    source_df: pd.DataFrame,
+    *,
+    threshold: float,
+    flagged_flies_csv: str = "",
 ) -> None:
     """Append span metadata + flags so downstream plots can drop non-reactive flies."""
 
@@ -167,9 +187,15 @@ def _augment_prediction_csv(
     if "trial_type" not in merged.columns:
         merged["trial_type"] = "testing"
 
-    span_mask = _non_reactive_mask(merged, threshold=threshold)
-    merged["_non_reactive"] = span_mask
-    merged["non_reactive_flag"] = span_mask.astype(float)
+    if flagged_flies_csv:
+        exclusions = load_flagged_fly_exclusions(flagged_flies_csv)
+        keys = _fly_keys(merged)
+        csv_mask = pd.Series([k in exclusions for k in keys], index=merged.index)
+    else:
+        csv_mask = _non_reactive_mask(merged, threshold=threshold)
+
+    merged["_non_reactive"] = csv_mask
+    merged["non_reactive_flag"] = csv_mask.astype(float)
 
     merged.to_csv(output_csv, index=False)
     print(f"[REACTION] Annotated predictions with span metadata ({len(merged)} rows)")
@@ -205,7 +231,10 @@ def main(cfg: Settings) -> None:
         return
 
     span_threshold = float(getattr(cfg, "non_reactive_span_px", NON_REACTIVE_SPAN_PX))
-    filtered_df, flagged_pairs = _drop_flagged_flies(df, threshold=span_threshold)
+    flagged_csv = str(getattr(cfg, "flagged_flies_csv", "") or "")
+    filtered_df, flagged_pairs = _drop_flagged_flies(
+        df, threshold=span_threshold, flagged_flies_csv=flagged_csv
+    )
     if filtered_df.empty:
         print(
             "[REACTION] All candidate flies were flagged non-reactive; "
@@ -266,5 +295,7 @@ def main(cfg: Settings) -> None:
             except OSError:
                 pass
 
-    _augment_prediction_csv(output_csv, model_input_df, threshold=span_threshold)
+    _augment_prediction_csv(
+        output_csv, model_input_df, threshold=span_threshold, flagged_flies_csv=flagged_csv
+    )
     print(f"[REACTION] Wrote predictions to {output_csv}")

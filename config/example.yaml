@@ -64,7 +64,8 @@ distance_limits:
   class2_max: 250.0
 
 # Reaction filtering
-non_reactive_span_px: 7.5  # flag flies when global span ≤ this threshold (pixels)
+non_reactive_span_px: 7.5  # flag flies when global span ≤ this threshold (pixels, fallback if no CSV)
+flagged_flies_csv: ""  # path to flagged-flies truth CSV (overrides span threshold when set)
 
 # Tracking quality filtering
 tracking:

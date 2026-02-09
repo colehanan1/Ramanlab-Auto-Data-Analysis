@@ -28,6 +28,7 @@ import json
 import logging
 import math
 import re
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Mapping, Sequence, Tuple
@@ -585,24 +586,48 @@ def compute_non_reactive_flags(
     df: pd.DataFrame,
     *,
     threshold: float = NON_REACTIVE_SPAN_PX,
-    include_tracking: bool = True
+    include_tracking: bool = True,
+    flagged_flies_csv: str = "",
 ) -> pd.Series:
     """
-    Return a boolean mask flagging flies as non-reactive based on motion or tracking quality.
+    Return a boolean mask flagging flies as non-reactive.
 
-    A fly is flagged as non-reactive if EITHER:
-    1. Motion span ≤ threshold (existing criterion)
-    2. Proboscis tracking is poor (NEW criterion, if include_tracking=True)
+    When *flagged_flies_csv* is provided and the file exists, flies are flagged
+    based on the CSV truth table: flies with ``FLY-State != 1`` are excluded.
+    Otherwise falls back to the original span-threshold + tracking criteria.
 
     Args:
         df: DataFrame with fly data
-        threshold: Motion span threshold (pixels)
-        include_tracking: If True, also flag flies with poor tracking quality
+        threshold: Motion span threshold (pixels) – used only as fallback
+        include_tracking: If True, also flag flies with poor tracking quality (fallback only)
+        flagged_flies_csv: Path to the flagged-flies truth CSV
 
     Returns:
-        Boolean Series where True = non-reactive fly
+        Boolean Series where True = non-reactive / excluded fly
     """
-    # Criterion 1: Low motion (existing)
+    # --- CSV-based flagging (preferred when available) ---
+    if flagged_flies_csv:
+        try:
+            _src = str(Path(__file__).resolve().parents[2] / "src")
+            if _src not in sys.path:
+                sys.path.insert(0, _src)
+            from fbpipe.config import load_flagged_fly_exclusions
+            exclusions = load_flagged_fly_exclusions(flagged_flies_csv)
+            if exclusions:
+                ds = df["dataset"].astype(str).str.strip() if "dataset" in df.columns else pd.Series("", index=df.index)
+                fl = df["fly"].astype(str).str.strip() if "fly" in df.columns else pd.Series("", index=df.index)
+                fn = df["fly_number"].astype(str).str.strip() if "fly_number" in df.columns else pd.Series("", index=df.index)
+                keys = list(zip(ds, fl, fn))
+                mask = pd.Series([k in exclusions for k in keys], index=df.index)
+                n_flagged = mask.sum()
+                if n_flagged > 0:
+                    logger.info(f"Flagged {n_flagged} rows via CSV truth table ({len(exclusions)} excluded flies)")
+                return mask
+            return pd.Series(False, index=df.index, dtype=bool)
+        except Exception as exc:
+            logger.warning(f"Failed to load flagged flies CSV, falling back to threshold: {exc}")
+
+    # --- Fallback: span-threshold + tracking criteria ---
     gmin, gmax = _span_columns(df)
     span = pd.Series(np.nan, index=df.index, dtype=float)
     if isinstance(gmax, pd.Series) and isinstance(gmin, pd.Series):
@@ -610,15 +635,12 @@ def compute_non_reactive_flags(
     non_reactive_motion = gmin.notna() & gmax.notna() & span.le(float(threshold))
     non_reactive_motion = non_reactive_motion.fillna(False)
 
-    # Criterion 2: Poor tracking (NEW)
     non_reactive_tracking = pd.Series(False, index=df.index)
     if include_tracking and "tracking_flagged" in df.columns:
         non_reactive_tracking = df["tracking_flagged"].fillna(False).astype(bool)
 
-    # Combined: flag if EITHER criterion met
     combined = non_reactive_motion | non_reactive_tracking
 
-    # Logging for transparency
     n_motion_only = (non_reactive_motion & ~non_reactive_tracking).sum()
     n_tracking_only = (~non_reactive_motion & non_reactive_tracking).sum()
     n_both = (non_reactive_motion & non_reactive_tracking).sum()
