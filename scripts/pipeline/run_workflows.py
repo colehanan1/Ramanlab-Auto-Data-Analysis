@@ -988,28 +988,39 @@ def _run_combined(cfg: Mapping[str, Any] | None, settings: Settings | None) -> N
         odor_off = float(overlay_cfg.get("odor_off_s", 60.0))
         odor_latency = float(overlay_cfg.get("odor_latency_s", overlay_cfg.get("odor_latency", 0.0)))
         overwrite = bool(overlay_cfg.get("overwrite", False))
-        print(f"[analysis] combined.overlay → {out_dir}")
-        overlay_sources(
-            {
-                "RMS × Angle": {
-                    "MATRIX_NPY": str(combined_matrix),
-                    "CODES_JSON": str(combined_codes),
+
+        missing_files = [
+            p for p in (combined_matrix, combined_codes, distance_matrix, distance_codes)
+            if not p.exists()
+        ]
+        if missing_files:
+            print(
+                "[analysis] combined.overlay → skipping; missing files: "
+                + ", ".join(str(p) for p in missing_files)
+            )
+        else:
+            print(f"[analysis] combined.overlay → {out_dir}")
+            overlay_sources(
+                {
+                    "RMS × Angle": {
+                        "MATRIX_NPY": str(combined_matrix),
+                        "CODES_JSON": str(combined_codes),
+                    },
+                    "RMS": {
+                        "MATRIX_NPY": str(distance_matrix),
+                        "CODES_JSON": str(distance_codes),
+                    },
                 },
-                "RMS": {
-                    "MATRIX_NPY": str(distance_matrix),
-                    "CODES_JSON": str(distance_codes),
-                },
-            },
-            latency_sec=latency_sec,
-            after_show_sec=after_show,
-            output_dir=str(out_dir),
-            threshold_mult=thresh,
-            odor_on_s=odor_on,
-            odor_off_s=odor_off,
-            odor_latency_s=odor_latency,
-            overwrite=overwrite,
-            non_reactive_threshold=settings.non_reactive_span_px if settings is not None else None,
-        )
+                latency_sec=latency_sec,
+                after_show_sec=after_show,
+                output_dir=str(out_dir),
+                threshold_mult=thresh,
+                odor_on_s=odor_on,
+                odor_off_s=odor_off,
+                odor_latency_s=odor_latency,
+                overwrite=overwrite,
+                non_reactive_threshold=settings.non_reactive_span_px if settings is not None else None,
+            )
 
     secure_cfg = cfg.get("secure_cleanup")
     if secure_cfg:
