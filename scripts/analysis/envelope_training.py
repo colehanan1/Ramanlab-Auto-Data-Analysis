@@ -369,14 +369,41 @@ def _latency_to_cross(
     before_sec: float,
     during_sec: float,
     threshold_mult: float,
+    odor_on_s: float = 30.0,
+    odor_off_s: float = 60.0,
+    odor_latency_s: float = 0.0,
 ) -> Optional[float]:
+    """Compute latency to threshold crossing in response to odor.
+
+    Args:
+        env: Envelope signal (full trial duration)
+        fps: Frames per second
+        before_sec: Baseline window length (used for threshold calculation)
+        during_sec: Response search window length (legacy parameter, may be ignored)
+        threshold_mult: Multiplier for threshold = mean + k*std
+        odor_on_s: Commanded odor ON time (seconds)
+        odor_off_s: Commanded odor OFF time (seconds)
+        odor_latency_s: Transit delay from valve command to fly (seconds)
+
+    Returns:
+        Latency in seconds from odor arrival to threshold crossing, or None
+    """
     if env.size == 0 or not np.isfinite(fps) or fps <= 0:
         return None
 
+    # Baseline window: from trial start to before odor
     b_end = min(int(round(before_sec * fps)), env.size)
-    d_end = min(b_end + int(round(during_sec * fps)), env.size)
     before = env[:b_end]
-    during = env[b_end:d_end]
+
+    # Actual odor arrival times (accounting for latency)
+    odor_on_effective = odor_on_s + odor_latency_s
+    odor_off_effective = odor_off_s + odor_latency_s
+
+    # Response window: from actual odor arrival to odor offset
+    response_start = min(int(round(odor_on_effective * fps)), env.size)
+    response_end = min(int(round(odor_off_effective * fps)), env.size)
+    during = env[response_start:response_end]
+
     if before.size == 0 or during.size == 0:
         return None
 
@@ -386,6 +413,7 @@ def _latency_to_cross(
     idx = np.where(during > theta)[0]
     if idx.size == 0:
         return None
+    # Return latency from actual odor arrival time
     return float(idx[0]) / fps
 
 
@@ -662,6 +690,9 @@ def latency_reports(
     trials_of_interest: Sequence[int],
     fps_default: float,
     overwrite: bool,
+    odor_on_s: float = 30.0,
+    odor_off_s: float = 60.0,
+    odor_latency_s: float = 0.0,
 ) -> None:
     """Generate latency plots and summaries for the requested trials.
 
@@ -670,6 +701,9 @@ def latency_reports(
     the former taking precedence when both supplied) so that existing configs
     and cached CLI invocations continue to function without raising
     ``TypeError`` when mixing versions of the scripts.
+
+    The odor timing parameters (odor_on_s, odor_off_s, odor_latency_s) account
+    for the actual time the odor reaches the fly, not the commanded valve time.
     """
     if threshold_mult is None and threshold_std_mult is None:
         # Maintain the previous implicit default of 4.0 when neither keyword is
@@ -703,7 +737,12 @@ def latency_reports(
             continue
         env = _extract_env(row, env_cols)
         fps = float(row.get("fps", fps_default))
-        latency = _latency_to_cross(env, fps, before_sec, during_sec, threshold_mult)
+        latency = _latency_to_cross(
+            env, fps, before_sec, during_sec, threshold_mult,
+            odor_on_s=odor_on_s,
+            odor_off_s=odor_off_s,
+            odor_latency_s=odor_latency_s,
+        )
         lat_for_mean = latency if (latency is not None and latency <= latency_ceiling) else math.nan
         records.append(
             {
@@ -763,6 +802,18 @@ def build_parser() -> argparse.ArgumentParser:
     )
     env_parser.add_argument("--after-show-sec", type=float, default=30.0, help="Duration to display after odor OFF (seconds).")
     env_parser.add_argument("--threshold-std-mult", type=float, default=4.0, help="Threshold multiplier for baseline std dev.")
+    env_parser.add_argument(
+        "--light-annotation-mode",
+        choices=("none", "line", "paired-span"),
+        default="none",
+        help="Training light annotation style for envelopes.",
+    )
+    env_parser.add_argument(
+        "--max-flies",
+        type=int,
+        default=None,
+        help="Optional cap for number of fly figures to render.",
+    )
     env_parser.add_argument("--overwrite", action="store_true", help="Rebuild plots even if the target files exist.")
 
     lat_parser = sub.add_parser("latency", help="Compute latency-to-threshold metrics from the matrix outputs.")
@@ -783,7 +834,93 @@ def build_parser() -> argparse.ArgumentParser:
     lat_parser.add_argument("--fps-default", type=float, default=40.0, help="Fallback FPS when metadata missing.")
     lat_parser.add_argument("--overwrite", action="store_true", help="Rebuild plots even if the target files exist.")
 
+    # Add a new subcommand for adding time_to_threshold column
+    add_col_parser = sub.add_parser("add-threshold-col", help="Add time_to_threshold column to training CSV.")
+    add_col_parser.add_argument("--csv", type=Path, required=True, help="Training CSV file to augment.")
+    add_col_parser.add_argument("--matrix-npy", type=Path, required=True, help="Float16 matrix produced by the convert step.")
+    add_col_parser.add_argument("--codes-json", type=Path, required=True, help="JSON metadata file from the convert step.")
+    add_col_parser.add_argument("--before-sec", type=float, default=30.0, help="Baseline window length in seconds.")
+    add_col_parser.add_argument("--during-sec", type=float, default=35.0, help="During window length in seconds.")
+    add_col_parser.add_argument("--threshold-mult", type=float, default=2.0, help="Threshold multiplier (mu + k*std).")
+    add_col_parser.add_argument("--fps-default", type=float, default=40.0, help="Fallback FPS when metadata missing.")
+    add_col_parser.add_argument(
+        "--odor-on-s",
+        type=float,
+        default=30.0,
+        help="Commanded odor ON time (seconds).",
+    )
+    add_col_parser.add_argument(
+        "--odor-off-s",
+        type=float,
+        default=60.0,
+        help="Commanded odor OFF time (seconds).",
+    )
+    add_col_parser.add_argument(
+        "--odor-latency-s",
+        type=float,
+        default=2.15,
+        help="Transit delay between valve command and odor at the fly (seconds).",
+    )
+
     return parser
+
+
+def add_time_to_threshold_column(
+    csv_path: Path,
+    matrix_path: Path,
+    codes_json: Path,
+    *,
+    before_sec: float,
+    during_sec: float,
+    threshold_mult: float,
+    fps_default: float,
+    odor_on_s: float = 30.0,
+    odor_off_s: float = 60.0,
+    odor_latency_s: float = 0.0,
+) -> None:
+    """Add 'time_to_threshold' column to training CSV.
+
+    This column represents the time (in seconds) from actual odor arrival
+    (odor_on_s + odor_latency_s) to when the signal crosses the threshold.
+    """
+    # Load the CSV file
+    df_csv = pd.read_csv(csv_path)
+
+    # Load the matrix
+    df_matrix, env_cols = _load_envelope_matrix(matrix_path, codes_json)
+    df_matrix = df_matrix[df_matrix["trial_type"].str.lower() == "training"].copy()
+
+    if df_matrix.empty:
+        raise RuntimeError("No training trials found in matrix.")
+
+    df_matrix["fps"] = df_matrix["fps"].replace([np.inf, -np.inf], np.nan).fillna(fps_default)
+
+    # Create a mapping from (dataset, fly, trial_label) to latency
+    latency_map = {}
+    for _, row in df_matrix.iterrows():
+        env = _extract_env(row, env_cols)
+        fps = float(row.get("fps", fps_default))
+        latency = _latency_to_cross(
+            env, fps, before_sec, during_sec, threshold_mult,
+            odor_on_s=odor_on_s,
+            odor_off_s=odor_off_s,
+            odor_latency_s=odor_latency_s,
+        )
+        key = (row["dataset"], row["fly"], row["trial_label"])
+        latency_map[key] = latency
+
+    # Add the column to the CSV
+    def get_latency(row):
+        key = (row["dataset"], row["fly"], row["trial_label"])
+        return latency_map.get(key)
+
+    df_csv["time_to_threshold"] = df_csv.apply(get_latency, axis=1)
+
+    # Save the updated CSV
+    df_csv.to_csv(csv_path, index=False)
+    print(f"✓ Added 'time_to_threshold' column to {csv_path}")
+    print(f"  - Rows with data: {df_csv['time_to_threshold'].notna().sum()}")
+    print(f"  - Mean latency: {df_csv['time_to_threshold'].mean():.2f}s")
 
 
 def main(argv: Optional[Sequence[str]] = None) -> None:
@@ -803,6 +940,8 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             after_show_sec=args.after_show_sec,
             threshold_std_mult=args.threshold_std_mult,
             trial_type="training",
+            light_annotation_mode=args.light_annotation_mode,
+            max_flies=args.max_flies,
             overwrite=args.overwrite,
         )
         generate_envelope_plots(cfg)
@@ -821,6 +960,21 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             trials_of_interest=tuple(args.trials),
             fps_default=args.fps_default,
             overwrite=args.overwrite,
+        )
+        return
+
+    if args.command == "add-threshold-col":
+        add_time_to_threshold_column(
+            args.csv.expanduser().resolve(),
+            args.matrix_npy.expanduser().resolve(),
+            args.codes_json.expanduser().resolve(),
+            before_sec=args.before_sec,
+            during_sec=args.during_sec,
+            threshold_mult=args.threshold_mult,
+            fps_default=args.fps_default,
+            odor_on_s=args.odor_on_s,
+            odor_off_s=args.odor_off_s,
+            odor_latency_s=args.odor_latency_s,
         )
         return
 

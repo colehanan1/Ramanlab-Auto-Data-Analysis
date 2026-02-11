@@ -52,7 +52,7 @@ from scripts.analysis.envelope_visuals import (
     generate_envelope_plots,
     generate_reaction_matrices,
 )
-from scripts.analysis.envelope_training import latency_reports
+from scripts.analysis.envelope_training import latency_reports, add_time_to_threshold_column
 from scripts.analysis.envelope_combined import (
     CombineConfig,
     build_wide_csv,
@@ -432,6 +432,10 @@ def _envelope_plot_config(data: Mapping[str, Any]) -> tuple[EnvelopePlotConfig, 
     opts = dict(data)
     for key in ("matrix_npy", "codes_json", "out_dir"):
         opts[key] = _ensure_path(opts.get(key), key)
+    trial_type = str(opts.get("trial_type", "testing")).strip().lower()
+    # Ensure training envelope renders include light-line annotations by default.
+    if trial_type == "training" and not str(opts.get("light_annotation_mode", "")).strip():
+        opts["light_annotation_mode"] = "line"
     # Extract SMB path for later use
     smb_path = opts.pop("out_dir_smb", None)
     return EnvelopePlotConfig(**opts), smb_path  # type: ignore[arg-type]
@@ -479,11 +483,20 @@ def _run_training(cfg: Mapping[str, Any] | None) -> None:
 
     envelopes_cfg = cfg.get("envelopes")
     if envelopes_cfg:
-        opts = dict(envelopes_cfg)
-        opts.setdefault("trial_type", "training")
-        config, smb_path = _envelope_plot_config(opts)
-        print(f"[analysis] training.envelopes → {config.out_dir}")
-        generate_envelope_plots(config)
+        entries = (
+            envelopes_cfg
+            if isinstance(envelopes_cfg, Sequence)
+            and not isinstance(envelopes_cfg, (str, bytes))
+            else [envelopes_cfg]
+        )
+        for entry in entries:
+            if not isinstance(entry, Mapping):
+                raise ValueError("training.envelopes entries must be mappings.")
+            opts = dict(entry)
+            opts.setdefault("trial_type", "training")
+            config, smb_path = _envelope_plot_config(opts)
+            print(f"[analysis] training.envelopes → {config.out_dir}")
+            generate_envelope_plots(config)
 
     latency_cfg = cfg.get("latency")
     if latency_cfg:
@@ -491,7 +504,25 @@ def _run_training(cfg: Mapping[str, Any] | None) -> None:
         matrix = _ensure_path(opts.pop("matrix_npy"), "matrix_npy")
         codes = _ensure_path(opts.pop("codes_json"), "codes_json")
         out_dir = _ensure_path(opts.pop("out_dir"), "out_dir")
+        csv_path = _resolve_path(opts.pop("csv_path", None))
         trials = tuple(int(t) for t in opts.pop("trials"))
+
+        # Add time_to_threshold column to CSV first (if csv_path provided)
+        if csv_path and csv_path.exists():
+            print(f"[analysis] training.add_threshold_col → {csv_path}")
+            add_time_to_threshold_column(
+                csv_path,
+                matrix,
+                codes,
+                before_sec=opts.get("before_sec", 30.0),
+                during_sec=opts.get("during_sec", 35.0),
+                threshold_mult=opts.get("threshold_mult", 2.0),
+                fps_default=opts.get("fps_default", 40.0),
+                odor_on_s=opts.get("odor_on_s", 30.0),
+                odor_off_s=opts.get("odor_off_s", 60.0),
+                odor_latency_s=opts.get("odor_latency_s", 0.0),
+            )
+
         print(f"[analysis] training.latency → {out_dir}")
         latency_reports(
             matrix,
@@ -1379,20 +1410,24 @@ def _batch_copy_to_smb(raw_cfg: Dict[str, Any]) -> None:
 
         envelopes_cfg = env_vis_cfg.get("envelopes")
         if envelopes_cfg:
-            out_dir = Path(envelopes_cfg.get("out_dir", ""))
-            smb_path = envelopes_cfg.get("out_dir_smb")
-            if out_dir.exists() and smb_path:
-                copies_to_make.append((out_dir, smb_path))
+            entries = envelopes_cfg if isinstance(envelopes_cfg, list) else [envelopes_cfg]
+            for env_cfg in entries:
+                out_dir = Path(env_cfg.get("out_dir", ""))
+                smb_path = env_cfg.get("out_dir_smb")
+                if out_dir.exists() and smb_path:
+                    copies_to_make.append((out_dir, smb_path))
 
     # Collect training outputs
     training_cfg = analysis_cfg.get("training", {})
     if training_cfg:
         envelopes_cfg = training_cfg.get("envelopes")
         if envelopes_cfg:
-            out_dir = Path(envelopes_cfg.get("out_dir", ""))
-            smb_path = envelopes_cfg.get("out_dir_smb")
-            if out_dir.exists() and smb_path:
-                copies_to_make.append((out_dir, smb_path))
+            entries = envelopes_cfg if isinstance(envelopes_cfg, list) else [envelopes_cfg]
+            for env_cfg in entries:
+                out_dir = Path(env_cfg.get("out_dir", ""))
+                smb_path = env_cfg.get("out_dir_smb")
+                if out_dir.exists() and smb_path:
+                    copies_to_make.append((out_dir, smb_path))
 
     # Collect combined outputs
     combined_cfg = analysis_cfg.get("combined", {})
