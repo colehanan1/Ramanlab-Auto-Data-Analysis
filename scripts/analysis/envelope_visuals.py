@@ -217,6 +217,21 @@ TESTING_DATASET_ALIAS = {
     "opto_3-oct": "opto_3-oct",
 }
 NON_REACTIVE_SPAN_PX = 7.5
+TRAINING_EXTENDED_ODOR_TRIALS = frozenset({4, 6, 8})
+TRAINING_EXTENDED_ODOR_OFF_S = 65.0
+TRAINING_DISCRIMINATE_ODOR_TRIALS = frozenset({5, 7})
+LIGHT_START_EARLY_TRIALS = frozenset({1, 2, 3})
+LIGHT_START_LATE_TRIALS = frozenset({4, 6, 8})
+LIGHT_START_EARLY_S = 35.0
+LIGHT_START_LATE_S = 40.0
+ODOR_PLUS_LIGHT_COLOR = "#9e9e9e"
+ODOR_PLUS_LIGHT_ALPHA = 0.20
+ODOR_PLUS_LIGHT_LINGER_ALPHA = 0.12
+DISCRIMINATE_ODOR_COLOR = "#4d4d4d"
+DISCRIMINATE_ODOR_ALPHA = 0.28
+DISCRIMINATE_ODOR_LINGER_ALPHA = 0.18
+DISCRIMINATE_ODOR_LABEL = "Discriminate odor"
+ODOR_PLUS_LIGHT_LABEL = "Odor + light"
 
 
 # ---------------------------------------------------------------------------
@@ -313,6 +328,47 @@ def should_write(path: Path, overwrite: bool) -> bool:
 def _trial_num(label: str) -> int:
     match = re.search(r"(\d+)", str(label))
     return int(match.group(1)) if match else -1
+
+
+def _trial_odor_window_seconds(
+    *,
+    trial_label: str,
+    trial_type: str,
+    odor_on_s: float,
+    odor_off_s: float,
+    odor_latency_s: float,
+) -> tuple[float, float]:
+    """Return latency-shifted odor on/off times (seconds) for one trial."""
+
+    on_cmd = float(odor_on_s)
+    off_cmd = float(odor_off_s)
+    if trial_type == "training" and _trial_num(trial_label) in TRAINING_EXTENDED_ODOR_TRIALS:
+        off_cmd = TRAINING_EXTENDED_ODOR_OFF_S
+
+    off_cmd = max(off_cmd, on_cmd)
+    latency = max(float(odor_latency_s), 0.0)
+    return on_cmd + latency, off_cmd + latency
+
+
+def _trial_light_start_seconds(*, trial_label: str, trial_type: str) -> float | None:
+    """Return light pulsing start time (seconds) for training trials."""
+
+    if trial_type != "training":
+        return None
+    trial_num = _trial_num(trial_label)
+    if trial_num in LIGHT_START_EARLY_TRIALS:
+        return LIGHT_START_EARLY_S
+    if trial_num in LIGHT_START_LATE_TRIALS:
+        return LIGHT_START_LATE_S
+    return None
+
+
+def _is_discriminate_odor_trial(*, trial_label: str, trial_type: str) -> bool:
+    """Return True for training trials using the discriminate-only odor condition."""
+
+    if trial_type != "training":
+        return False
+    return _trial_num(trial_label) in TRAINING_DISCRIMINATE_ODOR_TRIALS
 
 
 def _trained_label(dataset_canon: str) -> str:
@@ -1394,6 +1450,8 @@ class EnvelopePlotConfig:
     after_show_sec: float = 30.0
     threshold_std_mult: float = 4.0
     trial_type: str = "testing"
+    light_annotation_mode: str = "none"
+    max_flies: int | None = None
     overwrite: bool = False
 
 
@@ -1402,6 +1460,13 @@ def generate_envelope_plots(cfg: EnvelopePlotConfig) -> None:
     trial_type = cfg.trial_type.strip().lower()
     if trial_type not in {"testing", "training"}:
         raise ValueError(f"Unsupported trial type: {cfg.trial_type!r}")
+    light_annotation_mode = str(cfg.light_annotation_mode).strip().lower()
+    if light_annotation_mode not in {"none", "line", "paired-span"}:
+        raise ValueError(
+            f"Unsupported light_annotation_mode: {cfg.light_annotation_mode!r}; "
+            "expected one of {'none', 'line', 'paired-span'}."
+        )
+    max_flies = cfg.max_flies if cfg.max_flies is None else max(int(cfg.max_flies), 1)
 
     # Robust trial type filtering with diagnostics
     df_filtered, success, reason = filter_and_validate_trial_type(
@@ -1451,15 +1516,19 @@ def generate_envelope_plots(cfg: EnvelopePlotConfig) -> None:
     odor_latency = max(cfg.odor_latency_s, 0.0)
     odor_on_cmd = cfg.odor_on_s
     odor_off_cmd = cfg.odor_off_s
-    odor_on_effective = odor_on_cmd + odor_latency
     odor_off_effective = odor_off_cmd + odor_latency
     linger = max(cfg.latency_sec, 0.0)
     x_max_limit = odor_off_effective + linger + cfg.after_show_sec
 
+    flies_rendered = 0
     for (fly, fly_number), fly_df in df.groupby(["fly", "fly_number"], sort=False):
+        if max_flies is not None and flies_rendered >= max_flies:
+            break
         fly_df = fly_df.sort_values("trial_label", key=lambda s: s.map(_trial_num))
         indices = fly_df.index.to_numpy()
-        trial_curves: list[tuple[str, np.ndarray, np.ndarray, float, bool]] = []
+        trial_curves: list[
+            tuple[str, np.ndarray, np.ndarray, float, bool, float, float, float | None, bool]
+        ] = []
         y_max = 0.0
 
         dataset_candidates = [dataset_lookup[idx] for idx in indices if dataset_lookup[idx]]
@@ -1477,7 +1546,7 @@ def generate_envelope_plots(cfg: EnvelopePlotConfig) -> None:
             f"trials={len(indices)}",
             f"output={out_path}",
         )
-        if out_path.exists():
+        if out_path.exists() and not cfg.overwrite:
             continue
 
         for idx in indices:
@@ -1495,15 +1564,40 @@ def generate_envelope_plots(cfg: EnvelopePlotConfig) -> None:
 
             theta = _compute_theta(env, fps, odor_on_cmd, cfg.threshold_std_mult)
             dataset_canon = dataset_lookup[idx]
-            odor_name = _display_odor(dataset_canon, trial_lookup[idx])
+            trial_label = trial_lookup[idx]
+            odor_name = _display_odor(dataset_canon, trial_label)
             is_trained = _is_trained_odor(dataset_canon, odor_name)
+            trial_on_effective, trial_off_effective = _trial_odor_window_seconds(
+                trial_label=trial_label,
+                trial_type=trial_type,
+                odor_on_s=odor_on_cmd,
+                odor_off_s=odor_off_cmd,
+                odor_latency_s=odor_latency,
+            )
+            light_start_s = _trial_light_start_seconds(trial_label=trial_label, trial_type=trial_type)
+            is_discriminate_odor = _is_discriminate_odor_trial(
+                trial_label=trial_label,
+                trial_type=trial_type,
+            )
 
             max_local = float(np.nanmax(env)) if np.isfinite(env).any() else 0.0
             if math.isfinite(theta):
                 max_local = max(max_local, theta)
             y_max = max(y_max, max_local)
 
-            trial_curves.append((odor_name, t_full, env, theta, is_trained))
+            trial_curves.append(
+                (
+                    odor_name,
+                    t_full,
+                    env,
+                    theta,
+                    is_trained,
+                    trial_on_effective,
+                    trial_off_effective,
+                    light_start_s,
+                    is_discriminate_odor,
+                )
+            )
 
         if not trial_curves:
             continue
@@ -1527,15 +1621,70 @@ def generate_envelope_plots(cfg: EnvelopePlotConfig) -> None:
         if n_rows == 1:
             axes = [axes]
 
-        for ax, (odor_name, t, env, theta, is_trained) in zip(axes, trial_curves):
+        for ax, (
+            odor_name,
+            t,
+            env,
+            theta,
+            is_trained,
+            trial_on_effective,
+            trial_off_effective,
+            light_start_s,
+            is_discriminate_odor,
+        ) in zip(axes, trial_curves):
             ax.plot(t, env, linewidth=1.2, color="black")
-            ax.axvline(odor_on_effective, linestyle="--", linewidth=1.0, color="black")
-            ax.axvline(odor_off_effective, linestyle="--", linewidth=1.0, color="black")
+            ax.axvline(trial_on_effective, linestyle="--", linewidth=1.0, color="black")
+            ax.axvline(trial_off_effective, linestyle="--", linewidth=1.0, color="black")
 
-            transit_on_end = min(odor_on_effective, x_max_limit)
-            effective_off_end = min(odor_off_effective + linger, x_max_limit)
-            if effective_off_end > transit_on_end:
-                ax.axvspan(transit_on_end, effective_off_end, alpha=0.15, color="gray")
+            transit_on_end = min(trial_on_effective, x_max_limit)
+            steady_off_end = min(trial_off_effective, x_max_limit)
+            linger_off_end = min(trial_off_effective + linger, x_max_limit)
+            odor_bar_color = DISCRIMINATE_ODOR_COLOR if is_discriminate_odor else ODOR_PLUS_LIGHT_COLOR
+            odor_bar_alpha = DISCRIMINATE_ODOR_ALPHA if is_discriminate_odor else ODOR_PLUS_LIGHT_ALPHA
+            odor_linger_alpha = (
+                DISCRIMINATE_ODOR_LINGER_ALPHA
+                if is_discriminate_odor
+                else ODOR_PLUS_LIGHT_LINGER_ALPHA
+            )
+
+            if light_annotation_mode == "paired-span" and light_start_s is not None:
+                light_start_eff = min(max(light_start_s, transit_on_end), steady_off_end)
+                if light_start_eff > transit_on_end:
+                    ax.axvspan(
+                        transit_on_end,
+                        light_start_eff,
+                        alpha=odor_bar_alpha,
+                        color=odor_bar_color,
+                    )
+                if steady_off_end > light_start_eff:
+                    ax.axvspan(
+                        light_start_eff,
+                        steady_off_end,
+                        alpha=0.22,
+                        color="#f4a261",
+                    )
+                if linger_off_end > steady_off_end:
+                    ax.axvspan(
+                        steady_off_end,
+                        linger_off_end,
+                        alpha=odor_linger_alpha,
+                        color=odor_bar_color,
+                    )
+            elif linger_off_end > transit_on_end:
+                ax.axvspan(
+                    transit_on_end,
+                    linger_off_end,
+                    alpha=odor_bar_alpha,
+                    color=odor_bar_color,
+                )
+
+            if light_annotation_mode == "line" and light_start_s is not None and light_start_s <= x_max_limit:
+                ax.axvline(
+                    light_start_s,
+                    linestyle="-.",
+                    linewidth=1.3,
+                    color="tab:green",
+                )
 
             if math.isfinite(theta):
                 ax.axhline(theta, linestyle="-", linewidth=1.0, color="tab:red", alpha=0.9)
@@ -1554,9 +1703,51 @@ def generate_envelope_plots(cfg: EnvelopePlotConfig) -> None:
 
         legend_handles = [
             plt.Line2D([0], [0], linestyle="--", linewidth=1.0, color="black", label="Odor at fly"),
-            plt.Rectangle((0, 0), 1, 1, alpha=0.15, color="gray", label="Odor present / linger"),
-            plt.Line2D([0], [0], linestyle="-", linewidth=1.0, color="tab:red", label=r"$\theta = \mu_{before} + k\sigma_{before}$"),
+            plt.Rectangle(
+                (0, 0),
+                1,
+                1,
+                alpha=ODOR_PLUS_LIGHT_ALPHA,
+                color=ODOR_PLUS_LIGHT_COLOR,
+                label=ODOR_PLUS_LIGHT_LABEL,
+            ),
         ]
+        if trial_type == "training":
+            legend_handles.append(
+                plt.Rectangle(
+                    (0, 0),
+                    1,
+                    1,
+                    alpha=DISCRIMINATE_ODOR_ALPHA,
+                    color=DISCRIMINATE_ODOR_COLOR,
+                label=DISCRIMINATE_ODOR_LABEL,
+                )
+            )
+        if light_annotation_mode == "line":
+            legend_handles.append(
+                plt.Line2D(
+                    [0],
+                    [0],
+                    linestyle="-.",
+                    linewidth=1.3,
+                    color="tab:green",
+                    label="Light pulsing starts",
+                )
+            )
+        elif light_annotation_mode == "paired-span":
+            legend_handles.append(
+                plt.Rectangle(
+                    (0, 0),
+                    1,
+                    1,
+                    alpha=0.22,
+                    color="#f4a261",
+                    label="Light + Odor Paired",
+                )
+            )
+        legend_handles.append(
+            plt.Line2D([0], [0], linestyle="-", linewidth=1.0, color="tab:red", label=r"$\theta = \mu_{before} + k\sigma_{before}$")
+        )
         fig.legend(
             handles=legend_handles,
             loc="upper right",
@@ -1573,8 +1764,9 @@ def generate_envelope_plots(cfg: EnvelopePlotConfig) -> None:
         fly_flagged = bool(non_reactive_mask(fly_df).any())
         title_y = 0.995
         subtitle_y = title_y - 0.035
+        phase_label = "Training" if trial_type == "training" else "Testing"
         fig.suptitle(
-            "Proboscis Distance Across Testing Trials",
+            f"Proboscis Distance Across {phase_label} Trials",
             y=title_y,
             fontsize=14,
             weight="bold",
@@ -1594,6 +1786,7 @@ def generate_envelope_plots(cfg: EnvelopePlotConfig) -> None:
 
         if should_write(out_path, cfg.overwrite):
             fig.savefig(out_path, dpi=300, bbox_inches="tight")
+            flies_rendered += 1
 
         plt.close(fig)
 
@@ -1652,6 +1845,21 @@ def _parse_envelopes_args(subparser: argparse.ArgumentParser) -> None:
         default="testing",
         help="Trial type to visualise.",
     )
+    subparser.add_argument(
+        "--light-annotation-mode",
+        choices=("none", "line", "paired-span"),
+        default="none",
+        help=(
+            "Training-only light annotation style: none, a vertical line at light onset, "
+            "or a paired-color span from light onset to odor OFF."
+        ),
+    )
+    subparser.add_argument(
+        "--max-flies",
+        type=int,
+        default=None,
+        help="Optional cap for number of fly figures to render (useful for quick samples).",
+    )
     subparser.add_argument("--overwrite", action="store_true", help="Rebuild plots even if the target files exist.")
 
 
@@ -1708,6 +1916,8 @@ def main(argv: Sequence[str] | None = None) -> None:
             after_show_sec=args.after_show_sec,
             threshold_std_mult=args.threshold_std_mult,
             trial_type=args.trial_type,
+            light_annotation_mode=args.light_annotation_mode,
+            max_flies=args.max_flies,
             overwrite=args.overwrite,
         )
         generate_envelope_plots(cfg)
