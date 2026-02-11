@@ -700,6 +700,7 @@ def _run_combined(cfg: Mapping[str, Any] | None, settings: Settings | None) -> N
             for path in wide_cfg.get("exclude_roots", [])
         ]
         trial_type_filter = wide_cfg.get("trial_type_filter")
+        use_per_trial_baseline = wide_cfg.get("use_per_trial_baseline", False)
         extra_exports_cfg = wide_cfg.get("trial_type_exports", [])
         extra_exports: dict[str, str] = {}
         extra_matrix_dirs: dict[str, str] = {}
@@ -739,6 +740,7 @@ def _run_combined(cfg: Mapping[str, Any] | None, settings: Settings | None) -> N
             trial_type_filter=trial_type_filter,
             extra_trial_exports=extra_exports or None,
             non_reactive_threshold=non_reactive_threshold,
+            use_per_trial_baseline=use_per_trial_baseline,
         )
 
         for trial_key, matrix_dir in extra_matrix_dirs.items():
@@ -838,6 +840,7 @@ def _run_combined(cfg: Mapping[str, Any] | None, settings: Settings | None) -> N
                 trial_type_filter=trial_type_filter,
                 extra_trial_exports=extra_exports or None,
                 non_reactive_threshold=non_reactive_threshold,
+                use_per_trial_baseline=use_per_trial_baseline,
             )
 
             for trial_key, matrix_dir in extra_matrix_dirs.items():
@@ -965,6 +968,7 @@ def _run_combined(cfg: Mapping[str, Any] | None, settings: Settings | None) -> N
                 trial_type_filter=trial_type_filter,
                 extra_trial_exports=extra_exports,
                 non_reactive_threshold=non_reactive_threshold,
+                use_per_trial_baseline=use_per_trial_baseline,
             )
 
             print(f"[analysis] combined.pair_groups[{pair_name}].matrix → {pair_matrix_dir}")

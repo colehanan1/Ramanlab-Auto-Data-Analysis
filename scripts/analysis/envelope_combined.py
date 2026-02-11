@@ -1406,6 +1406,7 @@ def _compute_trial_metrics(
     fallback_fps: float,
     default_fps: float,
     fly_before_mean: float,
+    use_per_trial_baseline: bool = False,
 ) -> dict[str, float]:
     env = np.asarray(values, dtype=float)
     total_len = env.size
@@ -1418,9 +1419,16 @@ def _compute_trial_metrics(
     before_mean = float(np.nanmean(before)) if before.size else math.nan
     before_std = float(np.nanstd(before)) if before.size else 0.0
 
-    baseline = fly_before_mean
-    if not np.isfinite(baseline):
+    # Select baseline mode
+    if use_per_trial_baseline:
+        # Use only this trial's before period
         baseline = before_mean
+    else:
+        # Use the fly-level mean (current behavior)
+        baseline = fly_before_mean
+        if not np.isfinite(baseline):
+            baseline = before_mean
+
     if not np.isfinite(baseline):
         baseline = 0.0
     if not np.isfinite(before_std):
@@ -1806,6 +1814,7 @@ def build_wide_csv(
     trial_type_filter: str | Sequence[str] | None = None,
     extra_trial_exports: Mapping[str, str] | None = None,
     non_reactive_threshold: float | None = None,
+    use_per_trial_baseline: bool = False,
 ) -> None:
     print(
         f"[DEBUG] build_wide_csv → roots={list(roots)} output={output_csv} measure_cols={list(measure_cols)}"
@@ -2089,6 +2098,7 @@ def build_wide_csv(
                 fallback_fps=fps_fallback,
                 default_fps=fps_fallback,
                 fly_before_mean=fly_before_means.get(item["fly_key"], float("nan")),
+                use_per_trial_baseline=use_per_trial_baseline,
             )
 
             finite_mask = np.isfinite(values)
@@ -2748,6 +2758,11 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Override non-reactive span threshold (pixels) for trimmed span flagging.",
     )
+    wide_parser.add_argument(
+        "--use-per-trial-baseline",
+        action="store_true",
+        help="Use each trial's own before-period for baseline instead of fly-level mean.",
+    )
 
     matrix_parser = subparsers.add_parser("matrix", help="Convert wide CSV → float16 matrix + metadata.")
     matrix_parser.add_argument("--input-csv", required=True)
@@ -2833,6 +2848,7 @@ def main(argv: Sequence[str] | None = None) -> None:
             exclude_roots=args.exclude_root,
             config_path=args.config,
             non_reactive_threshold=args.non_reactive_threshold,
+            use_per_trial_baseline=args.use_per_trial_baseline,
         )
         return
 

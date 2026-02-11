@@ -113,6 +113,7 @@ def _compute_trial_metrics(
     fallback_fps: float,
     default_fps: float,
     fly_before_mean: float,
+    use_per_trial_baseline: bool = False,
 ) -> dict[str, float]:
     total_len = env.size
     before_end, during_start, during_end, after_end = _segment_bounds(total_len)
@@ -124,9 +125,16 @@ def _compute_trial_metrics(
     before_mean = float(np.nanmean(before)) if before.size else np.nan
     before_std = float(np.nanstd(before)) if before.size else 0.0
 
-    baseline = fly_before_mean
-    if not np.isfinite(baseline):
+    # Select baseline mode
+    if use_per_trial_baseline:
+        # Use only this trial's before period
         baseline = before_mean
+    else:
+        # Use the fly-level mean (current behavior)
+        baseline = fly_before_mean
+        if not np.isfinite(baseline):
+            baseline = before_mean
+
     if not np.isfinite(baseline):
         baseline = 0.0
     if not np.isfinite(before_std):
@@ -281,6 +289,7 @@ class CollectConfig:
     window_sec: float
     fallback_fps: float
     out_csv: Path
+    use_per_trial_baseline: bool = False
 
     @property
     def window_frames(self) -> int:
@@ -506,6 +515,7 @@ def collect_envelopes(cfg: CollectConfig) -> None:
             fallback_fps=cfg.fallback_fps,
             default_fps=cfg.fps_default,
             fly_before_mean=fly_before_means.get(row["fly"], float("nan")),
+            use_per_trial_baseline=cfg.use_per_trial_baseline,
         )
 
         padded = np.full(max_len, np.nan, dtype=float)
@@ -679,6 +689,11 @@ def _parse_collect_args(subparser: argparse.ArgumentParser) -> None:
         default=None,
         help="Output CSV path for the combined envelope table.",
     )
+    subparser.add_argument(
+        "--use-per-trial-baseline",
+        action="store_true",
+        help="Use each trial's own before-period for baseline instead of fly-level mean.",
+    )
 
 
 def _parse_convert_args(subparser: argparse.ArgumentParser) -> None:
@@ -738,6 +753,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         if not out_csv:
             raise SystemExit("No output CSV configured. Provide --out-csv or set analysis.combined.wide.output_csv.")
 
+        use_per_trial = args.use_per_trial_baseline or wide_cfg.get("use_per_trial_baseline", False)
         cfg = CollectConfig(
             roots=list(roots),
             measure_cols=args.measure_cols,
@@ -745,6 +761,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             window_sec=args.window_sec,
             fallback_fps=args.fallback_fps,
             out_csv=Path(out_csv),
+            use_per_trial_baseline=use_per_trial,
         )
         collect_envelopes(cfg)
         return
