@@ -531,6 +531,21 @@ pytest tests/test_envelope_combined.py
 
 ## Standalone analysis scripts
 
+### Dataset-level mean +/- SEM plots
+
+Generate per-dataset mean +/- SEM traces of Distance % for each testing odor:
+
+```bash
+python scripts/analysis/dataset_means.py \
+    --config config/config.yaml \
+    --outdir artifacts/dataset_means
+```
+
+Each dataset listed under `analysis.combined.combine.roots` produces a multi-panel
+figure (one panel per odor) and a JSON sidecar with metadata.  Use `--roots` to
+process specific directories, or `--fps`, `--odor-on-s`, `--odor-off-s` to
+override timing from the config.
+
 ### Reaction matrices from spreadsheet predictions
 
 Generate the black/white reaction matrices directly from the manual scoring
