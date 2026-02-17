@@ -1,8 +1,10 @@
-"""Generate dataset-level mean +/- SEM plots of Distance % for testing odors.
+"""Generate dataset-level mean plots of Distance % for testing odors.
 
-For each dataset root, produces one figure with one panel per odor showing the
-across-fly mean +/- SEM trace over time, with shaded odor presentation windows.
-A JSON sidecar with metadata is saved alongside each figure.
+Reads the pre-built wide-format CSV (all_envelope_rows_wide.csv) and
+optionally filters out flagged flies using flagged-flys-truth.csv.
+
+For each dataset, produces one figure with all odors overlaid and a JSON
+sidecar with metadata.
 
 Example
 -------
@@ -41,36 +43,31 @@ if _src_str not in sys.path:
     sys.path.insert(0, _src_str)
 
 from fbpipe.config import load_settings, resolve_config_path  # noqa: E402
-from fbpipe.utils.columns import (  # noqa: E402
-    find_proboscis_distance_percentage_column,
-    find_proboscis_distance_column,
-    find_proboscis_min_distance_column,
-    find_proboscis_max_distance_column,
-)
 from fbpipe.utils.nanstats import (  # noqa: E402
     count_finite_contributors,
     nan_pad_stack,
     nanmean_sem,
 )
 from scripts.analysis.envelope_combined import (  # noqa: E402
-    DIST_COLS,
     _canon_dataset,
     _display_odor,
-    _infer_category,
-    _locate_trials,
-    _pick_column,
-    _trial_label,
 )
 
 LOGGER = logging.getLogger("dataset_means")
-
-TRIAL_NUM_RE = re.compile(r"(\d+)")
 
 # ---------------------------------------------------------------------------
 # Plotting style (consistent with existing repo conventions)
 # ---------------------------------------------------------------------------
 DPI = 300
 FIGWIDTH = 8
+
+# Default paths for the wide CSV and flagged-flies CSV
+DEFAULT_WIDE_CSV = Path(
+    "/home/ramanlab/Documents/cole/Data/Opto/Combined/all_envelope_rows_wide.csv"
+)
+DEFAULT_FLAGGED_CSV = Path(
+    "/home/ramanlab/Documents/cole/Data/Opto/Combined/flagged-flys-truth.csv"
+)
 
 
 def _configure_logging(verbose: bool) -> None:
@@ -93,78 +90,70 @@ def _save_figure(fig: plt.Figure, base_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Data helpers
+# Flagged-fly filtering
 # ---------------------------------------------------------------------------
 
-def _read_distance_pct(
-    csv_path: Path,
-    min_floor_px: float,
-) -> Optional[np.ndarray]:
-    """Read a trial CSV and return the Distance % trace as a 1-D array.
+def load_excluded_flies(flagged_csv: Path) -> set[tuple[str, str, int]]:
+    """Load flagged-flys-truth.csv and return set of (dataset, fly, fly_number)
+    tuples that should be EXCLUDED (state 0 or -1).
 
-    If a ``distance_percentage`` column exists it is used directly.
-    Otherwise the raw distance is normalised using min/max columns
-    with an effective-minimum floor.  Returns *None* on failure.
+    Flies not in the CSV are included. Flies with state=1 are included.
     """
-    try:
-        df = pd.read_csv(csv_path)
-    except Exception as exc:
-        LOGGER.warning("Failed to read %s: %s", csv_path, exc)
-        return None
+    if not flagged_csv.exists():
+        LOGGER.warning("Flagged-flies CSV not found: %s — no filtering applied", flagged_csv)
+        return set()
 
-    pct_col = find_proboscis_distance_percentage_column(df)
-    if pct_col is not None:
-        vals = pd.to_numeric(df[pct_col], errors="coerce").to_numpy(dtype=np.float64)
-        return vals
+    df = pd.read_csv(flagged_csv)
+    # The state column has a verbose name; find it
+    state_col = None
+    for col in df.columns:
+        if "FLY-State" in col or "fly-state" in col.lower():
+            state_col = col
+            break
+    if state_col is None:
+        LOGGER.warning("No FLY-State column found in %s — no filtering applied", flagged_csv)
+        return set()
 
-    # Fallback: normalise raw distance with min/max columns
-    dist_col_name = _pick_column(df, DIST_COLS)
-    if dist_col_name is None:
-        dist_col_name_alt = find_proboscis_distance_column(df)
-        if dist_col_name_alt is None:
-            LOGGER.debug("No distance column in %s", csv_path)
-            return None
-        dist_col_name = dist_col_name_alt
+    # Exclude flies with state 0 or -1
+    excluded = df[df[state_col].isin([0, -1])]
+    result = set()
+    for _, row in excluded.iterrows():
+        result.add((str(row["dataset"]).strip(), str(row["fly"]).strip(), int(row["fly_number"])))
 
-    raw = pd.to_numeric(df[dist_col_name], errors="coerce").to_numpy(dtype=np.float64)
-    min_col = find_proboscis_min_distance_column(df)
-    max_col = find_proboscis_max_distance_column(df)
-    if min_col and max_col:
-        raw_min = pd.to_numeric(df[min_col], errors="coerce").iloc[0]
-        raw_max = pd.to_numeric(df[max_col], errors="coerce").iloc[0]
-    else:
-        raw_min = np.nanmin(raw)
-        raw_max = np.nanmax(raw)
-
-    eff_min = max(float(raw_min), min_floor_px)
-    span = float(raw_max) - eff_min
-    if span <= 0:
-        LOGGER.debug("Zero span in %s (raw_max=%.2f, eff_min=%.2f)", csv_path, raw_max, eff_min)
-        return None
-
-    vals = 100.0 * (raw - eff_min) / span
-    vals[raw < min_floor_px] = np.nan
-    return vals
-
-
-def _trial_number(label: str) -> int:
-    m = TRIAL_NUM_RE.search(label)
-    return int(m.group(1)) if m else -1
+    LOGGER.info(
+        "Flagged-fly filter: %d entries in CSV, %d excluded (state 0 or -1), %d kept (state 1)",
+        len(df),
+        len(result),
+        len(df) - len(result),
+    )
+    return result
 
 
 # ---------------------------------------------------------------------------
-# Core aggregation
+# Core aggregation (from wide CSV)
 # ---------------------------------------------------------------------------
 
 
 def compute_dataset_means(
-    dataset_root: Path,
+    wide_df: pd.DataFrame,
+    dataset_name: str,
     *,
-    trial_type: str = "testing",
-    min_floor_px: float = 9.5,
+    excluded_flies: set[tuple[str, str, int]] | None = None,
     fps: float = 40.0,
 ) -> dict[str, dict]:
-    """Discover flies under *dataset_root* and aggregate per-odor mean/SEM.
+    """Aggregate per-odor mean traces for a single dataset from the wide CSV.
+
+    Parameters
+    ----------
+    wide_df : pd.DataFrame
+        The full wide-format DataFrame (all_envelope_rows_wide.csv) already
+        filtered to `dataset == dataset_name`.
+    dataset_name : str
+        Name of the dataset being processed.
+    excluded_flies : set, optional
+        Set of (dataset, fly, fly_number) tuples to exclude.
+    fps : float
+        Frames per second (used only for logging).
 
     Returns a dict keyed by odor label with values::
 
@@ -173,71 +162,83 @@ def compute_dataset_means(
             "sem": np.ndarray,
             "n_flies": int,
             "fly_names": list[str],
-            "source_csvs": list[str],
         }
-
-    Returns an empty dict if no usable data is found.
     """
-    dataset_name = dataset_root.name
+    if excluded_flies is None:
+        excluded_flies = set()
+
     dataset_canon = _canon_dataset(dataset_name)
     LOGGER.info("Dataset: %s (canon=%s)", dataset_name, dataset_canon)
 
-    # odor_label -> list of per-fly mean traces
-    odor_fly_traces: dict[str, list[np.ndarray]] = defaultdict(list)
-    odor_fly_names: dict[str, list[str]] = defaultdict(list)
-    odor_source_csvs: dict[str, list[str]] = defaultdict(list)
-
-    fly_dirs = sorted(p for p in dataset_root.iterdir() if p.is_dir())
-    if not fly_dirs:
-        LOGGER.warning("No fly directories found in %s", dataset_root)
+    # Identify dir_val columns (the trace)
+    dir_cols = sorted(
+        [c for c in wide_df.columns if c.startswith("dir_val_")],
+        key=lambda c: int(c.split("_")[-1]),
+    )
+    if not dir_cols:
+        LOGGER.warning("No dir_val_* columns found")
         return {}
 
-    for fly_dir in fly_dirs:
-        fly_name = fly_dir.name
-        LOGGER.debug("  Fly: %s", fly_name)
-
-        entries = _locate_trials(
-            fly_dir,
-            ("*fly*_distances.csv", "*_distances.csv"),
-            DIST_COLS,
+    # Filter out excluded flies
+    pre_filter = len(wide_df)
+    if excluded_flies:
+        mask = wide_df.apply(
+            lambda row: (
+                str(row["dataset"]).strip(),
+                str(row["fly"]).strip(),
+                int(row["fly_number"]),
+            ) not in excluded_flies,
+            axis=1,
         )
-        # Filter to requested trial type
-        type_entries = [
-            (label, path, cat)
-            for label, path, cat in entries
-            if cat == trial_type
-        ]
-        if not type_entries:
-            LOGGER.debug("  No %s trials for %s", trial_type, fly_name)
-            continue
+        wide_df = wide_df[mask]
+    post_filter = len(wide_df)
+    if pre_filter != post_filter:
+        LOGGER.info(
+            "  Filtered: %d → %d rows (%d excluded)",
+            pre_filter, post_filter, pre_filter - post_filter,
+        )
 
-        # Group trials by odor label
-        odor_trials: dict[str, list[tuple[str, Path]]] = defaultdict(list)
-        for label, path, _cat in type_entries:
-            odor = _display_odor(dataset_canon, label)
-            odor_trials[odor].append((label, path))
+    if wide_df.empty:
+        LOGGER.warning("No data after filtering for %s", dataset_name)
+        return {}
 
-        for odor, trials in odor_trials.items():
-            traces = []
-            csv_paths = []
-            for label, path in trials:
-                trace = _read_distance_pct(path, min_floor_px)
-                if trace is not None and len(trace) > 0 and np.any(np.isfinite(trace)):
-                    traces.append(trace)
-                    csv_paths.append(str(path))
+    # Group by (fly, fly_number) to identify unique flies,
+    # then by trial_label to get odor
+    # odor -> list of per-fly mean traces
+    odor_fly_traces: dict[str, list[np.ndarray]] = defaultdict(list)
+    odor_fly_names: dict[str, list[str]] = defaultdict(list)
 
+    # Group rows by fly identity
+    fly_groups = wide_df.groupby(["fly", "fly_number"])
+
+    for (fly_name, fly_num), fly_rows in fly_groups:
+        fly_id = f"{fly_name}_fly{fly_num}"
+        LOGGER.debug("  Fly: %s", fly_id)
+
+        # Group this fly's trials by odor
+        odor_trials: dict[str, list[np.ndarray]] = defaultdict(list)
+        for _, row in fly_rows.iterrows():
+            trial_label = str(row["trial_label"])
+            odor = _display_odor(dataset_canon, trial_label)
+            trace = row[dir_cols].to_numpy(dtype=np.float64)
+            # Trim trailing NaNs
+            finite_mask = np.isfinite(trace)
+            if not finite_mask.any():
+                continue
+            last_finite = np.where(finite_mask)[0][-1]
+            trace = trace[: last_finite + 1]
+            odor_trials[odor].append(trace)
+
+        # Per-fly mean across trials for each odor
+        for odor, traces in odor_trials.items():
             if not traces:
                 continue
-
-            # Per-fly mean across this fly's trials for the odor
             stacked = nan_pad_stack(traces)
             with np.errstate(all="ignore"):
                 fly_mean = np.nanmean(stacked, axis=0)
-
             if np.any(np.isfinite(fly_mean)):
                 odor_fly_traces[odor].append(fly_mean)
-                odor_fly_names[odor].append(fly_name)
-                odor_source_csvs[odor].extend(csv_paths)
+                odor_fly_names[odor].append(fly_id)
 
     if not odor_fly_traces:
         LOGGER.warning("No usable data found for dataset %s", dataset_name)
@@ -254,8 +255,8 @@ def compute_dataset_means(
             "sem": sem,
             "n_flies": n_flies,
             "fly_names": odor_fly_names[odor],
-            "source_csvs": odor_source_csvs[odor],
         }
+        LOGGER.info("  %s: n=%d flies", odor, n_flies)
     return results
 
 
@@ -317,7 +318,6 @@ def write_sidecar(
     fps: float,
     odor_on_s: float,
     odor_off_s: float,
-    min_floor_px: float,
     trial_type: str,
     results: dict[str, dict],
 ) -> None:
@@ -326,7 +326,6 @@ def write_sidecar(
         "fps": fps,
         "odor_on_s": odor_on_s,
         "odor_off_s": odor_off_s,
-        "min_floor_px": min_floor_px,
         "trial_type": trial_type,
         "n_definition": "count of flies with at least one finite value in the trace",
         "odors": {},
@@ -335,7 +334,6 @@ def write_sidecar(
         info["odors"][odor] = {
             "n_flies": data["n_flies"],
             "fly_names": data["fly_names"],
-            "n_source_csvs": len(data["source_csvs"]),
             "n_timepoints": len(data["mean"]),
         }
     with open(path, "w", encoding="utf-8") as fh:
@@ -360,6 +358,18 @@ def build_parser(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         help="Path to config YAML (default: config/config.yaml)",
     )
     parser.add_argument(
+        "--wide-csv",
+        type=Path,
+        default=DEFAULT_WIDE_CSV,
+        help="Path to all_envelope_rows_wide.csv",
+    )
+    parser.add_argument(
+        "--flagged-csv",
+        type=Path,
+        default=DEFAULT_FLAGGED_CSV,
+        help="Path to flagged-flys-truth.csv (flies with state 0/-1 are excluded)",
+    )
+    parser.add_argument(
         "--outdir",
         type=Path,
         default=Path("/home/ramanlab/Documents/cole/Results/Opto/Dataset_means"),
@@ -373,49 +383,8 @@ def build_parser(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         default="testing",
         help="Trial type to aggregate (default: testing)",
     )
-    parser.add_argument(
-        "--min-floor-px",
-        type=float,
-        default=9.5,
-        help="Minimum distance floor in pixels for normalisation fallback",
-    )
-    parser.add_argument(
-        "--roots",
-        nargs="*",
-        type=Path,
-        default=None,
-        help="Explicit dataset roots (overrides config)",
-    )
     parser.add_argument("--verbose", action="store_true", help="Enable DEBUG logging")
     return parser.parse_args(argv)
-
-
-def _discover_roots(args: argparse.Namespace) -> list[Path]:
-    """Return dataset root directories from CLI args or config."""
-    if args.roots:
-        return [Path(r).expanduser().resolve() for r in args.roots]
-
-    import yaml
-
-    config_path = resolve_config_path(args.config)
-    if not config_path.exists():
-        LOGGER.error("Config not found: %s", config_path)
-        return []
-
-    with open(config_path, "r", encoding="utf-8") as fh:
-        data = yaml.safe_load(fh) or {}
-
-    # Primary: analysis.combined.combine.roots
-    combine = data.get("analysis", {}).get("combined", {}).get("combine", {})
-    roots = combine.get("roots", [])
-    if roots:
-        return [Path(r).expanduser().resolve() for r in roots]
-
-    # Fallback: main_directories / main_directory
-    md = data.get("main_directories", data.get("main_directory", []))
-    if isinstance(md, str):
-        md = [md]
-    return [Path(r).expanduser().resolve() for r in md]
 
 
 def _read_timing(args: argparse.Namespace) -> tuple[float, float, float]:
@@ -451,10 +420,23 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     args = build_parser(argv)
     _configure_logging(args.verbose)
 
-    roots = _discover_roots(args)
-    if not roots:
-        LOGGER.error("No dataset roots found. Check --roots or config.")
+    # Load the wide CSV
+    wide_csv = args.wide_csv.expanduser().resolve()
+    if not wide_csv.exists():
+        LOGGER.error("Wide CSV not found: %s", wide_csv)
         sys.exit(1)
+
+    LOGGER.info("Reading %s ...", wide_csv)
+    wide_df = pd.read_csv(wide_csv)
+    LOGGER.info("Loaded %d rows across %d datasets", len(wide_df), wide_df["dataset"].nunique())
+
+    # Filter by trial type
+    if args.trial_type:
+        wide_df = wide_df[wide_df["trial_type"] == args.trial_type]
+        LOGGER.info("After trial_type='%s' filter: %d rows", args.trial_type, len(wide_df))
+
+    # Load excluded flies
+    excluded = load_excluded_flies(args.flagged_csv.expanduser().resolve())
 
     fps, odor_on_s, odor_off_s = _read_timing(args)
     LOGGER.info("FPS=%.1f  odor_on=%.1fs  odor_off=%.1fs", fps, odor_on_s, odor_off_s)
@@ -463,18 +445,14 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     _ensure_directory(outdir)
 
     processed = 0
-    for root in roots:
-        if not root.is_dir():
-            LOGGER.warning("Skipping non-existent root: %s", root)
-            continue
-
-        dataset_name = root.name
+    for dataset_name in sorted(wide_df["dataset"].unique()):
         LOGGER.info("=== Dataset: %s ===", dataset_name)
 
+        ds_df = wide_df[wide_df["dataset"] == dataset_name].copy()
         results = compute_dataset_means(
-            root,
-            trial_type=args.trial_type,
-            min_floor_px=args.min_floor_px,
+            ds_df,
+            dataset_name,
+            excluded_flies=excluded,
             fps=fps,
         )
 
@@ -482,7 +460,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             LOGGER.warning("No data for %s — skipping.", dataset_name)
             continue
 
-        base = outdir / f"{dataset_name}_{args.trial_type}_odors_mean_sem"
+        base = outdir / f"{dataset_name}_{args.trial_type}_odors_mean"
         fig = plot_dataset_means(
             results,
             dataset_name=dataset_name,
@@ -499,7 +477,6 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             fps=fps,
             odor_on_s=odor_on_s,
             odor_off_s=odor_off_s,
-            min_floor_px=args.min_floor_px,
             trial_type=args.trial_type,
             results=results,
         )

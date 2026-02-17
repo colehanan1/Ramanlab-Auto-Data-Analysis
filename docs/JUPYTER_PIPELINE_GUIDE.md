@@ -2,6 +2,17 @@
 
 Run your entire analysis pipeline from a Jupyter notebook, perfect for auto-running after YOLO training.
 
+## Which notebook should I use?
+
+| Notebook | Best for | Key features |
+|----------|----------|-------------|
+| [Detailed_Pipeline_Walkthrough.ipynb](Detailed_Pipeline_Walkthrough.ipynb) | **Beginners** and step-by-step understanding | Safety-first defaults, dry-run mode, heavy comments, environment validation, troubleshooting table |
+| [Auto_Pipeline_Runner.ipynb](Auto_Pipeline_Runner.ipynb) | **Quick runs** after YOLO training | Auto-detects new YOLO models, updates config, runs `make run` |
+
+**Start with the Detailed Walkthrough** if you are new to the project or want to
+understand what each pipeline stage does. Use the Auto Pipeline Runner once you
+are comfortable and just need a fast "train model then run pipeline" workflow.
+
 ## Quick Start
 
 1. **Open the notebook:**
