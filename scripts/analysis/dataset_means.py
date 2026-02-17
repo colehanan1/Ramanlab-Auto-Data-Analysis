@@ -60,6 +60,7 @@ LOGGER = logging.getLogger("dataset_means")
 # ---------------------------------------------------------------------------
 DPI = 300
 FIGWIDTH = 8
+MAX_TIME_S = 90.0  # Only plot t=0 to t=90s
 
 # Default paths for the wide CSV and flagged-flies CSV
 DEFAULT_WIDE_CSV = Path(
@@ -280,9 +281,11 @@ def plot_dataset_means(
     odors = list(results.keys())
     fig, ax = plt.subplots(figsize=(FIGWIDTH, 5))
 
+    max_frames = int(MAX_TIME_S * fps)
+
     for idx, odor in enumerate(odors):
         data = results[odor]
-        mean = data["mean"]
+        mean = data["mean"][:max_frames]
         n_flies = data["n_flies"]
         n_frames = len(mean)
         time = np.arange(n_frames) / fps
@@ -295,6 +298,7 @@ def plot_dataset_means(
     ax.axvline(odor_off_s, color="black", linestyle="--", linewidth=0.8)
     ax.axvspan(odor_on_s, odor_off_s, alpha=0.12, color="grey")
 
+    ax.set_xlim(0, MAX_TIME_S)
     ax.set_xlabel("Time (s)")
     ax.set_ylabel("Distance %")
     ax.set_title(f"{dataset_name} \u2014 Testing Odors Mean", fontsize=11)

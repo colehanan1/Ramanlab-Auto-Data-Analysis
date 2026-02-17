@@ -1384,6 +1384,7 @@ def main(argv: Sequence[str] | None = None) -> None:
     _run_envelope_visuals(analysis_cfg.get("envelope_visuals"))
     _run_training(analysis_cfg.get("training"))
     _run_reactions(settings)
+    _run_dataset_means(config_path)
 
     # Copy all analysis outputs to SMB at the end
     LOGGER.info("\n" + "=" * 70)
@@ -1393,6 +1394,25 @@ def main(argv: Sequence[str] | None = None) -> None:
     LOGGER.info("=" * 70)
     LOGGER.info("✓ Batch copy complete!")
     LOGGER.info("=" * 70 + "\n")
+
+
+def _run_dataset_means(config_path: Path) -> None:
+    """Generate dataset-level mean plots from the wide envelope CSV."""
+    LOGGER.info("[analysis] Running dataset_means ...")
+    repo_root = _find_repo_root(Path(__file__).resolve())
+    cmd = [
+        sys.executable,
+        str(repo_root / "scripts" / "analysis" / "dataset_means.py"),
+        "--config",
+        str(config_path),
+    ]
+    env = os.environ.copy()
+    env["MPLBACKEND"] = "Agg"
+    result = subprocess.run(cmd, env=env, capture_output=False)
+    if result.returncode != 0:
+        LOGGER.warning("[analysis] dataset_means exited with code %d", result.returncode)
+    else:
+        LOGGER.info("[analysis] dataset_means complete.")
 
 
 def _batch_copy_to_smb(raw_cfg: Dict[str, Any]) -> None:
