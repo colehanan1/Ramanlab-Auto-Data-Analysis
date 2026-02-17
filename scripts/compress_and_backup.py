@@ -30,7 +30,7 @@ class CompressionBackup:
         """Initialize compression backup handler."""
         self.base_path = Path("/home/ramanlab/Documents/cole")
         self.archive_dir = self.base_path / "backups_compressed"
-        self.smb_location = "smb://ramanfile.local/ramanfiles/cole/flyTrackingData"
+        self.smb_location = "smb://10.229.137.184/ramanfiles/cole/flyTrackingData"
         self.box_remote = "Box-Folder"
         self.box_folder = "Ramanlab-Backups"
 

@@ -198,12 +198,12 @@ class BackupSystem:
         except Exception as e:
             logger.error(f"Error with rclone backup: {e}")
             logger.warning("Falling back to rsync...")
-            smb_base = smb_config.get('base_path', 'smb://ramanfile.local/ramanfiles/cole')
+            smb_base = smb_config.get('base_path', 'smb://10.229.137.184/ramanfiles/cole')
             return self._backup_to_smb_rsync(smb_config, use_compression, dry_run)
 
     def _backup_to_smb_rsync(self, smb_config: Dict, use_compression: bool, dry_run: bool) -> bool:
         """Backup to SMB using rsync (fallback)."""
-        smb_base = smb_config.get('base_path', 'smb://ramanfile.local/ramanfiles/cole')
+        smb_base = smb_config.get('base_path', 'smb://10.229.137.184/ramanfiles/cole')
         csv_dest = smb_config.get('csvs_path', f"{smb_base}/flyTrackingData")
         results_dest = smb_config.get('results_path', f"{smb_base}/Figures")
 

@@ -14,6 +14,7 @@ black squares) and ``0`` indicates no reaction (white squares).
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -150,6 +151,33 @@ def _load_predictions(
     df["during_hit"] = df["prediction"].fillna(0).astype(int)
     df["after_hit"] = df["during_hit"]
     return df
+
+
+def _collect_unordered_matrices(out_dir: Path) -> None:
+    """Collect all unordered matrix PNGs into a single 'all' folder."""
+    all_dir = out_dir / "all"
+    all_dir.mkdir(parents=True, exist_ok=True)
+
+    # Find all PNG files ending with "unordered.png"
+    for png_file in out_dir.rglob("*unordered.png"):
+        # Skip files in the "all" directory itself
+        if png_file.parent == all_dir:
+            continue
+
+        # Create a symlink or copy to the all folder
+        dest_path = all_dir / png_file.name
+        # Use relative symlink to original file
+        try:
+            # Remove existing symlink if it exists
+            if dest_path.exists() or dest_path.is_symlink():
+                dest_path.unlink()
+            # Create symlink - use relative path from all_dir to png_file
+            rel_path = os.path.relpath(png_file, all_dir)
+            dest_path.symlink_to(rel_path)
+        except (OSError, NotImplementedError):
+            # Fallback to copy if symlinks not supported
+            import shutil
+            shutil.copy2(png_file, dest_path)
 
 
 def generate_reaction_matrices_from_csv(cfg: SpreadsheetMatrixConfig) -> None:
@@ -398,6 +426,10 @@ def generate_reaction_matrices_from_csv(cfg: SpreadsheetMatrixConfig) -> None:
             if should_write(csv_path, cfg.overwrite):
                 pivot.to_csv(csv_path, index=False, float_format="%.4f")
                 print(f"[INFO] Exported reaction rate summary to {csv_path}")
+
+    # Collect all unordered matrices into a single 'all' folder
+    _collect_unordered_matrices(cfg.out_dir)
+    print(f"[INFO] Collected unordered matrices to {cfg.out_dir / 'all'}")
 
 
 def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
