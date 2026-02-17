@@ -282,14 +282,12 @@ def plot_dataset_means(
     for idx, odor in enumerate(odors):
         data = results[odor]
         mean = data["mean"]
-        sem = data["sem"]
         n_flies = data["n_flies"]
         n_frames = len(mean)
         time = np.arange(n_frames) / fps
         colour = f"C{idx % 10}"
 
         ax.plot(time, mean, linewidth=1.3, color=colour, label=f"{odor} (n={n_flies})")
-        ax.fill_between(time, mean - sem, mean + sem, alpha=0.20, color=colour)
 
     # Odor window
     ax.axvline(odor_on_s, color="black", linestyle="--", linewidth=0.8)
@@ -298,7 +296,7 @@ def plot_dataset_means(
 
     ax.set_xlabel("Time (s)")
     ax.set_ylabel("Distance %")
-    ax.set_title(f"{dataset_name} \u2014 Testing Odors Mean \u00b1 SEM", fontsize=11)
+    ax.set_title(f"{dataset_name} \u2014 Testing Odors Mean", fontsize=11)
     ax.legend(loc="upper right", fontsize=8, framealpha=0.9)
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
