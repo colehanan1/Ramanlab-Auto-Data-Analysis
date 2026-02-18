@@ -11,6 +11,8 @@ import sys
 from pathlib import Path
 from typing import Mapping, Optional, Sequence
 
+import matplotlib
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import matplotlib.transforms as mtransforms
 import numpy as np
@@ -337,7 +339,7 @@ def _load_envelope_matrix(matrix_path: Path, codes_json: Path) -> tuple[pd.DataF
     code_maps: Mapping[str, Mapping[str, int]] = meta["code_maps"]
     df = pd.DataFrame(matrix, columns=ordered_cols)
 
-    decode_cols = [c for c in ("dataset", "fly", "trial_type", "trial_label", "fps") if c in ordered_cols]
+    decode_cols = [c for c in ("dataset", "fly", "fly_number", "trial_type", "trial_label", "fps") if c in ordered_cols]
     for col in decode_cols:
         if col == "fps":
             df[col] = pd.to_numeric(df[col], errors="coerce")
@@ -351,12 +353,56 @@ def _load_envelope_matrix(matrix_path: Path, codes_json: Path) -> tuple[pd.DataF
     if "fps" not in df.columns:
         df["fps"] = np.nan
 
-    env_cols = [c for c in ordered_cols if c not in {"dataset", "fly", "trial_type", "trial_label", "fps"}]
+    env_cols = [c for c in ordered_cols if c not in {"dataset", "fly", "fly_number", "trial_type", "trial_label", "fps"}]
     return df, env_cols
 
 
 def _extract_env(row: pd.Series, env_cols: Sequence[str]) -> np.ndarray:
     env = row[env_cols].to_numpy(dtype=float)
+    if env.ndim == 0:
+        return np.empty(0, dtype=float)
+    mask = np.isfinite(env) & (env > 0)
+    return env[mask]
+
+
+def _norm_key_text(value: object) -> str:
+    return str(value).strip().lower()
+
+
+def _norm_fly_number(value: object) -> str:
+    if value is None:
+        return ""
+    try:
+        num = float(value)
+    except (TypeError, ValueError):
+        text = str(value).strip()
+        return "" if text.lower() in {"", "nan", "none"} else text
+
+    if not np.isfinite(num):
+        return ""
+    rounded = round(num)
+    if abs(num - rounded) < 1e-9:
+        return str(int(rounded))
+    text = f"{num:.6f}".rstrip("0").rstrip(".")
+    return text
+
+
+def _sorted_dir_cols(columns: Sequence[str]) -> list[str]:
+    cols = [c for c in columns if str(c).startswith("dir_val_")]
+    if not cols:
+        return []
+
+    def key(col: str) -> tuple[int, str]:
+        m = re.search(r"(\d+)$", col)
+        return (int(m.group(1)), col) if m else (10**9, col)
+
+    return sorted(cols, key=key)
+
+
+def _extract_env_from_dirvals(row: pd.Series, dir_cols: Sequence[str]) -> np.ndarray:
+    if not dir_cols:
+        return np.empty(0, dtype=float)
+    env = row.loc[list(dir_cols)].to_numpy(dtype=float, copy=False)
     if env.ndim == 0:
         return np.empty(0, dtype=float)
     mask = np.isfinite(env) & (env > 0)
@@ -373,7 +419,7 @@ def _latency_to_cross(
     odor_off_s: float = 60.0,
     odor_latency_s: float = 0.0,
 ) -> Optional[float]:
-    """Compute latency to threshold crossing in response to odor.
+    """Compute latency to threshold crossing during the odor window.
 
     Args:
         env: Envelope signal (full trial duration)
@@ -388,33 +434,221 @@ def _latency_to_cross(
     Returns:
         Latency in seconds from odor arrival to threshold crossing, or None
     """
-    if env.size == 0 or not np.isfinite(fps) or fps <= 0:
-        return None
+    during_latency, _ = _latency_profile(
+        env,
+        fps,
+        before_sec,
+        threshold_mult,
+        odor_on_s=odor_on_s,
+        odor_off_s=odor_off_s,
+        odor_latency_s=odor_latency_s,
+    )
+    return during_latency
 
-    # Baseline window: from trial start to before odor
+
+def _latency_profile(
+    env: np.ndarray,
+    fps: float,
+    before_sec: float,
+    threshold_mult: float,
+    *,
+    odor_on_s: float = 30.0,
+    odor_off_s: float = 60.0,
+    odor_latency_s: float = 0.0,
+) -> tuple[Optional[float], Optional[float]]:
+    """Return latency tuple: (during_odor_latency, any_latency_after_odor_on)."""
+    if env.size == 0 or not np.isfinite(fps) or fps <= 0:
+        return None, None
+
     b_end = min(int(round(before_sec * fps)), env.size)
     before = env[:b_end]
+    if before.size == 0:
+        return None, None
 
-    # Actual odor arrival times (accounting for latency)
     odor_on_effective = odor_on_s + odor_latency_s
     odor_off_effective = odor_off_s + odor_latency_s
-
-    # Response window: from actual odor arrival to odor offset
     response_start = min(int(round(odor_on_effective * fps)), env.size)
     response_end = min(int(round(odor_off_effective * fps)), env.size)
-    during = env[response_start:response_end]
-
-    if before.size == 0 or during.size == 0:
-        return None
+    if response_start >= env.size:
+        return None, None
 
     mu = float(np.nanmean(before))
     sd = float(np.nanstd(before))
     theta = mu + threshold_mult * sd
-    idx = np.where(during > theta)[0]
-    if idx.size == 0:
-        return None
-    # Return latency from actual odor arrival time
-    return float(idx[0]) / fps
+
+    during = env[response_start:response_end]
+    idx_during = np.where(during > theta)[0]
+    during_latency = float(idx_during[0]) / fps if idx_during.size else None
+
+    after_on = env[response_start:]
+    idx_any = np.where(after_on > theta)[0]
+    any_latency = float(idx_any[0]) / fps if idx_any.size else None
+
+    return during_latency, any_latency
+
+
+def _latency_records_from_csv(
+    csv_path: Path,
+    *,
+    before_sec: float,
+    during_sec: float,
+    threshold_mult: float,
+    latency_ceiling: float,
+    trials_of_interest: Sequence[int],
+    fps_default: float,
+    odor_on_s: float,
+    odor_off_s: float,
+    odor_latency_s: float,
+    fly_state_csv: Path | None = None,
+    fly_state_column: str = "FLY-State(1, 0, -1)",
+) -> pd.DataFrame:
+    df_all = pd.read_csv(csv_path)
+    for col in ("dataset", "fly", "trial_label"):
+        if col not in df_all.columns:
+            raise RuntimeError(f"CSV missing required column '{col}': {csv_path}")
+
+    if "fps" not in df_all.columns:
+        df_all["fps"] = np.nan
+    df_all["fps"] = pd.to_numeric(df_all["fps"], errors="coerce").replace([np.inf, -np.inf], np.nan).fillna(fps_default)
+
+    if "time_to_threshold" not in df_all.columns:
+        df_all["time_to_threshold"] = np.nan
+        need_save = True
+    else:
+        need_save = False
+
+    if "trial_type" in df_all.columns:
+        trial_type = df_all["trial_type"].astype(str).str.lower()
+        df = df_all[trial_type == "training"].copy()
+    else:
+        df = df_all.copy()
+
+    if fly_state_csv is not None and fly_state_csv.exists():
+        truth = pd.read_csv(fly_state_csv)
+        for col in ("dataset", "fly", fly_state_column):
+            if col not in truth.columns:
+                raise RuntimeError(
+                    f"Fly-state CSV missing required column '{col}': {fly_state_csv}"
+                )
+        truth_state = pd.to_numeric(truth[fly_state_column], errors="coerce")
+        truth = truth[truth_state.isin((0, -1))].copy()
+        use_fly_number = "fly_number" in truth.columns and "fly_number" in df.columns
+
+        if use_fly_number:
+            blocked = {
+                (
+                    _norm_key_text(_canon_dataset(ds)),
+                    _norm_key_text(fly),
+                    _norm_fly_number(fly_number),
+                )
+                for ds, fly, fly_number in zip(
+                    truth["dataset"], truth["fly"], truth["fly_number"]
+                )
+            }
+            ds_norm = df["dataset"].map(_canon_dataset).map(_norm_key_text)
+            fly_norm = df["fly"].map(_norm_key_text)
+            fly_num_norm = df["fly_number"].map(_norm_fly_number)
+            mask = [
+                (ds, fly, fly_num) not in blocked
+                for ds, fly, fly_num in zip(ds_norm, fly_norm, fly_num_norm)
+            ]
+        else:
+            blocked = {
+                (_norm_key_text(_canon_dataset(ds)), _norm_key_text(fly))
+                for ds, fly in zip(truth["dataset"], truth["fly"])
+            }
+            ds_norm = df["dataset"].map(_canon_dataset).map(_norm_key_text)
+            fly_norm = df["fly"].map(_norm_key_text)
+            mask = [(ds, fly) not in blocked for ds, fly in zip(ds_norm, fly_norm)]
+        df = df[mask].copy()
+
+    df["trial_num"] = df["trial_label"].map(_trial_num)
+    df = df[df["trial_num"].isin(set(int(t) for t in trials_of_interest))].copy()
+    if df.empty:
+        raise RuntimeError("No training rows in CSV matched the requested trial numbers.")
+
+    dir_cols = _sorted_dir_cols(df.columns)
+    if not dir_cols and df["time_to_threshold"].isna().any():
+        raise RuntimeError(
+            "CSV lacks both dir_val_* trace columns and complete time_to_threshold values."
+        )
+
+    ttt_existing = pd.to_numeric(df["time_to_threshold"], errors="coerce")
+    during_cache: dict[int, Optional[float]] = {}
+    any_cache: dict[int, Optional[float]] = {}
+    for idx, row in df.iterrows():
+        lat_during: Optional[float] = None
+        lat_any: Optional[float] = None
+        if dir_cols:
+            env = _extract_env_from_dirvals(row, dir_cols)
+            lat_during, lat_any = _latency_profile(
+                env,
+                float(row.get("fps", fps_default)),
+                before_sec,
+                threshold_mult,
+                odor_on_s=odor_on_s,
+                odor_off_s=odor_off_s,
+                odor_latency_s=odor_latency_s,
+            )
+
+        existing = ttt_existing.loc[idx] if idx in ttt_existing.index else math.nan
+        if lat_during is None and np.isfinite(existing):
+            lat_during = float(existing)
+            if lat_any is None:
+                lat_any = lat_during
+        elif not np.isfinite(existing) and lat_during is not None:
+            df.at[idx, "time_to_threshold"] = float(lat_during)
+            need_save = True
+
+        during_cache[idx] = lat_during
+        any_cache[idx] = lat_any
+
+    if need_save:
+        vals = pd.to_numeric(df["time_to_threshold"], errors="coerce")
+        df_all.loc[vals.index, "time_to_threshold"] = vals.to_numpy(dtype=float)
+        df_all.to_csv(csv_path, index=False)
+
+    records = []
+    for idx, row in df.iterrows():
+        latency = during_cache.get(idx)
+        latency_any = any_cache.get(idx)
+
+        if latency_any is None:
+            response_kind = "no_response_any"
+            plot_latency = None
+            lat_for_mean = float(latency_ceiling)
+        elif latency_any > latency_ceiling:
+            response_kind = "response_after_ceiling"
+            plot_latency = float(latency_ceiling)
+            lat_for_mean = float(latency_ceiling)
+        else:
+            response_kind = "response_within_ceiling"
+            plot_latency = float(latency_any)
+            lat_for_mean = float(latency_any)
+
+        dataset_val = row.get("dataset", "UNKNOWN")
+        dataset_text = dataset_val if isinstance(dataset_val, str) else str(dataset_val)
+        fly_val = row.get("fly", "UNKNOWN")
+        fly_text = fly_val if isinstance(fly_val, str) else str(fly_val)
+        fly_num_text = _norm_fly_number(row.get("fly_number", ""))
+        records.append(
+            {
+                "dataset": dataset_text,
+                "dataset_canon": _canon_dataset(dataset_text),
+                "fly": fly_text,
+                "fly_number": fly_num_text,
+                "trial_num": int(row["trial_num"]),
+                "latency": latency,
+                "latency_any": latency_any,
+                "plot_latency": plot_latency,
+                "response_kind": response_kind,
+                "lat_for_mean": lat_for_mean,
+            }
+        )
+
+    if not records:
+        raise RuntimeError("No latency records could be built from CSV.")
+    return pd.DataFrame(records)
 
 
 # ---------------------------------------------------------------------------
@@ -430,63 +664,98 @@ def _plot_latency_per_fly(
     trials_of_interest: Sequence[int],
     overwrite: bool,
 ) -> None:
-    for fly in sorted(lat_df["fly"].unique()):
-        subset = lat_df[lat_df["fly"] == fly]
+    work = lat_df.copy()
+    if "fly_number" not in work.columns:
+        work["fly_number"] = ""
+    work["dataset_canon"] = work["dataset_canon"].fillna("UNKNOWN")
+    work["fly"] = work["fly"].fillna("UNKNOWN")
+    work["fly_number_norm"] = work["fly_number"].map(_norm_fly_number)
+
+    for (dataset_canon, fly, fly_number), subset in work.groupby(
+        ["dataset_canon", "fly", "fly_number_norm"],
+        dropna=False,
+        sort=True,
+    ):
         if subset.empty:
             continue
 
-        datasets = subset["dataset_canon"].dropna().unique().tolist()
-        target_dir = _target_dir(out_dir, datasets or ("UNKNOWN",))
-        out_png = target_dir / f"{fly}_training_{'_'.join(map(str, trials_of_interest))}_latency.png"
+        target_dir = _target_dir(out_dir, [str(dataset_canon)])
+        fly_slug = _safe_dirname(str(fly))
+        fly_suffix = f"_fly{fly_number}" if fly_number else ""
+        out_png = target_dir / f"{fly_slug}{fly_suffix}_training_{'_'.join(map(str, trials_of_interest))}_latency.png"
         if out_png.exists() and not overwrite:
             continue
 
-        latencies = []
-        labels = []
+        fly_label = str(fly)
+        if fly_number:
+            fly_label = f"{fly_label} (fly {fly_number})"
+
+        labels = [f"Training {n}" for n in trials_of_interest]
+        values: list[float | None] = []
+        annotations: list[str | None] = []
+        colors: list[str | None] = []
+        no_per_flags: list[bool] = []
+
         for trial_num in trials_of_interest:
-            labels.append(f"Training {trial_num}")
-            row = subset[subset["trial_num"] == trial_num]
-            latencies.append(row["latency"].iloc[0] if not row.empty else None)
+            trial_rows = subset[subset["trial_num"] == trial_num]
+            if trial_rows.empty:
+                values.append(None)
+                annotations.append(None)
+                colors.append(None)
+                no_per_flags.append(False)
+                continue
 
-        any_response = any(lat is not None and lat <= latency_ceiling for lat in latencies)
-
-        if not any_response:
-            fig, ax = plt.subplots(figsize=(6.5, 3.2))
-            ax.set_title(f"{fly} — Time to PER", pad=10, fontsize=14, weight="bold")
-            ax.set_xticks(np.arange(len(labels)))
-            ax.set_xticklabels(labels)
-            ax.set_ylim(0, latency_ceiling + 2.0)
-            ax.text(0.5, 0.55, "NR", transform=ax.transAxes, ha="center", va="center", fontsize=18, color="#666666", weight="bold")
-            ax.set_ylabel("Time After Odor Sent (s)")
-            ax.axhline(latency_ceiling, linestyle="--", linewidth=1.1, color="#444444")
-            trans = mtransforms.blended_transform_factory(ax.transAxes, ax.transData)
-            ax.text(0.995, latency_ceiling + 0.12, f"NR if > {latency_ceiling:.1f} s", transform=trans, ha="right", va="bottom", fontsize=10, color="#444444", clip_on=False)
-            fig.tight_layout()
-            if _should_write(out_png, overwrite):
-                fig.savefig(out_png, dpi=300)
-            plt.close(fig)
-            continue
-
-        values = []
-        annotations = []
-        colors = []
-        for lat in latencies:
-            if lat is None or lat > latency_ceiling:
-                values.append(latency_ceiling)
+            kinds = trial_rows["response_kind"].astype(str).tolist() if "response_kind" in trial_rows.columns else []
+            if any(k == "response_within_ceiling" for k in kinds):
+                vals = pd.to_numeric(
+                    trial_rows.loc[trial_rows["response_kind"] == "response_within_ceiling", "plot_latency"],
+                    errors="coerce",
+                ).to_numpy(dtype=float)
+                finite = vals[np.isfinite(vals)]
+                plot_val = float(finite.mean()) if finite.size else float(latency_ceiling)
+                values.append(plot_val)
+                annotations.append(f"{plot_val:.2f}s")
+                colors.append("#1A1A1A")
+                no_per_flags.append(False)
+            elif any(k == "response_after_ceiling" for k in kinds):
+                values.append(float(latency_ceiling))
                 annotations.append("NR")
                 colors.append("#BDBDBD")
+                no_per_flags.append(False)
             else:
-                values.append(lat)
-                annotations.append(f"{lat:.2f}s")
-                colors.append("#1A1A1A")
+                # Explicitly no threshold crossing after odor-on in this trial.
+                values.append(None)
+                annotations.append(None)
+                colors.append(None)
+                no_per_flags.append(True)
 
         fig, ax = plt.subplots(figsize=(6.5, 3.6))
         x = np.arange(len(labels))
-        bars = ax.bar(x, values, width=0.6, color=colors, edgecolor="black", linewidth=1.0)
+        bars: list[plt.Rectangle | None] = []
+        for idx, val in enumerate(values):
+            if val is None:
+                bars.append(None)
+                continue
+            bar = ax.bar(
+                x[idx],
+                val,
+                width=0.6,
+                color=colors[idx] or "#1A1A1A",
+                edgecolor="black",
+                linewidth=1.0,
+            )[0]
+            bars.append(bar)
 
-        for bar, text in zip(bars, annotations):
+        for idx, (bar, text) in enumerate(zip(bars, annotations)):
+            if bar is None or text is None:
+                continue
             ypos = max(bar.get_height() * 0.5, 0.35)
-            ax.text(bar.get_x() + bar.get_width() / 2, ypos, text, ha="center", va="center", fontsize=10, color="white" if text != "NR" else "#444444")
+            txt_color = "white" if text != "NR" else "#444444"
+            ax.text(bar.get_x() + bar.get_width() / 2, ypos, text, ha="center", va="center", fontsize=10, color=txt_color)
+
+        for idx, no_per in enumerate(no_per_flags):
+            if no_per:
+                ax.text(x[idx], 0.14, "No PER", ha="center", va="bottom", fontsize=9, color="#666666")
 
         ax.set_xticks(x)
         ax.set_xticklabels(labels)
@@ -495,7 +764,7 @@ def _plot_latency_per_fly(
         ax.axhline(latency_ceiling, linestyle="--", linewidth=1.1, color="#444444")
         trans = mtransforms.blended_transform_factory(ax.transAxes, ax.transData)
         ax.text(0.995, latency_ceiling + 0.12, f"NR if > {latency_ceiling:.1f} s", transform=trans, ha="right", va="bottom", fontsize=10, color="#444444", clip_on=False)
-        ax.set_title(f"{fly} — Time to PER", pad=10, fontsize=14, weight="bold")
+        ax.set_title(f"{fly_label} — Time to PER", pad=10, fontsize=14, weight="bold")
 
         fig.tight_layout()
         if _should_write(out_png, overwrite):
@@ -678,10 +947,13 @@ def _plot_latency_grand_means(
 
 
 def latency_reports(
-    matrix_path: Path,
-    codes_json: Path,
+    matrix_path: Path | None,
+    codes_json: Path | None,
     out_dir: Path,
     *,
+    csv_path: Path | None = None,
+    fly_state_csv: Path | None = None,
+    fly_state_column: str = "FLY-State(1, 0, -1)",
     before_sec: float,
     during_sec: float,
     threshold_mult: float | None = None,
@@ -722,43 +994,76 @@ def latency_reports(
 
     threshold_mult = float(threshold_mult)
 
-    df, env_cols = _load_envelope_matrix(matrix_path, codes_json)
-    df = df[df["trial_type"].str.lower() == "training"].copy()
-    if df.empty:
-        raise RuntimeError("No training trials present in matrix; cannot compute latency.")
-
-    df["fps"] = df["fps"].replace([np.inf, -np.inf], np.nan).fillna(fps_default)
-    df["dataset_canon"] = df["dataset"].map(_canon_dataset)
-
-    records = []
-    for _, row in df.iterrows():
-        trial_num = _trial_num(row["trial_label"])
-        if trial_num not in trials_of_interest:
-            continue
-        env = _extract_env(row, env_cols)
-        fps = float(row.get("fps", fps_default))
-        latency = _latency_to_cross(
-            env, fps, before_sec, during_sec, threshold_mult,
+    if csv_path is not None and csv_path.exists():
+        lat_df = _latency_records_from_csv(
+            csv_path,
+            before_sec=before_sec,
+            during_sec=during_sec,
+            threshold_mult=threshold_mult,
+            latency_ceiling=latency_ceiling,
+            trials_of_interest=trials_of_interest,
+            fps_default=fps_default,
             odor_on_s=odor_on_s,
             odor_off_s=odor_off_s,
             odor_latency_s=odor_latency_s,
+            fly_state_csv=fly_state_csv,
+            fly_state_column=fly_state_column,
         )
-        lat_for_mean = latency if (latency is not None and latency <= latency_ceiling) else math.nan
-        records.append(
-            {
-                "dataset": row["dataset"],
-                "dataset_canon": row["dataset_canon"],
-                "fly": row["fly"],
-                "trial_num": trial_num,
-                "latency": latency,
-                "lat_for_mean": lat_for_mean,
-            }
-        )
+    else:
+        if matrix_path is None or codes_json is None:
+            raise ValueError("Provide csv_path, or provide both matrix_path and codes_json.")
+        df, env_cols = _load_envelope_matrix(matrix_path, codes_json)
+        df = df[df["trial_type"].str.lower() == "training"].copy()
+        if df.empty:
+            raise RuntimeError("No training trials present in matrix; cannot compute latency.")
 
-    if not records:
-        raise RuntimeError("No training trials matched the requested trial numbers.")
+        df["fps"] = df["fps"].replace([np.inf, -np.inf], np.nan).fillna(fps_default)
+        df["dataset_canon"] = df["dataset"].map(_canon_dataset)
 
-    lat_df = pd.DataFrame(records)
+        records = []
+        for _, row in df.iterrows():
+            trial_num = _trial_num(row["trial_label"])
+            if trial_num not in trials_of_interest:
+                continue
+            env = _extract_env(row, env_cols)
+            fps = float(row.get("fps", fps_default))
+            latency, latency_any = _latency_profile(
+                env, fps, before_sec, threshold_mult,
+                odor_on_s=odor_on_s,
+                odor_off_s=odor_off_s,
+                odor_latency_s=odor_latency_s,
+            )
+            if latency_any is None:
+                response_kind = "no_response_any"
+                plot_latency = None
+                lat_for_mean = float(latency_ceiling)
+            elif latency_any > latency_ceiling:
+                response_kind = "response_after_ceiling"
+                plot_latency = float(latency_ceiling)
+                lat_for_mean = float(latency_ceiling)
+            else:
+                response_kind = "response_within_ceiling"
+                plot_latency = float(latency_any)
+                lat_for_mean = float(latency_any)
+            records.append(
+                {
+                    "dataset": row["dataset"],
+                    "dataset_canon": row["dataset_canon"],
+                    "fly": row["fly"],
+                    "fly_number": _norm_fly_number(row.get("fly_number", "")),
+                    "trial_num": trial_num,
+                    "latency": latency,
+                    "latency_any": latency_any,
+                    "plot_latency": plot_latency,
+                    "response_kind": response_kind,
+                    "lat_for_mean": lat_for_mean,
+                }
+            )
+
+        if not records:
+            raise RuntimeError("No training trials matched the requested trial numbers.")
+
+        lat_df = pd.DataFrame(records)
 
     _plot_latency_per_fly(
         lat_df,
@@ -817,8 +1122,11 @@ def build_parser() -> argparse.ArgumentParser:
     env_parser.add_argument("--overwrite", action="store_true", help="Rebuild plots even if the target files exist.")
 
     lat_parser = sub.add_parser("latency", help="Compute latency-to-threshold metrics from the matrix outputs.")
-    lat_parser.add_argument("--matrix-npy", type=Path, required=True, help="Float16 matrix produced by the convert step.")
-    lat_parser.add_argument("--codes-json", type=Path, required=True, help="JSON metadata file from the convert step.")
+    lat_parser.add_argument("--matrix-npy", type=Path, required=False, help="Float16 matrix produced by the convert step.")
+    lat_parser.add_argument("--codes-json", type=Path, required=False, help="JSON metadata file from the convert step.")
+    lat_parser.add_argument("--csv-path", type=Path, required=False, help="Wide training CSV used for CSV-first latency plots.")
+    lat_parser.add_argument("--fly-state-csv", type=Path, required=False, help="CSV with fly-state labels; excludes only flies marked 0 or -1 when provided.")
+    lat_parser.add_argument("--fly-state-column", type=str, default="FLY-State(1, 0, -1)", help="Column name in fly-state CSV indicating keep/drop state.")
     lat_parser.add_argument("--out-dir", type=Path, required=True, help="Directory for figures and CSV summaries.")
     lat_parser.add_argument("--before-sec", type=float, default=30.0, help="Baseline window length in seconds.")
     lat_parser.add_argument("--during-sec", type=float, default=35.0, help="During window length in seconds.")
@@ -829,8 +1137,8 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Deprecated alias for --threshold-mult maintained for backward compatibility.",
     )
-    lat_parser.add_argument("--latency-ceiling", type=float, default=9.5, help="Cap for marking NR trials in seconds.")
-    lat_parser.add_argument("--trials", nargs="+", type=int, default=[4, 5, 6], help="Training trial numbers to analyse.")
+    lat_parser.add_argument("--latency-ceiling", type=float, default=10.0, help="Cap for marking NR trials in seconds.")
+    lat_parser.add_argument("--trials", nargs="+", type=int, default=[4, 6, 8], help="Training trial numbers to analyse.")
     lat_parser.add_argument("--fps-default", type=float, default=40.0, help="Fallback FPS when metadata missing.")
     lat_parser.add_argument("--overwrite", action="store_true", help="Rebuild plots even if the target files exist.")
 
@@ -895,7 +1203,9 @@ def add_time_to_threshold_column(
 
     df_matrix["fps"] = df_matrix["fps"].replace([np.inf, -np.inf], np.nan).fillna(fps_default)
 
-    # Create a mapping from (dataset, fly, trial_label) to latency
+    use_fly_number = "fly_number" in df_matrix.columns and "fly_number" in df_csv.columns
+
+    # Create a mapping from fly key to latency
     latency_map = {}
     for _, row in df_matrix.iterrows():
         env = _extract_env(row, env_cols)
@@ -906,12 +1216,28 @@ def add_time_to_threshold_column(
             odor_off_s=odor_off_s,
             odor_latency_s=odor_latency_s,
         )
-        key = (row["dataset"], row["fly"], row["trial_label"])
+        if use_fly_number:
+            key = (
+                row["dataset"],
+                row["fly"],
+                _norm_fly_number(row.get("fly_number", "")),
+                row["trial_label"],
+            )
+        else:
+            key = (row["dataset"], row["fly"], row["trial_label"])
         latency_map[key] = latency
 
     # Add the column to the CSV
     def get_latency(row):
-        key = (row["dataset"], row["fly"], row["trial_label"])
+        if use_fly_number:
+            key = (
+                row["dataset"],
+                row["fly"],
+                _norm_fly_number(row.get("fly_number", "")),
+                row["trial_label"],
+            )
+        else:
+            key = (row["dataset"], row["fly"], row["trial_label"])
         return latency_map.get(key)
 
     df_csv["time_to_threshold"] = df_csv.apply(get_latency, axis=1)
@@ -949,9 +1275,12 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
 
     if args.command == "latency":
         latency_reports(
-            args.matrix_npy.expanduser().resolve(),
-            args.codes_json.expanduser().resolve(),
+            args.matrix_npy.expanduser().resolve() if args.matrix_npy else None,
+            args.codes_json.expanduser().resolve() if args.codes_json else None,
             args.out_dir.expanduser().resolve(),
+            csv_path=args.csv_path.expanduser().resolve() if args.csv_path else None,
+            fly_state_csv=args.fly_state_csv.expanduser().resolve() if args.fly_state_csv else None,
+            fly_state_column=args.fly_state_column,
             before_sec=args.before_sec,
             during_sec=args.during_sec,
             threshold_mult=args.threshold_mult,

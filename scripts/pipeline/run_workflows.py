@@ -52,7 +52,7 @@ from scripts.analysis.envelope_visuals import (
     generate_envelope_plots,
     generate_reaction_matrices,
 )
-from scripts.analysis.envelope_training import latency_reports, add_time_to_threshold_column
+from scripts.analysis.envelope_training import latency_reports
 from scripts.analysis.envelope_combined import (
     CombineConfig,
     build_wide_csv,
@@ -501,33 +501,30 @@ def _run_training(cfg: Mapping[str, Any] | None) -> None:
     latency_cfg = cfg.get("latency")
     if latency_cfg:
         opts = dict(latency_cfg)
-        matrix = _ensure_path(opts.pop("matrix_npy"), "matrix_npy")
-        codes = _ensure_path(opts.pop("codes_json"), "codes_json")
+        matrix_raw = opts.pop("matrix_npy", None)
+        codes_raw = opts.pop("codes_json", None)
+        matrix = _resolve_path(matrix_raw)
+        codes = _resolve_path(codes_raw)
         out_dir = _ensure_path(opts.pop("out_dir"), "out_dir")
         csv_path = _resolve_path(opts.pop("csv_path", None))
-        trials = tuple(int(t) for t in opts.pop("trials"))
-
-        # Add time_to_threshold column to CSV first (if csv_path provided)
-        if csv_path and csv_path.exists():
-            print(f"[analysis] training.add_threshold_col → {csv_path}")
-            add_time_to_threshold_column(
-                csv_path,
-                matrix,
-                codes,
-                before_sec=opts.get("before_sec", 30.0),
-                during_sec=opts.get("during_sec", 35.0),
-                threshold_mult=opts.get("threshold_mult", 2.0),
-                fps_default=opts.get("fps_default", 40.0),
-                odor_on_s=opts.get("odor_on_s", 30.0),
-                odor_off_s=opts.get("odor_off_s", 60.0),
-                odor_latency_s=opts.get("odor_latency_s", 0.0),
-            )
+        fly_state_csv = _resolve_path(opts.pop("fly_state_csv", None))
+        fly_state_column = str(opts.pop("fly_state_column", "FLY-State(1, 0, -1)"))
+        trials = tuple(int(t) for t in opts.pop("trials", [4, 6, 8]))
+        if csv_path is not None and not csv_path.exists():
+            print(f"[WARN] training.latency csv_path missing: {csv_path}")
+            csv_path = None
+        if fly_state_csv is not None and not fly_state_csv.exists():
+            print(f"[WARN] training.latency fly_state_csv missing: {fly_state_csv}")
+            fly_state_csv = None
 
         print(f"[analysis] training.latency → {out_dir}")
         latency_reports(
             matrix,
             codes,
             out_dir,
+            csv_path=csv_path,
+            fly_state_csv=fly_state_csv,
+            fly_state_column=fly_state_column,
             trials_of_interest=trials,
             **opts,
         )
