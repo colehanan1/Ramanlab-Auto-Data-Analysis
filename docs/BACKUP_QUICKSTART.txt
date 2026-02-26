@@ -103,8 +103,8 @@ BACKUP DESTINATIONS
 ═══════════════════════════════════════════════════════════════════════════
 
 SMB Network Share:
-  CSVs:    smb://ramanfile.local/ramanfiles/cole/flyTrackingData/
-  Results: smb://ramanfile.local/ramanfiles/cole/Figures/
+  CSVs:    smb://10.229.137.184/ramanfiles/cole/flyTrackingData/
+  Results: smb://10.229.137.184/ramanfiles/cole/Figures/
 
 Box Cloud:
   CSVs:    Box-Folder:Ramanlab-Backups/CSVs/
@@ -122,7 +122,7 @@ Watch backups in real-time:
   $ tail -f backup.log
 
 Check SMB access:
-  $ ls smb://ramanfile.local/ramanfiles/cole/
+  $ ls smb://10.229.137.184/ramanfiles/cole/
 
 Check Box:
   $ rclone ls Box-Folder:Ramanlab-Backups/
@@ -194,7 +194,7 @@ TROUBLESHOOTING
 
 SMB not accessible?
   $ mount | grep smb
-  $ ls smb://ramanfile.local/ramanfiles/cole/
+  $ ls smb://10.229.137.184/ramanfiles/cole/
 
 Box not connecting?
   $ rclone listremotes
