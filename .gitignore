@@ -90,3 +90,10 @@ Thumbs.db
 
 # Claude AI generated documentation
 docs/claude-output/
+# Local combined scripts (do not track)
+combinedv2_1.py
+combinedv2_1_pi1.py
+combinedv2_pi1.py
+combinedv2_pi2.py
+combinedv3_pi1.py
+combinedv3_pi2.py
