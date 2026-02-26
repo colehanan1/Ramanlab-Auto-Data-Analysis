@@ -37,6 +37,14 @@ from matplotlib.colors import ListedColormap
 from matplotlib.patches import Patch
 from scipy.signal import hilbert
 
+# Ensure all plots use Arial to match lab styling.
+plt.rcParams.update(
+    {
+        "font.family": "Arial",
+        "font.sans-serif": ["Arial"],
+    }
+)
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SRC_ROOT = REPO_ROOT / "src"
 for path in (str(REPO_ROOT), str(SRC_ROOT)):
@@ -2542,6 +2550,8 @@ def overlay_sources(
             "axes.linewidth": 0.8,
             "xtick.direction": "out",
             "ytick.direction": "out",
+            "font.family": "Arial",
+            "font.sans-serif": ["Arial"],
             "font.size": 10,
         }
     )

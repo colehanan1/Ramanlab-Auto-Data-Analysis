@@ -31,7 +31,8 @@ from ..utils.fly_files import iter_fly_distance_csvs
 # Display defaults mirror the notebook example
 plt.rcParams.update(
     {
-        "font.family": "serif",
+        "font.family": "Arial",
+        "font.sans-serif": ["Arial"],
         "font.size": 12,
         "axes.labelsize": 12,
         "axes.titlesize": 13,

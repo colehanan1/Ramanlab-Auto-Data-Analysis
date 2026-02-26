@@ -59,6 +59,8 @@ _RC_CONTEXT = {
     "savefig.dpi": 300,
     "axes.spines.top": False,
     "axes.spines.right": False,
+    "font.family": "Arial",
+    "font.sans-serif": ["Arial"],
 }
 
 

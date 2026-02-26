@@ -18,6 +18,14 @@ import matplotlib.transforms as mtransforms
 import numpy as np
 import pandas as pd
 
+# Ensure all plots use Arial to match lab styling.
+plt.rcParams.update(
+    {
+        "font.family": "Arial",
+        "font.sans-serif": ["Arial"],
+    }
+)
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))

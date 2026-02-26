@@ -27,6 +27,13 @@ import matplotlib.pyplot as plt  # noqa: E402
 
 
 LOGGER = logging.getLogger("plot_dirval_heatmaps")
+# Ensure all plots use Arial to match lab styling.
+plt.rcParams.update(
+    {
+        "font.family": "Arial",
+        "font.sans-serif": ["Arial"],
+    }
+)
 DEFAULT_OUTDIR = Path("results") / "heatmaps"
 DEFAULT_VPERCENTILES = (2.0, 98.0)
 DEFAULT_DIRVAL_RANGE = (0.0, 200.0)

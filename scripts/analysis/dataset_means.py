@@ -31,6 +31,14 @@ import matplotlib.pyplot as plt  # noqa: E402
 import numpy as np  # noqa: E402
 import pandas as pd  # noqa: E402
 
+# Ensure all plots use Arial to match lab styling.
+plt.rcParams.update(
+    {
+        "font.family": "Arial",
+        "font.sans-serif": ["Arial"],
+    }
+)
+
 # ---------------------------------------------------------------------------
 # Repo root setup (so we can import fbpipe and sibling scripts)
 # ---------------------------------------------------------------------------

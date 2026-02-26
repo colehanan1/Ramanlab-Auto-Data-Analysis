@@ -39,6 +39,14 @@ import pandas as pd
 from matplotlib import gridspec
 from matplotlib.colors import BoundaryNorm, ListedColormap
 
+# Ensure all plots use Arial to match lab styling.
+plt.rcParams.update(
+    {
+        "font.family": "Arial",
+        "font.sans-serif": ["Arial"],
+    }
+)
+
 logger = logging.getLogger(__name__)
 
 
@@ -122,6 +130,19 @@ ODOR_ORDER = [
     "opto_AIR",
     "opto_3-oct",
 ]
+
+REACTION_RATE_ODOR_ORDER = [
+    "3-Octonol",
+    "Apple Cider Vinegar",
+    "Benzaldehyde",
+    "Citral",
+    "Ethyl Butyrate",
+    "Hexanol",
+    "Linalool",
+]
+REACTION_RATE_ODOR_INDEX = {
+    label.casefold(): idx for idx, label in enumerate(REACTION_RATE_ODOR_ORDER)
+}
 
 TRAINED_FIRST_ORDER = (2, 4, 5, 1, 3, 6, 7, 8, 9)
 HEXANOL_LABEL = "Hexanol"
@@ -985,7 +1006,15 @@ def reaction_rate_stats_from_rows(
     highlight_label = _trained_label(dataset_canon)
     stats_df["is_trained"] = stats_df["odor"].astype(str).str.casefold() == highlight_label.casefold()
 
-    stats_df = stats_df.sort_values(["rate", "odor"], ascending=[False, True], kind="mergesort")
+    stats_df = stats_df.assign(
+        _order_key=stats_df["odor"].map(
+            lambda value: REACTION_RATE_ODOR_INDEX.get(str(value).casefold(), len(REACTION_RATE_ODOR_INDEX))
+        ),
+        _order_label=stats_df["odor"].astype(str).str.casefold(),
+    )
+    stats_df = stats_df.sort_values(
+        ["_order_key", "_order_label"], ascending=[True, True], kind="mergesort"
+    ).drop(columns=["_order_key", "_order_label"])
     stats_df = stats_df.reset_index(drop=True)
 
     logger.debug(
@@ -1264,6 +1293,8 @@ def generate_reaction_matrices(cfg: MatrixPlotConfig) -> None:
                     "savefig.dpi": 300,
                     "axes.spines.top": False,
                     "axes.spines.right": False,
+                    "font.family": "Arial",
+                    "font.sans-serif": ["Arial"],
                 }
             )
             fig = plt.figure(figsize=(fig_w, fig_h), constrained_layout=False)
@@ -1611,6 +1642,8 @@ def generate_envelope_plots(cfg: EnvelopePlotConfig) -> None:
                 "axes.linewidth": 0.8,
                 "xtick.direction": "out",
                 "ytick.direction": "out",
+                "font.family": "Arial",
+                "font.sans-serif": ["Arial"],
                 "font.size": 10,
             }
         )
