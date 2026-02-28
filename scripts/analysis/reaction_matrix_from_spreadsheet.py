@@ -51,6 +51,7 @@ from scripts.analysis.envelope_visuals import (
     _style_trained_xticks,
     _trial_num,
     _trial_order_for,
+    _drop_testing_11,
 )
 
 
@@ -232,6 +233,7 @@ def generate_reaction_matrices_from_csv(cfg: SpreadsheetMatrixConfig) -> None:
             ]
             fly_pairs.sort(key=lambda pair: _fly_sort_key(*pair))
             trial_list = _trial_order_for(list(subset["trial"].unique()), order)
+            trial_list = _drop_testing_11(trial_list)
             pretty_labels = [_display_odor(odor, trial) for trial in trial_list]
 
             during_matrix = np.full((len(fly_pairs), len(trial_list)), np.nan, dtype=float)
@@ -253,7 +255,8 @@ def generate_reaction_matrices_from_csv(cfg: SpreadsheetMatrixConfig) -> None:
             base_w = max(10.0, 0.70 * n_trials + 6.0)
             base_h = max(5.0, n_flies * 0.26 + 3.8)
             fig_w = base_w
-            fig_h = base_h + cfg.row_gap * cfg.height_per_gap_in + cfg.bottom_shift_in
+            gap_scale = 0.6
+            fig_h = base_h + cfg.row_gap * cfg.height_per_gap_in * gap_scale + cfg.bottom_shift_in
 
             xtick_fs = 9 if n_trials <= 10 else (8 if n_trials <= 16 else 7)
 
@@ -263,7 +266,7 @@ def generate_reaction_matrices_from_csv(cfg: SpreadsheetMatrixConfig) -> None:
                     2,
                     1,
                     height_ratios=[3.0, 1.25],
-                    hspace=cfg.row_gap,
+                    hspace=cfg.row_gap * gap_scale,
                 )
 
                 ax_during = fig.add_subplot(gs[0, 0])

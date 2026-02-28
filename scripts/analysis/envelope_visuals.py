@@ -1098,7 +1098,7 @@ def _style_trained_xticks(ax, labels: Sequence[str], trained_display: str, fonts
             styled.append(label.upper())
         else:
             styled.append(label)
-    ax.set_xticklabels(styled, rotation=90, ha="center", va="top", fontsize=fontsize)
+    ax.set_xticklabels(styled, rotation=35, ha="right", va="top", fontsize=fontsize)
     for tick, label in zip(ax.get_xticklabels(), styled):
         if label.upper() == trained_display.upper():
             tick.set_color("tab:blue")
@@ -1119,6 +1119,17 @@ def _trial_order_for(dataset_trials: Sequence[str], order: str) -> list[str]:
         ordered.extend(sorted(extras, key=_trial_num))
         return ordered
     raise ValueError(f"Unsupported trial order: {order}")
+
+
+def _is_testing_11_label(label: object) -> bool:
+    """Return True when the label looks like testing trial 11."""
+    return "testing" in str(label).lower() and _trial_num(label) == 11
+
+
+def _drop_testing_11(trials: Sequence[str]) -> list[str]:
+    """Remove testing trial 11 from reaction prediction plots."""
+    cleaned = [trial for trial in trials if not _is_testing_11_label(trial)]
+    return cleaned
 
 
 def _order_suffix(order: str) -> str:
@@ -1241,6 +1252,16 @@ def generate_reaction_matrices(cfg: MatrixPlotConfig) -> None:
 
             subset = subset.copy()
             subset = _normalise_fly_columns(subset)
+            drop_mask = subset["trial"].apply(_is_testing_11_label)
+            if drop_mask.any():
+                subset = subset.loc[~drop_mask].copy()
+                if subset.empty:
+                    print(
+                        "[INFO] reaction_matrices: skipping",
+                        odor,
+                        "because only testing_11 trials remained after filtering.",
+                    )
+                    continue
             flagged_mask = non_reactive_mask(subset)
             flagged_pairs = {
                 (row.fly, row.fly_number)
@@ -1263,6 +1284,7 @@ def generate_reaction_matrices(cfg: MatrixPlotConfig) -> None:
             ]
             fly_pairs.sort(key=lambda pair: _fly_sort_key(*pair))
             trial_list = _trial_order_for(list(subset["trial"].unique()), order)
+            trial_list = _drop_testing_11(trial_list)
             pretty_labels = [_display_odor(odor, trial) for trial in trial_list]
 
             during_matrix = np.full((len(fly_pairs), len(trial_list)), -1, dtype=int)
@@ -1283,7 +1305,8 @@ def generate_reaction_matrices(cfg: MatrixPlotConfig) -> None:
             base_w = max(10.0, 0.70 * n_trials + 6.0)
             base_h = max(5.0, n_flies * 0.26 + 3.8)
             fig_w = base_w
-            fig_h = base_h + cfg.row_gap * cfg.height_per_gap_in + cfg.bottom_shift_in
+            gap_scale = 0.6
+            fig_h = base_h + cfg.row_gap * cfg.height_per_gap_in * gap_scale + cfg.bottom_shift_in
 
             xtick_fs = 9 if n_trials <= 10 else (8 if n_trials <= 16 else 7)
 
@@ -1302,7 +1325,7 @@ def generate_reaction_matrices(cfg: MatrixPlotConfig) -> None:
                 2,
                 1,
                 height_ratios=[3.0, 1.25],
-                hspace=cfg.row_gap,
+                hspace=cfg.row_gap * gap_scale,
             )
 
             ax_during = fig.add_subplot(gs[0, 0])
@@ -1486,6 +1509,13 @@ class EnvelopePlotConfig:
     overwrite: bool = False
 
 
+def _envelope_ylabel(cfg: EnvelopePlotConfig) -> str:
+    matrix_label = str(cfg.matrix_npy).lower()
+    if "combined_base" in matrix_label or "angle_distance" in matrix_label:
+        return "Max Distance x Angle %"
+    return "RMS (a.u.)"
+
+
 def generate_envelope_plots(cfg: EnvelopePlotConfig) -> None:
     df, env_cols = _load_matrix(cfg.matrix_npy, cfg.codes_json)
     trial_type = cfg.trial_type.strip().lower()
@@ -1550,6 +1580,9 @@ def generate_envelope_plots(cfg: EnvelopePlotConfig) -> None:
     odor_off_effective = odor_off_cmd + odor_latency
     linger = max(cfg.latency_sec, 0.0)
     x_max_limit = odor_off_effective + linger + cfg.after_show_sec
+    y_label = _envelope_ylabel(cfg)
+    matrix_label = str(cfg.matrix_npy).lower()
+    share_ylabel = "combined_base" in matrix_label or "angle_distance" in matrix_label
 
     flies_rendered = 0
     for (fly, fly_number), fly_df in df.groupby(["fly", "fly_number"], sort=False):
@@ -1653,6 +1686,8 @@ def generate_envelope_plots(cfg: EnvelopePlotConfig) -> None:
         fig, axes = plt.subplots(n_rows, 1, figsize=(10, fig_h), sharex=True)
         if n_rows == 1:
             axes = [axes]
+        if share_ylabel:
+            fig.text(0.02, 0.5, y_label, va="center", rotation="vertical", fontsize=10)
 
         for ax, (
             odor_name,
@@ -1725,7 +1760,8 @@ def generate_envelope_plots(cfg: EnvelopePlotConfig) -> None:
             ax.set_ylim(0, y_max * 1.02 if y_max > 0 else 1.0)
             ax.set_xlim(0, x_max_limit)
             ax.margins(x=0, y=0.02)
-            ax.set_ylabel("RMS (a.u.)", fontsize=10)
+            if not share_ylabel:
+                ax.set_ylabel(y_label, fontsize=10)
 
             if is_trained:
                 ax.set_title(odor_name.upper(), loc="left", fontsize=11, weight="bold", pad=2, color="tab:blue")
@@ -1815,7 +1851,8 @@ def generate_envelope_plots(cfg: EnvelopePlotConfig) -> None:
             weight="bold",
             color="tab:red" if fly_flagged else "black",
         )
-        fig.tight_layout(rect=[0, 0, 1, 0.93])
+        left_pad = 0.04 if share_ylabel else 0.0
+        fig.tight_layout(rect=[left_pad, 0, 1, 0.93])
 
         if should_write(out_path, cfg.overwrite):
             fig.savefig(out_path, dpi=300, bbox_inches="tight")

@@ -133,6 +133,7 @@ DIST_COLS = [
     "measure",
     "value",
 ]
+COMBINED_SCALE = 0.5  # Scale distance × angle so max is 100 (100% distance * 2 multiplier / 2).
 TIME_COLS = ["time_s", "time_seconds", "t_s", "time"]
 TIMESTAMP_COLS = ["UTC_ISO", "Timestamp", "Number", "MonoNs"]
 FRAME_COLS = ["Frame", "FrameNumber", "Frame Number"]
@@ -1600,13 +1601,13 @@ def combine_distance_angle(cfg: CombineConfig) -> None:
                     print(
                         f"[DEBUG] {fly_name}: distance columns={list(dist_df.columns)} selected={dist_col}"
                     )
-                    # Load distance percentages and check for anomalies > 200
+                    # Load distance percentages and check for anomalies > 100
                     dist_numeric = pd.to_numeric(dist_df[dist_col], errors="coerce").fillna(0.0)
-                    invalid_frames = dist_numeric > 200.0
+                    invalid_frames = dist_numeric > 100.0
                     if invalid_frames.any():
                         invalid_count = invalid_frames.sum()
                         print(
-                            f"[WARN] {fly_name} {trial_id}: {invalid_count} frames with distance_percentage > 200 (max valid: 200)"
+                            f"[WARN] {fly_name} {trial_id}: {invalid_count} frames with distance_percentage > 100 (max valid: 100)"
                         )
                     dist_pct = (
                         dist_numeric
@@ -1637,8 +1638,20 @@ def combine_distance_angle(cfg: CombineConfig) -> None:
                     interp_angle = np.interp(
                         time_dist, time_ang, angle_vals, left=angle_vals[0], right=angle_vals[-1]
                     )
-                    multiplier = _angle_multiplier(interp_angle)
-                    combined = dist_pct * multiplier
+                    angle_clipped = np.clip(interp_angle, -100.0, 100.0)
+                    clip_mask = (
+                        np.isfinite(interp_angle)
+                        & np.isfinite(angle_clipped)
+                        & ~np.isclose(angle_clipped, interp_angle)
+                    )
+                    if np.any(clip_mask):
+                        clipped_count = int(np.sum(clip_mask))
+                        print(
+                            f"[WARN] {fly_name} {trial_id}: clipped {clipped_count} angle_pct samples to [-100, 100]"
+                        )
+                    multiplier = _angle_multiplier(angle_clipped)
+                    combined_raw = dist_pct * multiplier
+                    combined = combined_raw * COMBINED_SCALE
                     combined_rms = _rolling_rms(combined, cfg.window_frames)
                     envelope = _hilbert_envelope(combined_rms, cfg.window_frames)
 
@@ -1647,7 +1660,7 @@ def combine_distance_angle(cfg: CombineConfig) -> None:
                     out_df = pd.DataFrame(
                         {
                             "time_s": time_dist,
-                            "angle_centered_pct_interp": interp_angle,
+                            "angle_centered_pct_interp": angle_clipped,
                             "distance_percentage": dist_pct,
                             "multiplier": multiplier,
                             "combined_base": combined,
@@ -1671,7 +1684,7 @@ def combine_distance_angle(cfg: CombineConfig) -> None:
                         f"{fly_name} — {trial_id}: Envelope(RMS(distance × angle-mult))"
                     )
                     plt.xlabel("Time (s)")
-                    plt.ylabel("Envelope of RMS (arb.)")
+                    plt.ylabel("Max RMS of Distance x Angle")
                     plt.margins(x=0)
                     plt.grid(True, alpha=0.3)
                     out_png = out_fig_dir / f"{fly_name}_{trial_id}_env_rms_angle_distance.png"
@@ -2657,7 +2670,7 @@ def overlay_sources(
             ax.set_ylim(0, y_max * 1.02 if y_max > 0 else 1.0)
             ax.set_xlim(0, x_max)
             ax.margins(x=0, y=0.02)
-            ax.set_ylabel("DIST or DIST×ANGLE", fontsize=10)
+            ax.set_ylabel("Max RMS of Distance x Angle", fontsize=10)
             title = f"{odor_name} — {trial_label}"
             if is_trained:
                 ax.set_title(title, loc="left", fontsize=11, weight="bold", pad=2, color="tab:blue")

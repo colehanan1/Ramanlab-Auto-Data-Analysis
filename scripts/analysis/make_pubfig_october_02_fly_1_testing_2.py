@@ -219,6 +219,7 @@ def main() -> None:
             "xtick.direction": "out",
             "ytick.direction": "out",
             "font.family": "Arial",
+            "font.sans-serif": ["Arial"],
             "font.size": 14,
         }
     )
