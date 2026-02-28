@@ -49,6 +49,7 @@ from scripts.analysis.envelope_visuals import (
     NON_REACTIVE_SPAN_PX,
     _order_suffix,
     _style_trained_xticks,
+    _is_testing_11_label,
     _trial_num,
     _trial_order_for,
     _drop_testing_11,
@@ -211,6 +212,16 @@ def generate_reaction_matrices_from_csv(cfg: SpreadsheetMatrixConfig) -> None:
 
             subset = subset.copy()
             subset = _normalise_fly_columns(subset)
+            drop_mask = subset["trial"].apply(_is_testing_11_label)
+            if drop_mask.any():
+                subset = subset.loc[~drop_mask].copy()
+                if subset.empty:
+                    print(
+                        "[INFO] reaction_matrix_csv: skipping",
+                        odor,
+                        "because only testing_11 trials remained after filtering.",
+                    )
+                    continue
             flagged_mask = non_reactive_mask(subset)
             flagged_pairs = {
                 (row.fly, row.fly_number)
