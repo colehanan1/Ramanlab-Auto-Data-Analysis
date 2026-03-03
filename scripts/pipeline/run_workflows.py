@@ -41,7 +41,7 @@ for path in (str(SRC_ROOT), str(REPO_ROOT)):
 
 STATE_VERSION = 1
 
-from fbpipe.config import Settings, load_settings, resolve_config_path
+from fbpipe.config import Settings, discover_flagged_directories, load_settings, resolve_config_path
 from fbpipe.pipeline import ORDERED_STEPS
 from fbpipe.steps import predict_reactions
 from fbpipe.utils.smb_copy import copy_to_smb
@@ -626,6 +626,18 @@ def _run_combined(cfg: Mapping[str, Any] | None, settings: Settings | None) -> N
     non_reactive_threshold = settings.non_reactive_span_px if settings is not None else None
     limits = (settings.class2_min, settings.class2_max) if settings is not None else None
 
+    # Auto-discover flagged experiment directories.
+    flagged_dirs: list[Path] = []
+    if settings is not None and settings.flagged_root:
+        flagged_dirs = discover_flagged_directories(settings.flagged_root)
+        if flagged_dirs:
+            LOGGER.info(
+                "Auto-discovered %d flagged experiment(s) under %s: %s",
+                len(flagged_dirs),
+                settings.flagged_root,
+                [p.name for p in flagged_dirs],
+            )
+
     combine_cfg = cfg.get("combine")
     if combine_cfg:
         opts = dict(combine_cfg)
@@ -640,6 +652,9 @@ def _run_combined(cfg: Mapping[str, Any] | None, settings: Settings | None) -> N
             roots_iter = [root_value]
         else:
             raise ValueError("combined.combine requires 'root' or 'roots'.")
+
+        # Append flagged directories so they are processed identically.
+        roots_iter.extend(str(d) for d in flagged_dirs)
 
         for entry in roots_iter:
             entry_path = _ensure_path(entry, "combine.root")
@@ -667,6 +682,35 @@ def _run_combined(cfg: Mapping[str, Any] | None, settings: Settings | None) -> N
             else [roots_cfg]
         )
         wide_root_paths = [_ensure_path(root, "roots") for root in roots_iter]
+
+        # Mirror flagged directories into secured storage, then add the
+        # secured paths to the wide build (matching the normal experiment flow).
+        if flagged_dirs:
+            flagged_secured = (
+                Path(settings.flagged_secured_root).expanduser().resolve()
+                if settings is not None and settings.flagged_secured_root
+                else None
+            )
+            existing_names = {p.name.lower() for p in wide_root_paths}
+            for fd in flagged_dirs:
+                if fd.name.lower() in existing_names:
+                    continue
+                if flagged_secured is not None:
+                    secured_dest = flagged_secured / fd.name
+                    secured_dest.mkdir(parents=True, exist_ok=True)
+                    print(f"[analysis] combined.mirror (flagged) → {secured_dest}")
+                    copied, bytes_copied = mirror_directory(str(fd), str(secured_dest))
+                    size_mb = bytes_copied / (1024 * 1024) if bytes_copied else 0.0
+                    print(
+                        f"[analysis] combined.mirror (flagged) copied {copied} file(s) "
+                        f"({size_mb:.1f} MiB)."
+                    )
+                    wide_root_paths.append(secured_dest)
+                    LOGGER.info("Added flagged secured root to wide build: %s", secured_dest)
+                else:
+                    # No secured storage configured; use source path directly.
+                    wide_root_paths.append(fd)
+                    LOGGER.info("Added flagged root to wide build: %s", fd)
 
         mirror_cfg = wide_cfg.get("mirror")
         handled_datasets: list[str] = []
@@ -773,6 +817,22 @@ def _run_combined(cfg: Mapping[str, Any] | None, settings: Settings | None) -> N
                 raise ValueError(
                     "combined.combined_base.wide.roots must list at least one directory."
                 )
+
+            # Include flagged directories in combined_base wide build
+            # (use secured storage paths when available, mirrored earlier).
+            if flagged_dirs:
+                flagged_secured = (
+                    Path(settings.flagged_secured_root).expanduser().resolve()
+                    if settings is not None and settings.flagged_secured_root
+                    else None
+                )
+                existing_names = {p.name.lower() for p in base_root_paths}
+                for fd in flagged_dirs:
+                    if fd.name.lower() not in existing_names:
+                        if flagged_secured is not None:
+                            base_root_paths.append(flagged_secured / fd.name)
+                        else:
+                            base_root_paths.append(fd)
 
             roots = [str(path) for path in base_root_paths]
             output_csv = _ensure_path(
@@ -1061,6 +1121,7 @@ def _run_combined(cfg: Mapping[str, Any] | None, settings: Settings | None) -> N
             raise ValueError("combined.secure_cleanup.sources must list at least one directory.")
         dest = _ensure_path(secure_cfg.get("destination"), "secure_cleanup.destination")
         resolved_sources = [str(_ensure_path(src, "secure_cleanup.sources")) for src in sources]
+
         perform_cleanup = bool(secure_cfg.get("perform_cleanup", True))
         print(
             f"[analysis] combined.secure_cleanup → dest={dest} sources={resolved_sources} perform_cleanup={perform_cleanup}"
@@ -1070,6 +1131,25 @@ def _run_combined(cfg: Mapping[str, Any] | None, settings: Settings | None) -> N
             str(dest),
             perform_cleanup=perform_cleanup,
         )
+
+    # Secure-copy flagged experiments to their own secured storage folder.
+    if flagged_dirs:
+        if settings is not None and settings.flagged_secured_root:
+            flagged_dest: Path | None = Path(settings.flagged_secured_root).expanduser().resolve()
+        else:
+            flagged_dest = None
+        if flagged_dest is not None:
+            flagged_dest.mkdir(parents=True, exist_ok=True)
+            flagged_sources = [str(fd) for fd in flagged_dirs]
+            print(
+                f"[analysis] combined.secure_cleanup (flagged) → dest={flagged_dest} "
+                f"sources={[fd.name for fd in flagged_dirs]}"
+            )
+            secure_copy_and_cleanup(
+                flagged_sources,
+                str(flagged_dest),
+                perform_cleanup=False,  # Never auto-delete flagged experiment source data
+            )
 
 
 def _run_reactions(settings: Settings) -> None:

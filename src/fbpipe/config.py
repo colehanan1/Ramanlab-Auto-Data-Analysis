@@ -107,11 +107,23 @@ def load_raw_config(config_path: str | Path) -> Dict[str, Any]:
     return {}
 
 
+def discover_flagged_directories(flagged_root: str | Path) -> list[Path]:
+    """Return all immediate subdirectories of the flagged experiments root.
+
+    Any new folder added under *flagged_root* will be picked up automatically.
+    """
+    root = Path(flagged_root).expanduser().resolve()
+    if not root.is_dir():
+        return []
+    return sorted(p for p in root.iterdir() if p.is_dir())
+
+
 def get_main_directories(cfg: Settings) -> list[Path]:
     """
     Normalize main_directories to always return a list of Path objects.
 
     Handles both single string and list of strings from config.
+    Automatically appends any subdirectories found under ``flagged_root``.
 
     Args:
         cfg: Settings object
@@ -120,8 +132,14 @@ def get_main_directories(cfg: Settings) -> list[Path]:
         List of Path objects for all main directories
     """
     if isinstance(cfg.main_directories, list):
-        return [Path(d).expanduser().resolve() for d in cfg.main_directories]
-    return [Path(cfg.main_directories).expanduser().resolve()]
+        dirs = [Path(d).expanduser().resolve() for d in cfg.main_directories]
+    else:
+        dirs = [Path(cfg.main_directories).expanduser().resolve()]
+
+    if cfg.flagged_root:
+        dirs.extend(discover_flagged_directories(cfg.flagged_root))
+
+    return dirs
 
 
 @dataclass
@@ -265,6 +283,8 @@ class Settings:
     model_path: str
     main_directories: str | list[str]  # Can be single path or list of paths
     cache_dir: str = ""
+    flagged_root: str = ""  # Parent dir for flagged/bad experiments; subdirs auto-discovered
+    flagged_secured_root: str = ""  # Secured storage mirror for flagged experiments
     allow_cpu: bool = False
     cuda_allow_tf32: bool = True
     non_reactive_span_px: float = 5.0
@@ -586,10 +606,19 @@ def load_settings(config_path: str | Path) -> Settings:
         export_coco_json=_as_bool(pseudolabel_cfg.get("export_coco_json", False), False),
     )
 
+    flagged_root = str(
+        os.getenv("FLAGGED_ROOT", _get(data, "flagged_root", ""))
+    )
+    flagged_secured_root = str(
+        os.getenv("FLAGGED_SECURED_ROOT", _get(data, "flagged_secured_root", ""))
+    )
+
     return Settings(
         model_path=model_path,
         main_directories=main_directories,
         cache_dir=str(Path(cache_dir).expanduser()),
+        flagged_root=flagged_root,
+        flagged_secured_root=flagged_secured_root,
         allow_cpu=allow_cpu,
         cuda_allow_tf32=cuda_allow_tf32,
         non_reactive_span_px=non_reactive_span_px,

@@ -133,7 +133,8 @@ DIST_COLS = [
     "measure",
     "value",
 ]
-COMBINED_SCALE = 0.5  # Scale distance × angle so max is 100 (100% distance * 2 multiplier / 2).
+# Per-fly normalization replaces the old COMBINED_SCALE = 0.5 constant.
+# Each fly's combined_raw is now divided by its own max across all trials.
 TIME_COLS = ["time_s", "time_seconds", "t_s", "time"]
 TIMESTAMP_COLS = ["UTC_ISO", "Timestamp", "Number", "MonoNs"]
 FRAME_COLS = ["Frame", "FrameNumber", "Frame Number"]
@@ -602,7 +603,22 @@ def _safe_dirname(value: str) -> str:
 def _canon_dataset(value: str) -> str:
     if not isinstance(value, str):
         return "UNKNOWN"
-    return ODOR_CANON.get(value.strip().lower(), value.strip())
+    stripped = value.strip()
+    key = stripped.lower()
+    canon = ODOR_CANON.get(key)
+    if canon is not None:
+        return canon
+    # Strip "-flagged" suffix so flagged experiments inherit the odor/trial
+    # labelling of their parent dataset (e.g. "opto_EB-flagged" → "opto_EB").
+    if key.endswith("-flagged"):
+        base_key = key[: -len("-flagged")]
+        canon = ODOR_CANON.get(base_key)
+        if canon is not None:
+            return canon
+        # Base may not be in ODOR_CANON (pass-through datasets like opto_benz_1);
+        # return the base name with original casing.
+        return stripped[: -len("-flagged")]
+    return stripped
 
 
 def _trial_num(label: str) -> int:
@@ -747,25 +763,22 @@ def _hilbert_envelope(values: np.ndarray, window: int) -> np.ndarray:
 
 def _angle_multiplier(angle_pct: np.ndarray) -> np.ndarray:
     """
-    Convert angle percentage (-100 to +100) to continuous multiplier (0.5 to 2.0).
+    Convert angle percentage (-100 to +100) to continuous multiplier (1.0 to 2.0).
 
-    Modification #3: Continuous exponential angle scaling replaces binned approach.
-    - Negative angles (-100 to 0): multiplier = 0.5 + 0.5 * (1.0 + angle/100)
-    - Positive angles (0 to +100): multiplier = 1.0 + angle/100
+    - Negative/zero angles (-100 to 0): multiplier = 1.0 (no penalty)
+    - Positive angles (0 to +100): multiplier = 1.0 + angle/100 (linear to 2.0)
 
     This provides smooth scaling where:
-    - -100° → 0.5×
-    - 0° → 1.0×
-    - +100° → 2.0×
+    -  ≤0% → 1.0×
+    - +100% → 2.0×
     """
     pct = np.asarray(angle_pct, dtype=float)
     pct = np.clip(pct, -100.0, 100.0)
 
-    # Vectorized continuous multiplier calculation
     multiplier = np.where(
-        pct < 0,
-        0.5 + 0.5 * (1.0 + pct / 100.0),  # Negative angles
-        1.0 + pct / 100.0  # Positive angles
+        pct <= 0.0,
+        1.0,                  # no penalty for negative/zero angles
+        1.0 + pct / 100.0    # linear 1.0 → 2.0 for positive angles
     )
 
     return multiplier
@@ -1553,7 +1566,11 @@ def combine_distance_angle(cfg: CombineConfig) -> None:
         out_csv_dir.mkdir(parents=True, exist_ok=True)
         out_fig_dir.mkdir(parents=True, exist_ok=True)
 
-        totals: dict[str, tuple[int, int]] = {}
+        # ── PASS 1: compute combined_raw for all trials, find per-fly max ──
+        fly_combined_raw_max = 0.0
+        trial_data_cache: list[dict] = []
+        pass1_skipped = 0
+
         for trial_type, regex in trial_configs:
             dist_idx = _collect_distance_entries(distance_entries, regex, trial_type)
             if not dist_idx:
@@ -1561,7 +1578,6 @@ def combine_distance_angle(cfg: CombineConfig) -> None:
                     print(f"[{fly_name}] No {trial_type} distance trials found.")
                 continue
 
-            completed = skipped = 0
             for key, (dist_path, base_key, slot_label) in sorted(dist_idx.items()):
                 lookup_keys = [key, base_key]
                 angle_path: Optional[Path] = None
@@ -1575,7 +1591,7 @@ def combine_distance_angle(cfg: CombineConfig) -> None:
                     print(
                         f"[WARN] {fly_name} {trial_type} {key}: no matching angle file — skipped."
                     )
-                    skipped += 1
+                    pass1_skipped += 1
                     continue
 
                 fly_number = _extract_fly_number(slot_label, dist_path.stem, fly_dir.name)
@@ -1601,13 +1617,15 @@ def combine_distance_angle(cfg: CombineConfig) -> None:
                     print(
                         f"[DEBUG] {fly_name}: distance columns={list(dist_df.columns)} selected={dist_col}"
                     )
-                    # Load distance percentages and check for anomalies > 100
+                    # Load distance percentages and check for out-of-range sentinels
                     dist_numeric = pd.to_numeric(dist_df[dist_col], errors="coerce").fillna(0.0)
-                    invalid_frames = dist_numeric > 100.0
+                    invalid_frames = (dist_numeric > 100.0) | (dist_numeric < 0.0)
                     if invalid_frames.any():
-                        invalid_count = invalid_frames.sum()
+                        over_count = int((dist_numeric > 100.0).sum())
+                        under_count = int((dist_numeric < 0.0).sum())
                         print(
-                            f"[WARN] {fly_name} {trial_id}: {invalid_count} frames with distance_percentage > 100 (max valid: 100)"
+                            f"[WARN] {fly_name} {base_key}: {over_count} over-range and "
+                            f"{under_count} under-range sentinel frames clipped to [0, 100]"
                         )
                     dist_pct = (
                         dist_numeric
@@ -1647,69 +1665,115 @@ def combine_distance_angle(cfg: CombineConfig) -> None:
                     if np.any(clip_mask):
                         clipped_count = int(np.sum(clip_mask))
                         print(
-                            f"[WARN] {fly_name} {trial_id}: clipped {clipped_count} angle_pct samples to [-100, 100]"
+                            f"[WARN] {fly_name} {base_key}: clipped {clipped_count} angle_pct samples to [-100, 100]"
                         )
                     multiplier = _angle_multiplier(angle_clipped)
                     combined_raw = dist_pct * multiplier
-                    combined = combined_raw * COMBINED_SCALE
-                    combined_rms = _rolling_rms(combined, cfg.window_frames)
-                    envelope = _hilbert_envelope(combined_rms, cfg.window_frames)
+
+                    # Track per-fly max of combined_raw
+                    finite_cr = combined_raw[np.isfinite(combined_raw)]
+                    if finite_cr.size > 0:
+                        local_max = float(np.max(finite_cr))
+                        fly_combined_raw_max = max(fly_combined_raw_max, local_max)
 
                     slot_suffix = f"_{slot_label}" if slot_label else ""
                     trial_id = f"{base_key}{slot_suffix}".replace("__", "_")
-                    out_df = pd.DataFrame(
-                        {
-                            "time_s": time_dist,
-                            "angle_centered_pct_interp": angle_clipped,
-                            "distance_percentage": dist_pct,
-                            "multiplier": multiplier,
-                            "combined_base": combined,
-                            "rolling_rms": combined_rms,
-                            "envelope_of_rms": envelope,
-                            "invalid_distance_flag": invalid_frames.to_numpy(),
-                            "fly_number": fly_number_label,
-                        }
-                    )
-                    out_csv = out_csv_dir / f"{trial_id}_angle_distance_rms_envelope.csv"
-                    out_df.to_csv(out_csv, index=False)
-                    print(
-                        f"[DEBUG] {fly_name}: wrote {out_csv.name} rows={len(out_df)} fly_number={fly_number_label}"
-                    )
 
-                    plt.figure(figsize=(12, 4))
-                    plt.plot(time_dist, envelope, linewidth=1.5)
-                    plt.axvline(odor_on_effective, color="black", linewidth=1.2, linestyle="--")
-                    plt.axvline(odor_off_effective, color="black", linewidth=1.2, linestyle="--")
-                    plt.title(
-                        f"{fly_name} — {trial_id}: Envelope(RMS(distance × angle-mult))"
-                    )
-                    plt.xlabel("Time (s)")
-                    plt.ylabel("Max RMS of Distance x Angle")
-                    plt.margins(x=0)
-                    plt.grid(True, alpha=0.3)
-                    out_png = out_fig_dir / f"{fly_name}_{trial_id}_env_rms_angle_distance.png"
-                    plt.savefig(out_png, dpi=300, bbox_inches="tight")
-                    plt.close()
-
-                    print(
-                        f"[OK] {fly_name} {trial_id} → CSV: {out_csv.name} | FIG: {out_png.name}"
-                    )
-                    completed += 1
+                    trial_data_cache.append({
+                        "trial_type": trial_type,
+                        "trial_id": trial_id,
+                        "base_key": base_key,
+                        "time_dist": time_dist,
+                        "dist_pct": dist_pct,
+                        "angle_clipped": angle_clipped,
+                        "multiplier": multiplier,
+                        "combined_raw": combined_raw,
+                        "invalid_frames": invalid_frames.to_numpy(),
+                        "fly_number_label": fly_number_label,
+                    })
                 except Exception as exc:
                     print(f"[WARN] {fly_name} {trial_type} {base_key} → {exc}")
-                    skipped += 1
+                    pass1_skipped += 1
 
-            totals[trial_type] = (completed, skipped)
+        if fly_combined_raw_max <= 0.0:
+            print(f"[WARN] {fly_name}: fly_combined_raw_max is zero; cannot normalize — skipping.")
+            continue
+
+        print(f"[DEBUG] {fly_name}: fly_combined_raw_max={fly_combined_raw_max:.4f}")
+
+        # Write per-fly normalization metadata sidecar
+        norm_meta = {"fly_name": fly_name, "fly_combined_raw_max": fly_combined_raw_max}
+        norm_meta_path = out_csv_dir / "fly_norm_metadata.json"
+        with norm_meta_path.open("w") as _f:
+            json.dump(norm_meta, _f, indent=2)
+
+        # ── PASS 2: normalize by per-fly max, compute RMS/envelope, write outputs ──
+        totals: dict[str, tuple[int, int]] = {}
+        for data in trial_data_cache:
+            trial_type = data["trial_type"]
+            trial_id = data["trial_id"]
+
+            # Normalize: divide by per-fly max, scale to 0-100
+            combined_norm = (data["combined_raw"] / fly_combined_raw_max) * 100.0
+            combined_rms = _rolling_rms(combined_norm, cfg.window_frames)
+            envelope = _hilbert_envelope(combined_rms, cfg.window_frames)
+
+            out_df = pd.DataFrame(
+                {
+                    "time_s": data["time_dist"],
+                    "angle_centered_pct_interp": data["angle_clipped"],
+                    "distance_percentage": data["dist_pct"],
+                    "multiplier": data["multiplier"],
+                    "combined_raw": data["combined_raw"],
+                    "fly_combined_raw_max": fly_combined_raw_max,
+                    "combined_base": combined_norm,
+                    "rolling_rms": combined_rms,
+                    "envelope_of_rms": envelope,
+                    "invalid_distance_flag": data["invalid_frames"],
+                    "fly_number": data["fly_number_label"],
+                }
+            )
+            out_csv = out_csv_dir / f"{trial_id}_angle_distance_rms_envelope.csv"
+            out_df.to_csv(out_csv, index=False)
+            print(
+                f"[DEBUG] {fly_name}: wrote {out_csv.name} rows={len(out_df)} fly_number={data['fly_number_label']}"
+            )
+
+            plt.figure(figsize=(12, 4))
+            plt.plot(data["time_dist"], envelope, linewidth=1.5)
+            plt.axvline(odor_on_effective, color="black", linewidth=1.2, linestyle="--")
+            plt.axvline(odor_off_effective, color="black", linewidth=1.2, linestyle="--")
+            plt.title(
+                f"{fly_name} — {trial_id}: Envelope(RMS(distance × angle-mult))"
+            )
+            plt.xlabel("Time (s)")
+            plt.ylabel("Combined Metric (% of fly max)")
+            plt.margins(x=0)
+            plt.grid(True, alpha=0.3)
+            out_png = out_fig_dir / f"{fly_name}_{trial_id}_env_rms_angle_distance.png"
+            plt.savefig(out_png, dpi=300, bbox_inches="tight")
+            plt.close()
+
+            print(
+                f"[OK] {fly_name} {trial_id} → CSV: {out_csv.name} | FIG: {out_png.name}"
+            )
+            done, missed = totals.get(trial_type, (0, 0))
+            totals[trial_type] = (done + 1, missed)
+
+        # Account for skipped trials
+        for trial_type, _ in trial_configs:
+            if trial_type not in totals:
+                totals[trial_type] = (0, 0)
 
         if include_training and totals:
             for trial_type, (completed, skipped) in totals.items():
                 print(f"[{fly_name}] {trial_type} completed: {completed}, skipped: {skipped}")
             total_completed = sum(done for done, _ in totals.values())
-            total_skipped = sum(missed for _, missed in totals.values())
+            total_skipped = pass1_skipped
             print(f"[{fly_name}] combined completed: {total_completed}, skipped: {total_skipped}")
         else:
             completed, skipped = totals.get("testing", (0, 0))
-            print(f"[{fly_name}] completed: {completed}, skipped: {skipped}")
+            print(f"[{fly_name}] completed: {completed}, skipped: {skipped + pass1_skipped}")
 
 
 # ---------------------------------------------------------------------------

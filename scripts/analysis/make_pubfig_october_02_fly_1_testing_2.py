@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Standalone publication figure with two testing traces and frame annotations.
 
-Top half: testing_4 (Hexanol) frames + trace.
-Bottom half: testing_3 (Apple Cider Vinegar) frames + trace (values x2).
+Top half: testing_2 (Hexanol) frames + trace.
+Bottom half: testing_1 (Apple Cider Vinegar) frames + trace (values x2).
 """
 
 from __future__ import annotations
@@ -23,13 +23,14 @@ from matplotlib import font_manager
 from matplotlib.patches import Patch
 import numpy as np
 import pandas as pd
+from scipy.signal import hilbert
 from PIL import Image
 
 
 ROOT = Path("/home/ramanlab/Documents/cole")
 
-FRAME_DIR_TOP = ROOT / "Data/imagesForFigures/imagesForOptoHEXTesting"
-FRAME_DIR_BOTTOM = ROOT / "Data/imagesForFigures/imagesForOptoHEXTesting2"
+FRAME_DIR_TOP = ROOT / "Data/imagesForFigures/imagesForOptoHEXTesting3"
+FRAME_DIR_BOTTOM = ROOT / "Data/imagesForFigures/imagesForOptoHEXTesting4"
 FRAME_FILES = [
     "frame_0000800.png",
     "frame_0001500.png",
@@ -40,19 +41,23 @@ FRAME_NUMS = [800, 1500, 1800, 2200]
 
 DIST_CSV_TOP = (
     ROOT
-    / "Data/flys/opto_hex/october_10_batch_1/RMS_calculations/"
-    "updated_october_10_batch_1_testing_4_fly2_distances.csv"
+    / "Data/flys/opto_hex/october_08_batch_2/RMS_calculations/"
+    "updated_october_08_batch_2_testing_2_fly1_distances.csv"
 )
 DIST_CSV_BOTTOM = (
     ROOT
-    / "Data/flys/opto_hex/october_10_batch_1/RMS_calculations/"
-    "updated_october_10_batch_1_testing_3_fly2_distances.csv"
+    / "Data/flys/opto_hex/october_08_batch_2/RMS_calculations/"
+    "updated_october_08_batch_2_testing_1_fly1_distances.csv"
 )
 
 MATRIX_PATH = ROOT / "Data/Opto/Combined/matrix/combined_base/envelope_matrix_float16.npy"
 CODES_PATH = ROOT / "Data/Opto/Combined/matrix/combined_base/code_maps.json"
+if not MATRIX_PATH.exists():
+    MATRIX_PATH = ROOT / "Data/csvs/single_matrix_opto/envelope_matrix_float16.npy"
+if not CODES_PATH.exists():
+    CODES_PATH = ROOT / "Data/csvs/single_matrix_opto/code_maps.json"
 
-OUT_PATH = FRAME_DIR_BOTTOM / "october_10_batch_1_testing_4_and_3_fly2_pubfig.png"
+OUT_PATH = FRAME_DIR_TOP / "october_08_batch_2_testing_2_and_1_fly1_pubfig.png"
 SVG_RASTER_WIDTH = 1080
 
 def _resolve_frame_path(path: Path) -> Path:
@@ -122,7 +127,90 @@ def _load_image(path: Path) -> Image.Image:
     )
 
 
-def _load_env_trace(trial_label: str) -> tuple[np.ndarray, float, str]:
+def _rolling_rms(values: np.ndarray, window: int) -> np.ndarray:
+    series = pd.Series(values, dtype=float)
+    return (
+        series.pow(2)
+        .rolling(window=window, center=True, min_periods=1)
+        .mean()
+        .pow(0.5)
+        .to_numpy()
+    )
+
+
+def _hilbert_envelope(values: np.ndarray, window: int) -> np.ndarray:
+    env = np.abs(hilbert(np.nan_to_num(values, nan=0.0)))
+    return (
+        pd.Series(env, dtype=float)
+        .rolling(window=window, center=True, min_periods=1)
+        .mean()
+        .to_numpy()
+    )
+
+
+def _angle_multiplier(angle_pct: np.ndarray) -> np.ndarray:
+    pct = np.asarray(angle_pct, dtype=float)
+    pct = np.clip(pct, -100.0, 100.0)
+    return np.where(
+        pct <= 0.0,
+        1.0,                  # no penalty for negative/zero angles
+        1.0 + pct / 100.0,   # linear 1.0 → 2.0 for positive angles
+    )
+
+
+def _env_from_distance_csv(csv_path: Path, fps_default: float = 40.0) -> tuple[np.ndarray, float, str]:
+    df = pd.read_csv(csv_path)
+    if "timestamp" in df.columns:
+        time_s = pd.to_numeric(df["timestamp"], errors="coerce").to_numpy(dtype=float)
+        diffs = np.diff(time_s)
+        diffs = diffs[np.isfinite(diffs) & (diffs > 0)]
+        fps = float(1.0 / np.median(diffs)) if diffs.size else fps_default
+    else:
+        fps = fps_default
+
+    dist_col = None
+    for candidate in ("distance_percentage_0_1", "distance_percentage", "distance_pct"):
+        if candidate in df.columns:
+            dist_col = candidate
+            break
+    if dist_col is None:
+        raise RuntimeError(f"Distance column not found in {csv_path.name}")
+
+    angle_col = None
+    for candidate in ("angle_centered_pct", "angle_centered_percentage", "angle_pct"):
+        if candidate in df.columns:
+            angle_col = candidate
+            break
+    if angle_col is None:
+        raise RuntimeError(f"Angle column not found in {csv_path.name}")
+
+    dist_pct = (
+        pd.to_numeric(df[dist_col], errors="coerce")
+        .fillna(0.0)
+        .clip(lower=0.0, upper=100.0)
+        .to_numpy(dtype=float)
+    )
+    angle_pct = pd.to_numeric(df[angle_col], errors="coerce").to_numpy(dtype=float)
+    multiplier = _angle_multiplier(angle_pct)
+    combined_raw = dist_pct * multiplier
+
+    # Load per-fly normalization max from sidecar JSON written by pipeline
+    norm_meta_path = csv_path.parent.parent / "angle_distance_rms_envelope" / "fly_norm_metadata.json"
+    if norm_meta_path.exists():
+        with norm_meta_path.open() as _f:
+            fly_max = float(json.load(_f).get("fly_combined_raw_max", 200.0))
+    else:
+        fly_max = 200.0  # fallback: theoretical max (100% dist × 2.0 multiplier)
+        print(f"[WARN] No fly_norm_metadata.json at {norm_meta_path}; using fallback fly_max=200.")
+    combined = (combined_raw / fly_max) * 100.0 if fly_max > 0 else combined_raw
+
+    window_frames = max(int(round(0.25 * fps)), 1)
+    rms = _rolling_rms(combined, window_frames)
+    env = _hilbert_envelope(rms, window_frames)
+    return env, fps, "distance_csv"
+
+
+def _load_env_trace(trial_label: str, csv_path: Path) -> tuple[np.ndarray, float, str]:
     with CODES_PATH.open("r", encoding="utf-8") as fh:
         meta = json.load(fh)
     matrix = np.load(MATRIX_PATH, allow_pickle=False)
@@ -146,14 +234,17 @@ def _load_env_trace(trial_label: str) -> tuple[np.ndarray, float, str]:
         else:
             df["fps"] = pd.to_numeric(df["fps"], errors="coerce")
 
-    row = df[
-        (df["fly"] == "october_10_batch_1")
+    mask = (
+        (df["fly"] == "october_08_batch_2")
         & (df["trial_label"] == trial_label)
         & (df["trial_type"] == "testing")
-        & (df["fly_number"] == "2")
-    ]
+    )
+    if "fly_number" in df.columns:
+        mask &= df["fly_number"] == "1"
+
+    row = df[mask]
     if row.empty:
-        raise RuntimeError(f"No combined-base row found for {trial_label}.")
+        return _env_from_distance_csv(csv_path)
 
     row = row.iloc[0]
     fps = float(row.get("fps", 40.0)) if np.isfinite(row.get("fps", 40.0)) else 40.0
@@ -202,8 +293,8 @@ def _connect_frames(fig: plt.Figure, image_axes: list[tuple[int, plt.Axes]], plo
 
 
 def main() -> None:
-    env_top, fps_top, _ = _load_env_trace("testing_4")
-    env_bottom, fps_bottom, _ = _load_env_trace("testing_3")
+    env_top, fps_top, _ = _load_env_trace("testing_2", DIST_CSV_TOP)
+    env_bottom, fps_bottom, _ = _load_env_trace("testing_1", DIST_CSV_BOTTOM)
     frame_times_top = _load_frame_times(DIST_CSV_TOP)
     frame_times_bottom = _load_frame_times(DIST_CSV_BOTTOM)
 
