@@ -13,9 +13,11 @@ from typing import Optional
 # Condition patterns (order matters - check specific before general)
 # Pattern format: (regex_pattern, condition_name)
 CONDITION_PATTERNS = [
-    (r"benz[-_ ]training", "opto_benz_1"),
+    (r"benz[-_ ]training[-_ ]24", "Benz-Training-24"),
+    (r"hex[-_ ]training[-_ ]24", "Hex-Training-24"),
+    (r"benz[-_ ]training", "Benz-Training"),
+    (r"hex[-_ ]training", "Hex-Training"),
     (r"benz[-_ ]control", "benz_control"),
-    (r"hex[-_ ]training", "opto_hex"),
     (r"hex[-_ ]control", "hex_control"),
     (r"eb[-_ ]training\\(no[-_ ]operant\\)", "opto_Eb"),
     (r"eb[-_ ]training", "opto_Eb"),

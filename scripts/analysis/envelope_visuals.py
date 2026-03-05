@@ -66,10 +66,10 @@ ODOR_CANON: Mapping[str, str] = {
     "benzaldehyde": "Benz",
     "benz-ald": "Benz",
     "benzadhyde": "Benz",
-    "benz-training": "opto_benz_1",
-    "benz training": "opto_benz_1",
-    "benz-training-24": "opto_benz_1",
-    "benz training 24": "opto_benz_1",
+    "benz-training": "Benz-Training",
+    "benz training": "Benz-Training",
+    "benz-training-24": "Benz-Training-24",
+    "benz training 24": "Benz-Training-24",
     "benz-control": "Benz_control",
     "benz_control": "Benz_control",
     "benz control": "Benz_control",
@@ -83,9 +83,9 @@ ODOR_CANON: Mapping[str, str] = {
     "hex_control": "hex_control",
     "hexanol control": "hex_control",
     "hex-control": "hex_control",
-    "hex-training": "opto_hex",
-    "hex-training-24": "opto_hex",
-    "hex training 24": "opto_hex",
+    "hex-training": "Hex-Training",
+    "hex-training-24": "Hex-Training-24",
+    "hex training 24": "Hex-Training-24",
     "acv-training": "opto_ACV",
     "air-training": "opto_AIR",
     "3oct-training": "opto_3-oct",
@@ -123,8 +123,12 @@ DISPLAY_LABEL = {
     "opto_EB": "Ethyl Butyrate",
     "opto_EB_6_training": "Ethyl Butyrate (6-Training)",
     "opto_benz_1": "Benzaldehyde",
+    "Benz-Training": "Benzaldehyde",
+    "Benz-Training-24": "Benzaldehyde",
     "opto_ACV": "Apple Cider Vinegar",
     "opto_hex": "Hexanol",
+    "Hex-Training": "Hexanol",
+    "Hex-Training-24": "Hexanol",
     "opto_AIR": "AIR",
     "opto_3-oct": "3-Octonol",
 }
@@ -141,8 +145,12 @@ ODOR_ORDER = [
     "opto_EB_6_training",
     "EB_control",
     "opto_benz_1",
+    "Benz-Training",
+    "Benz-Training-24",
     "Benz_control",
     "opto_hex",
+    "Hex-Training",
+    "Hex-Training-24",
     "hex_control",
     "opto_AIR",
     "opto_3-oct",
@@ -248,10 +256,14 @@ TRAINING_ODOR_SCHEDULE_3OCT = {
 
 TESTING_DATASET_ALIAS = {
     "opto_hex": "hex_control",
+    "Hex-Training": "hex_control",
+    "Hex-Training-24": "hex_control",
     "opto_EB": "EB_control",
     "opto_EB_6_training": "EB_control",
     "opto_benz": "Benz_control",
     "opto_benz_1": "Benz_control",
+    "Benz-Training": "Benz_control",
+    "Benz-Training-24": "Benz_control",
     "opto_ACV": "ACV",
     "opto_3-oct": "opto_3-oct",
 }
@@ -280,8 +292,20 @@ ODOR_PLUS_LIGHT_LABEL = "Odor + light"
 def _canon_dataset(value: str) -> str:
     if not isinstance(value, str):
         return "UNKNOWN"
-    key = value.strip().lower()
-    return ODOR_CANON.get(key, value.strip())
+    stripped = value.strip()
+    key = stripped.lower()
+    canon = ODOR_CANON.get(key)
+    if canon is not None:
+        return canon
+    # Keep flagged datasets aligned with their parent condition for odor decoding.
+    # Example: "Hex-Control-flagged" -> "hex_control".
+    if key.endswith("-flagged"):
+        base_key = key[: -len("-flagged")]
+        canon = ODOR_CANON.get(base_key)
+        if canon is not None:
+            return canon
+        return stripped[: -len("-flagged")]
+    return stripped
 
 
 def _safe_dirname(value: str) -> str:
@@ -438,7 +462,7 @@ def _display_odor(dataset_canon: str, trial_label: str) -> str:
             odor_name = TRAINING_ODOR_SCHEDULE_EB_6TRAINING.get(number)
             if odor_name:
                 return odor_name
-        elif dataset_canon in ("opto_hex", "hex_control"):
+        elif dataset_canon in ("opto_hex", "Hex-Training", "Hex-Training-24", "hex_control"):
             odor_name = TRAINING_ODOR_SCHEDULE_HEX.get(number)
             if odor_name:
                 return odor_name
@@ -1164,7 +1188,9 @@ def _matrix_title(dataset_canon: str) -> str:
     """Return plot title text based on dataset origin (opto vs control)."""
 
     base = DISPLAY_LABEL.get(dataset_canon, dataset_canon)
-    suffix = "Conditioning Results" if str(dataset_canon).lower().startswith("opto_") else "Control Results"
+    dataset_key = str(dataset_canon)
+    is_conditioning = dataset_key.lower().startswith("opto_") or dataset_key in TESTING_DATASET_ALIAS
+    suffix = "Conditioning Results" if is_conditioning else "Control Results"
     return f"{base} {suffix}"
 
 
