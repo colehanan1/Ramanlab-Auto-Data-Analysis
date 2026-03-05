@@ -183,8 +183,8 @@ class BatchFileProcessor:
             under = d < gmin
             inr = ~(over | under)
 
-            perc[idx, over] = 101.0
-            perc[idx, under] = -1.0
+            perc[idx, over] = float('nan')
+            perc[idx, under] = float('nan')
 
             if effective_max != gmin:
                 perc[idx, inr] = 100.0 * (d[inr] - gmin) / (effective_max - gmin)

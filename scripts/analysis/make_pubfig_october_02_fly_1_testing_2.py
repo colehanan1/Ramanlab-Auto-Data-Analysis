@@ -173,8 +173,13 @@ def _env_from_distance_csv(csv_path: Path, fps_default: float = 40.0) -> tuple[n
         if candidate in df.columns:
             dist_col = candidate
             break
-    if dist_col is None:
-        raise RuntimeError(f"Distance column not found in {csv_path.name}")
+
+    # Read raw pixel distance for pixel-domain combining
+    raw_dist_col = None
+    for candidate in ("distance_0_1", "distance_proboscis", "distance"):
+        if candidate in df.columns:
+            raw_dist_col = candidate
+            break
 
     angle_col = None
     for candidate in ("angle_centered_pct", "angle_centered_percentage", "angle_pct"):
@@ -184,25 +189,45 @@ def _env_from_distance_csv(csv_path: Path, fps_default: float = 40.0) -> tuple[n
     if angle_col is None:
         raise RuntimeError(f"Angle column not found in {csv_path.name}")
 
-    dist_pct = (
-        pd.to_numeric(df[dist_col], errors="coerce")
-        .fillna(0.0)
-        .clip(lower=0.0, upper=100.0)
-        .to_numpy(dtype=float)
-    )
     angle_pct = pd.to_numeric(df[angle_col], errors="coerce").to_numpy(dtype=float)
     multiplier = _angle_multiplier(angle_pct)
-    combined_raw = dist_pct * multiplier
 
-    # Load per-fly normalization max from sidecar JSON written by pipeline
-    norm_meta_path = csv_path.parent.parent / "angle_distance_rms_envelope" / "fly_norm_metadata.json"
-    if norm_meta_path.exists():
-        with norm_meta_path.open() as _f:
-            fly_max = float(json.load(_f).get("fly_combined_raw_max", 200.0))
+    if raw_dist_col is not None:
+        # Pixel-domain combining: d_px * multiplier, then normalize with weighted bounds
+        d_px = pd.to_numeric(df[raw_dist_col], errors="coerce").to_numpy(dtype=float)
+        d_px_weighted = d_px * multiplier
+
+        # Load per-fly normalization bounds from sidecar JSON written by pipeline
+        norm_meta_path = csv_path.parent.parent / "angle_distance_rms_envelope" / "fly_norm_metadata.json"
+        if norm_meta_path.exists():
+            with norm_meta_path.open() as _f:
+                meta = json.load(_f)
+            # Determine fly number (this script targets fly1)
+            fn_key = "1"
+            weighted_gmin = float(
+                meta.get("fly_weighted_min_by_number", {}).get(fn_key, 0.0)
+            )
+            effective_max = float(
+                meta.get("fly_effective_max_by_number", {}).get(fn_key, 150.0)
+            )
+        else:
+            weighted_gmin = 0.0
+            effective_max = 150.0
+            print(f"[WARN] No fly_norm_metadata.json at {norm_meta_path}; using fallback bounds.")
+
+        if effective_max != weighted_gmin:
+            combined = 100.0 * (d_px_weighted - weighted_gmin) / (effective_max - weighted_gmin)
+        else:
+            combined = np.where(np.isfinite(d_px_weighted), 0.0, np.nan)
     else:
-        fly_max = 200.0  # fallback: theoretical max (100% dist × 2.0 multiplier)
-        print(f"[WARN] No fly_norm_metadata.json at {norm_meta_path}; using fallback fly_max=200.")
-    combined = (combined_raw / fly_max) * 100.0 if fly_max > 0 else combined_raw
+        # Fallback: use distance_pct if raw pixel column not available
+        if dist_col is None:
+            raise RuntimeError(f"Neither raw distance nor distance_pct found in {csv_path.name}")
+        dist_pct = (
+            pd.to_numeric(df[dist_col], errors="coerce")
+            .to_numpy(dtype=float)
+        )
+        combined = dist_pct * multiplier
 
     window_frames = max(int(round(0.25 * fps)), 1)
     rms = _rolling_rms(combined, window_frames)

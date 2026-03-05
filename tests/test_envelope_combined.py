@@ -11,30 +11,33 @@ root_str = str(ROOT)
 if root_str not in sys.path:
     sys.path.insert(0, root_str)
 
-from scripts import envelope_combined as ec  # noqa: E402
-from scripts import envelope_visuals as ev  # noqa: E402
-from scripts import run_workflows as rw  # noqa: E402
+from scripts.analysis import envelope_combined as ec  # noqa: E402
+from scripts.analysis import envelope_visuals as ev  # noqa: E402
+from scripts.pipeline import run_workflows as rw  # noqa: E402
 from fbpipe.utils.columns import EYE_CLASS, PROBOSCIS_CLASS  # noqa: E402
 
 
 def test_angle_multiplier_never_below_unity():
-    """Ensure dir_val multipliers never attenuate the distance percentage."""
+    """Ensure multipliers are >= 1.0 for all angles and match log formula."""
 
-    angles = np.array([-80, -30, -12, 0, 15, 35, 55, 90], dtype=float)
+    angles = np.array([-100, -50, -1, 0, 50, 100], dtype=float)
     multipliers = ec._angle_multiplier(angles)
 
+    # Negative/zero angles always produce 1.0
     assert np.all(multipliers[:4] == 1.0)
-    assert multipliers[4] == 1.25
-    assert multipliers[5] == 1.50
-    assert multipliers[6] == 1.75
-    assert multipliers[7] == 2.00
+    # Positive angles produce > 1.0
+    assert np.all(multipliers[4:] > 1.0)
+    # At +100%, multiplier should be exactly 2.0
+    np.testing.assert_allclose(multipliers[5], 2.0)
+    # All values >= 1.0 (never attenuates)
+    assert np.all(multipliers >= 1.0)
 
 
 def test_angle_multiplier_handles_scalars():
-    """Scalar inputs should still respect the unity floor."""
+    """Scalar inputs: negative → 1.0, positive → > 1.0."""
 
     assert ec._angle_multiplier(np.array([-100.0])).item() == 1.0
-    assert ec._angle_multiplier(np.array([5.0])).item() == 1.0
+    assert ec._angle_multiplier(np.array([5.0])).item() > 1.0
 
 
 def test_has_training_trials_detects_training_entries(tmp_path):
@@ -357,3 +360,83 @@ def test_auto_sync_wide_roots_copies_training_outputs(tmp_path):
 
     mirrored = secure_root / "angle_distance_rms_envelope" / training_file.name
     assert mirrored.exists()
+
+
+def test_combine_nan_propagation():
+    """NaN in d_px or angle must produce NaN in d_px_weighted."""
+
+    d_px = np.array([10.0, np.nan, 20.0, 30.0])
+    angle_pct = np.array([50.0, 50.0, np.nan, 0.0])
+    multiplier = ec._angle_multiplier(angle_pct)
+    weighted = d_px * multiplier
+
+    assert np.isfinite(weighted[0]), "Valid d_px + valid angle should be finite"
+    assert np.isnan(weighted[1]), "NaN d_px should propagate to weighted"
+    assert np.isnan(weighted[2]), "NaN angle should produce NaN multiplier and weighted"
+    assert np.isfinite(weighted[3]), "Valid d_px + zero angle should be finite"
+
+
+def test_sentinel_replaced_with_nan():
+    """Distance normalization should use NaN for out-of-range, not sentinels (-1/101)."""
+
+    try:
+        from fbpipe.utils.gpu_accelerated import GPUBatchProcessor
+    except ImportError:
+        import pytest
+        pytest.skip("gpu_accelerated not importable (missing torch)")
+
+    proc = GPUBatchProcessor(device="cpu")
+    d = np.array([5.0, 50.0, 100.0, 300.0], dtype=np.float32)
+    result = proc.normalize_distances_batch(d, gmin=10.0, gmax=250.0, effective_max=250.0)
+
+    # Under-range (5.0 < gmin=10.0) -> NaN, not -1
+    assert np.isnan(result[0]), "Under-range should be NaN, not -1"
+    # In-range -> finite percentage
+    assert np.isfinite(result[1])
+    assert np.isfinite(result[2])
+    # Over-range (300.0 > gmax=250.0) -> NaN, not 101
+    assert np.isnan(result[3]), "Over-range should be NaN, not 101"
+    # Verify no sentinel values remain
+    assert not np.any(result == -1.0), "No -1 sentinels should exist"
+    assert not np.any(result == 101.0), "No 101 sentinels should exist"
+
+
+def test_pixel_domain_then_normalize():
+    """Combined metric: multiply in pixel domain, normalize with per-fly weighted bounds."""
+
+    # Synthetic fly data
+    d_px = np.array([80.0, 100.0, 120.0, np.nan], dtype=float)
+    angle_pct = np.array([0.0, 50.0, 100.0, 50.0], dtype=float)
+
+    multiplier = ec._angle_multiplier(angle_pct)
+    d_px_weighted = d_px * multiplier
+
+    # mult at 0% = 1.0, mult at 100% = 2.0
+    np.testing.assert_allclose(multiplier[0], 1.0)
+    np.testing.assert_allclose(multiplier[2], 2.0, atol=0.01)
+
+    # Weighted values (approximate)
+    assert np.isclose(d_px_weighted[0], 80.0)  # 80 * 1.0
+    assert d_px_weighted[1] > 100.0  # 100 * ~1.62
+    assert np.isclose(d_px_weighted[2], 240.0)  # 120 * 2.0
+    assert np.isnan(d_px_weighted[3])  # NaN d_px
+
+    # Compute per-fly weighted bounds
+    finite_dpw = d_px_weighted[np.isfinite(d_px_weighted)]
+    weighted_gmin = float(np.min(finite_dpw))
+    weighted_gmax = float(np.max(finite_dpw))
+    effective_max_weighted = max(weighted_gmax, 150.0)
+
+    # Normalize
+    combined_pct = 100.0 * (d_px_weighted - weighted_gmin) / (
+        effective_max_weighted - weighted_gmin
+    )
+
+    # The minimum weighted value should map to 0%
+    assert np.isclose(combined_pct[0], 0.0)
+    # The maximum weighted value should map to 100% (since effective_max == weighted_gmax here)
+    assert np.isclose(combined_pct[2], 100.0)
+    # Mid-range value should be between 0 and 100
+    assert 0.0 < combined_pct[1] < 100.0
+    # NaN should propagate
+    assert np.isnan(combined_pct[3])

@@ -249,16 +249,27 @@ def _canon_dataset(value: str) -> str:
         return "UNKNOWN"
     stripped = value.strip()
     key = stripped.lower()
-    canon = ODOR_CANON.get(key)
-    if canon is not None:
-        return canon
     if key.endswith("-flagged"):
         base_key = key[: -len("-flagged")]
         canon = ODOR_CANON.get(base_key)
         if canon is not None:
-            return canon
-        return stripped[: -len("-flagged")]
+            return f"{canon}-flagged"
+        return stripped
+    canon = ODOR_CANON.get(key)
+    if canon is not None:
+        return canon
     return stripped
+
+
+def _odor_dataset_key(dataset_canon: str) -> str:
+    dataset_text = str(dataset_canon).strip() if isinstance(dataset_canon, str) else "UNKNOWN"
+    if not dataset_text:
+        return "UNKNOWN"
+    lower = dataset_text.lower()
+    if lower.endswith("-flagged"):
+        base = dataset_text[: -len("-flagged")].strip()
+        return ODOR_CANON.get(base.lower(), base)
+    return dataset_text
 
 
 def _safe_dirname(value: str) -> str:
@@ -303,8 +314,9 @@ def _trial_num(label: str) -> int:
 
 
 def _trained_label(dataset_canon: str) -> str:
+    dataset_key = _odor_dataset_key(dataset_canon)
     return PRIMARY_ODOR_LABEL.get(
-        dataset_canon, DISPLAY_LABEL.get(dataset_canon, dataset_canon)
+        dataset_key, DISPLAY_LABEL.get(dataset_key, dataset_key)
     )
 
 
@@ -316,22 +328,23 @@ def _training_odor(dataset_canon: str, number: int) -> str | None:
 
 
 def _display_odor(dataset_canon: str, trial_label: str) -> str:
+    dataset_key = _odor_dataset_key(dataset_canon)
     number = _trial_num(trial_label)
     label_lower = str(trial_label).lower()
 
     if "training" in label_lower:
-        odor_name = _training_odor(dataset_canon, number)
+        odor_name = _training_odor(dataset_key, number)
         if odor_name:
             return odor_name
-        return DISPLAY_LABEL.get(dataset_canon, dataset_canon)
+        return DISPLAY_LABEL.get(dataset_key, dataset_key)
 
-    dataset_for_testing = TESTING_DATASET_ALIAS.get(dataset_canon, dataset_canon)
+    dataset_for_testing = TESTING_DATASET_ALIAS.get(dataset_key, dataset_key)
 
     if number in (1, 3):
         return HEXANOL_LABEL
     if number in (2, 4, 5):
         return DISPLAY_LABEL.get(
-            dataset_for_testing, DISPLAY_LABEL.get(dataset_canon, dataset_canon)
+            dataset_for_testing, DISPLAY_LABEL.get(dataset_key, dataset_key)
         )
 
     mapping = {
@@ -391,7 +404,7 @@ def _display_odor(dataset_canon: str, trial_label: str) -> str:
 
     if dataset_for_testing in mapping:
         return mapping[dataset_for_testing].get(number, trial_label)
-    return mapping.get(dataset_canon, {}).get(number, trial_label)
+    return mapping.get(dataset_key, {}).get(number, trial_label)
 
 
 def _load_envelope_matrix(matrix_path: Path, codes_json: Path) -> tuple[pd.DataFrame, list[str]]:

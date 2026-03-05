@@ -294,18 +294,27 @@ def _canon_dataset(value: str) -> str:
         return "UNKNOWN"
     stripped = value.strip()
     key = stripped.lower()
-    canon = ODOR_CANON.get(key)
-    if canon is not None:
-        return canon
-    # Keep flagged datasets aligned with their parent condition for odor decoding.
-    # Example: "Hex-Control-flagged" -> "hex_control".
     if key.endswith("-flagged"):
         base_key = key[: -len("-flagged")]
         canon = ODOR_CANON.get(base_key)
         if canon is not None:
-            return canon
-        return stripped[: -len("-flagged")]
+            return f"{canon}-flagged"
+        return stripped
+    canon = ODOR_CANON.get(key)
+    if canon is not None:
+        return canon
     return stripped
+
+
+def _odor_dataset_key(dataset_canon: str) -> str:
+    dataset_text = str(dataset_canon).strip() if isinstance(dataset_canon, str) else "UNKNOWN"
+    if not dataset_text:
+        return "UNKNOWN"
+    lower = dataset_text.lower()
+    if lower.endswith("-flagged"):
+        base = dataset_text[: -len("-flagged")].strip()
+        return ODOR_CANON.get(base.lower(), base)
+    return dataset_text
 
 
 def _safe_dirname(value: str) -> str:
@@ -435,38 +444,40 @@ def _is_discriminate_odor_trial(*, trial_label: str, trial_type: str) -> bool:
 
 
 def _trained_label(dataset_canon: str) -> str:
+    dataset_key = _odor_dataset_key(dataset_canon)
     return PRIMARY_ODOR_LABEL.get(
-        dataset_canon, DISPLAY_LABEL.get(dataset_canon, dataset_canon)
+        dataset_key, DISPLAY_LABEL.get(dataset_key, dataset_key)
     )
 
 
 def _display_odor(dataset_canon: str, trial_label: str) -> str:
+    dataset_key = _odor_dataset_key(dataset_canon)
     number = _trial_num(trial_label)
     label_lower = str(trial_label).lower()
 
     if "training" in label_lower:
         # Select the appropriate training schedule based on dataset
-        if dataset_canon == "opto_AIR":
+        if dataset_key == "opto_AIR":
             odor_name = TRAINING_ODOR_SCHEDULE_AIR.get(number)
             if odor_name:
                 return odor_name
-        elif dataset_canon == "opto_3-oct":
+        elif dataset_key == "opto_3-oct":
             odor_name = TRAINING_ODOR_SCHEDULE_3OCT.get(number)
             if odor_name:
                 return odor_name
-        elif dataset_canon in ("opto_EB", "EB_control"):
+        elif dataset_key in ("opto_EB", "EB_control"):
             odor_name = TRAINING_ODOR_SCHEDULE_EB.get(number)
             if odor_name:
                 return odor_name
-        elif dataset_canon == "opto_EB_6_training":
+        elif dataset_key == "opto_EB_6_training":
             odor_name = TRAINING_ODOR_SCHEDULE_EB_6TRAINING.get(number)
             if odor_name:
                 return odor_name
-        elif dataset_canon in ("opto_hex", "Hex-Training", "Hex-Training-24", "hex_control"):
+        elif dataset_key in ("opto_hex", "Hex-Training", "Hex-Training-24", "hex_control"):
             odor_name = TRAINING_ODOR_SCHEDULE_HEX.get(number)
             if odor_name:
                 return odor_name
-        elif dataset_canon in ("opto_ACV", "ACV"):
+        elif dataset_key in ("opto_ACV", "ACV"):
             odor_name = TRAINING_ODOR_SCHEDULE_ACV.get(number)
             if odor_name:
                 return odor_name
@@ -474,10 +485,10 @@ def _display_odor(dataset_canon: str, trial_label: str) -> str:
             odor_name = TRAINING_ODOR_SCHEDULE.get(number)
             if odor_name:
                 return odor_name
-        return DISPLAY_LABEL.get(dataset_canon, dataset_canon)
+        return DISPLAY_LABEL.get(dataset_key, dataset_key)
 
     # Handle opto_AIR testing trials
-    if dataset_canon == "opto_AIR":
+    if dataset_key == "opto_AIR":
         if number in (1, 3):
             return HEXANOL_LABEL
         if number in (2, 4, 5):
@@ -494,7 +505,7 @@ def _display_odor(dataset_canon: str, trial_label: str) -> str:
             return "3-Octonol"
 
     # Handle opto_3-oct testing trials
-    if dataset_canon == "opto_3-oct":
+    if dataset_key == "opto_3-oct":
         if number in (1, 3):
             return HEXANOL_LABEL
         if number in (2, 4, 5):
@@ -510,7 +521,7 @@ def _display_odor(dataset_canon: str, trial_label: str) -> str:
         if number == 10:
             return "Linalool"
 
-    dataset_for_testing = TESTING_DATASET_ALIAS.get(dataset_canon, dataset_canon)
+    dataset_for_testing = TESTING_DATASET_ALIAS.get(dataset_key, dataset_key)
 
     if dataset_for_testing == "hex_control":
         if number in (1, 3):
@@ -522,7 +533,7 @@ def _display_odor(dataset_canon: str, trial_label: str) -> str:
             return HEXANOL_LABEL
     if number in (2, 4, 5):
         return DISPLAY_LABEL.get(
-            dataset_for_testing, DISPLAY_LABEL.get(dataset_canon, dataset_canon)
+            dataset_for_testing, DISPLAY_LABEL.get(dataset_key, dataset_key)
         )
 
     mapping = {
@@ -597,7 +608,7 @@ def _display_odor(dataset_canon: str, trial_label: str) -> str:
 
     if dataset_for_testing in mapping:
         return mapping[dataset_for_testing].get(number, trial_label)
-    return mapping.get(dataset_canon, {}).get(number, trial_label)
+    return mapping.get(dataset_key, {}).get(number, trial_label)
 
 
 def _normalise_fly_label(value: object) -> str:
@@ -1187,8 +1198,8 @@ def _order_suffix(order: str) -> str:
 def _matrix_title(dataset_canon: str) -> str:
     """Return plot title text based on dataset origin (opto vs control)."""
 
-    base = DISPLAY_LABEL.get(dataset_canon, dataset_canon)
-    dataset_key = str(dataset_canon)
+    dataset_key = _odor_dataset_key(dataset_canon)
+    base = DISPLAY_LABEL.get(dataset_key, dataset_key)
     is_conditioning = dataset_key.lower().startswith("opto_") or dataset_key in TESTING_DATASET_ALIAS
     suffix = "Conditioning Results" if is_conditioning else "Control Results"
     return f"{base} {suffix}"

@@ -153,8 +153,8 @@ def main(cfg: Settings) -> None:
                 over = d > gmax
                 under = d < gmin
                 inr = ~(over | under)
-                perc[over] = 101.0
-                perc[under] = -1.0
+                perc[over] = np.nan
+                perc[under] = np.nan
                 # Use effective_max instead of gmax for normalization
                 if effective_max != gmin:
                     perc[inr] = 100.0 * (d[inr] - gmin) / (effective_max - gmin)

@@ -4,7 +4,7 @@
 This CLI exposes the distance-percentage × angle workflow that previously
 lived in ad-hoc notebooks.  It can
 
-* merge raw testing trials into combined RMS + Hilbert envelope CSVs/PNGs,
+* merge raw testing trials into combined RMS + Hilbert envelope CSVs (optional PNGs),
 * copy datasets into secured storage and prune the originals,
 * aggregate the direction-value envelopes into a float16 matrix, and
 * feed that matrix into the existing reaction-matrix / envelope exporters or
@@ -52,7 +52,13 @@ for path in (str(REPO_ROOT), str(SRC_ROOT)):
         sys.path.insert(0, path)
 
 from fbpipe.config import load_settings, resolve_config_path, load_raw_config
-from fbpipe.utils.columns import EYE_CLASS, PROBOSCIS_CLASS, PROBOSCIS_DISTANCE_PCT_COL
+from fbpipe.utils.columns import (
+    EYE_CLASS,
+    PROBOSCIS_CLASS,
+    PROBOSCIS_DISTANCE_COL,
+    PROBOSCIS_DISTANCE_PCT_COL,
+    find_proboscis_distance_column,
+)
 
 
 AUC_COLUMNS = (
@@ -75,6 +81,7 @@ from scripts.analysis import envelope_visuals
 from scripts.analysis.envelope_visuals import (
     EnvelopePlotConfig,
     MatrixPlotConfig,
+    NON_REACTIVE_SPAN_PX,
     compute_non_reactive_flags,
     generate_envelope_plots,
     generate_reaction_matrices,
@@ -133,8 +140,10 @@ DIST_COLS = [
     "measure",
     "value",
 ]
-# Per-fly normalization replaces the old COMBINED_SCALE = 0.5 constant.
-# Each fly's combined_raw is now divided by its own max across all trials.
+# Per-fly normalization: combined metric is d_px * angle_multiplier, then
+# normalized to [0, 100] using per-fly_number weighted gmin/gmax.
+WEIGHTED_EFFECTIVE_MAX_FLOOR = 150.0  # px floor for d_px_weighted normalization
+LOW_MAX_FLAG_THRESHOLD_PX = 50.0
 TIME_COLS = ["time_s", "time_seconds", "t_s", "time"]
 TIMESTAMP_COLS = ["UTC_ISO", "Timestamp", "Number", "MonoNs"]
 FRAME_COLS = ["Frame", "FrameNumber", "Frame Number"]
@@ -284,14 +293,11 @@ def _iter_slot_distance_csvs(fly_dir: Path, slot_label: str | None) -> Iterator[
         yield path
 
 
-def _class2_distances(csv_path: Path) -> np.ndarray:
-    """Compute pixel distances between eye and proboscis detections."""
+def _d_px_from_coords(df: pd.DataFrame) -> np.ndarray | None:
+    """Compute pixel distances from eye/proboscis coordinate columns in a DataFrame.
 
-    try:
-        df = pd.read_csv(csv_path)
-    except Exception as exc:
-        print(f"[WARN] Could not read raw distance columns from {csv_path.name}: {exc}")
-        return np.empty(0, dtype=float)
+    Returns None if the required coordinate columns are not found.
+    """
 
     x2_col = _resolve_column_alias(
         df,
@@ -339,8 +345,7 @@ def _class2_distances(csv_path: Path) -> np.ndarray:
     )
 
     if not all((x2_col, y2_col, x8_col, y8_col)):
-        print(f"[WARN] {csv_path.name} missing eye/proboscis columns")
-        return np.empty(0, dtype=float)
+        return None
 
     x2 = pd.to_numeric(df[x2_col], errors="coerce").to_numpy(dtype=float, copy=False)
     y2 = pd.to_numeric(df[y2_col], errors="coerce").to_numpy(dtype=float, copy=False)
@@ -348,6 +353,22 @@ def _class2_distances(csv_path: Path) -> np.ndarray:
     y8 = pd.to_numeric(df[y8_col], errors="coerce").to_numpy(dtype=float, copy=False)
     distances = np.sqrt((x2 - x8) ** 2 + (y2 - y8) ** 2)
     return distances.astype(float, copy=False)
+
+
+def _class2_distances(csv_path: Path) -> np.ndarray:
+    """Compute pixel distances between eye and proboscis detections."""
+
+    try:
+        df = pd.read_csv(csv_path)
+    except Exception as exc:
+        print(f"[WARN] Could not read raw distance columns from {csv_path.name}: {exc}")
+        return np.empty(0, dtype=float)
+
+    result = _d_px_from_coords(df)
+    if result is None:
+        print(f"[WARN] {csv_path.name} missing eye/proboscis columns")
+        return np.empty(0, dtype=float)
+    return result
 
 
 def _compute_distance_trimmed_span(
@@ -650,20 +671,27 @@ def _canon_dataset(value: str) -> str:
         return "UNKNOWN"
     stripped = value.strip()
     key = stripped.lower()
-    canon = ODOR_CANON.get(key)
-    if canon is not None:
-        return canon
-    # Strip "-flagged" suffix so flagged experiments inherit the odor/trial
-    # labelling of their parent dataset (e.g. "opto_EB-flagged" → "opto_EB").
     if key.endswith("-flagged"):
         base_key = key[: -len("-flagged")]
         canon = ODOR_CANON.get(base_key)
         if canon is not None:
-            return canon
-        # Base may not be in ODOR_CANON (pass-through datasets like opto_benz_1);
-        # return the base name with original casing.
-        return stripped[: -len("-flagged")]
+            return f"{canon}-flagged"
+        return stripped
+    canon = ODOR_CANON.get(key)
+    if canon is not None:
+        return canon
     return stripped
+
+
+def _odor_dataset_key(dataset_canon: str) -> str:
+    dataset_text = str(dataset_canon).strip() if isinstance(dataset_canon, str) else "UNKNOWN"
+    if not dataset_text:
+        return "UNKNOWN"
+    lower = dataset_text.lower()
+    if lower.endswith("-flagged"):
+        base = dataset_text[: -len("-flagged")].strip()
+        return ODOR_CANON.get(base.lower(), base)
+    return dataset_text
 
 
 def _trial_num(label: str) -> int:
@@ -672,8 +700,9 @@ def _trial_num(label: str) -> int:
 
 
 def _trained_label(dataset_canon: str) -> str:
+    dataset_key = _odor_dataset_key(dataset_canon)
     return PRIMARY_ODOR_LABEL.get(
-        dataset_canon, DISPLAY_LABEL.get(dataset_canon, dataset_canon)
+        dataset_key, DISPLAY_LABEL.get(dataset_key, dataset_key)
     )
 
 
@@ -685,16 +714,17 @@ def _training_odor(dataset_canon: str, number: int) -> str | None:
 
 
 def _display_odor(dataset_canon: str, trial_label: str) -> str:
+    dataset_key = _odor_dataset_key(dataset_canon)
     number = _trial_num(trial_label)
     label_lower = str(trial_label).lower()
 
     if "training" in label_lower:
-        odor_name = _training_odor(dataset_canon, number)
+        odor_name = _training_odor(dataset_key, number)
         if odor_name:
             return odor_name
-        return DISPLAY_LABEL.get(dataset_canon, dataset_canon)
+        return DISPLAY_LABEL.get(dataset_key, dataset_key)
 
-    dataset_for_testing = TESTING_DATASET_ALIAS.get(dataset_canon, dataset_canon)
+    dataset_for_testing = TESTING_DATASET_ALIAS.get(dataset_key, dataset_key)
 
     if dataset_for_testing == "hex_control":
         if number in (1, 3):
@@ -706,7 +736,7 @@ def _display_odor(dataset_canon: str, trial_label: str) -> str:
             return HEXANOL
     if number in (2, 4, 5):
         return DISPLAY_LABEL.get(
-            dataset_for_testing, DISPLAY_LABEL.get(dataset_canon, dataset_canon)
+            dataset_for_testing, DISPLAY_LABEL.get(dataset_key, dataset_key)
         )
 
     mapping = {
@@ -760,7 +790,7 @@ def _display_odor(dataset_canon: str, trial_label: str) -> str:
 
     if dataset_for_testing in mapping:
         return mapping[dataset_for_testing].get(number, trial_label)
-    return mapping.get(dataset_canon, {}).get(number, trial_label)
+    return mapping.get(dataset_key, {}).get(number, trial_label)
 
 
 def _is_trained(dataset_canon: str, odor_name: str) -> bool:
@@ -1567,6 +1597,7 @@ class CombineConfig:
     odor_on_s: float = 30.0
     odor_off_s: float = 60.0
     odor_latency_s: float = 0.0
+    save_trial_plots: bool = False
     angle_suffixes: tuple[str, ...] = (
         "*fly*_distances.csv",
         "*merged.csv",
@@ -1587,8 +1618,8 @@ class CombineConfig:
 
 def combine_distance_angle(cfg: CombineConfig) -> None:
     print(
-        "[DEBUG] combine_distance_angle → root=%s, fps_default=%.3f, window_frames=%d"
-        % (cfg.root, cfg.fps_default, cfg.window_frames)
+        "[DEBUG] combine_distance_angle → root=%s, fps_default=%.3f, window_frames=%d, save_trial_plots=%s"
+        % (cfg.root, cfg.fps_default, cfg.window_frames, cfg.save_trial_plots)
     )
     odor_latency = max(cfg.odor_latency_s, 0.0)
     odor_on_cmd = cfg.odor_on_s
@@ -1622,12 +1653,15 @@ def combine_distance_angle(cfg: CombineConfig) -> None:
             trial_configs.append(("training", TRAINING_REGEX))
 
         out_csv_dir = fly_dir / "angle_distance_rms_envelope"
-        out_fig_dir = out_csv_dir / "plots"
         out_csv_dir.mkdir(parents=True, exist_ok=True)
-        out_fig_dir.mkdir(parents=True, exist_ok=True)
+        out_fig_dir: Optional[Path] = None
+        if cfg.save_trial_plots:
+            out_fig_dir = out_csv_dir / "plots"
+            out_fig_dir.mkdir(parents=True, exist_ok=True)
 
-        # ── PASS 1: compute combined_raw for all trials, find per-fly-number max ──
-        fly_max_by_number: dict[str, float] = {}
+        # ── PASS 1: compute d_px_weighted for all trials, find per-fly-number weighted bounds ──
+        fly_weighted_min_by_number: dict[str, float] = {}
+        fly_weighted_max_by_number: dict[str, float] = {}
         trial_data_cache: list[dict] = []
         pass1_skipped = 0
 
@@ -1671,27 +1705,39 @@ def combine_distance_angle(cfg: CombineConfig) -> None:
 
                 try:
                     dist_df = pd.read_csv(dist_path)
-                    dist_col = _pick_column(dist_df, DIST_COLS)
-                    if not dist_col:
-                        raise ValueError("missing distance column")
-                    print(
-                        f"[DEBUG] {fly_name}: distance columns={list(dist_df.columns)} selected={dist_col}"
-                    )
-                    # Load distance percentages and check for out-of-range sentinels
-                    dist_numeric = pd.to_numeric(dist_df[dist_col], errors="coerce").fillna(0.0)
-                    invalid_frames = (dist_numeric > 100.0) | (dist_numeric < 0.0)
-                    if invalid_frames.any():
-                        over_count = int((dist_numeric > 100.0).sum())
-                        under_count = int((dist_numeric < 0.0).sum())
-                        print(
-                            f"[WARN] {fly_name} {base_key}: {over_count} over-range and "
-                            f"{under_count} under-range sentinel frames clipped to [0, 100]"
-                        )
+
+                    # Read raw pixel distance for combining
+                    raw_dist_col = find_proboscis_distance_column(dist_df)
+                    if raw_dist_col:
+                        d_px = pd.to_numeric(
+                            dist_df[raw_dist_col], errors="coerce"
+                        ).to_numpy(dtype=float)
+                    else:
+                        # Fallback: compute from eye/proboscis coordinate columns
+                        d_px = _d_px_from_coords(dist_df)
+                        if d_px is None:
+                            raise ValueError(
+                                f"missing raw distance column ({PROBOSCIS_DISTANCE_COL} or alias) "
+                                "and no coordinate columns found to compute it"
+                            )
+                        raw_dist_col = "(computed from coords)"
+
+                    # Also read distance_pct for standalone output (NaN-based, no clipping)
+                    pct_col = _pick_column(dist_df, DIST_COLS)
                     dist_pct = (
-                        dist_numeric
-                        .clip(lower=0.0, upper=100.0)
-                        .to_numpy()
+                        pd.to_numeric(dist_df[pct_col], errors="coerce").to_numpy(dtype=float)
+                        if pct_col
+                        else np.full_like(d_px, np.nan)
                     )
+
+                    # Invalid = NaN raw distance
+                    invalid_frames = ~np.isfinite(d_px)
+
+                    print(
+                        f"[DEBUG] {fly_name}: distance columns={list(dist_df.columns)} "
+                        f"raw={raw_dist_col} pct={pct_col}"
+                    )
+
                     time_dist = _time_axis(dist_df, cfg.fps_default)
 
                     angle_df = pd.read_csv(angle_path)
@@ -1728,15 +1774,25 @@ def combine_distance_angle(cfg: CombineConfig) -> None:
                             f"[WARN] {fly_name} {base_key}: clipped {clipped_count} angle_pct samples to [-100, 100]"
                         )
                     multiplier = _angle_multiplier(angle_clipped)
-                    combined_raw = dist_pct * multiplier
 
-                    # Track per-fly-number max of combined_raw
-                    finite_cr = combined_raw[np.isfinite(combined_raw)]
-                    if finite_cr.size > 0:
-                        local_max = float(np.max(finite_cr))
-                        current = fly_max_by_number.get(fly_number_label, 0.0)
-                        if local_max > current:
-                            fly_max_by_number[fly_number_label] = local_max
+                    # Apply multiplier in pixel domain (NaN propagates naturally)
+                    d_px_weighted = d_px * multiplier
+
+                    # Track per-fly-number weighted min and max
+                    finite_dpw = d_px_weighted[np.isfinite(d_px_weighted)]
+                    if finite_dpw.size > 0:
+                        local_min = float(np.min(finite_dpw))
+                        local_max = float(np.max(finite_dpw))
+                        current_min = fly_weighted_min_by_number.get(
+                            fly_number_label, np.inf
+                        )
+                        if local_min < current_min:
+                            fly_weighted_min_by_number[fly_number_label] = local_min
+                        current_max = fly_weighted_max_by_number.get(
+                            fly_number_label, -np.inf
+                        )
+                        if local_max > current_max:
+                            fly_weighted_max_by_number[fly_number_label] = local_max
 
                     slot_suffix = f"_{slot_label}" if slot_label else ""
                     trial_id = f"{base_key}{slot_suffix}".replace("__", "_")
@@ -1746,49 +1802,79 @@ def combine_distance_angle(cfg: CombineConfig) -> None:
                         "trial_id": trial_id,
                         "base_key": base_key,
                         "time_dist": time_dist,
+                        "d_px": d_px,
                         "dist_pct": dist_pct,
                         "angle_clipped": angle_clipped,
                         "multiplier": multiplier,
-                        "combined_raw": combined_raw,
-                        "invalid_frames": invalid_frames.to_numpy(),
+                        "d_px_weighted": d_px_weighted,
+                        "invalid_frames": invalid_frames,
                         "fly_number_label": fly_number_label,
                     })
                 except Exception as exc:
                     print(f"[WARN] {fly_name} {trial_type} {base_key} → {exc}")
                     pass1_skipped += 1
 
-        if not fly_max_by_number:
-            print(f"[WARN] {fly_name}: no per-fly maxima found; cannot normalize — skipping.")
+        if not fly_weighted_max_by_number:
+            print(f"[WARN] {fly_name}: no per-fly weighted stats found; cannot normalize — skipping.")
             continue
 
-        max_summary = ", ".join(
-            f"{k}={v:.4f}" for k, v in sorted(fly_max_by_number.items())
+        # Compute effective max per fly number
+        fly_effective_max_by_number: dict[str, float] = {}
+        for fn_label in fly_weighted_max_by_number:
+            wgmax = fly_weighted_max_by_number[fn_label]
+            fly_effective_max_by_number[fn_label] = max(wgmax, WEIGHTED_EFFECTIVE_MAX_FLOOR)
+
+        bounds_summary = ", ".join(
+            f"{k}: min={fly_weighted_min_by_number.get(k, 'N/A'):.4f} "
+            f"max={fly_weighted_max_by_number.get(k, 'N/A'):.4f} "
+            f"eff_max={fly_effective_max_by_number.get(k, 'N/A'):.4f}"
+            for k in sorted(fly_weighted_max_by_number)
         )
-        print(f"[DEBUG] {fly_name}: fly_max_by_number {{ {max_summary} }}")
+        print(f"[DEBUG] {fly_name}: weighted bounds {{ {bounds_summary} }}")
 
         # Write per-fly normalization metadata sidecar
-        norm_meta = {"fly_name": fly_name, "fly_max_by_number": fly_max_by_number}
+        norm_meta = {
+            "fly_name": fly_name,
+            "fly_weighted_min_by_number": fly_weighted_min_by_number,
+            "fly_weighted_max_by_number": fly_weighted_max_by_number,
+            "fly_effective_max_by_number": fly_effective_max_by_number,
+            "weighted_effective_max_floor": WEIGHTED_EFFECTIVE_MAX_FLOOR,
+        }
         norm_meta_path = out_csv_dir / "fly_norm_metadata.json"
         with norm_meta_path.open("w") as _f:
             json.dump(norm_meta, _f, indent=2)
 
-        # ── PASS 2: normalize by per-fly max, compute RMS/envelope, write outputs ──
+        # ── PASS 2: normalize by per-fly weighted bounds, compute RMS/envelope, write outputs ──
         totals: dict[str, tuple[int, int]] = {}
         for data in trial_data_cache:
             trial_type = data["trial_type"]
             trial_id = data["trial_id"]
 
-            # Normalize: divide by per-fly-number max, scale to 0-100
+            # Normalize using per-fly-number weighted gmin/gmax
             fly_number_label = str(data.get("fly_number_label", "UNKNOWN"))
-            denom = fly_max_by_number.get(fly_number_label, 0.0)
-            if not denom or denom <= 0.0 or not np.isfinite(denom):
+            weighted_gmin = fly_weighted_min_by_number.get(fly_number_label, np.nan)
+            weighted_gmax = fly_weighted_max_by_number.get(fly_number_label, np.nan)
+
+            if not (np.isfinite(weighted_gmin) and np.isfinite(weighted_gmax)):
                 print(
-                    f"[WARN] {fly_name} {trial_id}: invalid per-fly max for "
+                    f"[WARN] {fly_name} {trial_id}: non-finite per-fly weighted bounds for "
                     f"fly_number={fly_number_label}; skipping normalization."
                 )
                 continue
-            combined_norm = (data["combined_raw"] / denom) * 100.0
-            combined_rms = _rolling_rms(combined_norm, cfg.window_frames)
+
+            effective_max_weighted = fly_effective_max_by_number.get(
+                fly_number_label, max(weighted_gmax, WEIGHTED_EFFECTIVE_MAX_FLOOR)
+            )
+            d_px_weighted = data["d_px_weighted"]
+
+            if effective_max_weighted != weighted_gmin:
+                combined_pct = 100.0 * (d_px_weighted - weighted_gmin) / (
+                    effective_max_weighted - weighted_gmin
+                )
+            else:
+                combined_pct = np.where(np.isfinite(d_px_weighted), 0.0, np.nan)
+
+            combined_rms = _rolling_rms(combined_pct, cfg.window_frames)
             envelope = _hilbert_envelope(combined_rms, cfg.window_frames)
 
             out_df = pd.DataFrame(
@@ -1796,10 +1882,13 @@ def combine_distance_angle(cfg: CombineConfig) -> None:
                     "time_s": data["time_dist"],
                     "angle_centered_pct_interp": data["angle_clipped"],
                     "distance_percentage": data["dist_pct"],
+                    "d_px": data["d_px"],
                     "multiplier": data["multiplier"],
-                    "combined_raw": data["combined_raw"],
-                    "fly_combined_raw_max": denom,
-                    "combined_base": combined_norm,
+                    "d_px_weighted": data["d_px_weighted"],
+                    "weighted_gmin": weighted_gmin,
+                    "weighted_gmax": weighted_gmax,
+                    "effective_max_weighted": effective_max_weighted,
+                    "combined_pct": combined_pct,
                     "rolling_rms": combined_rms,
                     "envelope_of_rms": envelope,
                     "invalid_distance_flag": data["invalid_frames"],
@@ -1812,24 +1901,29 @@ def combine_distance_angle(cfg: CombineConfig) -> None:
                 f"[DEBUG] {fly_name}: wrote {out_csv.name} rows={len(out_df)} fly_number={data['fly_number_label']}"
             )
 
-            plt.figure(figsize=(12, 4))
-            plt.plot(data["time_dist"], envelope, linewidth=1.5)
-            plt.axvline(odor_on_effective, color="black", linewidth=1.2, linestyle="--")
-            plt.axvline(odor_off_effective, color="black", linewidth=1.2, linestyle="--")
-            plt.title(
-                f"{fly_name} — {trial_id}: Envelope(RMS(distance × angle-mult))"
-            )
-            plt.xlabel("Time (s)")
-            plt.ylabel("Combined Metric (% of fly max)")
-            plt.margins(x=0)
-            plt.grid(True, alpha=0.3)
-            out_png = out_fig_dir / f"{fly_name}_{trial_id}_env_rms_angle_distance.png"
-            plt.savefig(out_png, dpi=300, bbox_inches="tight")
-            plt.close()
+            out_png: Optional[Path] = None
+            if cfg.save_trial_plots and out_fig_dir is not None:
+                plt.figure(figsize=(12, 4))
+                plt.plot(data["time_dist"], envelope, linewidth=1.5)
+                plt.axvline(odor_on_effective, color="black", linewidth=1.2, linestyle="--")
+                plt.axvline(odor_off_effective, color="black", linewidth=1.2, linestyle="--")
+                plt.title(
+                    f"{fly_name} — {trial_id}: Envelope(RMS(distance × angle-mult))"
+                )
+                plt.xlabel("Time (s)")
+                plt.ylabel("Combined Metric (%)")
+                plt.margins(x=0)
+                plt.grid(True, alpha=0.3)
+                out_png = out_fig_dir / f"{fly_name}_{trial_id}_env_rms_angle_distance.png"
+                plt.savefig(out_png, dpi=300, bbox_inches="tight")
+                plt.close()
 
-            print(
-                f"[OK] {fly_name} {trial_id} → CSV: {out_csv.name} | FIG: {out_png.name}"
-            )
+            if out_png is not None:
+                print(
+                    f"[OK] {fly_name} {trial_id} → CSV: {out_csv.name} | FIG: {out_png.name}"
+                )
+            else:
+                print(f"[OK] {fly_name} {trial_id} → CSV: {out_csv.name}")
             done, missed = totals.get(trial_type, (0, 0))
             totals[trial_type] = (done + 1, missed)
 
@@ -1972,6 +2066,7 @@ def build_wide_csv(
     trial_type_filter: str | Sequence[str] | None = None,
     extra_trial_exports: Mapping[str, str] | None = None,
     non_reactive_threshold: float | None = None,
+    low_max_threshold_px: float = LOW_MAX_FLAG_THRESHOLD_PX,
     use_per_trial_baseline: bool = False,
 ) -> None:
     print(
@@ -2129,11 +2224,13 @@ def build_wide_csv(
         "local_max",
         "local_min_before",
         "local_max_before",
+        "before_std_from_median",
         "local_min_during",
         "local_max_during",
         "local_max_over_global_min",
         "local_max_during_over_global_min",
         "non_reactive_flag",
+        "low_max_flag",
         "tracking_missing_frames",
         "tracking_pct_missing",
         "tracking_flagged",
@@ -2297,14 +2394,24 @@ def build_wide_csv(
             if before_slice.size:
                 before_mask = np.isfinite(before_slice)
                 if before_mask.any():
-                    local_min_before = float(np.min(before_slice[before_mask]))
-                    local_max_before = float(np.max(before_slice[before_mask]))
+                    before_vals = before_slice[before_mask]
+                    local_min_before = float(np.min(before_vals))
+                    local_max_before = float(np.max(before_vals))
+                    before_median = float(np.nanmedian(before_vals))
+                    if np.isfinite(before_median):
+                        before_std_from_median = float(
+                            np.sqrt(np.nanmean((before_vals - before_median) ** 2))
+                        )
+                    else:
+                        before_std_from_median = float("nan")
                 else:
                     local_min_before = float("nan")
                     local_max_before = float("nan")
+                    before_std_from_median = float("nan")
             else:
                 local_min_before = float("nan")
                 local_max_before = float("nan")
+                before_std_from_median = float("nan")
 
             # Compute tracking quality from raw distance CSV (if available)
             tracking_quality = {"missing_frames": 0, "pct_missing": 0.0, "flagged": False}
@@ -2340,6 +2447,7 @@ def build_wide_csv(
                     "local_max": local_max,
                     "local_min_before": local_min_before,
                     "local_max_before": local_max_before,
+                    "before_std_from_median": before_std_from_median,
                     "local_min_during": local_min_during,
                     "local_max_during": local_max_during,
                     "tracking_missing_frames": tracking_quality.get("missing_frames", 0),
@@ -2398,6 +2506,10 @@ def build_wide_csv(
             non_reactive = 1.0 if is_non_reactive_span(trimmed_min_effective, trimmed_max_effective, threshold=trimmed_threshold) else 0.0
         else:
             non_reactive = 0.0
+        if math.isfinite(trimmed_max_effective):
+            low_max_flag = 1.0 if trimmed_max_effective < float(low_max_threshold_px) else 0.0
+        else:
+            low_max_flag = 0.0
 
         # Enhanced logging for non-reactive flag debugging
         if non_reactive:
@@ -2414,6 +2526,11 @@ def build_wide_csv(
             print(
                 f"[REACTIVE] dataset={dataset} fly={fly} fly_number={fly_number_label} "
                 f"span={span:.2f}px (threshold={trimmed_threshold:.2f}px)"
+            )
+        if low_max_flag:
+            print(
+                f"[LOW-MAX] dataset={dataset} fly={fly} fly_number={fly_number_label} "
+                f"max={trimmed_max_effective:.2f}px (< {float(low_max_threshold_px):.2f}px)"
             )
 
         trial_results.sort(
@@ -2458,11 +2575,13 @@ def build_wide_csv(
                 result["local_max"],
                 result["local_min_before"],
                 result["local_max_before"],
+                result["before_std_from_median"],
                 result["local_min_during"],
                 result["local_max_during"],
                 local_max_over_global_min,
                 local_max_during_over_global_min,
                 non_reactive,
+                low_max_flag,
                 result.get("tracking_missing_frames", 0),
                 result.get("tracking_pct_missing", 0.0),
                 result.get("tracking_flagged", False),
@@ -2552,9 +2671,11 @@ def wide_to_matrix(input_csv: str, output_dir: str) -> None:
             "local_max",
             "local_min_during",
             "local_max_during",
+            "before_std_from_median",
             "local_max_over_global_min",
             "local_max_during_over_global_min",
             "non_reactive_flag",
+            "low_max_flag",
         )
         if col in df.columns
     ]
@@ -2883,6 +3004,11 @@ def build_parser() -> argparse.ArgumentParser:
         default=0.0,
         help="Transit delay between valve command and odor at the fly (seconds).",
     )
+    combine_parser.add_argument(
+        "--save-trial-plots",
+        action="store_true",
+        help="Write per-trial PNG plots under each fly folder.",
+    )
 
     copy_parser = subparsers.add_parser("secure-sync", help="Copy datasets then clean source directories.")
     copy_parser.add_argument("--source", action="append", required=True, help="Source directory (repeatable).")
@@ -3002,6 +3128,7 @@ def main(argv: Sequence[str] | None = None) -> None:
             odor_on_s=args.odor_on,
             odor_off_s=args.odor_off,
             odor_latency_s=args.odor_latency,
+            save_trial_plots=args.save_trial_plots,
         )
         combine_distance_angle(cfg)
         return

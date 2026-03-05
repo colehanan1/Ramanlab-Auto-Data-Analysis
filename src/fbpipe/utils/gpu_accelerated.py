@@ -102,8 +102,8 @@ class GPUBatchProcessor:
         inr = ~(over | under)
 
         # Assign values
-        perc[over] = 101.0
-        perc[under] = -1.0
+        perc[over] = float('nan')
+        perc[under] = float('nan')
 
         if norm_max != gmin:
             perc[inr] = 100.0 * (d[inr] - gmin) / (norm_max - gmin)
