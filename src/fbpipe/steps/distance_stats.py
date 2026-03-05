@@ -11,15 +11,54 @@ from ..utils.columns import EYE_CLASS, PROBOSCIS_DISTANCE_COL, find_proboscis_di
 from ..utils.fly_files import iter_fly_distance_csvs
 
 
+def _stats_path_for_token(fly_dir: Path, token: str) -> Path:
+    slot_label = token.replace("_distances", "")
+    return fly_dir / f"{slot_label}_global_distance_stats_class_{EYE_CLASS}.json"
+
+
+def _needs_stats_refresh(csv_path: Path, *, force_recompute: bool) -> bool:
+    if force_recompute:
+        return True
+    try:
+        header = pd.read_csv(csv_path, nrows=0)
+    except Exception:
+        return True
+    columns = set(header.columns)
+    return "distance_percentage" not in columns
+
+
 def main(cfg: Settings) -> None:
+    force_recompute = bool(getattr(getattr(cfg, "force", None), "pipeline", False))
     roots = get_main_directories(cfg)
     print(f"[DIST] Starting distance stats scan in {len(roots)} directories")
     for root in roots:
         print(f"[DIST] Processing root directory: {root}")
         for fly_dir in [p for p in root.iterdir() if p.is_dir()]:
             print(f"[DIST] Inspecting fly directory: {fly_dir.name}")
+            entries = list(iter_fly_distance_csvs(fly_dir, recursive=True))
+            if not entries:
+                continue
+
+            tokens_to_refresh: set[str] = set()
+            if force_recompute:
+                tokens_to_refresh = {token for _, token, _ in entries}
+            else:
+                for csv_path, token, _ in entries:
+                    stats_path = _stats_path_for_token(fly_dir, token)
+                    if not stats_path.exists():
+                        tokens_to_refresh.add(token)
+                        continue
+                    if _needs_stats_refresh(csv_path, force_recompute=force_recompute):
+                        tokens_to_refresh.add(token)
+
+            if not tokens_to_refresh:
+                print(f"[DIST] {fly_dir.name}: all slot stats are up-to-date; skipping.")
+                continue
+
             slot_ranges: Dict[str, Tuple[float, float]] = {}
-            for csv_path, token, _ in iter_fly_distance_csvs(fly_dir, recursive=True):
+            for csv_path, token, _ in entries:
+                if token not in tokens_to_refresh:
+                    continue
                 print(
                     f"[DIST] Reading {csv_path.name} for slot '{token}' in {fly_dir.name}"
                 )

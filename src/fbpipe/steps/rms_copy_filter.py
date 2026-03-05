@@ -14,6 +14,7 @@ from ..utils.fly_files import iter_fly_distance_csvs
 
 
 def main(cfg: Settings) -> None:
+    force_recompute = bool(getattr(getattr(cfg, "force", None), "pipeline", False))
     roots = get_main_directories(cfg)
     for root in roots:
         for fly_dir in [p for p in root.iterdir() if p.is_dir()]:
@@ -65,6 +66,13 @@ def main(cfg: Settings) -> None:
                     cols.append(pct_col)
 
                 out_path = dest / ("updated_" + csv_path.name)
+                if (
+                    not force_recompute
+                    and out_path.exists()
+                    and out_path.stat().st_mtime >= csv_path.stat().st_mtime
+                ):
+                    print(f"[RMS] Skipping up-to-date output: {out_path.name}")
+                    continue
                 try:
                     df[cols].to_csv(out_path, index=False)
                     print(f"[RMS] {csv_path.name} → {out_path.name}")

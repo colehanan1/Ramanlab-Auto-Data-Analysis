@@ -112,7 +112,7 @@ def _compute_trial_metrics(
     *,
     fallback_fps: float,
     default_fps: float,
-    fly_before_mean: float,
+    fly_before_median: float,
     use_per_trial_baseline: bool = False,
 ) -> dict[str, float]:
     total_len = env.size
@@ -122,25 +122,26 @@ def _compute_trial_metrics(
     during = env[during_start:during_end]
     after = env[during_end:after_end]
 
-    before_mean = float(np.nanmean(before)) if before.size else np.nan
-    before_std = float(np.nanstd(before)) if before.size else 0.0
+    before_median = float(np.nanmedian(before)) if before.size else np.nan
+    mad = float(np.nanmedian(np.abs(before - before_median))) if before.size else 0.0
+    before_sigma = 1.4826 * mad if np.isfinite(mad) else 0.0
 
     # Select baseline mode
     if use_per_trial_baseline:
         # Use only this trial's before period
-        baseline = before_mean
+        baseline = before_median
     else:
-        # Use the fly-level mean (current behavior)
-        baseline = fly_before_mean
+        # Use the fly-level median (current behavior)
+        baseline = fly_before_median
         if not np.isfinite(baseline):
-            baseline = before_mean
+            baseline = before_median
 
     if not np.isfinite(baseline):
         baseline = 0.0
-    if not np.isfinite(before_std):
-        before_std = 0.0
+    if not np.isfinite(before_sigma):
+        before_sigma = 0.0
 
-    threshold = baseline + 3.0 * before_std
+    threshold = baseline + 3.0 * before_sigma
 
     fps_eff = _effective_fps(fps, fallback=fallback_fps, default=default_fps)
     dt = 1.0 / fps_eff if fps_eff > 0 else 0.0
@@ -425,7 +426,7 @@ def collect_envelopes(cfg: CollectConfig) -> None:
     ]
 
     trial_rows: List[dict] = []
-    fly_before_totals: dict[str, tuple[float, int]] = {}
+    fly_before_values: dict[str, list[float]] = {}
     for item in items:
         csv_path = item["csv_path"]
         measure_col = item["measure_col"]
@@ -489,21 +490,17 @@ def collect_envelopes(cfg: CollectConfig) -> None:
                 before_segment = env[:before_len]
                 finite_mask = np.isfinite(before_segment)
                 if np.any(finite_mask):
-                    sum_before = float(np.nansum(before_segment[finite_mask]))
-                    count_before = int(np.sum(finite_mask))
-                    total, count = fly_before_totals.get(item["fly"], (0.0, 0))
-                    fly_before_totals[item["fly"]] = (
-                        total + sum_before,
-                        count + count_before,
-                    )
+                    values = before_segment[finite_mask].astype(float).tolist()
+                    if values:
+                        fly_before_values.setdefault(item["fly"], []).extend(values)
 
         print(
             f"[DEBUG] Buffered row for fly={item['fly']} fly_number={item['fly_number']} frames={len(env)}"
         )
 
-    fly_before_means = {
-        fly: (total / count if count > 0 else float("nan"))
-        for fly, (total, count) in fly_before_totals.items()
+    fly_before_medians = {
+        fly: float(np.nanmedian(values)) if values else float("nan")
+        for fly, values in fly_before_values.items()
     }
 
     records: List[dict] = []
@@ -514,7 +511,7 @@ def collect_envelopes(cfg: CollectConfig) -> None:
             row["fps"],
             fallback_fps=cfg.fallback_fps,
             default_fps=cfg.fps_default,
-            fly_before_mean=fly_before_means.get(row["fly"], float("nan")),
+            fly_before_median=fly_before_medians.get(row["fly"], float("nan")),
             use_per_trial_baseline=cfg.use_per_trial_baseline,
         )
 

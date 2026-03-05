@@ -153,8 +153,8 @@ def _angle_multiplier(angle_pct: np.ndarray) -> np.ndarray:
     pct = np.clip(pct, -100.0, 100.0)
     return np.where(
         pct <= 0.0,
-        1.0,                  # no penalty for negative/zero angles
-        1.0 + pct / 100.0,   # linear 1.0 → 2.0 for positive angles
+        1.0,
+        1.0 + np.log1p((pct / 100.0) * (np.e - 1.0)),  # log scale 1.0 → 2.0
     )
 
 

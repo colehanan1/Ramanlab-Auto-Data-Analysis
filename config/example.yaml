@@ -2,16 +2,16 @@
 # Project configuration
 model_path: "/path/to/sam2/notebooks/YOLOProjectProboscisLegs/runs/obb/train5/weights/best.pt"
 main_directory:
-          - "/path/to/Data/flys/Benz_control/"
-          - "/path/to/Data/flys/EB_control/"
-          - "/path/to/Data/flys/hex_control/"
-          - "/path/to/Data/flys/opto_ACV/"
-          - "/path/to/Data/flys/opto_AIR/"
-          - "/path/to/Data/flys/opto_benz_1/"
-          - "/path/to/Data/flys/opto_EB/"
-          - "/path/to/Data/flys/opto_EB(6-training)/"
-          - "/path/to/Data/flys/opto_hex/"
-          - "/path/to/Data/flys/opto_3-oct/"
+          - "/path/to/Data/flys/Benz-Control/"
+          - "/path/to/Data/flys/EB-Control/"
+          - "/path/to/Data/flys/Hex-Control/"
+          - "/path/to/Data/flys/ACV-Training/"
+          - "/path/to/Data/flys/AIR-Training/"
+          - "/path/to/Data/flys/Benz-Training/"
+          - "/path/to/Data/flys/EB-Training/"
+          - "/path/to/Data/flys/EB-Training(No-Operant)/"
+          - "/path/to/Data/flys/Hex-Training/"
+          - "/path/to/Data/flys/3OCT-Training/"
 
 cache_dir: "/path/to/cache"
 force:
@@ -95,16 +95,16 @@ yolo_curation:
     multiplier: 2  # Aim for 2x dataset size via augmentation
   output_dir: "yolo_curation"  # Directory name (relative to FLY_DIR)
   video_source_dirs:  # Additional directories to search for videos (e.g., secure storage)
-    - "/path/to/secure/storage/opto_EB/"
-    - "/path/to/secure/storage/opto_EB(6-training)/"
-    - "/path/to/secure/storage/opto_benz_1/"
-    - "/path/to/secure/storage/opto_hex/"
-    - "/path/to/secure/storage/opto_ACV/"
-    - "/path/to/secure/storage/hex_control/"
-    - "/path/to/secure/storage/EB_control/"
-    - "/path/to/secure/storage/Benz_control/"
-    - "/path/to/secure/storage/opto_AIR/"
-    - "/path/to/secure/storage/opto_3-oct/"
+    - "/path/to/secure/storage/EB-Training/"
+    - "/path/to/secure/storage/EB-Training(No-Operant)/"
+    - "/path/to/secure/storage/Benz-Training/"
+    - "/path/to/secure/storage/Hex-Training/"
+    - "/path/to/secure/storage/ACV-Training/"
+    - "/path/to/secure/storage/Hex-Control/"
+    - "/path/to/secure/storage/EB-Control/"
+    - "/path/to/secure/storage/Benz-Control/"
+    - "/path/to/secure/storage/AIR-Training/"
+    - "/path/to/secure/storage/3OCT-Training/"
 
 # Pseudolabel mining + export (builds an Ultralytics-compatible dataset from videos)
 pseudolabel:
@@ -210,16 +210,16 @@ analysis:
   combined:
     combine:
       roots:
-        - "/path/to/Data/flys/opto_benz_1/"
-        - "/path/to/Data/flys/hex_control/"
-        - "/path/to/Data/flys/EB_control/"
-        - "/path/to/Data/flys/Benz_control/"
-        - "/path/to/Data/flys/opto_EB/"
-        - "/path/to/Data/flys/opto_EB(6-training)/"
-        - "/path/to/Data/flys/opto_hex/"
-        - "/path/to/Data/flys/opto_ACV/"
-        - "/path/to/Data/flys/opto_AIR/"
-        - "/path/to/Data/flys/opto_3-oct/"
+        - "/path/to/Data/flys/Benz-Training/"
+        - "/path/to/Data/flys/Hex-Control/"
+        - "/path/to/Data/flys/EB-Control/"
+        - "/path/to/Data/flys/Benz-Control/"
+        - "/path/to/Data/flys/EB-Training/"
+        - "/path/to/Data/flys/EB-Training(No-Operant)/"
+        - "/path/to/Data/flys/Hex-Training/"
+        - "/path/to/Data/flys/ACV-Training/"
+        - "/path/to/Data/flys/AIR-Training/"
+        - "/path/to/Data/flys/3OCT-Training/"
 
       fps_default: 40.0
       window_sec: 0.25
@@ -228,25 +228,25 @@ analysis:
       odor_latency_s: 2.15
     wide:
       mirror:
-        - source: "/path/to/Data/flys/opto_hex/"
-          destination: "/path/to/secure/storage/opto_hex/"
-        - source: "/path/to/Data/flys/opto_ACV/"
-          destination: "/path/to/secure/storage/opto_ACV/"
-        - source: "/path/to/Data/flys/opto_EB(6-training)/"
-          destination: "/path/to/secure/storage/opto_EB(6-training)/"
+        - source: "/path/to/Data/flys/Hex-Training/"
+          destination: "/path/to/secure/storage/Hex-Training/"
+        - source: "/path/to/Data/flys/ACV-Training/"
+          destination: "/path/to/secure/storage/ACV-Training/"
+        - source: "/path/to/Data/flys/EB-Training(No-Operant)/"
+          destination: "/path/to/secure/storage/EB-Training(No-Operant)/"
       roots:
-        - "/path/to/secure/storage/opto_EB/"
-        - "/path/to/secure/storage/opto_EB(6-training)/"
-        - "/path/to/secure/storage/opto_benz_1/"
-        - "/path/to/secure/storage/opto_hex/"
-        - "/path/to/secure/storage/opto_ACV/"
-        - "/path/to/secure/storage/hex_control/"
-        - "/path/to/secure/storage/EB_control/"
-        - "/path/to/secure/storage/Benz_control/"
-        - "/path/to/secure/storage/opto_AIR/"
-        - "/path/to/secure/storage/opto_3-oct/"
+        - "/path/to/secure/storage/EB-Training/"
+        - "/path/to/secure/storage/EB-Training(No-Operant)/"
+        - "/path/to/secure/storage/Benz-Training/"
+        - "/path/to/secure/storage/Hex-Training/"
+        - "/path/to/secure/storage/ACV-Training/"
+        - "/path/to/secure/storage/Hex-Control/"
+        - "/path/to/secure/storage/EB-Control/"
+        - "/path/to/secure/storage/Benz-Control/"
+        - "/path/to/secure/storage/AIR-Training/"
+        - "/path/to/secure/storage/3OCT-Training/"
       exclude_roots:
-        - "/path/to/secure/storage/opto_benz/"
+        - "/path/to/secure/storage/Benz-Training/"
       output_csv: "/path/to/Data/Opto/Combined/all_envelope_rows_wide.csv"
       measure_cols: ["envelope_of_rms"]
       fps_fallback: 40.0
@@ -314,16 +314,16 @@ analysis:
     secure_cleanup:
       destination: "/path/to/secure/storage/"
       sources:
-        - "/path/to/Data/flys/opto_EB/"
-        - "/path/to/Data/flys/opto_EB(6-training)/"
-        - "/path/to/Data/flys/opto_benz_1/"
-        - "/path/to/Data/flys/opto_hex/"
-        - "/path/to/Data/flys/opto_ACV/"
-        - "/path/to/Data/flys/hex_control/"
-        - "/path/to/Data/flys/EB_control/"
-        - "/path/to/Data/flys/Benz_control/"
-        - "/path/to/Data/flys/opto_AIR/"
-        - "/path/to/Data/flys/opto_3-oct/"
+        - "/path/to/Data/flys/EB-Training/"
+        - "/path/to/Data/flys/EB-Training(No-Operant)/"
+        - "/path/to/Data/flys/Benz-Training/"
+        - "/path/to/Data/flys/Hex-Training/"
+        - "/path/to/Data/flys/ACV-Training/"
+        - "/path/to/Data/flys/Hex-Control/"
+        - "/path/to/Data/flys/EB-Control/"
+        - "/path/to/Data/flys/Benz-Control/"
+        - "/path/to/Data/flys/AIR-Training/"
+        - "/path/to/Data/flys/3OCT-Training/"
 
 tools:
   auto_label_images:
@@ -351,11 +351,11 @@ tools:
     dest_dir: "/path/to/model/to-be-labelled"
   collect_eye_prob_coords:
     sources:
-      - "/path/to/secure/storage/opto_EB/"
-      - "/path/to/secure/storage/opto_benz_1/"
-      - "/path/to/secure/storage/opto_hex/"
-      - "/path/to/secure/storage/opto_ACV/"
-      - "/path/to/secure/storage/hex_control/"
+      - "/path/to/secure/storage/EB-Training/"
+      - "/path/to/secure/storage/Benz-Training/"
+      - "/path/to/secure/storage/Hex-Training/"
+      - "/path/to/secure/storage/ACV-Training/"
+      - "/path/to/secure/storage/Hex-Control/"
     output_csv: "/path/to/Data/Opto/all_eye_prob_coords_wide.csv"
     fps: 40
     max_frames: 3600

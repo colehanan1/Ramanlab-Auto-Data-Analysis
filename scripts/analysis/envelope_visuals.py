@@ -66,13 +66,30 @@ ODOR_CANON: Mapping[str, str] = {
     "benzaldehyde": "Benz",
     "benz-ald": "Benz",
     "benzadhyde": "Benz",
+    "benz-training": "opto_benz_1",
+    "benz training": "opto_benz_1",
+    "benz-training-24": "opto_benz_1",
+    "benz training 24": "opto_benz_1",
+    "benz-control": "Benz_control",
     "benz_control": "Benz_control",
     "benz control": "Benz_control",
     "ethyl butyrate": "EB",
     "eb_control": "EB_control",
     "eb control": "EB_control",
+    "eb-control": "EB_control",
+    "eb-training": "opto_EB",
+    "eb-training(no-operant)": "opto_EB_6_training",
+    "eb-training-no-operant": "opto_EB_6_training",
     "hex_control": "hex_control",
     "hexanol control": "hex_control",
+    "hex-control": "hex_control",
+    "hex-training": "opto_hex",
+    "hex-training-24": "opto_hex",
+    "hex training 24": "opto_hex",
+    "acv-training": "opto_ACV",
+    "air-training": "opto_AIR",
+    "3oct-training": "opto_3-oct",
+    "3oct training": "opto_3-oct",
     "optogenetics benzaldehyde": "opto_benz",
     "optogenetics benzaldehyde 1": "opto_benz_1",
     "optogenetics ethyl butyrate": "opto_EB",
@@ -232,6 +249,7 @@ TRAINING_ODOR_SCHEDULE_3OCT = {
 TESTING_DATASET_ALIAS = {
     "opto_hex": "hex_control",
     "opto_EB": "EB_control",
+    "opto_EB_6_training": "EB_control",
     "opto_benz": "Benz_control",
     "opto_benz_1": "Benz_control",
     "opto_ACV": "ACV",
@@ -763,7 +781,10 @@ def _compute_theta(
         return math.nan
 
     window = env[:before_end]
-    return float(np.nanmean(window) + std_mult * np.nanstd(window))
+    baseline = float(np.nanmedian(window))
+    mad = float(np.nanmedian(np.abs(window - baseline)))
+    sigma = 1.4826 * mad
+    return float(baseline + std_mult * sigma)
 
 
 def filter_and_validate_trial_type(
@@ -913,7 +934,7 @@ class MatrixPlotConfig:
     before_sec: float = 30.0
     during_sec: float = 30.0
     after_window_sec: float = 30.0
-    threshold_std_mult: float = 4.0
+    threshold_std_mult: float = 3.0
     min_samples_over: int = 20
     row_gap: float = 0.6
     height_per_gap_in: float = 3.0
@@ -947,7 +968,10 @@ def _score_trial(env: np.ndarray, fps: float, cfg: MatrixPlotConfig) -> tuple[in
     if before.size == 0:
         return (0, 0)
 
-    theta = float(np.nanmean(before) + cfg.threshold_std_mult * np.nanstd(before))
+    baseline = float(np.nanmedian(before))
+    mad = float(np.nanmedian(np.abs(before - baseline)))
+    sigma = 1.4826 * mad
+    theta = float(baseline + cfg.threshold_std_mult * sigma)
     during_hit = int(np.sum(during > theta) >= cfg.min_samples_over) if during.size else 0
     after_hit = int(np.sum(after > theta) >= cfg.min_samples_over) if after.size else 0
     return during_hit, after_hit
@@ -1502,7 +1526,7 @@ class EnvelopePlotConfig:
     odor_off_s: float = 60.0
     odor_latency_s: float = 0.0
     after_show_sec: float = 30.0
-    threshold_std_mult: float = 4.0
+    threshold_std_mult: float = 3.0
     trial_type: str = "testing"
     light_annotation_mode: str = "none"
     max_flies: int | None = None
@@ -1689,6 +1713,9 @@ def generate_envelope_plots(cfg: EnvelopePlotConfig) -> None:
         if share_ylabel:
             fig.text(0.02, 0.5, y_label, va="center", rotation="vertical", fontsize=10)
 
+        # Force consistent y-axis scaling for PER RMS and combined-base envelopes.
+        fixed_y_max = 100.0
+
         for ax, (
             odor_name,
             t,
@@ -1757,7 +1784,7 @@ def generate_envelope_plots(cfg: EnvelopePlotConfig) -> None:
             if math.isfinite(theta):
                 ax.axhline(theta, linestyle="-", linewidth=1.0, color="tab:red", alpha=0.9)
 
-            ax.set_ylim(0, y_max * 1.02 if y_max > 0 else 1.0)
+            ax.set_ylim(0, fixed_y_max)
             ax.set_xlim(0, x_max_limit)
             ax.margins(x=0, y=0.02)
             if not share_ylabel:
@@ -1815,7 +1842,14 @@ def generate_envelope_plots(cfg: EnvelopePlotConfig) -> None:
                 )
             )
         legend_handles.append(
-            plt.Line2D([0], [0], linestyle="-", linewidth=1.0, color="tab:red", label=r"$\theta = \mu_{before} + k\sigma_{before}$")
+            plt.Line2D(
+                [0],
+                [0],
+                linestyle="-",
+                linewidth=1.0,
+                color="tab:red",
+                label=r"$\theta = \mathrm{median}_{before} + k\cdot\mathrm{MAD}_{before}$",
+            )
         )
         fig.legend(
             handles=legend_handles,
@@ -1874,7 +1908,12 @@ def _parse_matrices_args(subparser: argparse.ArgumentParser) -> None:
     subparser.add_argument("--before-sec", type=float, default=30.0, help="Duration of the baseline window (seconds).")
     subparser.add_argument("--during-sec", type=float, default=30.0, help="Duration of the DURING window (seconds).")
     subparser.add_argument("--after-window-sec", type=float, default=30.0, help="Duration of the AFTER window (seconds).")
-    subparser.add_argument("--threshold-std-mult", type=float, default=4.0, help="Threshold multiplier applied to baseline std dev.")
+    subparser.add_argument(
+        "--threshold-std-mult",
+        type=float,
+        default=3.0,
+        help="Threshold multiplier applied to baseline MAD (scaled to sigma).",
+    )
     subparser.add_argument("--min-samples-over", type=int, default=20, help="Minimum samples over threshold to count a hit.")
     subparser.add_argument("--row-gap", type=float, default=0.6, help="Vertical gap between matrix and bar charts.")
     subparser.add_argument("--height-per-gap-in", type=float, default=3.0, help="Figure height added per 1.0 of row gap (inches).")
@@ -1908,7 +1947,12 @@ def _parse_envelopes_args(subparser: argparse.ArgumentParser) -> None:
         help="Transit delay between valve command and odor at the fly (seconds).",
     )
     subparser.add_argument("--after-show-sec", type=float, default=30.0, help="Duration to display after odor off (seconds).")
-    subparser.add_argument("--threshold-std-mult", type=float, default=4.0, help="Threshold multiplier applied to baseline std dev.")
+    subparser.add_argument(
+        "--threshold-std-mult",
+        type=float,
+        default=3.0,
+        help="Threshold multiplier applied to baseline MAD (scaled to sigma).",
+    )
     subparser.add_argument(
         "--trial-type",
         choices=("testing", "training"),

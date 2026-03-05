@@ -124,7 +124,8 @@ class SMBCopier:
             logger.error(f"Source directory not found: {src}")
             return False
 
-        cmd = ["rclone", "sync", str(src), f"{self.rclone_remote}:{dest_path}"]
+        cmd = ["rclone", "sync", str(src), f"{self.rclone_remote}:{dest_path}",
+               "--copy-links"]  # dereference symlinks to avoid errors
 
         if skip_same_size:
             cmd.append("--size-only")

@@ -36,6 +36,48 @@ from ..utils.fly_files import iter_fly_distance_csvs
 from ..utils.gpu_batch_optimizer import BatchFileProcessor, estimate_optimal_batch_size
 
 
+def _is_already_normalized(
+    columns: list[str],
+    snapshot: pd.DataFrame,
+    *,
+    gmin: float,
+    gmax: float,
+    effective_max: float,
+) -> bool:
+    normalized_cols = {
+        PROBOSCIS_DISTANCE_PCT_COL,
+        "distance_percentage",
+        "distance_percent",
+        "distance_pct",
+    }
+    has_pct = any(col in columns for col in normalized_cols)
+    has_bounds_cols = (
+        PROBOSCIS_MIN_DISTANCE_COL in columns
+        and PROBOSCIS_MAX_DISTANCE_COL in columns
+    )
+    if not (has_pct and has_bounds_cols):
+        return False
+    if snapshot.empty:
+        return False
+
+    row = snapshot.iloc[0]
+    file_gmin = pd.to_numeric(row.get(PROBOSCIS_MIN_DISTANCE_COL), errors="coerce")
+    file_gmax = pd.to_numeric(row.get(PROBOSCIS_MAX_DISTANCE_COL), errors="coerce")
+    if not np.isfinite(file_gmin) or not np.isfinite(file_gmax):
+        return False
+    if not (np.isclose(float(file_gmin), gmin) and np.isclose(float(file_gmax), gmax)):
+        return False
+
+    effective_col = f"effective_max_distance_{EYE_CLASS}_{PROBOSCIS_CLASS}"
+    if effective_col in columns:
+        file_effective = pd.to_numeric(row.get(effective_col), errors="coerce")
+        if not np.isfinite(file_effective):
+            return False
+        if not np.isclose(float(file_effective), effective_max):
+            return False
+    return True
+
+
 def main(cfg: Settings) -> None:
     """
     Ultra-optimized GPU-accelerated distance normalization with batching.
@@ -48,6 +90,7 @@ def main(cfg: Settings) -> None:
 
     # Initialize batch processor
     force_cpu = getattr(cfg, 'allow_cpu', False)
+    force_recompute = bool(getattr(getattr(cfg, "force", None), "pipeline", False))
     device = 'cpu' if force_cpu else 'cuda'
     processor = BatchFileProcessor(batch_size=batch_size, device=device, use_pinned_memory=True)
 
@@ -85,8 +128,16 @@ def main(cfg: Settings) -> None:
                 threshold = float(stats.get("effective_max_threshold", 95.0))
                 effective_max = max(fly_max, threshold)
 
-                # Quick check for distance column
+                # Quick check for distance column + skip already-normalized files.
                 df_temp = pd.read_csv(csv_path, nrows=1)
+                if not force_recompute and _is_already_normalized(
+                    list(df_temp.columns),
+                    df_temp,
+                    gmin=gmin,
+                    gmax=gmax,
+                    effective_max=effective_max,
+                ):
+                    continue
                 dist_col = find_proboscis_distance_column(df_temp)
                 if dist_col is None:
                     continue

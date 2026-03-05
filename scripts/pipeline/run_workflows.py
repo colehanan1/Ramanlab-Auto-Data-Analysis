@@ -1371,7 +1371,11 @@ def main(argv: Sequence[str] | None = None) -> None:
     if dataset_roots:
         remaining_steps = [step.name for step in ORDERED_STEPS if step.name != "yolo"]
 
-        pipeline_expectation = {"non_reactive_span_px": settings.non_reactive_span_px}
+        pipeline_expectation = {
+            "non_reactive_span_px": settings.non_reactive_span_px,
+            "class2_min": settings.class2_min,
+            "class2_max": settings.class2_max,
+        }
 
         yolo_targets: list[str] = []
         pipeline_targets: list[tuple[str, dict[str, Any]]] = []
@@ -1417,6 +1421,8 @@ def main(argv: Sequence[str] | None = None) -> None:
     if combined_cfg_input:
         combined_expected = {
             "non_reactive_span_px": settings.non_reactive_span_px,
+            "class2_min": settings.class2_min,
+            "class2_max": settings.class2_max,
             "dataset_roots": sorted(dataset_roots) if dataset_roots else [],
         }
         pair_cfg_input = combined_cfg_input.get("pair_groups")
@@ -1566,7 +1572,7 @@ def _batch_copy_to_smb(raw_cfg: Dict[str, Any]) -> None:
             if out_dir.exists() and smb_path:
                 copies_to_make.append((out_dir, smb_path))
 
-    # Collect reaction prediction CSV
+    # Collect reaction prediction outputs (CSV + matrix figures)
     reaction_cfg = raw_cfg.get("reaction_prediction", {})
     if reaction_cfg:
         output_csv = reaction_cfg.get("output_csv")
@@ -1575,6 +1581,13 @@ def _batch_copy_to_smb(raw_cfg: Dict[str, Any]) -> None:
             csv_path = Path(output_csv)
             if csv_path.exists():
                 copies_to_make.append((csv_path, output_csv_smb))
+
+        matrix_cfg = reaction_cfg.get("matrix", {})
+        if matrix_cfg:
+            matrix_out_dir = Path(matrix_cfg.get("out_dir", ""))
+            matrix_smb = matrix_cfg.get("out_dir_smb")
+            if matrix_out_dir.exists() and matrix_smb:
+                copies_to_make.append((matrix_out_dir, matrix_smb))
 
     # Execute all copies
     if copies_to_make:

@@ -41,6 +41,48 @@ from ..utils.fly_files import iter_fly_distance_csvs
 from ..utils.gpu_accelerated import get_default_processor
 
 
+def _is_already_normalized(
+    columns: list[str],
+    snapshot: pd.DataFrame,
+    *,
+    gmin: float,
+    gmax: float,
+    effective_max: float,
+) -> bool:
+    normalized_cols = {
+        PROBOSCIS_DISTANCE_PCT_COL,
+        "distance_percentage",
+        "distance_percent",
+        "distance_pct",
+    }
+    has_pct = any(col in columns for col in normalized_cols)
+    has_bounds_cols = (
+        PROBOSCIS_MIN_DISTANCE_COL in columns
+        and PROBOSCIS_MAX_DISTANCE_COL in columns
+    )
+    if not (has_pct and has_bounds_cols):
+        return False
+    if snapshot.empty:
+        return False
+
+    row = snapshot.iloc[0]
+    file_gmin = pd.to_numeric(row.get(PROBOSCIS_MIN_DISTANCE_COL), errors="coerce")
+    file_gmax = pd.to_numeric(row.get(PROBOSCIS_MAX_DISTANCE_COL), errors="coerce")
+    if not np.isfinite(file_gmin) or not np.isfinite(file_gmax):
+        return False
+    if not (np.isclose(float(file_gmin), gmin) and np.isclose(float(file_gmax), gmax)):
+        return False
+
+    effective_col = f"effective_max_distance_{EYE_CLASS}_{PROBOSCIS_CLASS}"
+    if effective_col in columns:
+        file_effective = pd.to_numeric(row.get(effective_col), errors="coerce")
+        if not np.isfinite(file_effective):
+            return False
+        if not np.isclose(float(file_effective), effective_max):
+            return False
+    return True
+
+
 def main(cfg: Settings) -> None:
     """
     GPU-accelerated distance normalization for all fly directories.
@@ -55,6 +97,7 @@ def main(cfg: Settings) -> None:
     """
     # Initialize GPU processor (auto-detects device)
     force_cpu = getattr(cfg, 'allow_cpu', False)
+    force_recompute = bool(getattr(getattr(cfg, "force", None), "pipeline", False))
     gpu_processor = get_default_processor(force_cpu=force_cpu)
 
     roots = get_main_directories(cfg)
@@ -103,6 +146,40 @@ def main(cfg: Settings) -> None:
                     f"[NORM-GPU] {fly_dir.name}/{slot_label}: fly_max={fly_max:.3f}, "
                     f"threshold={threshold:.3f}, effective_max={effective_max:.3f}"
                 )
+
+                if not force_recompute:
+                    try:
+                        header = pd.read_csv(csv_path, nrows=0)
+                    except Exception as exc:
+                        print(f"[NORM-GPU] Failed to read header for {csv_path.name}: {exc}")
+                        header = pd.DataFrame()
+                    if not header.empty:
+                        check_cols = [
+                            col
+                            for col in (
+                                PROBOSCIS_MIN_DISTANCE_COL,
+                                PROBOSCIS_MAX_DISTANCE_COL,
+                                f"effective_max_distance_{EYE_CLASS}_{PROBOSCIS_CLASS}",
+                            )
+                            if col in header.columns
+                        ]
+                        try:
+                            snapshot = (
+                                pd.read_csv(csv_path, usecols=check_cols, nrows=1)
+                                if check_cols
+                                else pd.DataFrame()
+                            )
+                        except Exception:
+                            snapshot = pd.DataFrame()
+                        if _is_already_normalized(
+                            list(header.columns),
+                            snapshot,
+                            gmin=gmin,
+                            gmax=gmax,
+                            effective_max=effective_max,
+                        ):
+                            print(f"[NORM-GPU] Skipping already-normalized CSV: {csv_path.name}")
+                            continue
 
                 # Read CSV
                 df = pd.read_csv(csv_path)

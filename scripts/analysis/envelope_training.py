@@ -44,13 +44,30 @@ ODOR_CANON: Mapping[str, str] = {
     "benzaldehyde": "Benz",
     "benz-ald": "Benz",
     "benzadhyde": "Benz",
+    "benz-training": "opto_benz_1",
+    "benz training": "opto_benz_1",
+    "benz-training-24": "opto_benz_1",
+    "benz training 24": "opto_benz_1",
+    "benz-control": "benz_control",
     "ethyl butyrate": "EB",
     "eb_control": "EB_control",
     "eb control": "EB_control",
+    "eb-control": "EB_control",
+    "eb-training": "opto_EB",
+    "eb-training(no-operant)": "opto_EB_6_training",
+    "eb-training-no-operant": "opto_EB_6_training",
     "hex_control": "hex_control",
     "hex control": "hex_control",
+    "hex-control": "hex_control",
+    "hex-training": "opto_hex",
+    "hex-training-24": "opto_hex",
+    "hex training 24": "opto_hex",
     "benz_control": "benz_control",
     "benz control": "benz_control",
+    "acv-training": "opto_ACV",
+    "air-training": "opto_AIR",
+    "3oct-training": "opto_3-oct",
+    "3oct training": "opto_3-oct",
     "optogenetics benzaldehyde": "opto_benz",
     "optogenetics benzaldehyde 1": "opto_benz_1",
     "optogenetics ethyl butyrate": "opto_EB",
@@ -434,7 +451,7 @@ def _latency_to_cross(
         fps: Frames per second
         before_sec: Baseline window length (used for threshold calculation)
         during_sec: Response search window length (legacy parameter, may be ignored)
-        threshold_mult: Multiplier for threshold = mean + k*std
+        threshold_mult: Multiplier for threshold = median + k*MAD (scaled)
         odor_on_s: Commanded odor ON time (seconds)
         odor_off_s: Commanded odor OFF time (seconds)
         odor_latency_s: Transit delay from valve command to fly (seconds)
@@ -480,9 +497,10 @@ def _latency_profile(
     if response_start >= env.size:
         return None, None
 
-    mu = float(np.nanmean(before))
-    sd = float(np.nanstd(before))
-    theta = mu + threshold_mult * sd
+    mu = float(np.nanmedian(before))
+    mad = float(np.nanmedian(np.abs(before - mu)))
+    sigma = 1.4826 * mad
+    theta = mu + threshold_mult * sigma
 
     during = env[response_start:response_end]
     idx_during = np.where(during > theta)[0]
@@ -1114,7 +1132,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Transit delay between valve command and odor at the fly (seconds).",
     )
     env_parser.add_argument("--after-show-sec", type=float, default=30.0, help="Duration to display after odor OFF (seconds).")
-    env_parser.add_argument("--threshold-std-mult", type=float, default=4.0, help="Threshold multiplier for baseline std dev.")
+    env_parser.add_argument(
+        "--threshold-std-mult",
+        type=float,
+        default=4.0,
+        help="Threshold multiplier for baseline MAD (scaled to sigma).",
+    )
     env_parser.add_argument(
         "--light-annotation-mode",
         choices=("none", "line", "paired-span"),
@@ -1138,7 +1161,12 @@ def build_parser() -> argparse.ArgumentParser:
     lat_parser.add_argument("--out-dir", type=Path, required=True, help="Directory for figures and CSV summaries.")
     lat_parser.add_argument("--before-sec", type=float, default=30.0, help="Baseline window length in seconds.")
     lat_parser.add_argument("--during-sec", type=float, default=35.0, help="During window length in seconds.")
-    lat_parser.add_argument("--threshold-mult", type=float, default=4.0, help="Threshold multiplier (mu + k*std).")
+    lat_parser.add_argument(
+        "--threshold-mult",
+        type=float,
+        default=4.0,
+        help="Threshold multiplier (median + k*MAD).",
+    )
     lat_parser.add_argument(
         "--threshold-std-mult",
         type=float,
@@ -1157,7 +1185,12 @@ def build_parser() -> argparse.ArgumentParser:
     add_col_parser.add_argument("--codes-json", type=Path, required=True, help="JSON metadata file from the convert step.")
     add_col_parser.add_argument("--before-sec", type=float, default=30.0, help="Baseline window length in seconds.")
     add_col_parser.add_argument("--during-sec", type=float, default=35.0, help="During window length in seconds.")
-    add_col_parser.add_argument("--threshold-mult", type=float, default=2.0, help="Threshold multiplier (mu + k*std).")
+    add_col_parser.add_argument(
+        "--threshold-mult",
+        type=float,
+        default=2.0,
+        help="Threshold multiplier (median + k*MAD).",
+    )
     add_col_parser.add_argument("--fps-default", type=float, default=40.0, help="Fallback FPS when metadata missing.")
     add_col_parser.add_argument(
         "--odor-on-s",

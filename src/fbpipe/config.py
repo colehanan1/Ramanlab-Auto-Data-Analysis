@@ -145,6 +145,7 @@ def get_main_directories(cfg: Settings) -> list[Path]:
 @dataclass
 class ReactionMatrixSettings:
     out_dir: str = ""
+    out_dir_smb: str = ""  # SMB path for matrix figures export
     latency_sec: float = 2.15
     after_window_sec: float = 30.0
     row_gap: float = 0.6

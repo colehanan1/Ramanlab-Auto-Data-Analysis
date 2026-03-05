@@ -414,13 +414,30 @@ ODOR_CANON = {
     "benzaldehyde": "Benz",
     "benz-ald": "Benz",
     "benzadhyde": "Benz",
+    "benz-training": "opto_benz_1",
+    "benz training": "opto_benz_1",
+    "benz-training-24": "opto_benz_1",
+    "benz training 24": "opto_benz_1",
+    "benz-control": "benz_control",
     "ethyl butyrate": "EB",
     "eb_control": "EB_control",
     "eb control": "EB_control",
+    "eb-control": "EB_control",
+    "eb-training": "opto_EB",
+    "eb-training(no-operant)": "opto_EB_6_training",
+    "eb-training-no-operant": "opto_EB_6_training",
     "hex_control": "hex_control",
     "hex control": "hex_control",
+    "hex-control": "hex_control",
+    "hex-training": "opto_hex",
+    "hex-training-24": "opto_hex",
+    "hex training 24": "opto_hex",
     "benz_control": "benz_control",
     "benz control": "benz_control",
+    "acv-training": "opto_ACV",
+    "air-training": "opto_AIR",
+    "3oct-training": "opto_3-oct",
+    "3oct training": "opto_3-oct",
     "optogenetics benzaldehyde": "opto_benz",
     "optogenetics benzaldehyde 1": "opto_benz_1",
     "optogenetics ethyl butyrate": "opto_EB",
@@ -766,19 +783,22 @@ def _angle_multiplier(angle_pct: np.ndarray) -> np.ndarray:
     Convert angle percentage (-100 to +100) to continuous multiplier (1.0 to 2.0).
 
     - Negative/zero angles (-100 to 0): multiplier = 1.0 (no penalty)
-    - Positive angles (0 to +100): multiplier = 1.0 + angle/100 (linear to 2.0)
+    - Positive angles (0 to +100): logarithmic scale from 1.0 to 2.0
 
-    This provides smooth scaling where:
-    -  ≤0% → 1.0×
+    Uses ln(1 + x*(e-1)) so that:
+    -  ≤0% → 1.0×  (flat, no penalty)
+    - +50% ≈ 1.62×  (most of the gain happens early)
     - +100% → 2.0×
     """
     pct = np.asarray(angle_pct, dtype=float)
     pct = np.clip(pct, -100.0, 100.0)
 
+    # Logarithmic: 1.0 + ln(1 + (pct/100)*(e-1))
+    # At 0%: 1+ln(1)=1.0, at 100%: 1+ln(e)=2.0
     multiplier = np.where(
         pct <= 0.0,
-        1.0,                  # no penalty for negative/zero angles
-        1.0 + pct / 100.0    # linear 1.0 → 2.0 for positive angles
+        1.0,
+        1.0 + np.log1p((pct / 100.0) * (np.e - 1.0)),
     )
 
     return multiplier
@@ -1421,13 +1441,25 @@ def _segment_auc(values: np.ndarray, threshold: float, dt: float) -> float:
     return float(np.sum(positive) * dt)
 
 
+def _mad_sigma(values: np.ndarray) -> float:
+    if values.size == 0:
+        return 0.0
+    median = float(np.nanmedian(values))
+    if not np.isfinite(median):
+        return 0.0
+    mad = float(np.nanmedian(np.abs(values - median)))
+    if not np.isfinite(mad):
+        return 0.0
+    return 1.4826 * mad
+
+
 def _compute_trial_metrics(
     values: np.ndarray,
     fps: float,
     *,
     fallback_fps: float,
     default_fps: float,
-    fly_before_mean: float,
+    fly_before_median: float,
     use_per_trial_baseline: bool = False,
 ) -> dict[str, float]:
     env = np.asarray(values, dtype=float)
@@ -1438,25 +1470,25 @@ def _compute_trial_metrics(
     during = env[during_start:during_end]
     after = env[during_end:after_end]
 
-    before_mean = float(np.nanmean(before)) if before.size else math.nan
-    before_std = float(np.nanstd(before)) if before.size else 0.0
+    before_median = float(np.nanmedian(before)) if before.size else math.nan
+    before_sigma = _mad_sigma(before)
 
     # Select baseline mode
     if use_per_trial_baseline:
         # Use only this trial's before period
-        baseline = before_mean
+        baseline = before_median
     else:
-        # Use the fly-level mean (current behavior)
-        baseline = fly_before_mean
+        # Use the fly-level median (current behavior)
+        baseline = fly_before_median
         if not np.isfinite(baseline):
-            baseline = before_mean
+            baseline = before_median
 
     if not np.isfinite(baseline):
         baseline = 0.0
-    if not np.isfinite(before_std):
-        before_std = 0.0
+    if not np.isfinite(before_sigma):
+        before_sigma = 0.0
 
-    threshold = baseline + 3.0 * before_std
+    threshold = baseline + 3.0 * before_sigma
 
     fps_eff = _effective_fps(fps, fallback=fallback_fps, default=default_fps)
     dt = 1.0 / fps_eff if fps_eff > 0 else 0.0
@@ -1566,8 +1598,8 @@ def combine_distance_angle(cfg: CombineConfig) -> None:
         out_csv_dir.mkdir(parents=True, exist_ok=True)
         out_fig_dir.mkdir(parents=True, exist_ok=True)
 
-        # ── PASS 1: compute combined_raw for all trials, find per-fly max ──
-        fly_combined_raw_max = 0.0
+        # ── PASS 1: compute combined_raw for all trials, find per-fly-number max ──
+        fly_max_by_number: dict[str, float] = {}
         trial_data_cache: list[dict] = []
         pass1_skipped = 0
 
@@ -1670,11 +1702,13 @@ def combine_distance_angle(cfg: CombineConfig) -> None:
                     multiplier = _angle_multiplier(angle_clipped)
                     combined_raw = dist_pct * multiplier
 
-                    # Track per-fly max of combined_raw
+                    # Track per-fly-number max of combined_raw
                     finite_cr = combined_raw[np.isfinite(combined_raw)]
                     if finite_cr.size > 0:
                         local_max = float(np.max(finite_cr))
-                        fly_combined_raw_max = max(fly_combined_raw_max, local_max)
+                        current = fly_max_by_number.get(fly_number_label, 0.0)
+                        if local_max > current:
+                            fly_max_by_number[fly_number_label] = local_max
 
                     slot_suffix = f"_{slot_label}" if slot_label else ""
                     trial_id = f"{base_key}{slot_suffix}".replace("__", "_")
@@ -1695,14 +1729,17 @@ def combine_distance_angle(cfg: CombineConfig) -> None:
                     print(f"[WARN] {fly_name} {trial_type} {base_key} → {exc}")
                     pass1_skipped += 1
 
-        if fly_combined_raw_max <= 0.0:
-            print(f"[WARN] {fly_name}: fly_combined_raw_max is zero; cannot normalize — skipping.")
+        if not fly_max_by_number:
+            print(f"[WARN] {fly_name}: no per-fly maxima found; cannot normalize — skipping.")
             continue
 
-        print(f"[DEBUG] {fly_name}: fly_combined_raw_max={fly_combined_raw_max:.4f}")
+        max_summary = ", ".join(
+            f"{k}={v:.4f}" for k, v in sorted(fly_max_by_number.items())
+        )
+        print(f"[DEBUG] {fly_name}: fly_max_by_number {{ {max_summary} }}")
 
         # Write per-fly normalization metadata sidecar
-        norm_meta = {"fly_name": fly_name, "fly_combined_raw_max": fly_combined_raw_max}
+        norm_meta = {"fly_name": fly_name, "fly_max_by_number": fly_max_by_number}
         norm_meta_path = out_csv_dir / "fly_norm_metadata.json"
         with norm_meta_path.open("w") as _f:
             json.dump(norm_meta, _f, indent=2)
@@ -1713,8 +1750,16 @@ def combine_distance_angle(cfg: CombineConfig) -> None:
             trial_type = data["trial_type"]
             trial_id = data["trial_id"]
 
-            # Normalize: divide by per-fly max, scale to 0-100
-            combined_norm = (data["combined_raw"] / fly_combined_raw_max) * 100.0
+            # Normalize: divide by per-fly-number max, scale to 0-100
+            fly_number_label = str(data.get("fly_number_label", "UNKNOWN"))
+            denom = fly_max_by_number.get(fly_number_label, 0.0)
+            if not denom or denom <= 0.0 or not np.isfinite(denom):
+                print(
+                    f"[WARN] {fly_name} {trial_id}: invalid per-fly max for "
+                    f"fly_number={fly_number_label}; skipping normalization."
+                )
+                continue
+            combined_norm = (data["combined_raw"] / denom) * 100.0
             combined_rms = _rolling_rms(combined_norm, cfg.window_frames)
             envelope = _hilbert_envelope(combined_rms, cfg.window_frames)
 
@@ -1725,7 +1770,7 @@ def combine_distance_angle(cfg: CombineConfig) -> None:
                     "distance_percentage": data["dist_pct"],
                     "multiplier": data["multiplier"],
                     "combined_raw": data["combined_raw"],
-                    "fly_combined_raw_max": fly_combined_raw_max,
+                    "fly_combined_raw_max": denom,
                     "combined_base": combined_norm,
                     "rolling_rms": combined_rms,
                     "envelope_of_rms": envelope,
@@ -2013,7 +2058,7 @@ def build_wide_csv(
     if not items:
         raise RuntimeError("No eligible testing/training CSVs found in provided roots.")
 
-    fly_before_totals: dict[str, tuple[float, int]] = {}
+    fly_before_samples: dict[str, list[np.ndarray]] = {}
     baseline_types = trial_type_allow or {"testing"}
     for item in items:
         csv_path = Path(item["csv_path"])
@@ -2031,16 +2076,20 @@ def build_wide_csv(
         finite_mask = np.isfinite(series)
         if not np.any(finite_mask):
             continue
-        total, count = fly_before_totals.get(item["fly_key"], (0.0, 0))
-        fly_before_totals[item["fly_key"]] = (
-            total + float(np.nansum(series[finite_mask])),
-            count + int(np.sum(finite_mask)),
-        )
+        finite_values = series[finite_mask]
+        if finite_values.size:
+            fly_before_samples.setdefault(item["fly_key"], []).append(finite_values)
 
-    fly_before_means = {
-        key: (total / count if count > 0 else float("nan"))
-        for key, (total, count) in fly_before_totals.items()
-    }
+    fly_before_medians: dict[str, float] = {}
+    for key, chunks in fly_before_samples.items():
+        if not chunks:
+            fly_before_medians[key] = float("nan")
+            continue
+        merged = np.concatenate(chunks)
+        if merged.size == 0:
+            fly_before_medians[key] = float("nan")
+        else:
+            fly_before_medians[key] = float(np.nanmedian(merged))
 
     meta_prefix = ["dataset", "fly", "fly_number"]
     stat_columns = [
@@ -2182,7 +2231,7 @@ def build_wide_csv(
                 fps,
                 fallback_fps=fps_fallback,
                 default_fps=fps_fallback,
-                fly_before_mean=fly_before_means.get(item["fly_key"], float("nan")),
+                fly_before_median=fly_before_medians.get(item["fly_key"], float("nan")),
                 use_per_trial_baseline=use_per_trial_baseline,
             )
 
@@ -2569,7 +2618,7 @@ def overlay_sources(
     latency_sec: float,
     after_show_sec: float,
     output_dir: str,
-    threshold_mult: float = 4.0,
+    threshold_mult: float = 3.0,
     odor_on_s: float = 30.0,
     odor_off_s: float = 60.0,
     odor_latency_s: float = 0.0,
@@ -2652,7 +2701,7 @@ def overlay_sources(
                     mu_per_source.setdefault(row["_source"], []).extend(baseline)
 
         mu_lookup = {
-            source: float(np.mean(values)) if values else math.nan
+            source: float(np.nanmedian(values)) if values else math.nan
             for source, values in mu_per_source.items()
         }
 
@@ -2672,10 +2721,11 @@ def overlay_sources(
 
             baseline_end = min(int(round(odor_on_cmd * fps)), env.size)
             baseline = env[:baseline_end]
-            sigma = float(np.nanstd(baseline)) if baseline.size else math.nan
+            baseline = baseline[np.isfinite(baseline)]
+            sigma = _mad_sigma(baseline)
             mu = mu_lookup.get(row["_source"], math.nan)
             if not math.isfinite(mu) and baseline.size:
-                mu = float(np.nanmean(baseline))
+                mu = float(np.nanmedian(baseline))
             theta = mu + threshold_mult * sigma if math.isfinite(mu) and math.isfinite(sigma) else math.nan
 
             dataset_canon = row["dataset_canon"]
@@ -2746,7 +2796,14 @@ def overlay_sources(
         legend_handles = [
             plt.Line2D([0], [0], linestyle="--", linewidth=1.0, color="black", label="Odor at fly"),
             plt.Rectangle((0, 0), 1, 1, alpha=0.15, color="gray", label="Odor present"),
-            plt.Line2D([0], [0], linestyle=":", linewidth=1.0, color="black", label=r"$\theta=\mu_{global}+k\sigma_{trial}$"),
+            plt.Line2D(
+                [0],
+                [0],
+                linestyle=":",
+                linewidth=1.0,
+                color="black",
+                label=r"$\theta=\mathrm{median}_{global}+k\cdot\mathrm{MAD}_{trial}$",
+            ),
         ]
         for tag, style in style_map.items():
             legend_handles.insert(0, plt.Line2D([0], [0], linewidth=1.3, color=style["color"], label=tag))
@@ -2763,7 +2820,7 @@ def overlay_sources(
         )
         fly_flagged = bool(df_fly.get("_non_reactive", pd.Series(False)).any())
         fig.suptitle(
-            f"{fly} — Envelope overlay by testing trial (global μ per source, σ per trial)",
+            f"{fly} — Envelope overlay by testing trial (global median per source, MAD per trial)",
             y=0.995,
             fontsize=14,
             weight="bold",
@@ -2885,7 +2942,7 @@ def build_parser() -> argparse.ArgumentParser:
     overlay_parser.add_argument("--out-dir", required=True, help="Output directory for overlay figures.")
     overlay_parser.add_argument("--latency-sec", type=float, default=0.0)
     overlay_parser.add_argument("--after-show-sec", type=float, default=30.0)
-    overlay_parser.add_argument("--threshold-std-mult", type=float, default=4.0)
+    overlay_parser.add_argument("--threshold-std-mult", type=float, default=3.0)
     overlay_parser.add_argument("--odor-on-s", type=float, default=30.0)
     overlay_parser.add_argument("--odor-off-s", type=float, default=60.0)
     overlay_parser.add_argument(

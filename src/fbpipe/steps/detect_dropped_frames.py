@@ -31,12 +31,21 @@ def _consecutive_runs(values: list[int], min_len: int = 10) -> list[tuple[int, i
 
 
 def main(cfg: Settings) -> None:
+    force_recompute = bool(getattr(getattr(cfg, "force", None), "pipeline", False))
     roots = get_main_directories(cfg)
     for root in roots:
         print(f"[DROP] Scanning {root} for dropped frames")
         for fly_dir in [p for p in root.iterdir() if p.is_dir()]:
             print(f"[DROP] Checking fly directory: {fly_dir.name}")
             for csv_path, _, _ in iter_fly_distance_csvs(fly_dir, recursive=True):
+                out_path = Path(csv_path.with_suffix("").as_posix() + "_dropped_frames.txt")
+                if (
+                    not force_recompute
+                    and out_path.exists()
+                    and out_path.stat().st_mtime >= csv_path.stat().st_mtime
+                ):
+                    print(f"[DROP] Skipping up-to-date report: {out_path.name}")
+                    continue
                 print(f"[DROP] Evaluating frames in {csv_path.name}")
                 df = pd.read_csv(csv_path)
                 df.columns = df.columns.str.strip()
@@ -79,7 +88,6 @@ def main(cfg: Settings) -> None:
                 if trial_match:
                     trial_label = trial_match.group(0)
 
-                out_path = csv_path.with_suffix("").as_posix() + "_dropped_frames.txt"
                 with open(out_path, "w", encoding="utf-8") as fp:
                     if not all_dropped:
                         fp.write("No dropped frames found.\n")

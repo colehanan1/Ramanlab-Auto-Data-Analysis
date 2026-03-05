@@ -5,6 +5,7 @@ import pandas as pd
 from ..config import Settings, get_main_directories
 
 def main(cfg: Settings):
+    force_recompute = bool(getattr(getattr(cfg, "force", None), "pipeline", False))
     roots = get_main_directories(cfg)
     for root in roots:
         for fly in [p for p in root.iterdir() if p.is_dir()]:
@@ -28,6 +29,17 @@ def main(cfg: Settings):
                 if out_csv is None:
                     # graceful skip
                     continue
+                if not force_recompute:
+                    try:
+                        df_check = pd.read_csv(f, nrows=1)
+                        if (
+                            "OFM_State" in df_check.columns
+                            and f.stat().st_mtime >= out_csv.stat().st_mtime
+                        ):
+                            print(f"[OFM] Skipping up-to-date file: {f.name}")
+                            continue
+                    except Exception:
+                        pass
                 dfo = pd.read_csv(out_csv)
                 col = "ActiveOFM" if "ActiveOFM" in dfo.columns else None
                 if col is None:
