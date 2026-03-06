@@ -839,7 +839,7 @@ def _run_combined(cfg: Mapping[str, Any] | None, settings: Settings | None) -> N
                 base_wide_cfg.get("output_csv"),
                 "combined_base.wide.output_csv",
             )
-            base_measure_cols = base_wide_cfg.get("measure_cols") or ["combined_base"]
+            base_measure_cols = base_wide_cfg.get("measure_cols") or ["combined_pct", "combined_base"]
             base_fps_fallback = float(
                 base_wide_cfg.get("fps_fallback", wide_fps_fallback)
             )

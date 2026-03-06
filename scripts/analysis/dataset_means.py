@@ -384,7 +384,7 @@ def build_parser(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument(
         "--outdir",
         type=Path,
-        default=Path("/home/ramanlab/Documents/cole/Results/Opto/Dataset_means"),
+        default=Path("/home/ramanlab/Documents/cole/Results/Opto-Fly-Figures/Dataset_means"),
         help="Output directory for plots and sidecars",
     )
     parser.add_argument("--fps", type=float, default=None, help="Override frames per second")

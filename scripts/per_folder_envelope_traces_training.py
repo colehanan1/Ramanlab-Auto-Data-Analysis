@@ -71,36 +71,50 @@ HEXANOL_LABEL = "Hexanol"
 
 # ── display labels ────────────────────────────────────────────────────────
 DISPLAY_LABEL = {
-    "ACV": "Apple Cider Vinegar",
-    "3-octonol": "3-Octonol",
-    "Benz": "Benzaldehyde",
-    "EB": "Ethyl Butyrate",
-    "EB_control": "Ethyl Butyrate",
-    "hex_control": "Hexanol",
-    "Benz_control": "Benzaldehyde",
-    "opto_benz_1": "Benzaldehyde",
-    "opto_EB": "Ethyl Butyrate",
-    "opto_EB_6_training": "Ethyl Butyrate (6-Training)",
-    "opto_ACV": "Apple Cider Vinegar",
-    "opto_hex": "Hexanol",
-    "opto_AIR": "AIR",
-    "opto_3-oct": "3-Octonol",
+    "3OCT-Training": "3-Octonol",
+    "ACV-Training": "Apple Cider Vinegar",
+    "AIR-Training": "AIR",
+    "Benz-Control": "Benzaldehyde",
+    "Benz-Training": "Benzaldehyde",
+    "Benz-Training-24": "Benzaldehyde",
+    "EB-Control": "Ethyl Butyrate",
+    "EB-Training": "Ethyl Butyrate",
+    "EB-Training(No-Operant)": "Ethyl Butyrate (6-Training)",
+    "Hex-Control": "Hexanol",
+    "Hex-Training": "Hexanol",
+    "Hex-Training-24": "Hexanol",
 }
 
-# Map new dataset folder names to legacy canonical keys.
+# Map legacy and lower-case dataset names to canonical data folder names.
 DATASET_ALIAS = {
-    "benz-training": "opto_benz_1",
-    "benz-training-24": "opto_benz_1",
-    "benz-control": "Benz_control",
-    "hex-control": "hex_control",
-    "hex-training": "opto_hex",
-    "hex-training-24": "opto_hex",
-    "eb-control": "EB_control",
-    "eb-training": "opto_EB",
-    "eb-training(no-operant)": "opto_EB_6_training",
-    "acv-training": "opto_ACV",
-    "air-training": "opto_AIR",
-    "3oct-training": "opto_3-oct",
+    # legacy opto_* / *_control names
+    "opto_3-oct": "3OCT-Training",
+    "opto_ACV": "ACV-Training",
+    "opto_AIR": "AIR-Training",
+    "Benz_control": "Benz-Control",
+    "benz_control": "Benz-Control",
+    "opto_benz": "Benz-Training",
+    "opto_benz_1": "Benz-Training",
+    "EB_control": "EB-Control",
+    "eb_control": "EB-Control",
+    "opto_EB": "EB-Training",
+    "opto_EB_6_training": "EB-Training(No-Operant)",
+    "opto_EB(6-training)": "EB-Training(No-Operant)",
+    "hex_control": "Hex-Control",
+    "opto_hex": "Hex-Training",
+    # lower-case folder-style aliases
+    "3oct-training": "3OCT-Training",
+    "acv-training": "ACV-Training",
+    "air-training": "AIR-Training",
+    "benz-control": "Benz-Control",
+    "benz-training": "Benz-Training",
+    "benz-training-24": "Benz-Training-24",
+    "eb-control": "EB-Control",
+    "eb-training": "EB-Training",
+    "eb-training(no-operant)": "EB-Training(No-Operant)",
+    "hex-control": "Hex-Control",
+    "hex-training": "Hex-Training",
+    "hex-training-24": "Hex-Training-24",
 }
 
 # ── training odor schedules per dataset ───────────────────────────────────
@@ -160,20 +174,20 @@ def _trial_num(trial_label: str) -> int:
 
 def _resolve_training_odor(dataset: str, trial_label: str) -> str:
     base = _strip_flagged(dataset).strip()
-    ds = DATASET_ALIAS.get(base.lower(), base)
+    ds = DATASET_ALIAS.get(base, DATASET_ALIAS.get(base.lower(), base))
     number = _trial_num(trial_label)
 
-    if ds == "opto_AIR":
+    if ds == "AIR-Training":
         return TRAINING_ODOR_SCHEDULE_AIR.get(number, ds)
-    if ds == "opto_3-oct":
+    if ds == "3OCT-Training":
         return TRAINING_ODOR_SCHEDULE_3OCT.get(number, ds)
-    if ds in ("opto_EB", "EB_control"):
+    if ds in ("EB-Training", "EB-Control"):
         return TRAINING_ODOR_SCHEDULE_EB.get(number, ds)
-    if ds in ("opto_EB(6-training)", "opto_EB_6_training"):
+    if ds == "EB-Training(No-Operant)":
         return TRAINING_ODOR_SCHEDULE_EB_6TRAINING.get(number, ds)
-    if ds in ("opto_hex", "hex_control"):
+    if ds in ("Hex-Training", "Hex-Training-24", "Hex-Control"):
         return TRAINING_ODOR_SCHEDULE_HEX.get(number, ds)
-    if ds in ("opto_ACV", "ACV"):
+    if ds == "ACV-Training":
         return TRAINING_ODOR_SCHEDULE_ACV.get(number, ds)
     return TRAINING_ODOR_SCHEDULE.get(number,
            DISPLAY_LABEL.get(ds, ds))
@@ -181,7 +195,7 @@ def _resolve_training_odor(dataset: str, trial_label: str) -> str:
 
 def _is_trained_odor(dataset: str, odor_name: str) -> bool:
     base = _strip_flagged(dataset).strip()
-    ds = DATASET_ALIAS.get(base.lower(), base)
+    ds = DATASET_ALIAS.get(base, DATASET_ALIAS.get(base.lower(), base))
     trained = DISPLAY_LABEL.get(ds, ds)
     return str(odor_name).strip().lower() == str(trained).strip().lower()
 

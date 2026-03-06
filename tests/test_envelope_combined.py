@@ -95,44 +95,47 @@ def test_locate_trials_skips_derived_envelope_outputs(tmp_path):
 def test_hex_control_testing_trials_map_to_acv():
     """Hexanol datasets should label testing 1 and 3 as Apple Cider Vinegar."""
 
+    assert ec._display_odor("Hex-Control", "testing_1") == "Apple Cider Vinegar"
+    assert ec._display_odor("Hex-Control", "testing_3") == "Apple Cider Vinegar"
+    assert ec._display_odor("Hex-Training", "testing_1") == "Apple Cider Vinegar"
+    assert ec._display_odor("Hex-Training", "testing_2") == "Hexanol"
+    # Legacy names still resolve through ODOR_CANON aliases
     assert ec._display_odor("hex_control", "testing_1") == "Apple Cider Vinegar"
-    assert ec._display_odor("hex_control", "testing_3") == "Apple Cider Vinegar"
     assert ec._display_odor("opto_hex", "testing_1") == "Apple Cider Vinegar"
-    assert ec._display_odor("opto_hex", "testing_2") == "Hexanol"
 
 
 def test_resolve_dataset_output_dir_separates_eb_variants(tmp_path):
-    """EB control and opto_EB datasets should land in distinct result folders."""
+    """EB-Control and EB-Training datasets should land in distinct result folders."""
 
     base = tmp_path
-    eb_control_dir = ev.resolve_dataset_output_dir(base, ["EB_control"])
-    opto_eb_dir = ev.resolve_dataset_output_dir(base, ["opto_EB"])
+    eb_control_dir = ev.resolve_dataset_output_dir(base, ["EB-Control"])
+    eb_training_dir = ev.resolve_dataset_output_dir(base, ["EB-Training"])
 
-    assert eb_control_dir != opto_eb_dir
-    assert eb_control_dir.name != opto_eb_dir.name
-    assert "EB_control" in eb_control_dir.name
-    assert "opto_EB" in opto_eb_dir.name
+    assert eb_control_dir != eb_training_dir
+    assert eb_control_dir.name != eb_training_dir.name
+    assert "EB-Control" in eb_control_dir.name
+    assert "EB-Training" in eb_training_dir.name
 
 
 def test_testing_aliases_follow_control_ordering():
-    """Opto datasets should share the same testing labels as their controls."""
+    """Training datasets should share the same testing labels as their controls."""
 
     schedules = {
-        "EB_control": {
+        "EB-Control": {
             6: "Apple Cider Vinegar",
             7: "3-Octonol",
             8: "Benzaldehyde",
             9: "Citral",
             10: "Linalool",
         },
-        "hex_control": {
+        "Hex-Control": {
             6: "Benzaldehyde",
             7: "3-Octonol",
             8: "Ethyl Butyrate",
             9: "Citral",
             10: "Linalool",
         },
-        "benz_control": {
+        "Benz-Control": {
             6: "Apple Cider Vinegar",
             7: "3-Octonol",
             8: "Ethyl Butyrate",
@@ -142,9 +145,9 @@ def test_testing_aliases_follow_control_ordering():
     }
 
     aliases = {
-        "EB_control": ["opto_EB"],
-        "hex_control": ["opto_hex"],
-        "benz_control": ["opto_benz", "opto_benz_1"],
+        "EB-Control": ["EB-Training"],
+        "Hex-Control": ["Hex-Training"],
+        "Benz-Control": ["Benz-Training", "Benz-Training-24"],
     }
 
     for control, mapping in schedules.items():
@@ -159,7 +162,7 @@ def test_training_schedule_matches_spec():
     """Training trials map to dataset-specific odors for every canonical dataset."""
 
     expectations = {
-        "EB_control": {
+        "EB-Control": {
             1: "Ethyl Butyrate",
             2: "Ethyl Butyrate",
             3: "Ethyl Butyrate",
@@ -169,7 +172,7 @@ def test_training_schedule_matches_spec():
             7: "Hexanol",
             8: "Ethyl Butyrate",
         },
-        "opto_EB": {
+        "EB-Training": {
             1: "Ethyl Butyrate",
             2: "Ethyl Butyrate",
             3: "Ethyl Butyrate",
@@ -179,7 +182,7 @@ def test_training_schedule_matches_spec():
             7: "Hexanol",
             8: "Ethyl Butyrate",
         },
-        "hex_control": {
+        "Hex-Control": {
             1: "Hexanol",
             2: "Hexanol",
             3: "Hexanol",
@@ -189,7 +192,7 @@ def test_training_schedule_matches_spec():
             7: "Apple Cider Vinegar",
             8: "Hexanol",
         },
-        "opto_hex": {
+        "Hex-Training": {
             1: "Hexanol",
             2: "Hexanol",
             3: "Hexanol",
@@ -199,7 +202,7 @@ def test_training_schedule_matches_spec():
             7: "Apple Cider Vinegar",
             8: "Hexanol",
         },
-        "benz_control": {
+        "Benz-Control": {
             1: "Benzaldehyde",
             2: "Benzaldehyde",
             3: "Benzaldehyde",
@@ -209,7 +212,7 @@ def test_training_schedule_matches_spec():
             7: "Hexanol",
             8: "Benzaldehyde",
         },
-        "opto_benz": {
+        "Benz-Training": {
             1: "Benzaldehyde",
             2: "Benzaldehyde",
             3: "Benzaldehyde",
@@ -219,7 +222,7 @@ def test_training_schedule_matches_spec():
             7: "Hexanol",
             8: "Benzaldehyde",
         },
-        "opto_benz_1": {
+        "Benz-Training-24": {
             1: "Benzaldehyde",
             2: "Benzaldehyde",
             3: "Benzaldehyde",
@@ -270,6 +273,34 @@ def test_build_wide_csv_exports_training_subset(tmp_path):
     assert set(training_df["trial_type"].str.lower()) == {"training"}
     assert len(wide_df) == 1
     assert len(training_df) == 1
+
+
+def test_build_wide_csv_accepts_renamed_combined_pct_column(tmp_path):
+    """Legacy combined_base requests should still resolve renamed combined_pct data."""
+
+    dataset_root = tmp_path / "acv_training"
+    fly_dir = dataset_root / "march_05_batch_1"
+    out_dir = fly_dir / "angle_distance_rms_envelope"
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    values = np.array([0.0, 25.0, 50.0, 100.0], dtype=float)
+    stem = "march_05_batch_1_testing_1_angle_distance_rms_envelope"
+    pd.DataFrame({"combined_pct": values}).to_csv(out_dir / f"{stem}.csv", index=False)
+
+    output_csv = tmp_path / "wide_combined_base.csv"
+    ec.build_wide_csv(
+        [str(dataset_root)],
+        str(output_csv),
+        measure_cols=["combined_base"],
+    )
+
+    wide_df = pd.read_csv(output_csv)
+
+    assert len(wide_df) == 1
+    np.testing.assert_allclose(
+        wide_df.loc[0, ["dir_val_0", "dir_val_1", "dir_val_2", "dir_val_3"]].to_numpy(dtype=float),
+        values,
+    )
 
 
 def test_fly_max_centered_skips_empty_csv(tmp_path):

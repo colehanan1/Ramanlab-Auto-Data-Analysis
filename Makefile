@@ -1,5 +1,8 @@
 .PHONY: help setup run all yolo backup clean
 
+PYTHON ?= python3
+PIP ?= $(PYTHON) -m pip
+
 help:
 	@echo "Targets:"
 	@echo "  setup     - install requirements into the active environment"
@@ -18,19 +21,19 @@ help:
 	@echo "  - SMB, Box, and Secured storage are all enabled by default"
 
 setup:
-	pip install --upgrade pip && pip install -r requirements.txt
+	$(PIP) install --upgrade pip && $(PIP) install -r requirements.txt
 
 run:
-	export MPLBACKEND=Agg && export ORT_LOGGING_LEVEL=3 && export PYTHONNOUSERSITE=1 && python scripts/pipeline/run_workflows.py --config config/config.yaml
+	export MPLBACKEND=Agg && export ORT_LOGGING_LEVEL=3 && export PYTHONNOUSERSITE=1 && $(PYTHON) scripts/pipeline/run_workflows.py --config config/config.yaml
 	$(MAKE) backup
 
 all: run
 
 yolo:
-	python -m fbpipe.steps.yolo_infer --config config/config.yaml
+	$(PYTHON) -m fbpipe.steps.yolo_infer --config config/config.yaml
 
 backup:
-	python scripts/backup_system.py
+	$(PYTHON) scripts/backup_system.py
 
 clean:
 	rm -rf **/__pycache__ **/*.pyc

@@ -70,42 +70,46 @@ ODOR_CANON: Mapping[str, str] = {
     "benz training": "Benz-Training",
     "benz-training-24": "Benz-Training-24",
     "benz training 24": "Benz-Training-24",
-    "benz-control": "Benz_control",
-    "benz_control": "Benz_control",
-    "benz control": "Benz_control",
+    "benz-control": "Benz-Control",
+    "benz_control": "Benz-Control",
+    "benz control": "Benz-Control",
     "ethyl butyrate": "EB",
-    "eb_control": "EB_control",
-    "eb control": "EB_control",
-    "eb-control": "EB_control",
-    "eb-training": "opto_EB",
-    "eb-training(no-operant)": "opto_EB_6_training",
-    "eb-training-no-operant": "opto_EB_6_training",
-    "hex_control": "hex_control",
-    "hexanol control": "hex_control",
-    "hex-control": "hex_control",
+    "eb_control": "EB-Control",
+    "eb control": "EB-Control",
+    "eb-control": "EB-Control",
+    "eb-training": "EB-Training",
+    "eb-training(no-operant)": "EB-Training(No-Operant)",
+    "eb-training-no-operant": "EB-Training(No-Operant)",
+    "hex_control": "Hex-Control",
+    "hexanol control": "Hex-Control",
+    "hex-control": "Hex-Control",
     "hex-training": "Hex-Training",
     "hex-training-24": "Hex-Training-24",
     "hex training 24": "Hex-Training-24",
-    "acv-training": "opto_ACV",
-    "air-training": "opto_AIR",
-    "3oct-training": "opto_3-oct",
-    "3oct training": "opto_3-oct",
-    "optogenetics benzaldehyde": "opto_benz",
-    "optogenetics benzaldehyde 1": "opto_benz_1",
-    "optogenetics ethyl butyrate": "opto_EB",
-    "opto_eb": "opto_EB",
-    "opto_eb(6-training)": "opto_EB_6_training",
-    "optogenetics apple cider vinegar": "opto_ACV",
-    "optogenetics acv": "opto_ACV",
-    "optogenetics hexanol": "opto_hex",
-    "optogenetics hex": "opto_hex",
-    "hexanol": "opto_hex",
-    "opto_hex": "opto_hex",
-    "opto_acv": "opto_ACV",
-    "optogenetics air": "opto_AIR",
-    "opto_air": "opto_AIR",
-    "optogenetics 3-octanol": "opto_3-oct",
-    "opto_3-oct": "opto_3-oct",
+    "acv-training": "ACV-Training",
+    "air-training": "AIR-Training",
+    "3oct-training": "3OCT-Training",
+    "3oct training": "3OCT-Training",
+    "optogenetics benzaldehyde": "Benz-Training",
+    "optogenetics benzaldehyde 1": "Benz-Training",
+    "optogenetics ethyl butyrate": "EB-Training",
+    "opto_eb": "EB-Training",
+    "opto_eb(6-training)": "EB-Training(No-Operant)",
+    "optogenetics apple cider vinegar": "ACV-Training",
+    "optogenetics acv": "ACV-Training",
+    "optogenetics hexanol": "Hex-Training",
+    "optogenetics hex": "Hex-Training",
+    "hexanol": "Hex-Training",
+    "opto_hex": "Hex-Training",
+    "opto_acv": "ACV-Training",
+    "optogenetics air": "AIR-Training",
+    "opto_air": "AIR-Training",
+    "optogenetics 3-octanol": "3OCT-Training",
+    "opto_3-oct": "3OCT-Training",
+    # Legacy aliases – keep old opto_* names pointing to new canonical names
+    "opto_benz": "Benz-Training",
+    "opto_benz_1": "Benz-Training",
+    "opto_eb_6_training": "EB-Training(No-Operant)",
     "10s_odor_benz": "10s_Odor_Benz",
 }
 
@@ -115,45 +119,38 @@ DISPLAY_LABEL = {
     "Benz": "Benzaldehyde",
     "10s_Odor_Benz": "Benzaldehyde",
     "EB": "Ethyl Butyrate",
-    "EB_control": "Ethyl Butyrate",
-    "hex_control": "Hexanol",
-    "Benz_control": "Benzaldehyde",
-    "benz_control": "Benzaldehyde",
-    "opto_benz": "Benzaldehyde",
-    "opto_EB": "Ethyl Butyrate",
-    "opto_EB_6_training": "Ethyl Butyrate (6-Training)",
-    "opto_benz_1": "Benzaldehyde",
+    "EB-Control": "Ethyl Butyrate",
+    "Hex-Control": "Hexanol",
+    "Benz-Control": "Benzaldehyde",
     "Benz-Training": "Benzaldehyde",
     "Benz-Training-24": "Benzaldehyde",
-    "opto_ACV": "Apple Cider Vinegar",
-    "opto_hex": "Hexanol",
+    "EB-Training": "Ethyl Butyrate",
+    "EB-Training(No-Operant)": "Ethyl Butyrate (6-Training)",
+    "ACV-Training": "Apple Cider Vinegar",
     "Hex-Training": "Hexanol",
     "Hex-Training-24": "Hexanol",
-    "opto_AIR": "AIR",
-    "opto_3-oct": "3-Octonol",
+    "AIR-Training": "AIR",
+    "3OCT-Training": "3-Octonol",
 }
 
 ODOR_ORDER = [
     "ACV",
-    "opto_ACV",
+    "ACV-Training",
     "3-octonol",
     "Benz",
     "EB",
     "10s_Odor_Benz",
-    "opto_benz",
-    "opto_EB",
-    "opto_EB_6_training",
-    "EB_control",
-    "opto_benz_1",
     "Benz-Training",
+    "EB-Training",
+    "EB-Training(No-Operant)",
+    "EB-Control",
     "Benz-Training-24",
-    "Benz_control",
-    "opto_hex",
+    "Benz-Control",
     "Hex-Training",
     "Hex-Training-24",
-    "hex_control",
-    "opto_AIR",
-    "opto_3-oct",
+    "Hex-Control",
+    "AIR-Training",
+    "3OCT-Training",
 ]
 
 REACTION_RATE_ODOR_ORDER = [
@@ -173,10 +170,9 @@ TRAINED_FIRST_ORDER = (2, 4, 5, 1, 3, 6, 7, 8, 9)
 HEXANOL_LABEL = "Hexanol"
 
 PRIMARY_ODOR_LABEL = {
-    "EB_control": "Ethyl Butyrate",
-    "hex_control": HEXANOL_LABEL,
-    "Benz_control": "Benzaldehyde",
-    "benz_control": "Benzaldehyde",
+    "EB-Control": "Ethyl Butyrate",
+    "Hex-Control": HEXANOL_LABEL,
+    "Benz-Control": "Benzaldehyde",
 }
 
 TRAINING_ODOR_SCHEDULE_ACV = {
@@ -255,17 +251,14 @@ TRAINING_ODOR_SCHEDULE_3OCT = {
 }
 
 TESTING_DATASET_ALIAS = {
-    "opto_hex": "hex_control",
-    "Hex-Training": "hex_control",
-    "Hex-Training-24": "hex_control",
-    "opto_EB": "EB_control",
-    "opto_EB_6_training": "EB_control",
-    "opto_benz": "Benz_control",
-    "opto_benz_1": "Benz_control",
-    "Benz-Training": "Benz_control",
-    "Benz-Training-24": "Benz_control",
-    "opto_ACV": "ACV",
-    "opto_3-oct": "opto_3-oct",
+    "Hex-Training": "Hex-Control",
+    "Hex-Training-24": "Hex-Control",
+    "EB-Training": "EB-Control",
+    "EB-Training(No-Operant)": "EB-Control",
+    "Benz-Training": "Benz-Control",
+    "Benz-Training-24": "Benz-Control",
+    "ACV-Training": "ACV",
+    "3OCT-Training": "3OCT-Training",
 }
 NON_REACTIVE_SPAN_PX = 7.5
 TRAINING_EXTENDED_ODOR_TRIALS = frozenset({4, 6, 8})
@@ -314,7 +307,7 @@ def _odor_dataset_key(dataset_canon: str) -> str:
     if lower.endswith("-flagged"):
         base = dataset_text[: -len("-flagged")].strip()
         return ODOR_CANON.get(base.lower(), base)
-    return dataset_text
+    return ODOR_CANON.get(lower, dataset_text)
 
 
 def _safe_dirname(value: str) -> str:
@@ -352,10 +345,10 @@ def resolve_dataset_output_dir(base: Path, values: Sequence[str] | str) -> Path:
     Return the output directory for the provided dataset identifiers.
 
     Creates separate folders for each unique dataset to avoid mixing results:
-    - opto_hex → "opto_hex" folder
-    - hex_control → "hex_control" folder
-    - opto_EB → "opto_EB" folder
-    - EB_control → "EB_control" folder
+    - Hex-Training → "Hex-Training" folder
+    - Hex-Control → "Hex-Control" folder
+    - EB-Training → "EB-Training" folder
+    - EB-Control → "EB-Control" folder
     - etc.
     """
     if isinstance(values, str):
@@ -368,7 +361,7 @@ def resolve_dataset_output_dir(base: Path, values: Sequence[str] | str) -> Path:
         return base / "UNKNOWN"
 
     if len(candidates) == 1:
-        # Single dataset: use the canonical name directly (preserves opto_hex, hex_control, etc.)
+        # Single dataset: use the canonical name directly (preserves Hex-Training, Hex-Control, etc.)
         dataset_name = next(iter(candidates))
         return base / _safe_dirname(dataset_name)
 
@@ -457,27 +450,27 @@ def _display_odor(dataset_canon: str, trial_label: str) -> str:
 
     if "training" in label_lower:
         # Select the appropriate training schedule based on dataset
-        if dataset_key == "opto_AIR":
+        if dataset_key == "AIR-Training":
             odor_name = TRAINING_ODOR_SCHEDULE_AIR.get(number)
             if odor_name:
                 return odor_name
-        elif dataset_key == "opto_3-oct":
+        elif dataset_key == "3OCT-Training":
             odor_name = TRAINING_ODOR_SCHEDULE_3OCT.get(number)
             if odor_name:
                 return odor_name
-        elif dataset_key in ("opto_EB", "EB_control"):
+        elif dataset_key in ("EB-Training", "EB-Control"):
             odor_name = TRAINING_ODOR_SCHEDULE_EB.get(number)
             if odor_name:
                 return odor_name
-        elif dataset_key == "opto_EB_6_training":
+        elif dataset_key == "EB-Training(No-Operant)":
             odor_name = TRAINING_ODOR_SCHEDULE_EB_6TRAINING.get(number)
             if odor_name:
                 return odor_name
-        elif dataset_key in ("opto_hex", "Hex-Training", "Hex-Training-24", "hex_control"):
+        elif dataset_key in ("Hex-Training", "Hex-Training-24", "Hex-Control"):
             odor_name = TRAINING_ODOR_SCHEDULE_HEX.get(number)
             if odor_name:
                 return odor_name
-        elif dataset_key in ("opto_ACV", "ACV"):
+        elif dataset_key in ("ACV-Training", "ACV"):
             odor_name = TRAINING_ODOR_SCHEDULE_ACV.get(number)
             if odor_name:
                 return odor_name
@@ -487,8 +480,8 @@ def _display_odor(dataset_canon: str, trial_label: str) -> str:
                 return odor_name
         return DISPLAY_LABEL.get(dataset_key, dataset_key)
 
-    # Handle opto_AIR testing trials
-    if dataset_key == "opto_AIR":
+    # Handle AIR-Training testing trials
+    if dataset_key == "AIR-Training":
         if number in (1, 3):
             return HEXANOL_LABEL
         if number in (2, 4, 5):
@@ -504,8 +497,8 @@ def _display_odor(dataset_canon: str, trial_label: str) -> str:
         if number == 10:
             return "3-Octonol"
 
-    # Handle opto_3-oct testing trials
-    if dataset_key == "opto_3-oct":
+    # Handle 3OCT-Training testing trials
+    if dataset_key == "3OCT-Training":
         if number in (1, 3):
             return HEXANOL_LABEL
         if number in (2, 4, 5):
@@ -523,7 +516,7 @@ def _display_odor(dataset_canon: str, trial_label: str) -> str:
 
     dataset_for_testing = TESTING_DATASET_ALIAS.get(dataset_key, dataset_key)
 
-    if dataset_for_testing == "hex_control":
+    if dataset_for_testing == "Hex-Control":
         if number in (1, 3):
             return "Apple Cider Vinegar"
         if number in (2, 4, 5):
@@ -546,21 +539,7 @@ def _display_odor(dataset_canon: str, trial_label: str) -> str:
         },
         "3-octonol": {6: "Benzaldehyde", 7: "Citral", 8: "Linalool"},
         "Benz": {6: "Citral", 7: "Linalool"},
-        "benz_control": {
-            6: "Apple Cider Vinegar",
-            7: "3-Octonol",
-            8: "Ethyl Butyrate",
-            9: "Citral",
-            10: "Linalool",
-        },
-        "Benz_control": {
-            6: "Apple Cider Vinegar",
-            7: "3-Octonol",
-            8: "Ethyl Butyrate",
-            9: "Citral",
-            10: "Linalool",
-        },
-        "opto_benz_1": {
+        "Benz-Control": {
             6: "Apple Cider Vinegar",
             7: "3-Octonol",
             8: "Ethyl Butyrate",
@@ -574,29 +553,29 @@ def _display_odor(dataset_canon: str, trial_label: str) -> str:
             9: "Citral",
             10: "Linalool",
         },
-        "EB_control": {
+        "EB-Control": {
             6: "Apple Cider Vinegar",
             7: "3-Octonol",
             8: "Benzaldehyde",
             9: "Citral",
             10: "Linalool",
         },
-        "opto_EB_6_training": {
-            # Testing trials (6-10): same as opto_EB
+        "EB-Training(No-Operant)": {
+            # Testing trials (6-10): same as EB-Training
             6: "Apple Cider Vinegar",
             7: "3-Octonol",
             8: "Benzaldehyde",
             9: "Citral",
             10: "Linalool",
         },
-        "hex_control": {
+        "Hex-Control": {
             6: "Benzaldehyde",
             7: "3-Octonol",
             8: "Ethyl Butyrate",
             9: "Citral",
             10: "Linalool",
         },
-        "opto_ACV": {
+        "ACV-Training": {
             6: "3-Octonol",
             7: "Ethyl Butyrate",
             8: "Benzaldehyde",
@@ -1196,11 +1175,11 @@ def _order_suffix(order: str) -> str:
 
 
 def _matrix_title(dataset_canon: str) -> str:
-    """Return plot title text based on dataset origin (opto vs control)."""
+    """Return plot title text based on dataset origin (Training vs Control)."""
 
     dataset_key = _odor_dataset_key(dataset_canon)
     base = DISPLAY_LABEL.get(dataset_key, dataset_key)
-    is_conditioning = dataset_key.lower().startswith("opto_") or dataset_key in TESTING_DATASET_ALIAS
+    is_conditioning = "Training" in dataset_key or dataset_key in TESTING_DATASET_ALIAS
     suffix = "Conditioning Results" if is_conditioning else "Control Results"
     return f"{base} {suffix}"
 

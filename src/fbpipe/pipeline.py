@@ -17,7 +17,6 @@ if USE_GPU:
     print("[PIPELINE] ⚡ Using BATCH processing (12-15x speedup)")
     from .steps import (
         calculate_acceleration_gpu as calculate_acceleration,
-        # compose_videos_rms,  # DISABLED - uncomment to re-enable
         curate_yolo_dataset,
         detect_dropped_frames,
         distance_normalize_ultra as distance_normalize,  # ULTRA: Batch processing
@@ -31,7 +30,6 @@ else:
     print("[PIPELINE] ⚠️  GPU acceleration DISABLED (CUDA not available, using CPU)")
     from .steps import (
         calculate_acceleration,
-        # compose_videos_rms,  # DISABLED - uncomment to re-enable
         curate_yolo_dataset,
         detect_dropped_frames,
         distance_normalize,
@@ -53,10 +51,8 @@ class Step:
 
 
 # The order emphasises dependencies: normalization relies on the distance
-# stats, OFM state annotations require the RMS copies, and the video overlay
-# comes last so that all metadata is already embedded in the CSVs.
-# Modification #4: Added calculate_acceleration step after compose_videos_rms
-# Modification #5: Added curate_yolo_dataset step after yolo for dataset curation
+# stats, OFM state annotations require the RMS copies, and acceleration runs
+# after the CSV annotations it depends on.
 ORDERED_STEPS: tuple[Step, ...] = (
     Step("yolo", yolo_infer.main, "Run Ultralytics YOLO inference and export merged CSVs"),
     Step("curate_yolo_dataset", curate_yolo_dataset.main, "Identify problematic tracking and extract frames for labeling"),
@@ -66,8 +62,6 @@ ORDERED_STEPS: tuple[Step, ...] = (
     Step("rms_copy_filter", rms_copy_filter.main, "Copy curated columns into RMS_calculations"),
     Step("update_ofm_state", update_ofm_state.main, "Annotate RMS tables with OFM state transitions"),
     Step("move_videos", move_videos.main, "Stage annotated videos into the delivery directory"),
-    # DISABLED: compose_videos_rms step (uncomment line below to re-enable)
-    # Step("compose_videos_rms", compose_videos_rms.main, "Render RMS overlays onto exported videos (set DISABLE_COMPOSE_RMS=1 to skip)"),
     Step("calculate_acceleration", calculate_acceleration.main, "Calculate frame-to-frame acceleration metrics"),
 )
 
