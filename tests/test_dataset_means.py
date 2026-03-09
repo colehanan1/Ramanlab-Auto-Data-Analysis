@@ -23,9 +23,13 @@ from fbpipe.utils.nanstats import (  # noqa: E402
     nan_pad_stack,
     nanmean_sem,
 )
+import scripts.analysis.dataset_means as dataset_means_mod  # noqa: E402
 from scripts.analysis.dataset_means import (  # noqa: E402
     _odor_colour,
+    _resolve_flagged_csv_path,
+    _resolve_wide_csv_path,
     compute_dataset_means,
+    load_excluded_flies,
     plot_dataset_means,
     write_sidecar,
 )
@@ -179,6 +183,46 @@ def test_compute_dataset_means_can_leave_raw_values_when_baseline_disabled():
     )
 
     np.testing.assert_allclose(results["3-Octonol"]["mean"], [15.0, 15.0, 18.5, 20.5])
+
+
+def test_resolve_wide_csv_path_uses_fallback_default(monkeypatch, tmp_path):
+    preferred = tmp_path / "preferred.csv"
+    legacy = tmp_path / "legacy.csv"
+    legacy.write_text("dataset,fly,fly_number,trial_label,trial_type,dir_val_0\n")
+
+    monkeypatch.setattr(dataset_means_mod, "DEFAULT_WIDE_CSV", preferred)
+    monkeypatch.setattr(dataset_means_mod, "LEGACY_WIDE_CSV", legacy)
+    monkeypatch.setattr(dataset_means_mod, "DEFAULT_WIDE_CSV_CANDIDATES", (preferred, legacy))
+
+    assert _resolve_wide_csv_path(preferred) == legacy.resolve()
+
+
+def test_resolve_flagged_csv_path_uses_fallback_default(monkeypatch, tmp_path):
+    preferred = tmp_path / "preferred_flagged.csv"
+    legacy = tmp_path / "legacy_flagged.csv"
+    legacy.write_text("dataset,fly,fly_number,FLY-State(1, 0, -1)\n")
+
+    monkeypatch.setattr(dataset_means_mod, "DEFAULT_FLAGGED_CSV", preferred)
+    monkeypatch.setattr(dataset_means_mod, "LEGACY_FLAGGED_CSV", legacy)
+    monkeypatch.setattr(dataset_means_mod, "DEFAULT_FLAGGED_CSV_CANDIDATES", (preferred, legacy))
+
+    assert _resolve_flagged_csv_path(preferred) == legacy.resolve()
+
+
+def test_load_excluded_flies_excludes_nonpositive_states(tmp_path):
+    flagged_csv = tmp_path / "flagged.csv"
+    pd.DataFrame({
+        "dataset": ["ACV", "ACV", "Benz"],
+        "fly": ["fly_a", "fly_b", "fly_c"],
+        "fly_number": [1, 2, 3],
+        "FLY-State(1, 0, -1)": [1, 0, -2],
+    }).to_csv(flagged_csv, index=False)
+
+    excluded = load_excluded_flies(flagged_csv)
+
+    assert ("ACV", "fly_b", 2) in excluded
+    assert ("Benz", "fly_c", 3) in excluded
+    assert ("ACV", "fly_a", 1) not in excluded
 
 
 def test_plot_dataset_means_returns_baseline_labeled_figure():

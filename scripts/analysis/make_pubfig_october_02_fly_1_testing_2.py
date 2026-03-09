@@ -41,12 +41,12 @@ FRAME_NUMS = [800, 1500, 1800, 2200]
 
 DIST_CSV_TOP = (
     ROOT
-    / "Data/flys/opto_hex/october_08_batch_2/RMS_calculations/"
+    / "Data/flys/Hex-Training/october_08_batch_2/RMS_calculations/"
     "updated_october_08_batch_2_testing_2_fly1_distances.csv"
 )
 DIST_CSV_BOTTOM = (
     ROOT
-    / "Data/flys/opto_hex/october_08_batch_2/RMS_calculations/"
+    / "Data/flys/Hex-Training/october_08_batch_2/RMS_calculations/"
     "updated_october_08_batch_2_testing_1_fly1_distances.csv"
 )
 

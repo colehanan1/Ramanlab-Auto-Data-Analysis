@@ -89,10 +89,24 @@ FALLBACK_ODOR_COLOURS = (
 
 # Default paths for the wide CSV and flagged-flies CSV
 DEFAULT_WIDE_CSV = Path(
+    "/home/ramanlab/Documents/cole/Data/CSVs-ALL-Opto-Flys/all_envelope_rows_wide_combined_base.csv"
+)
+LEGACY_WIDE_CSV = Path(
     "/home/ramanlab/Documents/cole/Data/Opto/Combined/all_envelope_rows_wide.csv"
 )
+DEFAULT_WIDE_CSV_CANDIDATES = (
+    DEFAULT_WIDE_CSV,
+    LEGACY_WIDE_CSV,
+)
 DEFAULT_FLAGGED_CSV = Path(
+    "/home/ramanlab/Documents/cole/Data/CSVs-ALL-Opto-Flys/flagged-flys-truth.csv"
+)
+LEGACY_FLAGGED_CSV = Path(
     "/home/ramanlab/Documents/cole/Data/Opto/Combined/flagged-flys-truth.csv"
+)
+DEFAULT_FLAGGED_CSV_CANDIDATES = (
+    DEFAULT_FLAGGED_CSV,
+    LEGACY_FLAGGED_CSV,
 )
 
 
@@ -113,6 +127,52 @@ def _save_figure(fig: plt.Figure, base_path: Path) -> None:
     fig.savefig(png, dpi=DPI, bbox_inches="tight")
     plt.close(fig)
     LOGGER.info("Saved %s", png)
+
+
+def _resolve_wide_csv_path(path: Path) -> Path:
+    """Resolve the wide CSV path, falling back across known default locations."""
+
+    resolved = path.expanduser().resolve()
+    if resolved.exists():
+        return resolved
+
+    preferred_default = DEFAULT_WIDE_CSV.expanduser().resolve()
+    if resolved != preferred_default:
+        return resolved
+
+    for candidate in DEFAULT_WIDE_CSV_CANDIDATES[1:]:
+        fallback = candidate.expanduser().resolve()
+        if fallback.exists():
+            LOGGER.info(
+                "Wide CSV not found at preferred default %s; using fallback %s",
+                preferred_default,
+                fallback,
+            )
+            return fallback
+    return resolved
+
+
+def _resolve_flagged_csv_path(path: Path) -> Path:
+    """Resolve the flagged-fly CSV path, falling back across known defaults."""
+
+    resolved = path.expanduser().resolve()
+    if resolved.exists():
+        return resolved
+
+    preferred_default = DEFAULT_FLAGGED_CSV.expanduser().resolve()
+    if resolved != preferred_default:
+        return resolved
+
+    for candidate in DEFAULT_FLAGGED_CSV_CANDIDATES[1:]:
+        fallback = candidate.expanduser().resolve()
+        if fallback.exists():
+            LOGGER.info(
+                "Flagged-fly CSV not found at preferred default %s; using fallback %s",
+                preferred_default,
+                fallback,
+            )
+            return fallback
+    return resolved
 
 
 def _resolve_named_odor(dataset_canon: str, trial_label: str) -> str | None:
@@ -155,10 +215,10 @@ def _odor_colour(odor: str) -> str:
 # ---------------------------------------------------------------------------
 
 def load_excluded_flies(flagged_csv: Path) -> set[tuple[str, str, int]]:
-    """Load flagged-flys-truth.csv and return set of (dataset, fly, fly_number)
-    tuples that should be EXCLUDED (state 0 or -1).
+    """Load flagged-flys-truth.csv and return excluded fly identities.
 
-    Flies not in the CSV are included. Flies with state=1 are included.
+    Any row with ``FLY-State <= 0`` is excluded. Flies not present in the CSV
+    remain included.
     """
     if not flagged_csv.exists():
         LOGGER.warning("Flagged-flies CSV not found: %s — no filtering applied", flagged_csv)
@@ -175,14 +235,14 @@ def load_excluded_flies(flagged_csv: Path) -> set[tuple[str, str, int]]:
         LOGGER.warning("No FLY-State column found in %s — no filtering applied", flagged_csv)
         return set()
 
-    # Exclude flies with state 0 or -1
-    excluded = df[df[state_col].isin([0, -1])]
+    state_values = pd.to_numeric(df[state_col], errors="coerce")
+    excluded = df[state_values <= 0]
     result = set()
     for _, row in excluded.iterrows():
         result.add((str(row["dataset"]).strip(), str(row["fly"]).strip(), int(row["fly_number"])))
 
     LOGGER.info(
-        "Flagged-fly filter: %d entries in CSV, %d excluded (state 0 or -1), %d kept (state 1)",
+        "Flagged-fly filter: %d entries in CSV, %d excluded (FLY-State <= 0), %d kept",
         len(df),
         len(result),
         len(df) - len(result),
@@ -517,9 +577,14 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     _configure_logging(args.verbose)
 
     # Load the wide CSV
-    wide_csv = args.wide_csv.expanduser().resolve()
+    wide_csv = _resolve_wide_csv_path(args.wide_csv)
     if not wide_csv.exists():
-        LOGGER.error("Wide CSV not found: %s", wide_csv)
+        preferred_default = DEFAULT_WIDE_CSV.expanduser().resolve()
+        if args.wide_csv.expanduser().resolve() == preferred_default:
+            checked = ", ".join(str(path) for path in DEFAULT_WIDE_CSV_CANDIDATES)
+            LOGGER.error("Wide CSV not found. Checked: %s", checked)
+        else:
+            LOGGER.error("Wide CSV not found: %s", wide_csv)
         sys.exit(1)
 
     LOGGER.info("Reading %s ...", wide_csv)
@@ -532,7 +597,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         LOGGER.info("After trial_type='%s' filter: %d rows", args.trial_type, len(wide_df))
 
     # Load excluded flies
-    excluded = load_excluded_flies(args.flagged_csv.expanduser().resolve())
+    excluded = load_excluded_flies(_resolve_flagged_csv_path(args.flagged_csv))
 
     fps, odor_on_s, odor_off_s = _read_timing(args)
     LOGGER.info("FPS=%.1f  odor_on=%.1fs  odor_off=%.1fs", fps, odor_on_s, odor_off_s)
