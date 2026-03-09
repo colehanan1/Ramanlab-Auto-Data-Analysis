@@ -642,12 +642,30 @@ def _is_trained_odor(dataset_canon: str, odor_name: str) -> bool:
     return str(odor_name).strip().lower() == str(trained).strip().lower()
 
 
-def _extract_env_row(env_row: np.ndarray) -> np.ndarray:
+def _resolve_trace_len(trace_len: object, max_len: int) -> int | None:
+    try:
+        value = float(trace_len)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(value) or value <= 0:
+        return None
+    return max(0, min(int(round(value)), max_len))
+
+
+def _extract_env_row(env_row: np.ndarray, trace_len: object = None) -> np.ndarray:
     env = env_row.astype(float, copy=False)
-    mask = np.isfinite(env) & (env > 0)
-    if not np.any(mask):
+    resolved_len = _resolve_trace_len(trace_len, env.size)
+    if resolved_len is not None:
+        env = env[:resolved_len]
+    elif np.isnan(env).any():
+        finite_idx = np.flatnonzero(np.isfinite(env))
+        if finite_idx.size == 0:
+            return np.empty(0, dtype=float)
+        env = env[: finite_idx[-1] + 1]
+
+    if env.size == 0 or not np.isfinite(env).any():
         return np.empty(0, dtype=float)
-    return env[mask]
+    return env
 
 
 def is_non_reactive_span(global_min: object, global_max: object, *, threshold: float = NON_REACTIVE_SPAN_PX) -> bool:
@@ -928,9 +946,9 @@ def _load_matrix(matrix_path: Path, codes_json: Path) -> tuple[pd.DataFrame, lis
             }
             and col not in metric_cols_meta
         ]
-        prefixed = [col for col in env_cols if col.startswith("dir_val_")]
-        if prefixed:
-            env_cols = prefixed
+    prefixed = [col for col in env_cols if col.startswith("dir_val_")]
+    if prefixed:
+        env_cols = prefixed
     return df, env_cols
 
 
@@ -1234,6 +1252,10 @@ def generate_reaction_matrices(cfg: MatrixPlotConfig) -> None:
     trial_vals = df["trial_label"].to_numpy(str)
     fps_vals = df["fps"].to_numpy(float)
     non_reactive_vals = df["_non_reactive"].to_numpy(bool)
+    if "trace_len" in df.columns:
+        trace_len_vals = pd.to_numeric(df["trace_len"], errors="coerce").to_numpy(float)
+    else:
+        trace_len_vals = np.full(len(df), np.nan, dtype=float)
 
     scores = []
     for (
@@ -1244,6 +1266,7 @@ def generate_reaction_matrices(cfg: MatrixPlotConfig) -> None:
         trial_val,
         fps_val,
         non_reactive_val,
+        trace_len_val,
     ) in zip(
         env_data,
         dataset_vals,
@@ -1252,9 +1275,10 @@ def generate_reaction_matrices(cfg: MatrixPlotConfig) -> None:
         trial_vals,
         fps_vals,
         non_reactive_vals,
+        trace_len_vals,
         strict=False,
     ):
-        env = _extract_env_row(env_row)
+        env = _extract_env_row(env_row, trace_len=trace_len_val)
         during_hit, after_hit = _score_trial(env, float(fps_val), cfg)
         scores.append(
             {
@@ -1613,6 +1637,14 @@ def generate_envelope_plots(cfg: EnvelopePlotConfig) -> None:
     fps_lookup = {idx: fps for idx, fps in zip(df.index, fps_values, strict=False)}
     dataset_lookup = {idx: ds for idx, ds in zip(df.index, dataset_values, strict=False)}
     trial_lookup = {idx: tr for idx, tr in zip(df.index, trial_values, strict=False)}
+    if "trace_len" in df.columns:
+        trace_len_values = pd.to_numeric(df["trace_len"], errors="coerce").to_numpy(float)
+        trace_len_lookup = {
+            idx: trace_len
+            for idx, trace_len in zip(df.index, trace_len_values, strict=False)
+        }
+    else:
+        trace_len_lookup = {}
 
     odor_latency = max(cfg.odor_latency_s, 0.0)
     odor_on_cmd = cfg.odor_on_s
@@ -1654,7 +1686,10 @@ def generate_envelope_plots(cfg: EnvelopePlotConfig) -> None:
             continue
 
         for idx in indices:
-            env = _extract_env_row(env_lookup[idx])
+            env = _extract_env_row(
+                env_lookup[idx],
+                trace_len=trace_len_lookup.get(idx),
+            )
             if env.size == 0:
                 continue
 

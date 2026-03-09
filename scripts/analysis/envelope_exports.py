@@ -561,11 +561,40 @@ def convert_wide_csv(cfg: ConvertConfig) -> None:
     print(f"[DEBUG] Metadata columns detected: {meta_cols}")
 
     metric_cols = [col for col in AUC_COLUMNS if col in df.columns]
+    extra_metrics = [
+        col
+        for col in (
+            "global_min",
+            "global_max",
+            "trimmed_global_min",
+            "trimmed_global_max",
+            "local_min",
+            "local_max",
+            "local_min_before",
+            "local_max_before",
+            "before_std_from_median",
+            "local_min_during",
+            "local_max_during",
+            "local_max_over_global_min",
+            "local_max_during_over_global_min",
+            "non_reactive_flag",
+            "low_max_flag",
+            "tracking_missing_frames",
+            "tracking_pct_missing",
+            "tracking_flagged",
+            "trace_len",
+        )
+        if col in df.columns
+    ]
+    metric_cols.extend(extra_metrics)
     env_cols = [
         col
         for col in df.columns
         if col not in meta_cols and col not in metric_cols
     ]
+    prefixed_env_cols = [col for col in env_cols if col.startswith("dir_val_")]
+    if prefixed_env_cols:
+        env_cols = prefixed_env_cols
     if not env_cols:
         raise RuntimeError("No envelope columns found.")
     print(
@@ -589,14 +618,20 @@ def convert_wide_csv(cfg: ConvertConfig) -> None:
         df_num[col] = df_num[col].astype(str).map(mapping).fillna(0).astype(np.int32)
         print(f"[DEBUG] Column {col} mapped to numeric codes")
 
-    numeric_cols = metric_cols + env_cols
-    df_num[numeric_cols] = (
-        df_num[numeric_cols]
-        .apply(pd.to_numeric, errors="coerce")
-        .fillna(0.0)
-        .astype(np.float32, copy=False)
-    )
-    print("[DEBUG] Envelope + metric values coerced to numeric with NaNs filled as 0.0")
+    if metric_cols:
+        df_num[metric_cols] = (
+            df_num[metric_cols]
+            .apply(pd.to_numeric, errors="coerce")
+            .fillna(0.0)
+            .astype(np.float32, copy=False)
+        )
+    if env_cols:
+        df_num[env_cols] = (
+            df_num[env_cols]
+            .apply(pd.to_numeric, errors="coerce")
+            .astype(np.float32, copy=False)
+        )
+    print("[DEBUG] Metric values were zero-filled; envelope NaNs were preserved")
 
     ordered_cols = meta_cols + metric_cols + env_cols
     matrix_f32 = df_num[ordered_cols].to_numpy(dtype=np.float32, copy=False)
@@ -623,7 +658,7 @@ def convert_wide_csv(cfg: ConvertConfig) -> None:
                 fh.write(f"{code:>5} : {name}\n")
         fh.write("\nNotes:\n")
         fh.write("- Matrix dtype is float16 (16-bit). Metadata codes are stored as float16 numbers in the matrix.\n")
-        fh.write("- Envelope NaNs (shorter videos) were replaced with 0.0.\n")
+        fh.write("- Envelope NaNs are preserved in the matrix to keep visible gaps in plots.\n")
         fh.write("- Code '0' means UNKNOWN for the metadata fields.\n")
 
     json_path = cfg.codes_json or (cfg.out_dir / "code_maps.json")

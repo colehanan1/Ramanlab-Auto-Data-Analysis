@@ -1466,9 +1466,28 @@ def _estimate_fps(seconds: pd.Series) -> float | None:
     return mask.sum() / duration
 
 
+def _resolve_trace_len(trace_len: object, max_len: int) -> int | None:
+    try:
+        value = float(trace_len)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(value) or value <= 0:
+        return None
+    return max(0, min(int(round(value)), max_len))
+
+
 def _extract_env(row: pd.Series, env_cols: Sequence[str]) -> np.ndarray:
     env = row[list(env_cols)].to_numpy(dtype=float)
-    env = env[np.isfinite(env) & (env > 0)]
+    resolved_len = _resolve_trace_len(row.get("trace_len"), env.size)
+    if resolved_len is not None:
+        env = env[:resolved_len]
+    elif np.isnan(env).any():
+        finite_idx = np.flatnonzero(np.isfinite(env))
+        if finite_idx.size == 0:
+            return np.empty(0, dtype=float)
+        env = env[: finite_idx[-1] + 1]
+    if env.size == 0 or not np.isfinite(env).any():
+        return np.empty(0, dtype=float)
     return env
 
 
@@ -2235,6 +2254,7 @@ def build_wide_csv(
         "tracking_missing_frames",
         "tracking_pct_missing",
         "tracking_flagged",
+        "trace_len",
     ]
     meta_suffix = ["trial_type", "trial_label", "fps"]
     metadata = meta_prefix + stat_columns + meta_suffix
@@ -2454,6 +2474,7 @@ def build_wide_csv(
                     "tracking_missing_frames": tracking_quality.get("missing_frames", 0),
                     "tracking_pct_missing": tracking_quality.get("pct_missing", 0.0),
                     "tracking_flagged": tracking_quality.get("flagged", False),
+                    "trace_len": int(len(values)),
                 }
             )
             # Collect samples from BOTH testing and training trials
@@ -2586,6 +2607,7 @@ def build_wide_csv(
                 result.get("tracking_missing_frames", 0),
                 result.get("tracking_pct_missing", 0.0),
                 result.get("tracking_flagged", False),
+                result.get("trace_len", len(values)),
                 result["trial_type"],
                 result["label"],
                 float(result["fps"]),
@@ -2668,8 +2690,12 @@ def wide_to_matrix(input_csv: str, output_dir: str) -> None:
         for col in (
             "global_min",
             "global_max",
+            "trimmed_global_min",
+            "trimmed_global_max",
             "local_min",
             "local_max",
+            "local_min_before",
+            "local_max_before",
             "local_min_during",
             "local_max_during",
             "before_std_from_median",
@@ -2677,6 +2703,10 @@ def wide_to_matrix(input_csv: str, output_dir: str) -> None:
             "local_max_during_over_global_min",
             "non_reactive_flag",
             "low_max_flag",
+            "tracking_missing_frames",
+            "tracking_pct_missing",
+            "tracking_flagged",
+            "trace_len",
         )
         if col in df.columns
     ]
@@ -2686,6 +2716,9 @@ def wide_to_matrix(input_csv: str, output_dir: str) -> None:
         for column in df.columns
         if column not in meta_cols and column not in metric_cols
     ]
+    prefixed_env_cols = [column for column in env_cols if column.startswith("dir_val_")]
+    if prefixed_env_cols:
+        env_cols = prefixed_env_cols
     if not env_cols:
         raise RuntimeError("No envelope columns found.")
 
@@ -2702,13 +2735,21 @@ def wide_to_matrix(input_csv: str, output_dir: str) -> None:
         code_maps[column] = mapping
         df_num[column] = df_num[column].astype(str).map(mapping).fillna(0).astype(np.int32)
 
-    env_numeric = (
-        df_num[metric_cols + env_cols]
-        .apply(pd.to_numeric, errors="coerce")
-        .fillna(0.0)
-        .astype(np.float32, copy=False)
-    )
-    df_num[metric_cols + env_cols] = env_numeric
+    if metric_cols:
+        metric_numeric = (
+            df_num[metric_cols]
+            .apply(pd.to_numeric, errors="coerce")
+            .fillna(0.0)
+            .astype(np.float32, copy=False)
+        )
+        df_num[metric_cols] = metric_numeric
+    if env_cols:
+        env_numeric = (
+            df_num[env_cols]
+            .apply(pd.to_numeric, errors="coerce")
+            .astype(np.float32, copy=False)
+        )
+        df_num[env_cols] = env_numeric
 
     ordered_cols = meta_cols + metric_cols + env_cols
     matrix_float32 = df_num[ordered_cols].to_numpy(dtype=np.float32, copy=False)
@@ -2749,7 +2790,7 @@ def wide_to_matrix(input_csv: str, output_dir: str) -> None:
                 fh.write(f"{code:>5} : {value}\n")
         fh.write("\nNotes:\n")
         fh.write("- Matrix dtype is float16 (16-bit). Metadata codes are stored as float16 numbers in the matrix.\n")
-        fh.write("- Envelope NaNs (shorter videos) were replaced with 0.0.\n")
+        fh.write("- Envelope NaNs are preserved in the matrix to keep visible gaps in plots.\n")
         fh.write("- Code '0' means UNKNOWN for the metadata fields.\n")
 
     print(f"[OK] Saved 16-bit matrix: {matrix_path} (shape={matrix.shape}, dtype={matrix.dtype})")

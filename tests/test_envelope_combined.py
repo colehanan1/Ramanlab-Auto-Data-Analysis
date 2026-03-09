@@ -1,5 +1,6 @@
 """Unit tests for angle-distance combination helpers."""
 
+import json
 import sys
 from pathlib import Path
 
@@ -301,6 +302,71 @@ def test_build_wide_csv_accepts_renamed_combined_pct_column(tmp_path):
         wide_df.loc[0, ["dir_val_0", "dir_val_1", "dir_val_2", "dir_val_3"]].to_numpy(dtype=float),
         values,
     )
+
+
+def test_extract_env_row_preserves_internal_nan_gaps():
+    """Trace extraction should preserve timebase gaps instead of compacting them away."""
+
+    env = ev._extract_env_row(
+        np.array([10.0, np.nan, 20.0, 0.0, np.nan], dtype=float),
+        trace_len=4,
+    )
+
+    assert env.shape == (4,)
+    assert np.isnan(env[1])
+    assert env[3] == 0.0
+
+
+def test_wide_to_matrix_preserves_nan_gaps_and_metrics(tmp_path):
+    """Matrix export should keep NaN gaps in dir_val columns and exclude tracking stats from env."""
+
+    wide_csv = tmp_path / "wide_combined_base.csv"
+    pd.DataFrame(
+        {
+            "dataset": ["ACV-Training"],
+            "fly": ["march_05_batch_1"],
+            "fly_number": ["1"],
+            "trial_type": ["testing"],
+            "trial_label": ["testing_1"],
+            "fps": [40.0],
+            "global_min": [1.0],
+            "global_max": [5.0],
+            "trimmed_global_min": [1.0],
+            "trimmed_global_max": [5.0],
+            "tracking_missing_frames": [12],
+            "tracking_pct_missing": [25.0],
+            "tracking_flagged": [1.0],
+            "trace_len": [4],
+            "dir_val_0": [10.0],
+            "dir_val_1": [np.nan],
+            "dir_val_2": [20.0],
+            "dir_val_3": [0.0],
+        }
+    ).to_csv(wide_csv, index=False)
+
+    out_dir = tmp_path / "matrix"
+    ec.wide_to_matrix(str(wide_csv), str(out_dir))
+
+    meta = json.loads((out_dir / "code_maps.json").read_text())
+    assert meta["env_columns"] == ["dir_val_0", "dir_val_1", "dir_val_2", "dir_val_3"]
+    assert "tracking_missing_frames" in meta["metric_columns"]
+
+    loaded_df, env_cols = ev._load_matrix(
+        out_dir / "envelope_matrix_float16.npy",
+        out_dir / "code_maps.json",
+    )
+
+    assert env_cols == ["dir_val_0", "dir_val_1", "dir_val_2", "dir_val_3"]
+    assert np.isnan(loaded_df.loc[0, "dir_val_1"])
+    assert loaded_df.loc[0, "tracking_missing_frames"] == 12.0
+
+    env = ev._extract_env_row(
+        loaded_df.loc[0, env_cols].to_numpy(dtype=float),
+        trace_len=loaded_df.loc[0, "trace_len"],
+    )
+    assert env.shape == (4,)
+    assert np.isnan(env[1])
+    assert env[3] == 0.0
 
 
 def test_fly_max_centered_skips_empty_csv(tmp_path):

@@ -248,12 +248,29 @@ def get_dir_val_cols(df: pd.DataFrame) -> list[str]:
     return cols
 
 
-def _extract_env(row_vals: np.ndarray) -> np.ndarray:
+def _resolve_trace_len(trace_len: object, max_len: int) -> int | None:
+    try:
+        value = float(trace_len)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(value) or value <= 0:
+        return None
+    return max(0, min(int(round(value)), max_len))
+
+
+def _extract_env(row_vals: np.ndarray, trace_len: object = None) -> np.ndarray:
     env = row_vals.astype(float, copy=False)
-    mask = np.isfinite(env) & (env > 0)
-    if not mask.any():
+    resolved_len = _resolve_trace_len(trace_len, env.size)
+    if resolved_len is not None:
+        env = env[:resolved_len]
+    elif np.isnan(env).any():
+        finite_idx = np.flatnonzero(np.isfinite(env))
+        if finite_idx.size == 0:
+            return np.empty(0, dtype=float)
+        env = env[: finite_idx[-1] + 1]
+    if env.size == 0 or not np.isfinite(env).any():
         return np.empty(0, dtype=float)
-    return env[mask]
+    return env
 
 
 def _compute_theta(env: np.ndarray, fps: float) -> float:
@@ -334,7 +351,8 @@ def plot_folder(
                 continue
 
             raw = fly_data[dir_val_cols].values.flatten()
-            env = _extract_env(raw)
+            trace_len = fly_data["trace_len"].iloc[0] if "trace_len" in fly_data.columns else None
+            env = _extract_env(raw, trace_len=trace_len)
             if env.size == 0:
                 continue
 
@@ -364,7 +382,15 @@ def plot_folder(
         # Threshold line (compute from first fly's before-period as reference)
         first_fly = trial_data[trial_data["fly_number"] == fly_numbers[0]]
         if not first_fly.empty:
-            ref_env = _extract_env(first_fly[dir_val_cols].values.flatten())
+            ref_trace_len = (
+                first_fly["trace_len"].iloc[0]
+                if "trace_len" in first_fly.columns
+                else None
+            )
+            ref_env = _extract_env(
+                first_fly[dir_val_cols].values.flatten(),
+                trace_len=ref_trace_len,
+            )
             if ref_env.size > 0:
                 theta = _compute_theta(ref_env, fps)
                 if math.isfinite(theta):

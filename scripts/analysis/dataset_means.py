@@ -50,7 +50,7 @@ _src_str = str(ROOT / "src")
 if _src_str not in sys.path:
     sys.path.insert(0, _src_str)
 
-from fbpipe.config import load_settings, resolve_config_path  # noqa: E402
+from fbpipe.config import resolve_config_path  # noqa: E402
 from fbpipe.utils.nanstats import (  # noqa: E402
     count_finite_contributors,
     nan_pad_stack,
@@ -69,6 +69,23 @@ LOGGER = logging.getLogger("dataset_means")
 DPI = 300
 FIGWIDTH = 8
 MAX_TIME_S = 90.0  # Only plot t=0 to t=90s
+ODOR_COLOURS = {
+    "Hexanol": "#2ca02c",
+    "Benzaldehyde": "#1f77b4",
+    "Apple Cider Vinegar": "#ff7f0e",
+    "3-Octonol": "#d62728",
+    "Ethyl Butyrate": "#9467bd",
+    "Ethyl Butyrate (6-Training)": "#9467bd",
+    "Citral": "#8c564b",
+    "Linalool": "#e377c2",
+    "AIR": "#7f7f7f",
+}
+FALLBACK_ODOR_COLOURS = (
+    "#17becf",
+    "#bcbd22",
+    "#8c564b",
+    "#7f7f7f",
+)
 
 # Default paths for the wide CSV and flagged-flies CSV
 DEFAULT_WIDE_CSV = Path(
@@ -96,6 +113,41 @@ def _save_figure(fig: plt.Figure, base_path: Path) -> None:
     fig.savefig(png, dpi=DPI, bbox_inches="tight")
     plt.close(fig)
     LOGGER.info("Saved %s", png)
+
+
+def _resolve_named_odor(dataset_canon: str, trial_label: str) -> str | None:
+    """Return the display odor for a trial or ``None`` if the trial is unmapped."""
+
+    label = str(trial_label).strip()
+    odor = _display_odor(dataset_canon, label)
+
+    # Unmapped testing trials fall back to the raw trial label (for example,
+    # ``testing_11``). Skip those so only named odors appear in the plots.
+    if "testing" in label.lower() and odor == label:
+        return None
+    return odor
+
+
+def _baseline_correct_trace(trace: np.ndarray, baseline_frames: int | None) -> np.ndarray:
+    """Subtract the pre-odor mean from a 1-D trace."""
+
+    if baseline_frames is None or baseline_frames <= 0:
+        return trace
+
+    baseline = trace[: min(len(trace), baseline_frames)]
+    finite = baseline[np.isfinite(baseline)]
+    if finite.size == 0:
+        return trace
+    return trace - float(finite.mean())
+
+
+def _odor_colour(odor: str) -> str:
+    """Return a stable display colour for an odor label."""
+
+    if odor in ODOR_COLOURS:
+        return ODOR_COLOURS[odor]
+    index = sum(ord(char) for char in odor.casefold()) % len(FALLBACK_ODOR_COLOURS)
+    return FALLBACK_ODOR_COLOURS[index]
 
 
 # ---------------------------------------------------------------------------
@@ -149,6 +201,8 @@ def compute_dataset_means(
     *,
     excluded_flies: set[tuple[str, str, int]] | None = None,
     fps: float = 40.0,
+    odor_on_s: float | None = None,
+    subtract_baseline: bool = True,
 ) -> dict[str, dict]:
     """Aggregate per-odor mean traces for a single dataset from the wide CSV.
 
@@ -162,7 +216,13 @@ def compute_dataset_means(
     excluded_flies : set, optional
         Set of (dataset, fly, fly_number) tuples to exclude.
     fps : float
-        Frames per second (used only for logging).
+        Frames per second used to derive the pre-odor baseline window.
+    odor_on_s : float, optional
+        Odor onset in seconds. When provided and ``subtract_baseline`` is True,
+        the trace mean from t=0 up to odor onset is subtracted from each
+        per-fly odor trace before across-fly averaging.
+    subtract_baseline : bool
+        Whether to baseline-correct each per-fly odor trace.
 
     Returns a dict keyed by odor label with values::
 
@@ -178,6 +238,14 @@ def compute_dataset_means(
 
     dataset_canon = _canon_dataset(dataset_name)
     LOGGER.info("Dataset: %s (canon=%s)", dataset_name, dataset_canon)
+    baseline_frames: int | None = None
+    if subtract_baseline and odor_on_s is not None and fps > 0:
+        baseline_frames = max(1, int(round(float(odor_on_s) * float(fps))))
+        LOGGER.info(
+            "  Baseline subtraction enabled: using frames [0:%d) (t < %.2fs)",
+            baseline_frames,
+            odor_on_s,
+        )
 
     # Identify dir_val columns (the trace)
     dir_cols = sorted(
@@ -228,7 +296,10 @@ def compute_dataset_means(
         odor_trials: dict[str, list[np.ndarray]] = defaultdict(list)
         for _, row in fly_rows.iterrows():
             trial_label = str(row["trial_label"])
-            odor = _display_odor(dataset_canon, trial_label)
+            odor = _resolve_named_odor(dataset_canon, trial_label)
+            if odor is None:
+                LOGGER.debug("  Skipping unmapped testing trial %s for %s", trial_label, fly_id)
+                continue
             trace = row[dir_cols].to_numpy(dtype=np.float64)
             # Trim trailing NaNs
             finite_mask = np.isfinite(trace)
@@ -236,6 +307,7 @@ def compute_dataset_means(
                 continue
             last_finite = np.where(finite_mask)[0][-1]
             trace = trace[: last_finite + 1]
+            trace = _baseline_correct_trace(trace, baseline_frames)
             odor_trials[odor].append(trace)
 
         # Per-fly mean across trials for each odor
@@ -281,6 +353,7 @@ def plot_dataset_means(
     fps: float,
     odor_on_s: float,
     odor_off_s: float,
+    baseline_subtracted: bool = False,
 ) -> Optional[plt.Figure]:
     """Create a single plot with all odors overlaid in different colours."""
     if not results:
@@ -291,13 +364,13 @@ def plot_dataset_means(
 
     max_frames = int(MAX_TIME_S * fps)
 
-    for idx, odor in enumerate(odors):
+    for odor in odors:
         data = results[odor]
         mean = data["mean"][:max_frames]
         n_flies = data["n_flies"]
         n_frames = len(mean)
         time = np.arange(n_frames) / fps
-        colour = f"C{idx % 10}"
+        colour = _odor_colour(odor)
 
         ax.plot(time, mean, linewidth=1.3, color=colour, label=f"{odor} (n={n_flies})")
 
@@ -305,11 +378,19 @@ def plot_dataset_means(
     ax.axvline(odor_on_s, color="black", linestyle="--", linewidth=0.8)
     ax.axvline(odor_off_s, color="black", linestyle="--", linewidth=0.8)
     ax.axvspan(odor_on_s, odor_off_s, alpha=0.12, color="grey")
+    if baseline_subtracted:
+        ax.axhline(0.0, color="0.35", linestyle=":", linewidth=0.8)
 
     ax.set_xlim(0, MAX_TIME_S)
     ax.set_xlabel("Time (s)")
-    ax.set_ylabel("Distance %")
-    ax.set_title(f"{dataset_name} \u2014 Testing Odors Mean", fontsize=11)
+    ylabel = "Distance %"
+    if baseline_subtracted:
+        ylabel = "Distance % (baseline-subtracted)"
+    ax.set_ylabel(ylabel)
+    title = f"{dataset_name} \u2014 Testing Odors Mean"
+    if baseline_subtracted:
+        title += " (Pre-odor centered)"
+    ax.set_title(title, fontsize=11)
     ax.legend(loc="upper right", fontsize=8, framealpha=0.9)
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
@@ -332,6 +413,7 @@ def write_sidecar(
     odor_off_s: float,
     trial_type: str,
     results: dict[str, dict],
+    baseline_subtracted: bool,
 ) -> None:
     info: dict = {
         "dataset": dataset_name,
@@ -339,6 +421,8 @@ def write_sidecar(
         "odor_on_s": odor_on_s,
         "odor_off_s": odor_off_s,
         "trial_type": trial_type,
+        "baseline_subtracted": baseline_subtracted,
+        "baseline_window_s": [0.0, odor_on_s] if baseline_subtracted else None,
         "n_definition": "count of flies with at least one finite value in the trace",
         "odors": {},
     }
@@ -466,6 +550,8 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             dataset_name,
             excluded_flies=excluded,
             fps=fps,
+            odor_on_s=odor_on_s,
+            subtract_baseline=True,
         )
 
         if not results:
@@ -479,6 +565,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             fps=fps,
             odor_on_s=odor_on_s,
             odor_off_s=odor_off_s,
+            baseline_subtracted=True,
         )
         if fig is not None:
             _save_figure(fig, base)
@@ -491,6 +578,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             odor_off_s=odor_off_s,
             trial_type=args.trial_type,
             results=results,
+            baseline_subtracted=True,
         )
         processed += 1
 
