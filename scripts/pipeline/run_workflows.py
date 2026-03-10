@@ -11,6 +11,7 @@ import re
 import subprocess
 import sys
 import time
+import urllib.request
 from dataclasses import replace as dc_replace
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
@@ -1638,5 +1639,24 @@ def _batch_copy_to_smb(raw_cfg: Dict[str, Any]) -> None:
         LOGGER.info("No items configured for SMB copy (out_dir_smb/output_csv_smb not set)")
 
 
+NTFY_TOPIC = "ramanlab-pipeline"
+
+def ntfy_notify(title, message, priority="default", tags=""):
+    try:
+        data = message.encode("utf-8")
+        req = urllib.request.Request(f"https://ntfy.sh/{NTFY_TOPIC}", data=data, method="POST")
+        req.add_header("Title", title)
+        req.add_header("Priority", priority)
+        if tags:
+            req.add_header("Tags", tags)
+        urllib.request.urlopen(req, timeout=10)
+    except Exception:
+        pass
+
 if __name__ == "__main__":  # pragma: no cover
-    main()
+    try:
+        main()
+        ntfy_notify("Pipeline Complete", "Pipeline finished successfully.", tags="white_check_mark")
+    except Exception as exc:
+        ntfy_notify("Pipeline FAILED", f"Pipeline crashed with error:\n{exc}", priority="high", tags="x")
+        raise

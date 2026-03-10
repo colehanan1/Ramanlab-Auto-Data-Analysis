@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Standalone publication figure with two testing traces and frame annotations.
 
-Top half: testing_2 (Hexanol) frames + trace.
-Bottom half: testing_1 (Apple Cider Vinegar) frames + trace (values x2).
+Top half: testing_2 (Hexanol) frames + `combined_pct` trace.
+Bottom half: testing_1 (Apple Cider Vinegar) frames + `combined_pct` trace
+(values x2).
 """
 
 from __future__ import annotations
@@ -10,7 +11,6 @@ from __future__ import annotations
 from pathlib import Path
 
 import io
-import json
 import os
 import shutil
 import subprocess
@@ -23,7 +23,6 @@ from matplotlib import font_manager
 from matplotlib.patches import Patch
 import numpy as np
 import pandas as pd
-from scipy.signal import hilbert
 from PIL import Image
 
 
@@ -40,22 +39,13 @@ FRAME_FILES = [
 FRAME_NUMS = [800, 1500, 1800, 2200]
 
 DIST_CSV_TOP = (
-    ROOT
-    / "Data/flys/Hex-Training/october_08_batch_2/RMS_calculations/"
-    "updated_october_08_batch_2_testing_2_fly1_distances.csv"
+    Path("/securedstorage/DATAsec/cole/Data-secured/Hex-Training/october_08_batch_2")
+    / "angle_distance_rms_envelope/testing_2_fly1_angle_distance_rms_envelope.csv"
 )
 DIST_CSV_BOTTOM = (
-    ROOT
-    / "Data/flys/Hex-Training/october_08_batch_2/RMS_calculations/"
-    "updated_october_08_batch_2_testing_1_fly1_distances.csv"
+    Path("/securedstorage/DATAsec/cole/Data-secured/Hex-Training/october_08_batch_2")
+    / "angle_distance_rms_envelope/testing_1_fly1_angle_distance_rms_envelope.csv"
 )
-
-MATRIX_PATH = ROOT / "Data/Opto/Combined/matrix/combined_base/envelope_matrix_float16.npy"
-CODES_PATH = ROOT / "Data/Opto/Combined/matrix/combined_base/code_maps.json"
-if not MATRIX_PATH.exists():
-    MATRIX_PATH = ROOT / "Data/csvs/single_matrix_opto/envelope_matrix_float16.npy"
-if not CODES_PATH.exists():
-    CODES_PATH = ROOT / "Data/csvs/single_matrix_opto/code_maps.json"
 
 OUT_PATH = FRAME_DIR_TOP / "october_08_batch_2_testing_2_and_1_fly1_pubfig.png"
 SVG_RASTER_WIDTH = 1080
@@ -127,170 +117,52 @@ def _load_image(path: Path) -> Image.Image:
     )
 
 
-def _rolling_rms(values: np.ndarray, window: int) -> np.ndarray:
-    series = pd.Series(values, dtype=float)
-    return (
-        series.pow(2)
-        .rolling(window=window, center=True, min_periods=1)
-        .mean()
-        .pow(0.5)
-        .to_numpy()
-    )
-
-
-def _hilbert_envelope(values: np.ndarray, window: int) -> np.ndarray:
-    env = np.abs(hilbert(np.nan_to_num(values, nan=0.0)))
-    return (
-        pd.Series(env, dtype=float)
-        .rolling(window=window, center=True, min_periods=1)
-        .mean()
-        .to_numpy()
-    )
-
-
-def _angle_multiplier(angle_pct: np.ndarray) -> np.ndarray:
-    pct = np.asarray(angle_pct, dtype=float)
-    pct = np.clip(pct, -100.0, 100.0)
-    return np.where(
-        pct <= 0.0,
-        1.0,
-        1.0 + np.log1p((pct / 100.0) * (np.e - 1.0)),  # log scale 1.0 → 2.0
-    )
-
-
-def _env_from_distance_csv(csv_path: Path, fps_default: float = 40.0) -> tuple[np.ndarray, float, str]:
-    df = pd.read_csv(csv_path)
-    if "timestamp" in df.columns:
-        time_s = pd.to_numeric(df["timestamp"], errors="coerce").to_numpy(dtype=float)
+def _infer_fps(df: pd.DataFrame, fps_default: float = 40.0) -> float:
+    for time_col in ("time_s", "timestamp"):
+        if time_col not in df.columns:
+            continue
+        time_s = pd.to_numeric(df[time_col], errors="coerce").to_numpy(dtype=float)
         diffs = np.diff(time_s)
         diffs = diffs[np.isfinite(diffs) & (diffs > 0)]
-        fps = float(1.0 / np.median(diffs)) if diffs.size else fps_default
-    else:
-        fps = fps_default
-
-    dist_col = None
-    for candidate in ("distance_percentage_0_1", "distance_percentage", "distance_pct"):
-        if candidate in df.columns:
-            dist_col = candidate
-            break
-
-    # Read raw pixel distance for pixel-domain combining
-    raw_dist_col = None
-    for candidate in ("distance_0_1", "distance_proboscis", "distance"):
-        if candidate in df.columns:
-            raw_dist_col = candidate
-            break
-
-    angle_col = None
-    for candidate in ("angle_centered_pct", "angle_centered_percentage", "angle_pct"):
-        if candidate in df.columns:
-            angle_col = candidate
-            break
-    if angle_col is None:
-        raise RuntimeError(f"Angle column not found in {csv_path.name}")
-
-    angle_pct = pd.to_numeric(df[angle_col], errors="coerce").to_numpy(dtype=float)
-    multiplier = _angle_multiplier(angle_pct)
-
-    if raw_dist_col is not None:
-        # Pixel-domain combining: d_px * multiplier, then normalize with weighted bounds
-        d_px = pd.to_numeric(df[raw_dist_col], errors="coerce").to_numpy(dtype=float)
-        d_px_weighted = d_px * multiplier
-
-        # Load per-fly normalization bounds from sidecar JSON written by pipeline
-        norm_meta_path = csv_path.parent.parent / "angle_distance_rms_envelope" / "fly_norm_metadata.json"
-        if norm_meta_path.exists():
-            with norm_meta_path.open() as _f:
-                meta = json.load(_f)
-            # Determine fly number (this script targets fly1)
-            fn_key = "1"
-            weighted_gmin = float(
-                meta.get("fly_weighted_min_by_number", {}).get(fn_key, 0.0)
-            )
-            effective_max = float(
-                meta.get("fly_effective_max_by_number", {}).get(fn_key, 150.0)
-            )
-        else:
-            weighted_gmin = 0.0
-            effective_max = 150.0
-            print(f"[WARN] No fly_norm_metadata.json at {norm_meta_path}; using fallback bounds.")
-
-        if effective_max != weighted_gmin:
-            combined = 100.0 * (d_px_weighted - weighted_gmin) / (effective_max - weighted_gmin)
-        else:
-            combined = np.where(np.isfinite(d_px_weighted), 0.0, np.nan)
-    else:
-        # Fallback: use distance_pct if raw pixel column not available
-        if dist_col is None:
-            raise RuntimeError(f"Neither raw distance nor distance_pct found in {csv_path.name}")
-        dist_pct = (
-            pd.to_numeric(df[dist_col], errors="coerce")
-            .to_numpy(dtype=float)
-        )
-        combined = dist_pct * multiplier
-
-    window_frames = max(int(round(0.25 * fps)), 1)
-    rms = _rolling_rms(combined, window_frames)
-    env = _hilbert_envelope(rms, window_frames)
-    return env, fps, "distance_csv"
+        if diffs.size:
+            return float(1.0 / np.median(diffs))
+    return fps_default
 
 
-def _load_env_trace(trial_label: str, csv_path: Path) -> tuple[np.ndarray, float, str]:
-    with CODES_PATH.open("r", encoding="utf-8") as fh:
-        meta = json.load(fh)
-    matrix = np.load(MATRIX_PATH, allow_pickle=False)
-    df = pd.DataFrame(matrix, columns=meta["column_order"])
+def _load_trace(
+    csv_path: Path,
+    value_col: str = "combined_pct",
+    fps_default: float = 40.0,
+) -> tuple[np.ndarray, float]:
+    df = pd.read_csv(csv_path)
+    if value_col not in df.columns:
+        raise RuntimeError(f"Column '{value_col}' not found in {csv_path.name}")
 
-    code_maps = meta["code_maps"]
-    rev_maps = {
-        col: {int(code): label for label, code in mapping.items()}
-        for col, mapping in code_maps.items()
-    }
-    for col in ["dataset", "fly", "fly_number", "trial_type", "trial_label"]:
-        if col in df.columns:
-            vals = np.rint(df[col].to_numpy(np.float32, copy=False)).astype(np.int32, copy=False)
-            df[col] = pd.Series(vals).map(rev_maps.get(col, {})).fillna("UNKNOWN")
-
-    if "fps" in df.columns:
-        fps_codes = np.rint(df["fps"].to_numpy(np.float32, copy=False)).astype(np.int32, copy=False)
-        if "fps" in rev_maps:
-            fps_strings = pd.Series(fps_codes).map(rev_maps["fps"]).astype(str)
-            df["fps"] = pd.to_numeric(fps_strings, errors="coerce")
-        else:
-            df["fps"] = pd.to_numeric(df["fps"], errors="coerce")
-
-    mask = (
-        (df["fly"] == "october_08_batch_2")
-        & (df["trial_label"] == trial_label)
-        & (df["trial_type"] == "testing")
-    )
-    if "fly_number" in df.columns:
-        mask &= df["fly_number"] == "1"
-
-    row = df[mask]
-    if row.empty:
-        return _env_from_distance_csv(csv_path)
-
-    row = row.iloc[0]
-    fps = float(row.get("fps", 40.0)) if np.isfinite(row.get("fps", 40.0)) else 40.0
-    dataset = str(row.get("dataset", "UNKNOWN"))
-
-    env_cols = [c for c in meta["env_columns"] if str(c).startswith("dir_val_")]
-    env = row[env_cols].to_numpy(float, copy=False)
-    env = env[np.isfinite(env) & (env > 0)]
-
-    return env, fps, dataset
+    fps = _infer_fps(df, fps_default=fps_default)
+    trace = pd.to_numeric(df[value_col], errors="coerce").to_numpy(dtype=float)
+    return trace, fps
 
 
 def _load_frame_times(csv_path: Path) -> dict[int, float]:
     df = pd.read_csv(csv_path)
-    if "frame" not in df.columns or "timestamp" not in df.columns:
-        raise RuntimeError("Distance CSV missing required columns: frame, timestamp.")
-    lookup = df.set_index("frame")["timestamp"].to_dict()
-    missing = [f for f in FRAME_NUMS if f not in lookup]
-    if missing:
-        raise RuntimeError(f"Frames not found in distance CSV: {missing}")
-    return {f: float(lookup[f]) for f in FRAME_NUMS}
+    if "frame" in df.columns:
+        time_col = "time_s" if "time_s" in df.columns else "timestamp" if "timestamp" in df.columns else None
+        if time_col is not None:
+            lookup = df.set_index("frame")[time_col].to_dict()
+            missing = [f for f in FRAME_NUMS if f not in lookup]
+            if missing:
+                raise RuntimeError(f"Frames not found in trace CSV: {missing}")
+            return {f: float(lookup[f]) for f in FRAME_NUMS}
+
+    if "time_s" not in df.columns:
+        raise RuntimeError("Trace CSV missing required timing columns: frame/time_s or frame/timestamp.")
+
+    if max(FRAME_NUMS) >= len(df):
+        raise RuntimeError(
+            f"Trace CSV has {len(df)} rows; cannot resolve frame numbers {FRAME_NUMS}."
+        )
+    time_values = pd.to_numeric(df["time_s"], errors="coerce").to_numpy(dtype=float)
+    return {f: float(time_values[f]) for f in FRAME_NUMS}
 
 
 def _connect_frames(fig: plt.Figure, image_axes: list[tuple[int, plt.Axes]], plot_ax: plt.Axes,
@@ -318,8 +190,8 @@ def _connect_frames(fig: plt.Figure, image_axes: list[tuple[int, plt.Axes]], plo
 
 
 def main() -> None:
-    env_top, fps_top, _ = _load_env_trace("testing_2", DIST_CSV_TOP)
-    env_bottom, fps_bottom, _ = _load_env_trace("testing_1", DIST_CSV_BOTTOM)
+    env_top, fps_top = _load_trace(DIST_CSV_TOP)
+    env_bottom, fps_bottom = _load_trace(DIST_CSV_BOTTOM)
     frame_times_top = _load_frame_times(DIST_CSV_TOP)
     frame_times_bottom = _load_frame_times(DIST_CSV_BOTTOM)
 
