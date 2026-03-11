@@ -4,6 +4,17 @@ from pathlib import Path
 import pandas as pd
 from ..config import Settings, get_main_directories
 
+_OFM_COL_CANDIDATES = ("ActiveOFM", "Active OFM Pin")
+
+
+def _find_ofm_col(df: pd.DataFrame) -> str | None:
+    """Return the first OFM column name present in *df*, or None."""
+    for candidate in _OFM_COL_CANDIDATES:
+        if candidate in df.columns:
+            return candidate
+    return None
+
+
 def main(cfg: Settings):
     force_recompute = bool(getattr(getattr(cfg, "force", None), "pipeline", False))
     roots = get_main_directories(cfg)
@@ -17,12 +28,12 @@ def main(cfg: Settings):
                 if not (f.is_file() and f.name.startswith("updated_") and f.suffix==".csv"):
                     continue
                 dfu = pd.read_csv(f)
-                # Heuristic: try to find an "output" CSV with ActiveOFM column
+                # Heuristic: try to find an "output" CSV with an OFM column
                 out_csv = None
                 for o in outs:
                     try:
                         dfo = pd.read_csv(o, nrows=5)
-                        if "ActiveOFM" in dfo.columns:
+                        if _find_ofm_col(dfo) is not None:
                             out_csv = o; break
                     except Exception:
                         continue
@@ -41,7 +52,7 @@ def main(cfg: Settings):
                     except Exception:
                         pass
                 dfo = pd.read_csv(out_csv)
-                col = "ActiveOFM" if "ActiveOFM" in dfo.columns else None
+                col = _find_ofm_col(dfo)
                 if col is None:
                     continue
                 on_idx = dfo.index[dfo[col].astype(str) != "off"].tolist()

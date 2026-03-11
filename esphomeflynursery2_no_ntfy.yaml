@@ -1,0 +1,454 @@
+esphome:
+  name: flynursery2
+  friendly_name: FlyNursery2
+  on_boot:
+    then:
+      - delay: 5s
+      - lambda: |-
+          id(fly_sun_brightness_pct).publish_state(id(sun_brightness_pct));
+          id(heat_pad_watts).publish_state(id(heat_pad_watts_value));
+      - script.execute: query_plug_state
+      - script.execute: query_plug_metrics
+      - delay: 2s
+      - script.execute: set_sun_from_time
+
+esp32:
+  board: esp32dev
+  framework:
+    type: esp-idf
+
+logger:
+
+api:
+  encryption:
+    key: "N9a4lBjekIwYGdgl/GVHiRnKTB6CarXspihjBKNoL1k="
+
+ota:
+  - platform: esphome
+    password: "e2f0a88ea12c225bc66f9c180239a5ac"
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  on_disconnect:
+    - lambda: |-
+        ESP_LOGW("wifi", "WiFi disconnected");
+
+  ap:
+    ssid: "Flynursery2 Fallback Hotspot"
+    password: "BrUUG9IggKi8"
+
+captive_portal:
+
+time:
+  - platform: homeassistant
+    id: sntp_time
+    timezone: "America/Chicago"
+    on_time_sync:
+      then:
+        - lambda: |-
+            auto t = id(sntp_time).now();
+            if (t.is_valid()) {
+              ESP_LOGI("time", "Home Assistant time synced: %04d-%02d-%02d %02d:%02d:%02d",
+                       t.year, t.month, t.day_of_month,
+                       t.hour, t.minute, t.second);
+            }
+    on_time:
+      - at: "07:00:00"
+        then:
+          - script.execute: sunrise_20min
+      - at: "19:00:00"
+        then:
+          - script.execute: sunset_20min
+
+web_server:
+  port: 80
+
+mqtt:
+  broker: "192.168.1.6"
+  port: 1883
+  username: "ramanlab"
+  password: "Ramanlab!"
+  discovery: false
+  discover_ip: true
+  on_json_message:
+    - topic: "tele/PLUG1/SENSOR"
+      then:
+        - lambda: |-
+            auto power = x["ENERGY"]["Power"];
+            if (!power.isNull()) {
+              float watts = power.as<float>();
+              if (!isnan(watts)) {
+                id(heat_pad_watts_value) = watts;
+                id(heat_pad_watts).publish_state(watts);
+              }
+            }
+    - topic: "stat/PLUG1/STATUS8"
+      then:
+        - lambda: |-
+            auto power = x["StatusSNS"]["ENERGY"]["Power"];
+            if (!power.isNull()) {
+              float watts = power.as<float>();
+              if (!isnan(watts)) {
+                id(heat_pad_watts_value) = watts;
+                id(heat_pad_watts).publish_state(watts);
+              }
+            }
+
+i2c:
+  sda: GPIO21
+  scl: GPIO22
+  scan: true
+  frequency: 50kHz
+  id: bus_a
+
+text_sensor:
+  - platform: mqtt_subscribe
+    id: heat_state
+    name: "Heat Plug State"
+    topic: "stat/PLUG1/POWER"
+  - platform: template
+    id: esp_current_time
+    name: "ESP Current Time"
+    icon: "mdi:clock-outline"
+    update_interval: 15s
+    lambda: |-
+      auto t = id(sntp_time).now();
+      if (!t.is_valid()) {
+        return std::string("TIME_INVALID");
+      }
+      char buf[32];
+      snprintf(buf, sizeof(buf), "%04d-%02d-%02d %02d:%02d:%02d",
+               t.year, t.month, t.day_of_month,
+               t.hour, t.minute, t.second);
+      return std::string(buf);
+
+display:
+  - platform: lcd_pcf8574
+    id: main_lcd
+    i2c_id: bus_a
+    address: 0x27
+    dimensions: 16x2
+    lambda: |-
+      std::string hs = id(heat_state).state;
+      const char *heat_txt;
+
+      if (hs == "ON") {
+        heat_txt = "ON";
+      } else if (hs == "OFF") {
+        heat_txt = "OFF";
+      } else if (hs.empty()) {
+        heat_txt = "ERR";
+      } else {
+        heat_txt = hs.c_str();
+      }
+      int h1 = (int)(id(bme_hum1).state + 0.5);
+      int h2 = (int)(id(bme_hum2).state + 0.5);
+      it.printf(0, 0, "H:i%do%d%% %s", h1, h2, heat_txt);
+      it.printf(0, 1, "T:i%.1fo%.2fC", id(bme_temp1).state, id(bme_temp2).state);
+
+globals:
+  - id: fan_speed_value
+    type: float
+    restore_value: true
+    initial_value: '20.0'
+  - id: sun_ramp_step
+    type: int
+    restore_value: false
+    initial_value: '0'
+  - id: sun_brightness_pct
+    type: float
+    restore_value: false
+    initial_value: '0.0'
+  - id: heat_pad_watts_value
+    type: float
+    restore_value: false
+    initial_value: '0.0'
+
+light:
+  - platform: monochromatic
+    name: "Fly Nursery Sun"
+    id: fly_sun
+    output: sun_pwm_output
+    default_transition_length: 0s
+    restore_mode: ALWAYS_OFF
+
+script:
+  - id: set_fan_speed
+    mode: single
+    then:
+      - lambda: |-
+          id(fan_pwm_output).set_level(id(fan_speed_value) / 100.0);
+
+  - id: periodic_ventilation
+    mode: restart
+    then:
+      - lambda: |-
+          ESP_LOGD("fan_ctrl", "Periodic ventilation: fan 25%% for 3 minutes");
+          id(fan_speed_value) = 25.0;
+          id(fan_pwm_output).set_level(0.25);
+      - delay: 3min
+      - lambda: |-
+          ESP_LOGD("fan_ctrl", "Periodic ventilation done: stopping fan");
+          id(fan_speed_value) = 0.0;
+          id(fan_pwm_output).set_level(0.0);
+
+  - id: sunrise_20min
+    mode: restart
+    then:
+      - script.stop: set_sun_from_time
+      - globals.set:
+          id: sun_ramp_step
+          value: '0'
+      - lambda: |-
+          id(sun_brightness_pct) = 0.0f;
+      - light.turn_off:
+          id: fly_sun
+      - repeat:
+          count: 20
+          then:
+            - delay: 1min
+            - lambda: |-
+                id(sun_ramp_step) += 1;
+                float b = id(sun_ramp_step) * 0.0125f;
+                if (b > 0.25f) b = 0.25f;
+                id(sun_brightness_pct) = b * 100.0f;
+                ESP_LOGD("sun", "Sunrise step %d -> brightness %.0f%%", id(sun_ramp_step), b * 100.0f);
+                id(fly_sun).turn_on().set_brightness(b).perform();
+      - lambda: |-
+          id(sun_brightness_pct) = 25.0f;
+          id(fly_sun).turn_on().set_brightness(0.25f).perform();
+          ESP_LOGD("sun", "Sunrise complete: 25%%");
+
+  - id: sunset_20min
+    mode: restart
+    then:
+      - script.stop: set_sun_from_time
+      - globals.set:
+          id: sun_ramp_step
+          value: '20'
+      - lambda: |-
+          id(sun_brightness_pct) = 25.0f;
+      - light.turn_on:
+          id: fly_sun
+          brightness: 25%
+      - repeat:
+          count: 20
+          then:
+            - delay: 1min
+            - lambda: |-
+                id(sun_ramp_step) -= 1;
+                float b = id(sun_ramp_step) * 0.0125f;
+                ESP_LOGD("sun", "Sunset step %d -> brightness %.0f%%", id(sun_ramp_step), b * 100.0f);
+                if (b < 0.001f) {
+                  id(sun_brightness_pct) = 0.0f;
+                  id(fly_sun).turn_off().perform();
+                } else {
+                  id(sun_brightness_pct) = b * 100.0f;
+                  id(fly_sun).turn_on().set_brightness(b).perform();
+                }
+      - light.turn_off:
+          id: fly_sun
+      - lambda: |-
+          id(sun_brightness_pct) = 0.0f;
+          ESP_LOGD("sun", "Sunset complete: light off");
+
+  - id: query_plug_state
+    mode: single
+    then:
+      - mqtt.publish:
+          topic: "cmnd/PLUG1/STATUS"
+          payload: "0"
+
+  - id: query_plug_metrics
+    mode: single
+    then:
+      - mqtt.publish:
+          topic: "cmnd/PLUG1/STATUS"
+          payload: "8"
+
+  - id: set_sun_from_time
+    mode: single
+    then:
+      - delay: 8s
+      - lambda: |-
+          if (id(sunrise_20min).is_running() || id(sunset_20min).is_running()) {
+            ESP_LOGD("sun", "Ramp script already running, skipping boot sun set");
+            return;
+          }
+          auto t = id(sntp_time).now();
+          if (!t.is_valid()) {
+            ESP_LOGW("sun", "SNTP not synced yet, skipping sun set");
+            id(sun_brightness_pct) = 0.0f;
+            id(fly_sun).turn_off().perform();
+            return;
+          }
+          int total_min = t.hour * 60 + t.minute;
+          float brightness;
+          if (total_min < 420 || total_min >= 1160) {
+            brightness = 0.0f;
+          } else if (total_min >= 440 && total_min < 1140) {
+            brightness = 0.25f;
+          } else if (total_min < 440) {
+            brightness = (total_min - 420) * 0.0125f;
+          } else {
+            brightness = 0.25f - (total_min - 1140) * 0.0125f;
+          }
+          id(sun_brightness_pct) = brightness * 100.0f;
+          ESP_LOGD("sun", "Boot sun set: time=%02d:%02d brightness=%.0f%%", t.hour, t.minute, brightness * 100.0f);
+          if (brightness < 0.001f) {
+            id(fly_sun).turn_off().perform();
+          } else {
+            id(fly_sun).turn_on().set_brightness(brightness).perform();
+          }
+
+interval:
+  - interval: 30min
+    then:
+      - script.execute: periodic_ventilation
+  - interval: 5min
+    then:
+      - script.execute: query_plug_state
+      - script.execute: query_plug_metrics
+
+number:
+  - platform: template
+    name: "Fan Speed"
+    id: fan_speed
+    unit_of_measurement: "%"
+    min_value: 0
+    max_value: 100
+    step: 1
+    set_action:
+      then:
+        - lambda: |-
+            ESP_LOGD("fan_speed", "Setting fan speed to %.1f%%", x);
+            id(fan_speed_value) = x;
+            id(fan_pwm_output).set_level(x / 100.0);
+    lambda: |-
+      return id(fan_speed_value);
+
+sensor:
+  - platform: bme680
+    temperature:
+      name: "Temperature fly"
+      id: bme_temp1
+      oversampling: 2x
+      on_value_range:
+        - below: 24.0
+          then:
+            - mqtt.publish:
+                topic: "cmnd/PLUG1/POWER"
+                payload: "ON"
+        - above: 26.0
+          then:
+            - mqtt.publish:
+                topic: "cmnd/PLUG1/POWER"
+                payload: "OFF"
+    pressure:
+      name: "Pressure fly"
+      id: bme_pressure1
+    humidity:
+      name: "Humidity fly"
+      id: bme_hum1
+      on_value_range:
+        - above: 65.0
+          then:
+            - lambda: |-
+                ESP_LOGD("fan_ctrl", "Humidity high (%.1f%%) -> fan 50%%", id(bme_hum1).state);
+                id(fan_speed_value) = 50.0;
+                id(fan_pwm_output).set_level(0.5);
+        - below: 55.0
+          then:
+            - lambda: |-
+                ESP_LOGD("fan_ctrl", "Humidity low (%.1f%%) -> fan off", id(bme_hum1).state);
+                id(fan_speed_value) = 0.0;
+                id(fan_pwm_output).set_level(0.0);
+    gas_resistance:
+      name: "Gas Resistance fly"
+    address: 0x77
+    update_interval: 60s
+
+  - platform: bme680
+    temperature:
+      name: "Temperature Room"
+      id: bme_temp2
+      oversampling: 2x
+    pressure:
+      name: "pressure Room"
+      id: bme_pressure2
+    humidity:
+      name: "Humidity Room"
+      id: bme_hum2
+    gas_resistance:
+      name: "Gas Resistance Room"
+    address: 0x76
+    update_interval: 60s
+
+  - platform: template
+    name: "Average RPM"
+    icon: mdi:pulse
+    unit_of_measurement: 'RPM'
+    accuracy_decimals: 0
+    lambda: |-
+      const std::vector<sensor::Sensor*> sensors = {
+        id(fan1_rpm)
+      };
+
+      float total = 0.00;
+      int count = 0;
+
+      for (auto *s : sensors) {
+        if (!isnan(s->state) && s->state > 0) {
+          total += s->state;
+          count++;
+        }
+      }
+
+      return count > 0 ? total / count : 0.00;
+    update_interval: 30s
+
+  - platform: template
+    name: "Fly Sun Brightness"
+    id: fly_sun_brightness_pct
+    unit_of_measurement: "%"
+    icon: "mdi:brightness-6"
+    accuracy_decimals: 0
+    update_interval: 10s
+    lambda: |-
+      return id(sun_brightness_pct);
+
+  - platform: template
+    name: "Heat Pad Watts"
+    id: heat_pad_watts
+    unit_of_measurement: "W"
+    device_class: power
+    state_class: measurement
+    accuracy_decimals: 1
+    update_interval: 10s
+    lambda: |-
+      return id(heat_pad_watts_value);
+
+  - platform: pulse_counter
+    name: "Fan 1 RPM"
+    id: fan1_rpm
+    unit_of_measurement: 'RPM'
+    pin:
+      number: 32
+      inverted: false
+      mode: INPUT_PULLUP
+    count_mode:
+      rising_edge: INCREMENT
+      falling_edge: DISABLE
+    use_pcnt: true
+    update_interval: 30s
+    filters:
+      - multiply: 0.5
+
+output:
+  - platform: ledc
+    id: fan_pwm_output
+    pin: GPIO27
+  - platform: ledc
+    id: sun_pwm_output
+    pin: GPIO15

@@ -45,6 +45,7 @@ STATE_VERSION = 1
 from fbpipe.config import Settings, discover_flagged_directories, load_settings, resolve_config_path
 from fbpipe.pipeline import ORDERED_STEPS
 from fbpipe.steps import predict_reactions
+from fbpipe.utils.data_secured_sync import sync_data_secured
 from fbpipe.utils.smb_copy import copy_to_smb
 
 from scripts.analysis.envelope_visuals import (
@@ -1510,6 +1511,7 @@ def main(argv: Sequence[str] | None = None) -> None:
     LOGGER.info("=" * 70)
     LOGGER.info("✓ Batch copy complete!")
     LOGGER.info("=" * 70 + "\n")
+    _run_data_secured_sync(data)
 
 
 def _run_dataset_means(config_path: Path) -> None:
@@ -1637,6 +1639,29 @@ def _batch_copy_to_smb(raw_cfg: Dict[str, Any]) -> None:
                 LOGGER.error(f"Error copying {local_path.name}: {e}")
     else:
         LOGGER.info("No items configured for SMB copy (out_dir_smb/output_csv_smb not set)")
+
+
+def _run_data_secured_sync(raw_cfg: Dict[str, Any]) -> None:
+    """Incrementally mirror Data-secured to the file server and Box."""
+    LOGGER.info("\n" + "=" * 70)
+    LOGGER.info("Starting incremental Data-secured backup...")
+    LOGGER.info("=" * 70)
+    try:
+        results = sync_data_secured(raw_cfg)
+    except Exception as exc:
+        LOGGER.error("Data-secured backup failed before transfer completed: %s", exc)
+        LOGGER.info("=" * 70 + "\n")
+        return
+
+    if not results:
+        LOGGER.info("Data-secured backup disabled or not configured.")
+    else:
+        failed = [name for name, ok in results.items() if not ok]
+        if failed:
+            LOGGER.warning("Data-secured backup finished with failures: %s", ", ".join(sorted(failed)))
+        else:
+            LOGGER.info("✓ Data-secured backup complete!")
+    LOGGER.info("=" * 70 + "\n")
 
 
 NTFY_TOPIC = "ramanlab-pipeline"

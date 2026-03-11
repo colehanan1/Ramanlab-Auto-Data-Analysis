@@ -482,6 +482,14 @@ ODOR_CANON = {
     "optogenetics hex": "Hex-Training",
     "optogenetics air": "AIR-Training",
     "optogenetics 3-octanol": "3OCT-Training",
+    # ── Manual / sucrose-trained fly datasets ──
+    "manual_3-octonol": "manual_3-octonol",
+    "manual_10s_odor_benz": "manual_10s_Odor_Benz",
+    "manual_acv": "manual_ACV",
+    "manual_benz": "manual_Benz",
+    "manual_eb": "manual_EB",
+    "manual_ret_eb": "manual_ret_EB",
+    "ret_eb": "manual_ret_EB",
 }
 
 DISPLAY_LABEL = {
@@ -502,6 +510,13 @@ DISPLAY_LABEL = {
     "Hex-Training-24": "Hexanol",
     "AIR-Training": "AIR",
     "3OCT-Training": "3-Octonol",
+    # Manual / sucrose-trained fly datasets
+    "manual_3-octonol": "3-Octonol",
+    "manual_10s_Odor_Benz": "Benzaldehyde",
+    "manual_ACV": "Apple Cider Vinegar",
+    "manual_Benz": "Benzaldehyde",
+    "manual_EB": "Ethyl Butyrate",
+    "manual_ret_EB": "Ethyl Butyrate",
 }
 
 HEXANOL = "Hexanol"
@@ -624,6 +639,34 @@ TRAINING_ODOR_SCHEDULE_OVERRIDES = {
         7: HEXANOL,
         8: "Apple Cider Vinegar",
     },
+    # ── Manual / sucrose-trained fly datasets ──
+    "manual_3-octonol": {
+        1: "3-Octonol", 2: "3-Octonol", 3: "3-Octonol",
+        4: "3-Octonol", 5: "3-Octonol", 6: "3-Octonol",
+    },
+    "manual_10s_Odor_Benz": {
+        1: "Benzaldehyde", 2: "Benzaldehyde", 3: "Benzaldehyde",
+        4: "Benzaldehyde", 5: "Benzaldehyde", 6: "Benzaldehyde",
+        7: "Benzaldehyde", 8: "Benzaldehyde",
+    },
+    "manual_ACV": {
+        1: "Apple Cider Vinegar", 2: "Apple Cider Vinegar",
+        3: "Apple Cider Vinegar", 4: "Apple Cider Vinegar",
+        5: "Apple Cider Vinegar", 6: "Apple Cider Vinegar",
+    },
+    "manual_Benz": {
+        1: "Benzaldehyde", 2: "Benzaldehyde", 3: "Benzaldehyde",
+        4: "Benzaldehyde", 5: "Benzaldehyde", 6: "Benzaldehyde",
+    },
+    "manual_EB": {
+        1: "Ethyl Butyrate", 2: "Ethyl Butyrate", 3: "Ethyl Butyrate",
+        4: "Ethyl Butyrate", 5: "Ethyl Butyrate", 6: "Ethyl Butyrate",
+    },
+    "manual_ret_EB": {
+        1: "Ethyl Butyrate", 2: "Ethyl Butyrate", 3: "Ethyl Butyrate",
+        4: "Ethyl Butyrate", 5: HEXANOL, 6: "Ethyl Butyrate",
+        7: HEXANOL, 8: "Ethyl Butyrate",
+    },
 }
 
 TESTING_DATASET_ALIAS = {
@@ -636,6 +679,13 @@ TESTING_DATASET_ALIAS = {
     "AIR-Training": "AIR-Training",
     "ACV-Training": "ACV-Training",
     "3OCT-Training": "3OCT-Training",
+    # Manual / sucrose-trained fly datasets (self-mappings)
+    "manual_3-octonol": "manual_3-octonol",
+    "manual_10s_Odor_Benz": "manual_10s_Odor_Benz",
+    "manual_ACV": "manual_ACV",
+    "manual_Benz": "manual_Benz",
+    "manual_EB": "manual_EB",
+    "manual_ret_EB": "manual_ret_EB",
 }
 
 
@@ -777,6 +827,36 @@ def _display_odor(dataset_canon: str, trial_label: str) -> str:
             8: "Benzaldehyde",
             9: "Citral",
             10: "Linalool",
+        },
+        # ── Manual / sucrose-trained fly datasets ──
+        "manual_3-octonol": {
+            1: "Hexanol", 2: "3-Octonol", 3: "Hexanol", 4: "3-Octonol",
+            5: "3-Octonol", 6: "Benzaldehyde", 7: "Citral", 8: "Linalool",
+        },
+        "manual_10s_Odor_Benz": {
+            1: "Hexanol", 2: "Benzaldehyde", 3: "Hexanol", 4: "Benzaldehyde",
+            5: "Benzaldehyde", 6: "Benzaldehyde", 7: "Benzaldehyde",
+        },
+        "manual_ACV": {
+            1: "Hexanol", 2: "Apple Cider Vinegar", 3: "Hexanol",
+            4: "Apple Cider Vinegar", 5: "Apple Cider Vinegar",
+            6: "3-Octonol", 7: "Ethyl Butyrate", 8: "Benzaldehyde", 9: "Citral",
+        },
+        "manual_Benz": {
+            1: "Hexanol", 2: "Benzaldehyde", 3: "Hexanol",
+            4: "Benzaldehyde", 5: "Benzaldehyde",
+        },
+        "manual_EB": {
+            1: "Hexanol", 2: "Ethyl Butyrate", 3: "Hexanol",
+            4: "Ethyl Butyrate", 5: "Ethyl Butyrate",
+            6: "Apple Cider Vinegar", 7: "3-Octonol", 8: "Benzaldehyde",
+            9: "Citral", 10: "Linalool",
+        },
+        "manual_ret_EB": {
+            1: "Hexanol", 2: "Ethyl Butyrate", 3: "Hexanol",
+            4: "Ethyl Butyrate", 5: "Ethyl Butyrate",
+            6: "Apple Cider Vinegar", 7: "3-Octonol", 8: "Benzaldehyde",
+            9: "Citral", 10: "Linalool",
         },
     }
 

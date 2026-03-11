@@ -1,0 +1,340 @@
+esphome:
+  name: flynursery2
+  friendly_name: FlyNursery2
+  on_boot:
+    then:
+      - delay: 5s
+      - script.execute: query_plug_state
+      - delay: 2s
+      - script.execute: set_sun_from_time
+
+esp32:
+  board: esp32dev
+  framework:
+    type: esp-idf
+
+logger:
+
+api:
+  encryption:
+    key: "N9a4lBjekIwYGdgl/GVHiRnKTB6CarXspihjBKNoL1k="
+
+ota:
+  - platform: esphome
+    password: "e2f0a88ea12c225bc66f9c180239a5ac"
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+
+  ap:
+    ssid: "Flynursery2 Fallback Hotspot"
+    password: "BrUUG9IggKi8"
+
+captive_portal:
+
+time:
+  - platform: sntp
+    id: sntp_time
+    timezone: "America/Chicago"
+    servers:
+      - 192.168.1.11
+      - 10.2.1.1
+    on_time:
+      - at: "07:00:00"
+        then:
+          - script.execute: sunrise_20min
+      - at: "19:00:00"
+        then:
+          - script.execute: sunset_20min
+
+web_server:
+  port: 80
+
+mqtt:
+  broker: "192.168.1.6"
+  port: 1883
+  username: "ramanlab"
+  password: "Ramanlab!"
+  discovery: false        # << important
+  discover_ip: true       # optional: lets HA find the device but NOT create MQTT entities
+
+i2c:
+  sda: GPIO21
+  scl: GPIO22
+  scan: true
+  frequency: 50kHz # Slower for stability
+  id: bus_a
+
+text_sensor:
+  - platform: mqtt_subscribe
+    id: heat_state
+    name: "Heat Plug State"
+    topic: "stat/PLUG1/POWER"
+
+display:
+  - platform: lcd_pcf8574
+    id: main_lcd
+    i2c_id: bus_a
+    address: 0x27      # or whatever you actually use
+    dimensions: 16x2
+    lambda: |-
+      // Determine plug status text
+      std::string hs = id(heat_state).state;
+      const char *heat_txt;
+
+      if (hs == "ON") {
+        heat_txt = "ON";
+      } else if (hs == "OFF") {
+        heat_txt = "OFF";
+      } else if (hs.empty()) {
+        heat_txt = "ERR";
+      } else {
+        heat_txt = hs.c_str();  // fallback if Tasmota sends something else
+      }
+      int h1 = (int)(id(bme_hum1).state + 0.5);
+      int h2 = (int)(id(bme_hum2).state + 0.5);
+      it.printf(0, 0, "H:i%do%d%% %s", h1, h2, heat_txt);           // Line 1 ✓ Correct
+      it.printf(0, 1, "T:i%.1fo%.2fC", id(bme_temp1).state, id(bme_temp2).state);
+
+globals:
+  - id: fan_speed_value
+    type: float
+    restore_value: true
+    initial_value: '20.0'
+
+light:
+  - platform: monochromatic
+    name: "Fly Nursery Sun"
+    id: fly_sun
+    output: sun_pwm_output
+    default_transition_length: 0s    # transitions handled by script
+
+script:
+  - id: set_fan_speed
+    mode: single
+    then:
+      - lambda: |-
+          id(fan_pwm_output).set_level(id(fan_speed_value) / 100.0);
+
+  # New script: periodic ventilation at 25% for 3 minutes
+  - id: periodic_ventilation
+    mode: restart
+    then:
+      - lambda: |-
+          ESP_LOGD("fan_ctrl", "Periodic ventilation: fan 25%% for 3 minutes");
+          id(fan_speed_value) = 25.0;
+          id(fan_pwm_output).set_level(0.25);
+      - delay: 3min
+      - lambda: |-
+          ESP_LOGD("fan_ctrl", "Periodic ventilation done: stopping fan");
+          id(fan_speed_value) = 0.0;
+          id(fan_pwm_output).set_level(0.0);
+  
+  # New: sunrise over 20 minutes from 0% to 100%
+  - id: sunrise_20min
+    mode: restart
+    then:
+      - light.turn_on:
+          id: fly_sun
+          brightness: 0%
+      - repeat:
+          count: 20
+          then:
+            - delay: 1min
+            - lambda: |-
+                // increase brightness by 5% each minute
+                float b = id(fly_sun).current_values.get_brightness();
+                b += 0.05f;
+                if (b > 1.0f) b = 1.0f;
+                id(fly_sun).turn_on().set_brightness(b).perform();
+
+  # New: sunset over 20 minutes from 100% to 0%
+  - id: sunset_20min
+    mode: restart
+    then:
+      - light.turn_on:
+          id: fly_sun
+          brightness: 100%
+      - repeat:
+          count: 20
+          then:
+            - delay: 1min
+            - lambda: |-
+                // decrease brightness by 5% each minute
+                float b = id(fly_sun).current_values.get_brightness();
+                b -= 0.05f;
+                if (b < 0.0f) b = 0.0f;
+                id(fly_sun).turn_on().set_brightness(b).perform();
+      - light.turn_off:
+          id: fly_sun
+
+  # Query plug state on demand via MQTT STATUS request
+  - id: query_plug_state
+    mode: single
+    then:
+      - mqtt.publish:
+          topic: "cmnd/PLUG1/STATUS"
+          payload: "0"
+    # Set sun output based on current time (run on boot)
+  - id: set_sun_from_time
+    mode: single
+    then:
+      - delay: 8s
+      - lambda: |-
+          auto t = id(sntp_time).now();
+          int h = t.hour;
+          if (h >= 7 && h <= 18) {
+            // daytime: full brightness
+            id(fly_sun).turn_on().set_brightness(1.0).perform();
+          } else {
+            // night: off
+            id(fly_sun).turn_off().perform();
+          }
+
+# Run the periodic ventilation script every 30 minutes
+interval:
+  - interval: 30min
+    then:
+      - script.execute: periodic_ventilation
+  - interval: 5min
+    then:
+      - script.execute: query_plug_state
+
+number:
+  - platform: template
+    name: "Fan Speed"
+    id: fan_speed
+    unit_of_measurement: "%"
+    min_value: 0
+    max_value: 100
+    step: 1
+    set_action:
+      then:
+        - lambda: |-
+            ESP_LOGD("fan_speed", "Setting fan speed to %.1f%%", x);
+            id(fan_speed_value) = x;
+            id(fan_pwm_output).set_level(x / 100.0);
+    lambda: |-
+      return id(fan_speed_value);
+
+sensor:
+  - platform: bme680
+    temperature:
+      name: "Temperature fly"
+      id: bme_temp1
+      oversampling: 2x
+      # When temperature drops below 23°C -> send MQTT to Tasmota relay
+      on_value_range:
+        - below: 24.0
+          then:
+            - mqtt.publish:
+                topic: "cmnd/PLUG1/POWER"
+                payload: "ON"
+        - above: 26.0
+          then:
+            - mqtt.publish:
+                topic: "cmnd/PLUG1/POWER"
+                payload: "OFF"
+    pressure:
+      name: "Pressure fly"
+      id: bme_pressure1
+    humidity:
+      name: "Humidity fly"
+      id: bme_hum1
+      # When humidity goes above 65% -> set fan to 50% duty
+      on_value_range:
+        - above: 65.0
+          then:
+            - lambda: |-
+                ESP_LOGD("fan_ctrl", "Humidity high (%.1f%%) -> fan 50%%", id(bme_hum1).state);
+                id(fan_speed_value) = 50.0;
+                id(fan_pwm_output).set_level(0.5);
+        # New: when humidity goes below 55% -> stop fan
+        - below: 55.0
+          then:
+            - lambda: |-
+                ESP_LOGD("fan_ctrl", "Humidity low (%.1f%%) -> fan off", id(bme_hum1).state);
+                id(fan_speed_value) = 0.0;
+                id(fan_pwm_output).set_level(0.0);
+    gas_resistance:
+      name: "Gas Resistance fly"
+    address: 0x77
+    update_interval: 60s
+
+  - platform: bme680    
+    temperature:
+      name: "Temperature Room"
+      id: bme_temp2
+      oversampling: 2x
+    pressure:
+      name: "pressure Room"
+      id: bme_pressure2
+    humidity:
+      name: "Humidity Room"
+      id: bme_hum2
+    gas_resistance:
+      name: "Gas Resistance Room"
+    address: 0x76
+    update_interval: 60s
+
+  - platform: template
+    name: "Average RPM"
+    icon: mdi:pulse
+    unit_of_measurement: 'RPM'
+    accuracy_decimals: 0
+    lambda: |-
+      const std::vector<sensor::Sensor*> sensors = {
+        id(fan1_rpm)
+      };
+
+      float total = 0.00;
+      int count = 0;
+
+      for (auto *s : sensors) {
+        if (!isnan(s->state) && s->state > 0) {
+          total += s->state;
+          count++;
+        }
+      }
+
+      return count > 0 ? total / count : 0.00;
+    update_interval: 30s
+
+  - platform: template
+    name: "Fly Sun Brightness"
+    id: fly_sun_brightness_pct
+    unit_of_measurement: "%"
+    icon: "mdi:brightness-6"
+    accuracy_decimals: 0
+    update_interval: 50s
+    lambda: |-
+      // 0.0–1.0 → 0–100 %
+      float b = id(fly_sun).current_values.get_brightness();
+      return b * 100.0f;
+
+  - platform: pulse_counter
+    name: "Fan 1 RPM"
+    id: fan1_rpm
+    unit_of_measurement: 'RPM'
+    pin:
+      number: 32
+      inverted: false
+      mode: INPUT_PULLUP
+    count_mode:
+      rising_edge: INCREMENT
+      falling_edge: DISABLE
+    use_pcnt: true
+    update_interval: 30s
+    filters:
+      - multiply: 0.5
+
+output:
+  - platform: ledc
+    id: fan_pwm_output
+    pin: GPIO27
+  # New: LED “sun” output (PWM to MOSFET / driver)
+  - platform: ledc
+    id: sun_pwm_output
+    pin: GPIO15
+

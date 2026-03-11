@@ -13,6 +13,14 @@ from typing import Optional
 # Condition patterns (order matters - check specific before general)
 # Pattern format: (regex_pattern, condition_name)
 CONDITION_PATTERNS = [
+    # Manual/sucrose-trained fly patterns (anchored on parent dir to avoid opto collisions)
+    (r"manual_flys/ret_eb", "manual_ret_EB"),           # must precede eb
+    (r"manual_flys/eb\b", "manual_EB"),
+    (r"manual_flys/10s_odor_benz", "manual_10s_Odor_Benz"),
+    (r"manual_flys/3-octonol", "manual_3-octonol"),
+    (r"manual_flys/acv", "manual_ACV"),
+    (r"manual_flys/benz\b", "manual_Benz"),
+    # Optogenetic fly patterns
     (r"benz[-_ ]training[-_ ]24", "Benz-Training-24"),
     (r"hex[-_ ]training[-_ ]24", "Hex-Training-24"),
     (r"benz[-_ ]training", "Benz-Training"),
