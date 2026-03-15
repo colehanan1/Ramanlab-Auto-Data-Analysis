@@ -53,6 +53,7 @@ from scripts.analysis.envelope_visuals import (
     MatrixPlotConfig,
     generate_envelope_plots,
     generate_reaction_matrices,
+    set_protocol,
 )
 from scripts.analysis.envelope_training import latency_reports
 from scripts.analysis.envelope_combined import (
@@ -1322,6 +1323,8 @@ def _run_reactions(settings: Settings) -> None:
         ]
         for trial_order in matrix_cfg.trial_orders:
             tvc_cmd.extend(["--trial-order", trial_order])
+        if flagged_csv:
+            tvc_cmd.extend(["--flagged-flies-csv", flagged_csv])
         if not matrix_cfg.include_hexanol:
             tvc_cmd.append("--exclude-hexanol")
         if matrix_cfg.overwrite:
@@ -1382,6 +1385,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         data = yaml.safe_load(fh) or {}
 
     settings = load_settings(config_path)
+    set_protocol(settings.protocol)
 
     dataset_cfg = data.get("main_directories")
     dataset_roots: Sequence[str] | None = None

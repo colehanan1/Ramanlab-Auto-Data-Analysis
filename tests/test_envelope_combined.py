@@ -158,6 +158,10 @@ def test_testing_aliases_follow_control_ordering():
             for alias in aliases[control]:
                 assert ec._display_odor(alias, label) == odor
 
+    for trial, odor in schedules["Hex-Control"].items():
+        label = f"testing_{trial}"
+        assert ec._display_odor("Hex-Control-24", label) == odor
+
 
 def test_training_schedule_matches_spec():
     """Training trials map to dataset-specific odors for every canonical dataset."""
@@ -184,6 +188,16 @@ def test_training_schedule_matches_spec():
             8: "Ethyl Butyrate",
         },
         "Hex-Control": {
+            1: "Hexanol",
+            2: "Hexanol",
+            3: "Hexanol",
+            4: "Hexanol",
+            5: "Apple Cider Vinegar",
+            6: "Hexanol",
+            7: "Apple Cider Vinegar",
+            8: "Hexanol",
+        },
+        "Hex-Control-24": {
             1: "Hexanol",
             2: "Hexanol",
             3: "Hexanol",

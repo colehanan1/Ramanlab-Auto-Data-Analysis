@@ -49,6 +49,17 @@ plt.rcParams.update(
 
 logger = logging.getLogger(__name__)
 
+# ---------------------------------------------------------------------------
+# Protocol selector – set once at pipeline start via set_protocol()
+# ---------------------------------------------------------------------------
+_ACTIVE_PROTOCOL: str = "legacy"
+
+
+def set_protocol(protocol: str) -> None:
+    """Set the active experiment protocol ('legacy' or 'v2')."""
+    global _ACTIVE_PROTOCOL
+    _ACTIVE_PROTOCOL = protocol
+
 
 # ---------------------------------------------------------------------------
 # Canonical mappings shared across visualisations
@@ -81,10 +92,13 @@ ODOR_CANON: Mapping[str, str] = {
     "eb-training(no-operant)": "EB-Training(No-Operant)",
     "eb-training-no-operant": "EB-Training(No-Operant)",
     "hex_control": "Hex-Control",
+    "hex_control_24": "Hex-Control-24",
     "hexanol control": "Hex-Control",
     "hex-control": "Hex-Control",
+    "hex-control-24": "Hex-Control-24",
     "hex-training": "Hex-Training",
     "hex-training-24": "Hex-Training-24",
+    "hex control 24": "Hex-Control-24",
     "hex training 24": "Hex-Training-24",
     "acv-training": "ACV-Training",
     "air-training": "AIR-Training",
@@ -111,6 +125,29 @@ ODOR_CANON: Mapping[str, str] = {
     "opto_benz_1": "Benz-Training",
     "opto_eb_6_training": "EB-Training(No-Operant)",
     "10s_odor_benz": "10s_Odor_Benz",
+    # v2 new datasets
+    "cit-training": "Cit-Training",
+    "cit_training": "Cit-Training",
+    "cit training": "Cit-Training",
+    "cit-control": "Cit-Control",
+    "cit_control": "Cit-Control",
+    "cit control": "Cit-Control",
+    "citral": "Cit-Training",
+    "lin-training": "Lin-Training",
+    "lin_training": "Lin-Training",
+    "lin training": "Lin-Training",
+    "lin-control": "Lin-Control",
+    "lin_control": "Lin-Control",
+    "lin control": "Lin-Control",
+    "linalool": "Lin-Training",
+    "acv-control": "ACV-Control",
+    "acv_control": "ACV-Control",
+    "acv control": "ACV-Control",
+    "3oct-control": "3Oct-Control",
+    "3oct_control": "3Oct-Control",
+    "3oct control": "3Oct-Control",
+    "3oct-training": "3Oct-Training",
+    "3oct_training": "3Oct-Training",
 }
 
 DISPLAY_LABEL = {
@@ -121,6 +158,7 @@ DISPLAY_LABEL = {
     "EB": "Ethyl Butyrate",
     "EB-Control": "Ethyl Butyrate",
     "Hex-Control": "Hexanol",
+    "Hex-Control-24": "Hexanol",
     "Benz-Control": "Benzaldehyde",
     "Benz-Training": "Benzaldehyde",
     "Benz-Training-24": "Benzaldehyde",
@@ -131,6 +169,14 @@ DISPLAY_LABEL = {
     "Hex-Training-24": "Hexanol",
     "AIR-Training": "AIR",
     "3OCT-Training": "3-Octonol",
+    # v2 new datasets
+    "Cit-Training": "Citral",
+    "Cit-Control": "Citral",
+    "Lin-Training": "Linalool",
+    "Lin-Control": "Linalool",
+    "ACV-Control": "Apple Cider Vinegar",
+    "3Oct-Training": "3-Octonol",
+    "3Oct-Control": "3-Octonol",
 }
 
 ODOR_ORDER = [
@@ -149,8 +195,17 @@ ODOR_ORDER = [
     "Hex-Training",
     "Hex-Training-24",
     "Hex-Control",
+    "Hex-Control-24",
     "AIR-Training",
     "3OCT-Training",
+    # v2 new datasets
+    "Cit-Training",
+    "Cit-Control",
+    "Lin-Training",
+    "Lin-Control",
+    "ACV-Control",
+    "3Oct-Training",
+    "3Oct-Control",
 ]
 
 REACTION_RATE_ODOR_ORDER = [
@@ -172,7 +227,13 @@ HEXANOL_LABEL = "Hexanol"
 PRIMARY_ODOR_LABEL = {
     "EB-Control": "Ethyl Butyrate",
     "Hex-Control": HEXANOL_LABEL,
+    "Hex-Control-24": HEXANOL_LABEL,
     "Benz-Control": "Benzaldehyde",
+    # v2 datasets
+    "Cit-Control": "Citral",
+    "Lin-Control": "Linalool",
+    "ACV-Control": "Apple Cider Vinegar",
+    "3Oct-Control": "3-Octonol",
 }
 
 TRAINING_ODOR_SCHEDULE_ACV = {
@@ -251,6 +312,7 @@ TRAINING_ODOR_SCHEDULE_3OCT = {
 }
 
 TESTING_DATASET_ALIAS = {
+    "Hex-Control-24": "Hex-Control",
     "Hex-Training": "Hex-Control",
     "Hex-Training-24": "Hex-Control",
     "EB-Training": "EB-Control",
@@ -259,6 +321,12 @@ TESTING_DATASET_ALIAS = {
     "Benz-Training-24": "Benz-Control",
     "ACV-Training": "ACV",
     "3OCT-Training": "3OCT-Training",
+    # v2 datasets – training aliases to their control counterpart
+    "Cit-Training": "Cit-Control",
+    "Lin-Training": "Lin-Control",
+    "ACV-Control": "ACV-Control",
+    "3Oct-Training": "3Oct-Control",
+    "3Oct-Control": "3Oct-Control",
 }
 NON_REACTIVE_SPAN_PX = 7.5
 TRAINING_EXTENDED_ODOR_TRIALS = frozenset({4, 6, 8})
@@ -407,8 +475,10 @@ def _trial_odor_window_seconds(
 
     on_cmd = float(odor_on_s)
     off_cmd = float(odor_off_s)
-    if trial_type == "training" and _trial_num(trial_label) in TRAINING_EXTENDED_ODOR_TRIALS:
-        off_cmd = TRAINING_EXTENDED_ODOR_OFF_S
+    # v2 protocol: all trials use standard 30s odor, no extended trials
+    if _ACTIVE_PROTOCOL == "legacy":
+        if trial_type == "training" and _trial_num(trial_label) in TRAINING_EXTENDED_ODOR_TRIALS:
+            off_cmd = TRAINING_EXTENDED_ODOR_OFF_S
 
     off_cmd = max(off_cmd, on_cmd)
     latency = max(float(odor_latency_s), 0.0)
@@ -419,6 +489,9 @@ def _trial_light_start_seconds(*, trial_label: str, trial_type: str) -> float | 
     """Return light pulsing start time (seconds) for training trials."""
 
     if trial_type != "training":
+        return None
+    # v2 protocol: no variable light start times (light schedule is in config)
+    if _ACTIVE_PROTOCOL == "v2":
         return None
     trial_num = _trial_num(trial_label)
     if trial_num in LIGHT_START_EARLY_TRIALS:
@@ -431,6 +504,9 @@ def _trial_light_start_seconds(*, trial_label: str, trial_type: str) -> float | 
 def _is_discriminate_odor_trial(*, trial_label: str, trial_type: str) -> bool:
     """Return True for training trials using the discriminate-only odor condition."""
 
+    # v2 protocol: no discriminate odor trials (all 6 training trials are same odor)
+    if _ACTIVE_PROTOCOL == "v2":
+        return False
     if trial_type != "training":
         return False
     return _trial_num(trial_label) in TRAINING_DISCRIMINATE_ODOR_TRIALS
@@ -443,7 +519,35 @@ def _trained_label(dataset_canon: str) -> str:
     )
 
 
+def _display_odor_v2(dataset_canon: str, trial_label: str) -> str:
+    """V2 protocol: extract odor name from trial label suffix or fall back to dataset label."""
+    label_str = str(trial_label)
+    # Try to extract odor suffix from label like "testing_2_Hexanol" or "training_1_ACV"
+    match = re.match(r"(?:testing|training)_\d+_(.+)", label_str, re.IGNORECASE)
+    if match:
+        odor_suffix = match.group(1)
+        if odor_suffix.lower() == "lightonly":
+            return "Light Only"
+        # Map through DISPLAY_LABEL for consistency
+        return DISPLAY_LABEL.get(odor_suffix, odor_suffix)
+
+    # No suffix: for training trials, return the trained odor
+    dataset_key = _odor_dataset_key(dataset_canon)
+    label_lower = label_str.lower()
+    if "training" in label_lower:
+        return DISPLAY_LABEL.get(dataset_key, dataset_key)
+
+    # testing_9 without suffix → Light Only
+    number = _trial_num(label_str)
+    if number == 9 and "testing" in label_lower:
+        return "Light Only"
+
+    return DISPLAY_LABEL.get(dataset_key, dataset_key)
+
+
 def _display_odor(dataset_canon: str, trial_label: str) -> str:
+    if _ACTIVE_PROTOCOL == "v2":
+        return _display_odor_v2(dataset_canon, trial_label)
     dataset_key = _odor_dataset_key(dataset_canon)
     number = _trial_num(trial_label)
     label_lower = str(trial_label).lower()
@@ -466,7 +570,7 @@ def _display_odor(dataset_canon: str, trial_label: str) -> str:
             odor_name = TRAINING_ODOR_SCHEDULE_EB_6TRAINING.get(number)
             if odor_name:
                 return odor_name
-        elif dataset_key in ("Hex-Training", "Hex-Training-24", "Hex-Control"):
+        elif dataset_key in ("Hex-Training", "Hex-Training-24", "Hex-Control", "Hex-Control-24"):
             odor_name = TRAINING_ODOR_SCHEDULE_HEX.get(number)
             if odor_name:
                 return odor_name
@@ -1182,9 +1286,21 @@ def _is_testing_11_label(label: object) -> bool:
     return "testing" in str(label).lower() and _trial_num(label) == 11
 
 
+def _is_testing_9_label(label: object) -> bool:
+    """Return True when the label looks like testing trial 9 (v2 light-only)."""
+    return "testing" in str(label).lower() and _trial_num(label) == 9
+
+
+def _is_light_only_label(label: object) -> bool:
+    """Return True for light-only trials: testing_11 (legacy) or testing_9 (v2)."""
+    if _ACTIVE_PROTOCOL == "v2":
+        return _is_testing_9_label(label)
+    return _is_testing_11_label(label)
+
+
 def _drop_testing_11(trials: Sequence[str]) -> list[str]:
-    """Remove testing trial 11 from reaction prediction plots."""
-    cleaned = [trial for trial in trials if not _is_testing_11_label(trial)]
+    """Remove testing trial 11 (legacy) or testing trial 9 (v2) from reaction prediction plots."""
+    cleaned = [trial for trial in trials if not _is_light_only_label(trial)]
     return cleaned
 
 

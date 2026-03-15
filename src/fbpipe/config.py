@@ -307,7 +307,7 @@ class Settings:
     use_optical_flow: bool = True
     flow_skip_edge: int = 10
     max_flies: int = 4
-    max_proboscis_tracks: int = 4
+    max_proboscis_tracks: int = 4  # Backward-compatible config field; YOLO now mirrors the initial eye count.
     pair_rebind_ratio: float = 0.20
     zero_iou_epsilon: float = 1e-8
 
@@ -327,6 +327,9 @@ class Settings:
 
     # Pseudolabel mining + export
     pseudolabel: PseudolabelSettings = field(default_factory=PseudolabelSettings)
+
+    # Protocol version: "legacy" (old flys/) or "v2" (new flys_New/)
+    protocol: str = "legacy"
 
 def _get(d: Dict[str, Any], key: str, default: Any):
     return d.get(key, default)
@@ -651,4 +654,5 @@ def load_settings(config_path: str | Path) -> Settings:
         tracking=tracking,
         yolo_curation=yolo_curation,
         pseudolabel=pseudolabel,
+        protocol=str(_get(data, "protocol", "legacy")),
     )

@@ -72,6 +72,10 @@ TRAINING_CONTROL_PAIRS = {
     "EB-Training": "EB-Control",
     "Hex-Training": "Hex-Control",
     "Benz-Training": "Benz-Control",
+    "ACV-Training": "ACV-Control",
+    "3Oct-Training": "3Oct-Control",
+    "Cit-Training": "Cit-Control",
+    "Lin-Training": "Lin-Control",
 }
 
 _RC_CONTEXT = {
@@ -374,6 +378,20 @@ def generate_training_vs_control_matrices(cfg: SpreadsheetMatrixConfig) -> None:
     df["trial"] = df["trial_label"]
     df["trial_num"] = df["trial"].apply(_trial_num)
     df["during_hit"] = df["prediction"].fillna(0).astype(int)
+    df = _normalise_fly_columns(df)
+
+    # --- Exclude flagged flies from matrix (before heatmap is built) ---
+    df["_non_reactive"] = compute_non_reactive_flags(
+        df, flagged_flies_csv=cfg.flagged_flies_csv
+    )
+    flagged_mask = df["_non_reactive"].astype(bool)
+    if flagged_mask.any():
+        flagged = df.loc[flagged_mask, ["dataset_canon", "fly", "fly_number"]].drop_duplicates()
+        summaries = ", ".join(
+            f"{r.dataset_canon}::{r.fly}::{r.fly_number}" for r in flagged.itertuples(index=False)
+        )
+        print(f"[INFO] Excluding non-reactive flies from matrix: {summaries}")
+        df = df.loc[~flagged_mask].copy()
 
     # Same colormap as reaction_matrix_from_spreadsheet: white/black
     cmap = ListedColormap(["white", "black"])
@@ -551,6 +569,8 @@ def main(argv: Sequence[str] | None = None) -> None:
     p.add_argument("--trial-order", action="append", choices=("observed", "trained-first"))
     p.add_argument("--exclude-hexanol", action="store_true")
     p.add_argument("--overwrite", action="store_true", default=True)
+    p.add_argument("--flagged-flies-csv", type=str, default="",
+                   help="Path to flagged-flies-truth CSV for excluding non-reactive flies.")
     args = p.parse_args(argv)
 
     trial_orders = tuple(args.trial_order) if args.trial_order else ("observed", "trained-first")
@@ -566,6 +586,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         trial_orders=trial_orders,
         include_hexanol=not args.exclude_hexanol,
         overwrite=args.overwrite,
+        flagged_flies_csv=args.flagged_flies_csv or "",
     )
 
     generate_training_vs_control_matrices(cfg)

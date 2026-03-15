@@ -147,9 +147,9 @@ LOW_MAX_FLAG_THRESHOLD_PX = 50.0
 TIME_COLS = ["time_s", "time_seconds", "t_s", "time"]
 TIMESTAMP_COLS = ["UTC_ISO", "Timestamp", "Number", "MonoNs"]
 FRAME_COLS = ["Frame", "FrameNumber", "Frame Number"]
-TRIAL_REGEX = re.compile(r"(testing|training)_(\d+)", re.IGNORECASE)
-TESTING_REGEX = re.compile(r"testing_(\d+)", re.IGNORECASE)
-TRAINING_REGEX = re.compile(r"training_(\d+)", re.IGNORECASE)
+TRIAL_REGEX = re.compile(r"(testing|training)_(\d+)(?:_(.+))?", re.IGNORECASE)
+TESTING_REGEX = re.compile(r"testing_(\d+)(?:_(.+))?", re.IGNORECASE)
+TRAINING_REGEX = re.compile(r"training_(\d+)(?:_(.+))?", re.IGNORECASE)
 FLY_SLOT_REGEX = re.compile(r"(fly\d+)_distances", re.IGNORECASE)
 FLY_NUMBER_REGEX = re.compile(r"fly\s*[_-]?\s*(\d+)", re.IGNORECASE)
 
@@ -436,6 +436,7 @@ ODOR_CANON = {
     "eb-training(no-operant)": "EB-Training(No-Operant)",
     "eb-training-no-operant": "EB-Training(No-Operant)",
     "hex-control": "Hex-Control",
+    "hex-control-24": "Hex-Control-24",
     "hex-training": "Hex-Training",
     "hex-training-24": "Hex-Training-24",
     # ── Legacy / alternate spellings → data folder names ──
@@ -451,7 +452,9 @@ ODOR_CANON = {
     "eb_control": "EB-Control",
     "eb control": "EB-Control",
     "hex_control": "Hex-Control",
+    "hex_control_24": "Hex-Control-24",
     "hex control": "Hex-Control",
+    "hex control 24": "Hex-Control-24",
     "benz_control": "Benz-Control",
     "benz control": "Benz-Control",
     # ── Loose odor names ──
@@ -500,6 +503,7 @@ DISPLAY_LABEL = {
     "EB": "Ethyl Butyrate",
     "EB-Control": "Ethyl Butyrate",
     "Hex-Control": "Hexanol",
+    "Hex-Control-24": "Hexanol",
     "Benz-Control": "Benzaldehyde",
     "Benz-Training": "Benzaldehyde",
     "Benz-Training-24": "Benzaldehyde",
@@ -524,6 +528,7 @@ HEXANOL = "Hexanol"
 PRIMARY_ODOR_LABEL = {
     "EB-Control": "Ethyl Butyrate",
     "Hex-Control": HEXANOL,
+    "Hex-Control-24": HEXANOL,
     "Benz-Control": "Benzaldehyde",
 }
 
@@ -540,6 +545,16 @@ TRAINING_ODOR_SCHEDULE_DEFAULT = {
 
 TRAINING_ODOR_SCHEDULE_OVERRIDES = {
     "Hex-Control": {
+        1: HEXANOL,
+        2: HEXANOL,
+        3: HEXANOL,
+        4: HEXANOL,
+        5: "Apple Cider Vinegar",
+        6: HEXANOL,
+        7: "Apple Cider Vinegar",
+        8: HEXANOL,
+    },
+    "Hex-Control-24": {
         1: HEXANOL,
         2: HEXANOL,
         3: HEXANOL,
@@ -670,6 +685,7 @@ TRAINING_ODOR_SCHEDULE_OVERRIDES = {
 }
 
 TESTING_DATASET_ALIAS = {
+    "Hex-Control-24": "Hex-Control",
     "Hex-Training": "Hex-Control",
     "Hex-Training-24": "Hex-Control",
     "EB-Training": "EB-Control",
@@ -1074,7 +1090,10 @@ def _trial_label(path: Path) -> str:
         chain = f"{path.stem}/" + "/".join(parent.name for parent in path.parents)
         match = TRIAL_REGEX.search(chain)
     if match:
-        return f"{match.group(1).lower()}_{match.group(2)}"
+        label = f"{match.group(1).lower()}_{match.group(2)}"
+        if match.group(3):
+            label += f"_{match.group(3)}"
+        return label
     trailing = re.search(r"(\d+)(?:_[a-z]+)?$", path.stem, re.IGNORECASE)
     if trailing:
         return f"{_infer_category(path)}_{trailing.group(1)}"

@@ -257,8 +257,7 @@ config/config.yaml` automatically fans the merged CSV into per-fly files.
 
    | Key | Purpose |
    | --- | --- |
-   | `max_flies` | Number of eye anchors (slots) to track; defaults to 4. |
-   | `max_proboscis_tracks` | Number of proboscis tracks kept after confidence filtering. |
+   | `max_flies` | Upper bound on eye anchors (slots). The YOLO step scans the first 5 frames and uses the detected eye count for both eye slots and proboscis tracks. |
    | `pair_rebind_ratio` | Fraction of the frame diagonal used as the rebinding radius when an eye temporarily loses its paired proboscis. |
    | `zero_iou_epsilon` | Numeric tolerance for enforcing non-overlapping eye anchors. |
 

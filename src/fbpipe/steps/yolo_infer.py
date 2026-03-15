@@ -106,6 +106,34 @@ def _scan_initial_fly_count(
     return len(eye_mgr.anchor_ids)
 
 
+def _active_proboscis_track_limit(active_max_flies: int) -> int:
+    """Keep proboscis capacity aligned with the eye slots inferred for the video."""
+
+    return max(0, int(active_max_flies))
+
+
+def _limit_proboscis_detections(
+    boxes: np.ndarray,
+    scores: np.ndarray,
+    active_max_flies: int,
+) -> Tuple[np.ndarray, np.ndarray]:
+    limit = _active_proboscis_track_limit(active_max_flies)
+    if boxes.shape[0] == 0 or limit <= 0:
+        return np.zeros((0, 4), np.float32), np.zeros((0,), np.float32)
+
+    order = np.argsort(-scores)[:limit]
+    return boxes[order], scores[order]
+
+
+def _build_proboscis_tracker(settings: Settings, active_max_flies: int) -> MultiObjectTracker:
+    return MultiObjectTracker(
+        iou_thres=settings.iou_match_thres,
+        max_age=settings.max_age,
+        ema_alpha=settings.ema_alpha,
+        max_tracks=_active_proboscis_track_limit(active_max_flies),
+    )
+
+
 def _process_frame(
     frame,
     frame_number,
@@ -163,10 +191,7 @@ def _process_frame(
 
     cls8_boxes = dets.get(PROBOSCIS_CLASS, {}).get("boxes", np.zeros((0, 4), np.float32))
     cls8_scores = dets.get(PROBOSCIS_CLASS, {}).get("scores", np.zeros((0,), np.float32))
-    if cls8_boxes.shape[0] > 0:
-        order = np.argsort(-cls8_scores)[: settings.max_proboscis_tracks]
-        cls8_boxes = cls8_boxes[order]
-        cls8_scores = cls8_scores[order]
+    cls8_boxes, cls8_scores = _limit_proboscis_detections(cls8_boxes, cls8_scores, active_max_flies)
 
     tracks8 = cls8_tracker.step(cls8_boxes, cls8_scores)
 
@@ -503,12 +528,7 @@ def main(cfg: Settings):
                     for cls in SINGLE_TRACK_CLASSES
                 }
                 eye_mgr = EyeAnchorManager(max_eyes=active_max_flies, zero_iou_eps=cfg.zero_iou_epsilon)
-                cls8_tracker = MultiObjectTracker(
-                    iou_thres=cfg.iou_match_thres,
-                    max_age=cfg.max_age,
-                    ema_alpha=cfg.ema_alpha,
-                    max_tracks=cfg.max_proboscis_tracks,
-                )
+                cls8_tracker = _build_proboscis_tracker(cfg, active_max_flies)
                 pairer = StablePairing(max_pairs=active_max_flies)
 
                 target_w, target_h = (1080, 1080) if (w, h) != (1080, 1080) else (w, h)

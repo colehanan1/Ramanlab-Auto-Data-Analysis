@@ -66,7 +66,7 @@ AFTER_FRAMES = 1200
 
 TIMESTAMP_CANDIDATES = ("UTC_ISO", "Timestamp", "Number", "MonoNs")
 FRAME_CANDIDATES = ("Frame", "FrameNumber", "Frame Number")
-TRIAL_REGEX = re.compile(r"(testing|training)_(\d+)", re.IGNORECASE)
+TRIAL_REGEX = re.compile(r"(testing|training)_(\d+)(?:_(.+))?", re.IGNORECASE)
 FLY_SLOT_REGEX = re.compile(r"(fly\d+)_distances", re.IGNORECASE)
 FLY_NUMBER_REGEX = re.compile(r"fly\s*[_-]?\s*(\d+)", re.IGNORECASE)
 
@@ -248,7 +248,10 @@ def _trial_label(path: Path) -> str:
         match = TRIAL_REGEX.search(chain)
     if match:
         kind, num = match.group(1).lower(), match.group(2)
-        return f"{kind}_{num}"
+        label = f"{kind}_{num}"
+        if match.group(3):
+            label += f"_{match.group(3)}"
+        return label
 
     trailing = re.search(r"(\d+)$", path.stem)
     if trailing:
