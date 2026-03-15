@@ -31,6 +31,8 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+import re as _re
+
 from scripts.analysis.envelope_visuals import (
     DISPLAY_LABEL,
     ODOR_ORDER,
@@ -54,6 +56,15 @@ from scripts.analysis.envelope_visuals import (
     _trial_order_for,
     _drop_testing_11,
 )
+
+
+def _normalise_trial_label(label: str) -> str:
+    """Strip fly-specific suffixes from trial labels.
+
+    ``testing_1_fly1_distances_fly1_angle_distance_rms_envelope`` → ``testing_1``
+    """
+    m = _re.match(r"(testing_\d+)", str(label))
+    return m.group(1) if m else str(label)
 
 
 _RC_CONTEXT = {
@@ -150,10 +161,14 @@ def _load_predictions(
         )
 
     df["dataset_canon"] = df["dataset"].map(_canon_dataset)
-    df["trial"] = df["trial_label"]
+    df["trial"] = df["trial_label"].apply(_normalise_trial_label)
     df["trial_num"] = df["trial"].apply(_trial_num)
     df["during_hit"] = df["prediction"].fillna(0).astype(int)
     df["after_hit"] = df["during_hit"]
+    # Drop duplicate rows created by trial label normalization (e.g.
+    # testing_1_fly1_distances_... and testing_1_fly1_angle_... both
+    # map to testing_1 with identical predictions).
+    df = df.drop_duplicates(subset=["dataset", "fly", "fly_number", "trial"], keep="first")
     return df
 
 

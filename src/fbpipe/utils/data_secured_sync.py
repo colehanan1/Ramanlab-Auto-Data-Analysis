@@ -143,9 +143,24 @@ def _write_files_from(sample_files: Sequence[str]) -> tempfile.TemporaryDirector
     return tmpdir
 
 
+_SYNC_TIMEOUT_SECONDS = 4 * 60 * 60  # 4 hours hard limit per destination
+
+
 def _run_command(label: str, cmd: Sequence[str]) -> bool:
     logger.info("%s sync command: %s", label, " ".join(cmd))
-    result = subprocess.run(list(cmd), check=False)
+    try:
+        result = subprocess.run(
+            list(cmd),
+            check=False,
+            timeout=_SYNC_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired:
+        logger.error(
+            "%s sync timed out after %d seconds. The process was killed.",
+            label,
+            _SYNC_TIMEOUT_SECONDS,
+        )
+        return False
     if result.returncode == 0:
         logger.info("%s sync completed.", label)
         return True
