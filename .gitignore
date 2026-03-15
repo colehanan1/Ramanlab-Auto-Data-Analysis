@@ -93,7 +93,6 @@ docs/claude-output/
 
 # Pi experiment code (lives on Pi, tracked separately)
 PiCode/
-HomeAssistant/
 # Local combined scripts (do not track)
 combinedv2_1.py
 combinedv2_1_pi1.py
