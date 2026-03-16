@@ -93,13 +93,18 @@ ODOR_CANON: Mapping[str, str] = {
     "eb-training-no-operant": "EB-Training(No-Operant)",
     "hex_control": "Hex-Control",
     "hex_control_24": "Hex-Control-24",
+    "hex_control_36": "Hex-Control-36",
     "hexanol control": "Hex-Control",
     "hex-control": "Hex-Control",
     "hex-control-24": "Hex-Control-24",
+    "hex-control-36": "Hex-Control-36",
     "hex-training": "Hex-Training",
     "hex-training-24": "Hex-Training-24",
+    "hex-training-36": "Hex-Training-36",
     "hex control 24": "Hex-Control-24",
+    "hex control 36": "Hex-Control-36",
     "hex training 24": "Hex-Training-24",
+    "hex training 36": "Hex-Training-36",
     "acv-training": "ACV-Training",
     "air-training": "AIR-Training",
     "3oct-training": "3OCT-Training",
@@ -159,6 +164,7 @@ DISPLAY_LABEL = {
     "EB-Control": "Ethyl Butyrate",
     "Hex-Control": "Hexanol",
     "Hex-Control-24": "Hexanol",
+    "Hex-Control-36": "Hexanol",
     "Benz-Control": "Benzaldehyde",
     "Benz-Training": "Benzaldehyde",
     "Benz-Training-24": "Benzaldehyde",
@@ -167,6 +173,7 @@ DISPLAY_LABEL = {
     "ACV-Training": "Apple Cider Vinegar",
     "Hex-Training": "Hexanol",
     "Hex-Training-24": "Hexanol",
+    "Hex-Training-36": "Hexanol",
     "AIR-Training": "AIR",
     "3OCT-Training": "3-Octonol",
     # v2 new datasets
@@ -194,8 +201,10 @@ ODOR_ORDER = [
     "Benz-Control",
     "Hex-Training",
     "Hex-Training-24",
+    "Hex-Training-36",
     "Hex-Control",
     "Hex-Control-24",
+    "Hex-Control-36",
     "AIR-Training",
     "3OCT-Training",
     # v2 new datasets
@@ -228,6 +237,7 @@ PRIMARY_ODOR_LABEL = {
     "EB-Control": "Ethyl Butyrate",
     "Hex-Control": HEXANOL_LABEL,
     "Hex-Control-24": HEXANOL_LABEL,
+    "Hex-Control-36": HEXANOL_LABEL,
     "Benz-Control": "Benzaldehyde",
     # v2 datasets
     "Cit-Control": "Citral",
@@ -312,9 +322,11 @@ TRAINING_ODOR_SCHEDULE_3OCT = {
 }
 
 TESTING_DATASET_ALIAS = {
+    "Hex-Control-36": "Hex-Control",
     "Hex-Control-24": "Hex-Control",
     "Hex-Training": "Hex-Control",
     "Hex-Training-24": "Hex-Control",
+    "Hex-Training-36": "Hex-Control",
     "EB-Training": "EB-Control",
     "EB-Training(No-Operant)": "EB-Control",
     "Benz-Training": "Benz-Control",
@@ -570,7 +582,14 @@ def _display_odor(dataset_canon: str, trial_label: str) -> str:
             odor_name = TRAINING_ODOR_SCHEDULE_EB_6TRAINING.get(number)
             if odor_name:
                 return odor_name
-        elif dataset_key in ("Hex-Training", "Hex-Training-24", "Hex-Control", "Hex-Control-24"):
+        elif dataset_key in (
+            "Hex-Training",
+            "Hex-Training-24",
+            "Hex-Training-36",
+            "Hex-Control",
+            "Hex-Control-24",
+            "Hex-Control-36",
+        ):
             odor_name = TRAINING_ODOR_SCHEDULE_HEX.get(number)
             if odor_name:
                 return odor_name

@@ -1,23 +1,27 @@
 #!/usr/bin/env python3
-"""Generate control vs trained PER% comparison bar plots for Hexanol and EB datasets."""
+"""Generate control-vs-trained PER% bar plots from binary reaction CSVs."""
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib import font_manager
+import numpy as np
+import pandas as pd
 from PIL import Image
+
 try:
     from pptx import Presentation
 except Exception:  # pragma: no cover
     Presentation = None
-import numpy as np
 
 ROOT = Path("/home/ramanlab/Documents/cole")
 OUT_DIR = ROOT / "Data/imagesForFigures/imagesForOptoHEXTesting"
+MATRIX_DIR = ROOT / "Results/Opto-Fly-Figures/Matrix-PER-Reactions-Model"
 
 BAR_ORDER = [
     ("3-Octonol", "3-Octanol"),
@@ -27,6 +31,52 @@ BAR_ORDER = [
     ("Ethyl Butyrate", "Ethyl Butyrate"),
     ("Hexanol", "Hexanol"),
     ("Linalool", "Linalool"),
+]
+
+
+@dataclass(frozen=True)
+class PairSpec:
+    title: str
+    trained_dataset: str
+    control_dataset: str
+    trained_label: str
+    control_label: str
+    out_name: str
+
+
+PAIR_SPECS = [
+    PairSpec(
+        title="PER% — Hexanol Trained vs Control",
+        trained_dataset="Hex-Training",
+        control_dataset="Hex-Control",
+        trained_label="Trained",
+        control_label="Control",
+        out_name="hex_trained_vs_hex_control_percents.png",
+    ),
+    PairSpec(
+        title="PER% — Ethyl Butyrate Trained vs Control",
+        trained_dataset="EB-Training",
+        control_dataset="EB-Control",
+        trained_label="Trained",
+        control_label="Control",
+        out_name="eb_trained_vs_eb_control_percents.png",
+    ),
+    PairSpec(
+        title="PER% — Hexanol Trained-24 vs Control-24",
+        trained_dataset="Hex-Training-24",
+        control_dataset="Hex-Control-24",
+        trained_label="Trained-24",
+        control_label="Control-24",
+        out_name="hex_trained_24_vs_hex_control_24_percents.png",
+    ),
+    PairSpec(
+        title="PER% — Hexanol Trained-36 vs Control-36",
+        trained_dataset="Hex-Training-36",
+        control_dataset="Hex-Control-36",
+        trained_label="Trained-36",
+        control_label="Control-36",
+        out_name="hex_trained_36_vs_hex_control_36_percents.png",
+    ),
 ]
 
 
@@ -43,6 +93,50 @@ def _register_arial() -> None:
         path = Path(font_path)
         if path.exists():
             font_manager.fontManager.addfont(str(path))
+
+
+def _binary_csv_path(dataset: str) -> Path | None:
+    dataset_dir = MATRIX_DIR / dataset
+    candidates = sorted(dataset_dir.glob(f"binary_reactions_{dataset}*.csv"))
+    if not candidates:
+        return None
+    for candidate in candidates:
+        if "unordered" in candidate.name:
+            return candidate
+    return candidates[0]
+
+
+def _load_dataset_rates(dataset: str) -> tuple[dict[str, float], int] | tuple[None, None]:
+    csv_path = _binary_csv_path(dataset)
+    if csv_path is None:
+        return None, None
+
+    try:
+        df = pd.read_csv(csv_path)
+    except Exception as exc:
+        print(f"[WARN] Failed to read {csv_path}: {exc}")
+        return None, None
+
+    if df.empty or "odor_sent" not in df.columns or "during_hit" not in df.columns:
+        print(f"[WARN] Binary reactions CSV missing usable data: {csv_path}")
+        return None, None
+
+    stats = (
+        df.groupby("odor_sent")["during_hit"]
+        .agg(num_reactions="sum", num_trials="size")
+        .reset_index()
+    )
+    stats["rate"] = np.where(
+        stats["num_trials"] > 0,
+        (stats["num_reactions"] / stats["num_trials"]) * 100.0,
+        0.0,
+    )
+    values = {str(row["odor_sent"]): float(row["rate"]) for _, row in stats.iterrows()}
+    if {"fly", "fly_number"}.issubset(df.columns):
+        n_flies = int(df[["fly", "fly_number"]].drop_duplicates().shape[0])
+    else:
+        n_flies = 0
+    return values, n_flies
 
 
 def plot_comparison(
@@ -64,7 +158,7 @@ def plot_comparison(
     width = 0.36
 
     fig, ax = plt.subplots(figsize=(11, 6))
-    bars_control = ax.bar(
+    ax.bar(
         x - width / 2,
         control,
         width,
@@ -73,7 +167,7 @@ def plot_comparison(
         linewidth=0.8,
         label=f"{control_label} (n = {control_n})",
     )
-    bars_trained = ax.bar(
+    ax.bar(
         x + width / 2,
         trained,
         width,
@@ -162,66 +256,27 @@ def main() -> None:
             "svg.fonttype": "none",
         }
     )
+    OUT_DIR.mkdir(parents=True, exist_ok=True)
 
-    # Hex trained vs Hex control
-    hex_trained = {
-        "Hexanol": 62.0,
-        "Ethyl Butyrate": 35.0,
-        "Apple Cider Vinegar": 13.0,
-        "3-Octonol": 30.0,
-        "Benzaldehyde": 5.0,
-        "Citral": 5.0,
-        "Linalool": 35.0,
-    }
-    hex_control = {
-        "Hexanol": 11.0,
-        "Apple Cider Vinegar": 8.0,
-        "Benzaldehyde": 0.0,
-        "3-Octonol": 16.0,
-        "Ethyl Butyrate": 83.0,
-        "Citral": 0.0,
-        "Linalool": 33.0,
-    }
-    plot_comparison(
-        title="PER% — Hexanol Trained vs Control",
-        trained_values=hex_trained,
-        control_values=hex_control,
-        trained_n=20,
-        control_n=6,
-        out_path=OUT_DIR / "hex_trained_vs_hex_control_percents.png",
-        trained_label="Trained",
-        control_label="Control",
-    )
-
-    # EB trained vs EB control
-    eb_trained = {
-        "Hexanol": 50.0,
-        "Ethyl Butyrate": 65.0,
-        "Apple Cider Vinegar": 0.0,
-        "3-Octonol": 32.0,
-        "Benzaldehyde": 11.0,
-        "Citral": 5.0,
-        "Linalool": 16.0,
-    }
-    eb_control = {
-        "Ethyl Butyrate": 50.0,
-        "Hexanol": 39.0,
-        "Apple Cider Vinegar": 0.0,
-        "3-Octonol": 36.0,
-        "Benzaldehyde": 21.0,
-        "Citral": 14.0,
-        "Linalool": 0.0,
-    }
-    plot_comparison(
-        title="PER% — Ethyl Butyrate Trained vs Control",
-        trained_values=eb_trained,
-        control_values=eb_control,
-        trained_n=19,
-        control_n=14,
-        out_path=OUT_DIR / "eb_trained_vs_eb_control_percents.png",
-        trained_label="Trained",
-        control_label="Control",
-    )
+    for spec in PAIR_SPECS:
+        trained_values, trained_n = _load_dataset_rates(spec.trained_dataset)
+        control_values, control_n = _load_dataset_rates(spec.control_dataset)
+        if trained_values is None or control_values is None:
+            print(
+                f"[WARN] Skipping {spec.trained_dataset} vs {spec.control_dataset}: "
+                "missing binary reaction CSVs."
+            )
+            continue
+        plot_comparison(
+            title=spec.title,
+            trained_values=trained_values,
+            control_values=control_values,
+            trained_n=trained_n or 0,
+            control_n=control_n or 0,
+            out_path=OUT_DIR / spec.out_name,
+            trained_label=spec.trained_label,
+            control_label=spec.control_label,
+        )
 
 
 if __name__ == "__main__":

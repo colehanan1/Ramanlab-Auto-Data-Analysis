@@ -437,8 +437,10 @@ ODOR_CANON = {
     "eb-training-no-operant": "EB-Training(No-Operant)",
     "hex-control": "Hex-Control",
     "hex-control-24": "Hex-Control-24",
+    "hex-control-36": "Hex-Control-36",
     "hex-training": "Hex-Training",
     "hex-training-24": "Hex-Training-24",
+    "hex-training-36": "Hex-Training-36",
     # ── Legacy / alternate spellings → data folder names ──
     "opto_eb": "EB-Training",
     "opto_eb(6-training)": "EB-Training(No-Operant)",
@@ -453,8 +455,10 @@ ODOR_CANON = {
     "eb control": "EB-Control",
     "hex_control": "Hex-Control",
     "hex_control_24": "Hex-Control-24",
+    "hex_control_36": "Hex-Control-36",
     "hex control": "Hex-Control",
     "hex control 24": "Hex-Control-24",
+    "hex control 36": "Hex-Control-36",
     "benz_control": "Benz-Control",
     "benz control": "Benz-Control",
     # ── Loose odor names ──
@@ -473,6 +477,7 @@ ODOR_CANON = {
     "benz training 24": "Benz-Training-24",
     "ethyl butyrate": "EB",
     "hex training 24": "Hex-Training-24",
+    "hex training 36": "Hex-Training-36",
     "3oct training": "3OCT-Training",
     "hexanol": "Hex-Training",
     "10s_odor_benz": "10s_Odor_Benz",
@@ -504,6 +509,7 @@ DISPLAY_LABEL = {
     "EB-Control": "Ethyl Butyrate",
     "Hex-Control": "Hexanol",
     "Hex-Control-24": "Hexanol",
+    "Hex-Control-36": "Hexanol",
     "Benz-Control": "Benzaldehyde",
     "Benz-Training": "Benzaldehyde",
     "Benz-Training-24": "Benzaldehyde",
@@ -512,6 +518,7 @@ DISPLAY_LABEL = {
     "ACV-Training": "Apple Cider Vinegar",
     "Hex-Training": "Hexanol",
     "Hex-Training-24": "Hexanol",
+    "Hex-Training-36": "Hexanol",
     "AIR-Training": "AIR",
     "3OCT-Training": "3-Octonol",
     # Manual / sucrose-trained fly datasets
@@ -529,6 +536,7 @@ PRIMARY_ODOR_LABEL = {
     "EB-Control": "Ethyl Butyrate",
     "Hex-Control": HEXANOL,
     "Hex-Control-24": HEXANOL,
+    "Hex-Control-36": HEXANOL,
     "Benz-Control": "Benzaldehyde",
 }
 
@@ -564,6 +572,16 @@ TRAINING_ODOR_SCHEDULE_OVERRIDES = {
         7: "Apple Cider Vinegar",
         8: HEXANOL,
     },
+    "Hex-Control-36": {
+        1: HEXANOL,
+        2: HEXANOL,
+        3: HEXANOL,
+        4: HEXANOL,
+        5: "Apple Cider Vinegar",
+        6: HEXANOL,
+        7: "Apple Cider Vinegar",
+        8: HEXANOL,
+    },
     "Hex-Training": {
         1: HEXANOL,
         2: HEXANOL,
@@ -575,6 +593,16 @@ TRAINING_ODOR_SCHEDULE_OVERRIDES = {
         8: HEXANOL,
     },
     "Hex-Training-24": {
+        1: HEXANOL,
+        2: HEXANOL,
+        3: HEXANOL,
+        4: HEXANOL,
+        5: "Apple Cider Vinegar",
+        6: HEXANOL,
+        7: "Apple Cider Vinegar",
+        8: HEXANOL,
+    },
+    "Hex-Training-36": {
         1: HEXANOL,
         2: HEXANOL,
         3: HEXANOL,
@@ -685,9 +713,11 @@ TRAINING_ODOR_SCHEDULE_OVERRIDES = {
 }
 
 TESTING_DATASET_ALIAS = {
+    "Hex-Control-36": "Hex-Control",
     "Hex-Control-24": "Hex-Control",
     "Hex-Training": "Hex-Control",
     "Hex-Training-24": "Hex-Control",
+    "Hex-Training-36": "Hex-Control",
     "EB-Training": "EB-Control",
     "EB-Training(No-Operant)": "EB-Control",
     "Benz-Training": "Benz-Control",
@@ -2137,6 +2167,7 @@ def mirror_directory(source: str | os.PathLike[str], destination: str | os.PathL
     dest = Path(destination).expanduser().resolve()
     if not src.is_dir():
         raise FileNotFoundError(f"Mirror source is not a directory: {src}")
+    dest.mkdir(parents=True, exist_ok=True)
 
     files_copied = 0
     bytes_copied = 0

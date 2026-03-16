@@ -147,7 +147,7 @@ def test_testing_aliases_follow_control_ordering():
 
     aliases = {
         "EB-Control": ["EB-Training"],
-        "Hex-Control": ["Hex-Training"],
+        "Hex-Control": ["Hex-Training", "Hex-Training-24", "Hex-Training-36"],
         "Benz-Control": ["Benz-Training", "Benz-Training-24"],
     }
 
@@ -161,6 +161,7 @@ def test_testing_aliases_follow_control_ordering():
     for trial, odor in schedules["Hex-Control"].items():
         label = f"testing_{trial}"
         assert ec._display_odor("Hex-Control-24", label) == odor
+        assert ec._display_odor("Hex-Control-36", label) == odor
 
 
 def test_training_schedule_matches_spec():
@@ -207,7 +208,37 @@ def test_training_schedule_matches_spec():
             7: "Apple Cider Vinegar",
             8: "Hexanol",
         },
+        "Hex-Control-36": {
+            1: "Hexanol",
+            2: "Hexanol",
+            3: "Hexanol",
+            4: "Hexanol",
+            5: "Apple Cider Vinegar",
+            6: "Hexanol",
+            7: "Apple Cider Vinegar",
+            8: "Hexanol",
+        },
         "Hex-Training": {
+            1: "Hexanol",
+            2: "Hexanol",
+            3: "Hexanol",
+            4: "Hexanol",
+            5: "Apple Cider Vinegar",
+            6: "Hexanol",
+            7: "Apple Cider Vinegar",
+            8: "Hexanol",
+        },
+        "Hex-Training-24": {
+            1: "Hexanol",
+            2: "Hexanol",
+            3: "Hexanol",
+            4: "Hexanol",
+            5: "Apple Cider Vinegar",
+            6: "Hexanol",
+            7: "Apple Cider Vinegar",
+            8: "Hexanol",
+        },
+        "Hex-Training-36": {
             1: "Hexanol",
             2: "Hexanol",
             3: "Hexanol",

@@ -60,13 +60,18 @@ ODOR_CANON: Mapping[str, str] = {
     "eb-training-no-operant": "EB-Training(No-Operant)",
     "hex_control": "Hex-Control",
     "hex_control_24": "Hex-Control-24",
+    "hex_control_36": "Hex-Control-36",
     "hex control": "Hex-Control",
     "hex control 24": "Hex-Control-24",
+    "hex control 36": "Hex-Control-36",
     "hex-control": "Hex-Control",
     "hex-control-24": "Hex-Control-24",
+    "hex-control-36": "Hex-Control-36",
     "hex-training": "Hex-Training",
     "hex-training-24": "Hex-Training-24",
+    "hex-training-36": "Hex-Training-36",
     "hex training 24": "Hex-Training-24",
+    "hex training 36": "Hex-Training-36",
     "acv-training": "ACV-Training",
     "air-training": "AIR-Training",
     "3oct-training": "3OCT-Training",
@@ -113,8 +118,10 @@ DISPLAY_LABEL = {
     "EB-Training(No-Operant)": "Ethyl Butyrate (6-Training)",
     "Hex-Control": "Hexanol",
     "Hex-Control-24": "Hexanol",
+    "Hex-Control-36": "Hexanol",
     "Hex-Training": "Hexanol",
     "Hex-Training-24": "Hexanol",
+    "Hex-Training-36": "Hexanol",
 }
 
 HEXANOL_LABEL = "Hexanol"
@@ -123,6 +130,7 @@ PRIMARY_ODOR_LABEL = {
     "EB-Control": "Ethyl Butyrate",
     "Hex-Control": HEXANOL_LABEL,
     "Hex-Control-24": HEXANOL_LABEL,
+    "Hex-Control-36": HEXANOL_LABEL,
     "Benz-Control": "Benzaldehyde",
 }
 
@@ -158,6 +166,16 @@ TRAINING_ODOR_SCHEDULE_OVERRIDES = {
         7: "Apple Cider Vinegar",
         8: HEXANOL_LABEL,
     },
+    "Hex-Control-36": {
+        1: HEXANOL_LABEL,
+        2: HEXANOL_LABEL,
+        3: HEXANOL_LABEL,
+        4: HEXANOL_LABEL,
+        5: "Apple Cider Vinegar",
+        6: HEXANOL_LABEL,
+        7: "Apple Cider Vinegar",
+        8: HEXANOL_LABEL,
+    },
     "Hex-Training": {
         1: HEXANOL_LABEL,
         2: HEXANOL_LABEL,
@@ -169,6 +187,16 @@ TRAINING_ODOR_SCHEDULE_OVERRIDES = {
         8: HEXANOL_LABEL,
     },
     "Hex-Training-24": {
+        1: HEXANOL_LABEL,
+        2: HEXANOL_LABEL,
+        3: HEXANOL_LABEL,
+        4: HEXANOL_LABEL,
+        5: "Apple Cider Vinegar",
+        6: HEXANOL_LABEL,
+        7: "Apple Cider Vinegar",
+        8: HEXANOL_LABEL,
+    },
+    "Hex-Training-36": {
         1: HEXANOL_LABEL,
         2: HEXANOL_LABEL,
         3: HEXANOL_LABEL,
@@ -239,9 +267,11 @@ TRAINING_ODOR_SCHEDULE_OVERRIDES = {
 }
 
 TESTING_DATASET_ALIAS = {
+    "Hex-Control-36": "Hex-Control",
     "Hex-Control-24": "Hex-Control",
     "Hex-Training": "Hex-Control",
     "Hex-Training-24": "Hex-Control",
+    "Hex-Training-36": "Hex-Control",
     "EB-Training": "EB-Control",
     "EB-Training(No-Operant)": "EB-Control",
     "Benz-Training": "Benz-Control",
