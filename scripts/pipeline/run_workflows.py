@@ -430,6 +430,32 @@ def _matrix_plot_config(data: Mapping[str, Any]) -> tuple[MatrixPlotConfig, str 
     return MatrixPlotConfig(**opts), smb_path  # type: ignore[arg-type]
 
 
+_PIPELINE_ENVELOPE_STYLE_DEFAULTS: dict[str, Any] = {
+    "style_scale": 2.0,
+    "trace_linewidth_scale": 2.0,
+    "panel_title_scale": 0.9,
+    "figure_title_scale": 0.72,
+    "figure_subtitle_scale": 0.5,
+    "legend_scale": 0.675,
+    "plot_size_scale": 1.2,
+    "single_ylabel_trial_num": 5,
+    "fixed_y_max": 105.0,
+    "y_label_override": "Max Distance x Angle %",
+    "legend_anchor_y": 0.895,
+    "figure_title_x": 0.5,
+    "figure_title_y": 0.925,
+    "figure_title_ha": "center",
+    "figure_subtitle_x": 0.5,
+    "figure_subtitle_y": 0.905,
+    "figure_subtitle_ha": "center",
+    "panel_title_x": 0.01,
+    "panel_title_y": 105.0,
+    "panel_title_va": "top",
+    "panel_title_use_data_y": True,
+    "tight_h_pad": 0.12,
+}
+
+
 def _envelope_plot_config(data: Mapping[str, Any]) -> tuple[EnvelopePlotConfig, str | None]:
     """Parse envelope plot config and return config plus SMB path."""
     opts = dict(data)
@@ -439,6 +465,8 @@ def _envelope_plot_config(data: Mapping[str, Any]) -> tuple[EnvelopePlotConfig, 
     # Ensure training envelope renders include light-line annotations by default.
     if trial_type == "training" and not str(opts.get("light_annotation_mode", "")).strip():
         opts["light_annotation_mode"] = "line"
+    for key, value in _PIPELINE_ENVELOPE_STYLE_DEFAULTS.items():
+        opts.setdefault(key, value)
     # Extract SMB path for later use
     smb_path = opts.pop("out_dir_smb", None)
     return EnvelopePlotConfig(**opts), smb_path  # type: ignore[arg-type]

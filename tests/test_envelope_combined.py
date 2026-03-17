@@ -414,6 +414,134 @@ def test_wide_to_matrix_preserves_nan_gaps_and_metrics(tmp_path):
     assert env[3] == 0.0
 
 
+def test_generate_envelope_plots_filters_to_requested_fly(tmp_path):
+    """Envelope plotting should honor explicit fly filters without affecting defaults."""
+
+    wide_csv = tmp_path / "wide_testing.csv"
+    pd.DataFrame(
+        {
+            "dataset": ["Hex-Training", "Hex-Training", "Hex-Training"],
+            "fly": ["october_10_batch_1", "october_10_batch_1", "october_10_batch_2"],
+            "fly_number": ["2", "2", "1"],
+            "trial_type": ["testing", "testing", "testing"],
+            "trial_label": ["testing_1", "testing_2", "testing_1"],
+            "fps": [40.0, 40.0, 40.0],
+            "global_min": [1.0, 1.0, 1.0],
+            "global_max": [20.0, 25.0, 20.0],
+            "trimmed_global_min": [1.0, 1.0, 1.0],
+            "trimmed_global_max": [20.0, 25.0, 20.0],
+            "trace_len": [4, 4, 4],
+            "dir_val_0": [0.0, 2.0, 1.0],
+            "dir_val_1": [8.0, 4.0, 3.0],
+            "dir_val_2": [16.0, 6.0, 5.0],
+            "dir_val_3": [4.0, 8.0, 2.0],
+        }
+    ).to_csv(wide_csv, index=False)
+
+    matrix_dir = tmp_path / "matrix"
+    ec.wide_to_matrix(str(wide_csv), str(matrix_dir))
+
+    cfg = ev.EnvelopePlotConfig(
+        matrix_npy=matrix_dir / "envelope_matrix_float16.npy",
+        codes_json=matrix_dir / "code_maps.json",
+        out_dir=tmp_path / "plots",
+        latency_sec=0.0,
+        odor_latency_s=0.0,
+        trial_type="testing",
+        overwrite=True,
+        fly_filter="october_10_batch_1",
+        fly_number_filter="2",
+        style_scale=2.0,
+        trace_linewidth_scale=2.0,
+        panel_title_scale=0.8,
+        figure_title_scale=0.5,
+        figure_subtitle_scale=0.5,
+        legend_scale=0.8,
+        plot_size_scale=1.1,
+        single_ylabel_trial_num=1,
+        fixed_y_max=105.0,
+        y_label_override="Max Distance x Angle %",
+    )
+    ev.generate_envelope_plots(cfg)
+
+    target_png = (
+        tmp_path
+        / "plots"
+        / "Hex-Training"
+        / "october_10_batch_1_fly2_testing_envelope_trials_by_odor_30_shifted.png"
+    )
+    other_png = (
+        tmp_path
+        / "plots"
+        / "Hex-Training"
+        / "october_10_batch_2_fly1_testing_envelope_trials_by_odor_30_shifted.png"
+    )
+
+    assert target_png.exists()
+    assert not other_png.exists()
+
+
+def test_select_trial_rows_prefers_distance_label_alias():
+    """Duplicate raw aliases should collapse to the canonical distance-labelled trial row."""
+
+    df = pd.DataFrame(
+        {
+            "trial_label": [
+                "testing_1_fly1_angle_distance_rms_envelope",
+                "testing_1_fly1_distances_fly1_angle_distance_rms_envelope",
+                "testing_2_fly1_distances_fly1_angle_distance_rms_envelope",
+            ],
+            "value": [1, 2, 3],
+        },
+        index=[10, 11, 12],
+    )
+
+    selected = ev._select_trial_rows(df)
+
+    assert list(selected.index) == [11, 12]
+    assert selected.iloc[0]["trial_label"] == "testing_1_fly1_distances_fly1_angle_distance_rms_envelope"
+
+
+def test_pipeline_envelope_plot_config_applies_style_defaults(tmp_path):
+    """Pipeline envelope configs should inherit the approved trace styling unless overridden."""
+
+    cfg, _ = rw._envelope_plot_config(
+        {
+            "matrix_npy": tmp_path / "matrix.npy",
+            "codes_json": tmp_path / "codes.json",
+            "out_dir": tmp_path / "plots",
+            "latency_sec": 0.0,
+        }
+    )
+
+    assert cfg.style_scale == 2.0
+    assert cfg.trace_linewidth_scale == 2.0
+    assert cfg.fixed_y_max == 105.0
+    assert cfg.y_label_override == "Max Distance x Angle %"
+    assert cfg.figure_title_y == 0.925
+    assert cfg.figure_subtitle_y == 0.905
+    assert cfg.panel_title_x == 0.01
+    assert cfg.panel_title_y == 105.0
+    assert cfg.panel_title_va == "top"
+    assert cfg.panel_title_use_data_y is True
+    assert cfg.legend_anchor_y == 0.895
+    assert cfg.tight_h_pad == 0.12
+
+    overridden, _ = rw._envelope_plot_config(
+        {
+            "matrix_npy": tmp_path / "matrix.npy",
+            "codes_json": tmp_path / "codes.json",
+            "out_dir": tmp_path / "plots",
+            "latency_sec": 0.0,
+            "style_scale": 1.5,
+            "fixed_y_max": 110.0,
+        }
+    )
+
+    assert overridden.style_scale == 1.5
+    assert overridden.fixed_y_max == 110.0
+
+
 def test_fly_max_centered_skips_empty_csv(tmp_path):
     """Empty per-trial CSVs should be ignored when computing the max angle delta."""
 

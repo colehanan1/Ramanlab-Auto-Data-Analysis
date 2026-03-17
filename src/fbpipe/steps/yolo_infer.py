@@ -134,6 +134,32 @@ def _build_proboscis_tracker(settings: Settings, active_max_flies: int) -> Multi
     )
 
 
+def _max_valid_eye_prob_distance_px(settings: Settings, active_max_flies: int) -> float:
+    """Apply an extra distance sanity cap only for 3-fly videos."""
+
+    if active_max_flies == 3:
+        return float(settings.class2_max)
+    return math.inf
+
+
+def _eye_prob_distance_is_valid(
+    distance_px: float,
+    settings: Settings,
+    active_max_flies: int,
+) -> bool:
+    if not np.isfinite(distance_px):
+        return False
+    return distance_px <= _max_valid_eye_prob_distance_px(settings, active_max_flies)
+
+
+def _clear_proboscis_match(row: Dict[str, float], idx: int) -> None:
+    row[f"cls8_{idx}_track_id"] = np.nan
+    row[f"cls8_{idx}_x"] = np.nan
+    row[f"cls8_{idx}_y"] = np.nan
+    row[f"dist_eye_{idx}_cls8_{idx}"] = np.nan
+    row[f"angle_eye_{idx}_cls8_vs_anchor"] = np.nan
+
+
 def _process_frame(
     frame,
     frame_number,
@@ -255,18 +281,20 @@ def _process_frame(
             if c8_id is not None and int(c8_id) in cls8_by_id:
                 track = cls8_by_id[int(c8_id)]
                 cx, cy, _, _ = xyxy_to_cxcywh(track.box_xyxy)
-                row[f"cls8_{idx}_x"] = float(cx)
-                row[f"cls8_{idx}_y"] = float(cy)
-                row[f"dist_eye_{idx}_cls8_{idx}"] = float(np.hypot(cx - ex, cy - ey))
-                cv2.line(frame, (int(ex), int(ey)), (int(cx), int(cy)), (0, 255, 0), 4)
-                v_eye_prob = (cx - ex, cy - ey)
-                v_eye_anchor = (AX - ex, AY - ey)
-                row[f"angle_eye_{idx}_cls8_vs_anchor"] = _angle_deg_between(v_eye_prob, v_eye_anchor)
+                distance_px = float(np.hypot(cx - ex, cy - ey))
+                if _eye_prob_distance_is_valid(distance_px, settings, active_max_flies):
+                    row[f"cls8_{idx}_x"] = float(cx)
+                    row[f"cls8_{idx}_y"] = float(cy)
+                    row[f"dist_eye_{idx}_cls8_{idx}"] = distance_px
+                    cv2.line(frame, (int(ex), int(ey)), (int(cx), int(cy)), (0, 255, 0), 4)
+                    v_eye_prob = (cx - ex, cy - ey)
+                    v_eye_anchor = (AX - ex, AY - ey)
+                    row[f"angle_eye_{idx}_cls8_vs_anchor"] = _angle_deg_between(v_eye_prob, v_eye_anchor)
+                else:
+                    pairer.eye_to_cls8[eye_id] = None
+                    _clear_proboscis_match(row, idx)
             else:
-                row[f"cls8_{idx}_x"] = np.nan
-                row[f"cls8_{idx}_y"] = np.nan
-                row[f"dist_eye_{idx}_cls8_{idx}"] = np.nan
-                row[f"angle_eye_{idx}_cls8_vs_anchor"] = np.nan
+                _clear_proboscis_match(row, idx)
 
             if single_track_class is not None:
                 if not np.isnan(det_single["x"]):
@@ -281,11 +309,7 @@ def _process_frame(
             row[f"eye_{idx}_track_id"] = np.nan
             row[f"eye_{idx}_x"] = np.nan
             row[f"eye_{idx}_y"] = np.nan
-            row[f"cls8_{idx}_track_id"] = np.nan
-            row[f"cls8_{idx}_x"] = np.nan
-            row[f"cls8_{idx}_y"] = np.nan
-            row[f"dist_eye_{idx}_cls8_{idx}"] = np.nan
-            row[f"angle_eye_{idx}_cls8_vs_anchor"] = np.nan
+            _clear_proboscis_match(row, idx)
             row[f"dist_eye_{idx}_anchor"] = np.nan
             if single_track_class is not None:
                 row[f"distance_class{single_track_class}_eye_{idx}"] = np.nan

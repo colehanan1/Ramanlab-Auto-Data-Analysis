@@ -1245,6 +1245,145 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Optional cap for number of fly figures to render.",
     )
+    env_parser.add_argument("--fly", type=str, default=None, help="Optional exact fly label to render.")
+    env_parser.add_argument("--fly-number", type=str, default=None, help="Optional exact fly number to render.")
+    env_parser.add_argument(
+        "--style-scale",
+        type=float,
+        default=1.0,
+        help="Multiplier for fonts, ticks, and axis line widths.",
+    )
+    env_parser.add_argument(
+        "--trace-linewidth-scale",
+        type=float,
+        default=1.0,
+        help="Multiplier for envelope and annotation line widths.",
+    )
+    env_parser.add_argument(
+        "--panel-title-scale",
+        type=float,
+        default=1.0,
+        help="Multiplier for per-trial odor label font size.",
+    )
+    env_parser.add_argument(
+        "--figure-title-scale",
+        type=float,
+        default=1.0,
+        help="Multiplier for the main figure title font size.",
+    )
+    env_parser.add_argument(
+        "--figure-subtitle-scale",
+        type=float,
+        default=1.0,
+        help="Multiplier for the fly subtitle font size.",
+    )
+    env_parser.add_argument(
+        "--legend-scale",
+        type=float,
+        default=1.0,
+        help="Multiplier for legend font sizes.",
+    )
+    env_parser.add_argument(
+        "--plot-size-scale",
+        type=float,
+        default=1.0,
+        help="Multiplier for the rendered figure width and per-row height.",
+    )
+    env_parser.add_argument(
+        "--single-ylabel-trial-num",
+        type=int,
+        default=None,
+        help="If set, only show the y-axis label on the subplot for this trial number.",
+    )
+    env_parser.add_argument(
+        "--fixed-y-max",
+        type=float,
+        default=100.0,
+        help="Upper y-axis limit shared across all subplots.",
+    )
+    env_parser.add_argument(
+        "--y-label-override",
+        type=str,
+        default=None,
+        help="Optional replacement text for the y-axis label.",
+    )
+    env_parser.add_argument(
+        "--legend-anchor-x",
+        type=float,
+        default=0.98,
+        help="Legend bbox anchor x position in figure coordinates.",
+    )
+    env_parser.add_argument(
+        "--legend-anchor-y",
+        type=float,
+        default=0.97,
+        help="Legend bbox anchor y position in figure coordinates.",
+    )
+    env_parser.add_argument(
+        "--figure-title-x",
+        type=float,
+        default=0.5,
+        help="Main title x position in figure coordinates.",
+    )
+    env_parser.add_argument(
+        "--figure-title-y",
+        type=float,
+        default=0.995,
+        help="Main title y position in figure coordinates.",
+    )
+    env_parser.add_argument(
+        "--figure-title-ha",
+        choices=("left", "center", "right"),
+        default="center",
+        help="Horizontal alignment for the main title.",
+    )
+    env_parser.add_argument(
+        "--figure-subtitle-x",
+        type=float,
+        default=0.5,
+        help="Subtitle x position in figure coordinates.",
+    )
+    env_parser.add_argument(
+        "--figure-subtitle-y",
+        type=float,
+        default=None,
+        help="Optional subtitle y position in figure coordinates.",
+    )
+    env_parser.add_argument(
+        "--figure-subtitle-ha",
+        choices=("left", "center", "right"),
+        default="center",
+        help="Horizontal alignment for the subtitle.",
+    )
+    env_parser.add_argument(
+        "--panel-title-x",
+        type=float,
+        default=0.0,
+        help="Per-panel odor label x position in axes coordinates.",
+    )
+    env_parser.add_argument(
+        "--panel-title-y",
+        type=float,
+        default=1.02,
+        help="Per-panel odor label y position in axes coordinates unless --panel-title-use-data-y is set.",
+    )
+    env_parser.add_argument(
+        "--panel-title-va",
+        choices=("top", "center", "bottom", "baseline", "center_baseline"),
+        default="bottom",
+        help="Vertical alignment for the per-panel odor label.",
+    )
+    env_parser.add_argument(
+        "--panel-title-use-data-y",
+        action="store_true",
+        help="Interpret --panel-title-y in data coordinates while keeping x in axes coordinates.",
+    )
+    env_parser.add_argument(
+        "--tight-h-pad",
+        type=float,
+        default=None,
+        help="Optional vertical padding passed to tight_layout between stacked subplots.",
+    )
     env_parser.add_argument("--overwrite", action="store_true", help="Rebuild plots even if the target files exist.")
 
     lat_parser = sub.add_parser("latency", help="Compute latency-to-threshold metrics from the matrix outputs.")
@@ -1405,6 +1544,31 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             light_annotation_mode=args.light_annotation_mode,
             max_flies=args.max_flies,
             overwrite=args.overwrite,
+            fly_filter=args.fly,
+            fly_number_filter=args.fly_number,
+            style_scale=args.style_scale,
+            trace_linewidth_scale=args.trace_linewidth_scale,
+            panel_title_scale=args.panel_title_scale,
+            figure_title_scale=args.figure_title_scale,
+            figure_subtitle_scale=args.figure_subtitle_scale,
+            legend_scale=args.legend_scale,
+            plot_size_scale=args.plot_size_scale,
+            single_ylabel_trial_num=args.single_ylabel_trial_num,
+            fixed_y_max=args.fixed_y_max,
+            y_label_override=args.y_label_override,
+            legend_anchor_x=args.legend_anchor_x,
+            legend_anchor_y=args.legend_anchor_y,
+            figure_title_x=args.figure_title_x,
+            figure_title_y=args.figure_title_y,
+            figure_title_ha=args.figure_title_ha,
+            figure_subtitle_x=args.figure_subtitle_x,
+            figure_subtitle_y=args.figure_subtitle_y,
+            figure_subtitle_ha=args.figure_subtitle_ha,
+            panel_title_x=args.panel_title_x,
+            panel_title_y=args.panel_title_y,
+            panel_title_va=args.panel_title_va,
+            panel_title_use_data_y=args.panel_title_use_data_y,
+            tight_h_pad=args.tight_h_pad,
         )
         generate_envelope_plots(cfg)
         return

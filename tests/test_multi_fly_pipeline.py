@@ -40,6 +40,45 @@ def _write_dummy_csv(path: Path) -> None:
     df.to_csv(path, index=False)
 
 
+def _write_existing_processed_csv(path: Path, distances: list[float]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    dist_col = f"distance_{EYE_CLASS}_{PROBOSCIS_CLASS}"
+    dist_pct_col = f"distance_percentage_{EYE_CLASS}_{PROBOSCIS_CLASS}"
+    angle_col = f"angle_deg_c{EYE_CLASS}_c{PROBOSCIS_CLASS}_vs_anchor"
+    frames = list(range(len(distances)))
+    df = pd.DataFrame(
+        {
+            "frame": frames,
+            "timestamp": [frame / 40.0 for frame in frames],
+            f"track_id_class{EYE_CLASS}": [1001.0] * len(distances),
+            f"x_class{EYE_CLASS}": [100.0] * len(distances),
+            f"y_class{EYE_CLASS}": [100.0] * len(distances),
+            f"track_id_class{PROBOSCIS_CLASS}": [17.0] * len(distances),
+            f"x_class{PROBOSCIS_CLASS}": [200.0] * len(distances),
+            f"y_class{PROBOSCIS_CLASS}": [200.0] * len(distances),
+            dist_col: distances,
+            "distance_percentage": [50.0] * len(distances),
+            dist_pct_col: [50.0] * len(distances),
+            angle_col: [12.5] * len(distances),
+        }
+    )
+    df.to_csv(path, index=False)
+
+
+def _write_existing_stats(path: Path, *, gmin: float, gmax: float) -> None:
+    path.write_text(
+        json.dumps(
+            {
+                "global_min": gmin,
+                "global_max": gmax,
+                "fly_max_distance": gmax,
+                "effective_max_threshold": 95.0,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
 def test_iter_fly_distance_csvs_detects_slot(tmp_path):
     fly_dir = tmp_path / "october_07_fly_1"
     csv_path = fly_dir / "october_07_fly_1_testing_2_fly1_distances.csv"
@@ -149,6 +188,68 @@ def test_collect_and_convert_capture_fly_number(tmp_path):
     assert "fly_number" in code_maps["code_maps"]
     assert code_maps["code_maps"]["fly_number"].get("3") == 1
     assert code_maps["column_order"][2] == "fly_number"
+
+
+def test_recalculation_sanitizes_existing_three_fly_overlimit_distances(tmp_path):
+    root = tmp_path / "experiment"
+    fly_dir = root / "october_07_session"
+    rms_dir = fly_dir / "RMS_calculations"
+    trial_prefix = "october_07_fly_1_testing_2"
+
+    fly1_csv = rms_dir / f"{trial_prefix}_fly1_distances.csv"
+    fly2_csv = rms_dir / f"{trial_prefix}_fly2_distances.csv"
+    fly3_csv = rms_dir / f"{trial_prefix}_fly3_distances.csv"
+
+    _write_existing_processed_csv(fly1_csv, [100.0, 260.0, 240.0])
+    _write_existing_processed_csv(fly2_csv, [110.0, 120.0, 130.0])
+    _write_existing_processed_csv(fly3_csv, [140.0, 150.0, 160.0])
+
+    _write_existing_stats(
+        fly_dir / f"fly1_global_distance_stats_class_{EYE_CLASS}.json",
+        gmin=100.0,
+        gmax=260.0,
+    )
+    _write_existing_stats(
+        fly_dir / f"fly2_global_distance_stats_class_{EYE_CLASS}.json",
+        gmin=110.0,
+        gmax=130.0,
+    )
+    _write_existing_stats(
+        fly_dir / f"fly3_global_distance_stats_class_{EYE_CLASS}.json",
+        gmin=140.0,
+        gmax=160.0,
+    )
+
+    settings = Settings(
+        model_path="",
+        main_directories=str(root),
+        class2_min=10.0,
+        class2_max=250.0,
+    )
+
+    distance_stats.main(settings)
+
+    dist_col = f"distance_{EYE_CLASS}_{PROBOSCIS_CLASS}"
+    dist_pct_col = f"distance_percentage_{EYE_CLASS}_{PROBOSCIS_CLASS}"
+    angle_col = f"angle_deg_c{EYE_CLASS}_c{PROBOSCIS_CLASS}_vs_anchor"
+    df = pd.read_csv(fly1_csv)
+    assert np.isnan(df.loc[1, dist_col])
+    assert np.isnan(df.loc[1, "distance_percentage"])
+    assert np.isnan(df.loc[1, dist_pct_col])
+    assert np.isnan(df.loc[1, f"track_id_class{PROBOSCIS_CLASS}"])
+    assert np.isnan(df.loc[1, f"x_class{PROBOSCIS_CLASS}"])
+    assert np.isnan(df.loc[1, f"y_class{PROBOSCIS_CLASS}"])
+    assert np.isnan(df.loc[1, angle_col])
+
+    stats = json.loads((fly_dir / f"fly1_global_distance_stats_class_{EYE_CLASS}.json").read_text())
+    assert stats["global_max"] == 240.0
+
+    distance_normalize.main(settings)
+
+    df = pd.read_csv(fly1_csv)
+    assert np.isnan(df.loc[1, dist_col])
+    assert np.isnan(df.loc[1, "distance_percentage"])
+    assert np.isnan(df.loc[1, dist_pct_col])
 
 
 def test_combine_distance_angle_includes_fly_number_column(tmp_path):

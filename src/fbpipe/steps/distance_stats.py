@@ -8,6 +8,10 @@ import pandas as pd
 
 from ..config import Settings, get_main_directories
 from ..utils.columns import EYE_CLASS, PROBOSCIS_DISTANCE_COL, find_proboscis_distance_column
+from ..utils.distance_sanity import (
+    csv_requires_three_fly_distance_sanitization,
+    sanitize_three_fly_distance_dataframe,
+)
 from ..utils.fly_files import iter_fly_distance_csvs
 
 
@@ -48,6 +52,9 @@ def main(cfg: Settings) -> None:
                     if not stats_path.exists():
                         tokens_to_refresh.add(token)
                         continue
+                    if csv_requires_three_fly_distance_sanitization(csv_path, cfg.class2_max):
+                        tokens_to_refresh.add(token)
+                        continue
                     if _needs_stats_refresh(csv_path, force_recompute=force_recompute):
                         tokens_to_refresh.add(token)
 
@@ -69,6 +76,18 @@ def main(cfg: Settings) -> None:
                         f"[DIST] Failed to read {csv_path.name} (slot {token}): {exc}"
                     )
                     continue
+
+                df, sanitized_count = sanitize_three_fly_distance_dataframe(
+                    df,
+                    csv_path,
+                    cfg.class2_max,
+                )
+                if sanitized_count:
+                    df.to_csv(csv_path, index=False)
+                    print(
+                        f"[DIST] Sanitized {sanitized_count} over-limit 3-fly rows in {csv_path.name} "
+                        f"(>{cfg.class2_max}px)."
+                    )
 
                 dist_col = find_proboscis_distance_column(df)
                 if dist_col is None:

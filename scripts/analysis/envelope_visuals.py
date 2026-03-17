@@ -36,7 +36,7 @@ from typing import Mapping, Sequence, Tuple
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-from matplotlib import gridspec
+from matplotlib import gridspec, transforms
 from matplotlib.colors import BoundaryNorm, ListedColormap
 
 # Ensure all plots use Arial to match lab styling.
@@ -1706,13 +1706,88 @@ class EnvelopePlotConfig:
     light_annotation_mode: str = "none"
     max_flies: int | None = None
     overwrite: bool = False
+    fly_filter: str | None = None
+    fly_number_filter: str | None = None
+    style_scale: float = 1.0
+    trace_linewidth_scale: float = 1.0
+    panel_title_scale: float = 1.0
+    figure_title_scale: float = 1.0
+    figure_subtitle_scale: float = 1.0
+    legend_scale: float = 1.0
+    plot_size_scale: float = 1.0
+    single_ylabel_trial_num: int | None = None
+    fixed_y_max: float = 100.0
+    y_label_override: str | None = None
+    show_legend: bool = True
+    show_figure_title: bool = True
+    show_figure_subtitle: bool = True
+    legend_anchor_x: float = 0.98
+    legend_anchor_y: float = 0.97
+    figure_title_x: float = 0.5
+    figure_title_y: float = 0.995
+    figure_title_ha: str = "center"
+    figure_subtitle_x: float = 0.5
+    figure_subtitle_y: float | None = None
+    figure_subtitle_ha: str = "center"
+    panel_title_x: float = 0.0
+    panel_title_y: float = 1.02
+    panel_title_va: str = "bottom"
+    panel_title_use_data_y: bool = False
+    odor_on_label_trial_num: int | None = None
+    odor_on_label_text: str | None = None
+    odor_on_label_scale: float = 1.0
+    odor_on_label_y: float | None = None
+    tight_h_pad: float | None = None
 
 
 def _envelope_ylabel(cfg: EnvelopePlotConfig) -> str:
+    if cfg.y_label_override:
+        return str(cfg.y_label_override)
     matrix_label = str(cfg.matrix_npy).lower()
     if "combined_base" in matrix_label or "angle_distance" in matrix_label:
         return "Max Distance x Angle %"
     return "RMS (a.u.)"
+
+
+def _bounded_scale(value: float | int | None, *, default: float = 1.0) -> float:
+    try:
+        scale = float(value)
+    except (TypeError, ValueError):
+        return default
+    if not math.isfinite(scale) or scale <= 0.0:
+        return default
+    return scale
+
+
+def _trial_selection_rank(trial_label: str) -> tuple[int, int]:
+    """Prefer canonical distance-labelled trial rows when duplicate aliases exist."""
+
+    label = str(trial_label).strip().lower()
+    prefers_distances = 1 if "_distances_" in label else 0
+    # Shorter labels are typically the canonical export when preference ties.
+    return (prefers_distances, -len(label))
+
+
+def _select_trial_rows(fly_df: pd.DataFrame) -> pd.DataFrame:
+    """Collapse duplicate raw aliases so each fly renders one subplot per trial number."""
+
+    chosen: dict[int, tuple[tuple[int, int], int]] = {}
+    passthrough: list[int] = []
+
+    for idx, row in fly_df.iterrows():
+        trial_label = str(row.get("trial_label", ""))
+        trial_num = _trial_num(trial_label)
+        if trial_num < 0:
+            passthrough.append(idx)
+            continue
+        rank = _trial_selection_rank(trial_label)
+        current = chosen.get(trial_num)
+        if current is None or rank > current[0]:
+            chosen[trial_num] = (rank, idx)
+
+    selected = [idx for _, idx in sorted(chosen.values(), key=lambda item: _trial_num(str(fly_df.loc[item[1], "trial_label"])))]
+    selected.extend(passthrough)
+    return fly_df.loc[selected].copy()
 
 
 def generate_envelope_plots(cfg: EnvelopePlotConfig) -> None:
@@ -1749,19 +1824,50 @@ def generate_envelope_plots(cfg: EnvelopePlotConfig) -> None:
 
     df = df_filtered
 
-    if "fly_number" not in df.columns:
-        df["fly_number"] = "UNKNOWN"
-    else:
-        df["fly_number"] = (
-            df["fly_number"]
-            .astype(str)
-            .str.strip()
-            .replace({"": "UNKNOWN", "nan": "UNKNOWN", "None": "UNKNOWN"})
-        )
+    df = _normalise_fly_columns(df)
 
     df["fps"] = df["fps"].replace([np.inf, -np.inf], np.nan).fillna(cfg.fps_default)
     df["dataset_canon"] = df["dataset"].map(_canon_dataset)
     df["_non_reactive"] = compute_non_reactive_flags(df)
+
+    fly_filter = _normalise_fly_label(cfg.fly_filter) if cfg.fly_filter else None
+    fly_number_filter = _normalise_fly_number(cfg.fly_number_filter) if cfg.fly_number_filter else None
+    if fly_filter is not None:
+        df = df.loc[df["fly"] == fly_filter].copy()
+    if fly_number_filter is not None:
+        df = df.loc[df["fly_number"] == fly_number_filter].copy()
+    if df.empty:
+        raise RuntimeError(
+            "No envelope rows matched the requested fly filters. "
+            f"fly={cfg.fly_filter!r}, fly_number={cfg.fly_number_filter!r}"
+        )
+
+    ui_scale = _bounded_scale(cfg.style_scale)
+    trace_scale = _bounded_scale(cfg.trace_linewidth_scale)
+    line_scale = max(ui_scale, trace_scale)
+    axes_linewidth = 0.8 * ui_scale
+    tick_width = 0.8 * ui_scale
+    tick_length = 3.5 * ui_scale
+    base_font = 10 * ui_scale
+    ylabel_font = 10 * ui_scale
+    xlabel_font = 11 * ui_scale
+    panel_title_font = 11 * ui_scale * _bounded_scale(cfg.panel_title_scale)
+    legend_font = 9 * ui_scale * _bounded_scale(cfg.legend_scale)
+    figure_title_font = 14 * ui_scale * _bounded_scale(cfg.figure_title_scale)
+    figure_subtitle_font = 12 * ui_scale * _bounded_scale(cfg.figure_subtitle_scale)
+    shared_ylabel_font = 10 * ui_scale
+    odor_on_label_font = 12 * ui_scale * _bounded_scale(cfg.odor_on_label_scale)
+    trace_lw = 1.2 * trace_scale
+    odor_marker_lw = 1.0 * line_scale
+    light_marker_lw = 1.3 * line_scale
+    threshold_lw = 1.0 * line_scale
+    plot_size_scale = _bounded_scale(cfg.plot_size_scale)
+    single_ylabel_trial_num = (
+        int(cfg.single_ylabel_trial_num)
+        if cfg.single_ylabel_trial_num is not None
+        else None
+    )
+    fixed_y_max = max(float(cfg.fixed_y_max), 1.0)
 
     env_data = df[env_cols].to_numpy(np.float32, copy=False)
     fps_values = df["fps"].to_numpy(float)
@@ -1795,10 +1901,11 @@ def generate_envelope_plots(cfg: EnvelopePlotConfig) -> None:
     for (fly, fly_number), fly_df in df.groupby(["fly", "fly_number"], sort=False):
         if max_flies is not None and flies_rendered >= max_flies:
             break
+        fly_df = _select_trial_rows(fly_df)
         fly_df = fly_df.sort_values("trial_label", key=lambda s: s.map(_trial_num))
         indices = fly_df.index.to_numpy()
         trial_curves: list[
-            tuple[str, np.ndarray, np.ndarray, float, bool, float, float, float | None, bool]
+            tuple[str, np.ndarray, np.ndarray, float, bool, float, float, float | None, bool, int]
         ] = []
         y_max = 0.0
 
@@ -1870,6 +1977,7 @@ def generate_envelope_plots(cfg: EnvelopePlotConfig) -> None:
                     trial_off_effective,
                     light_start_s,
                     is_discriminate_odor,
+                    _trial_num(trial_label),
                 )
             )
 
@@ -1882,25 +1990,38 @@ def generate_envelope_plots(cfg: EnvelopePlotConfig) -> None:
                 "savefig.dpi": 300,
                 "axes.spines.top": False,
                 "axes.spines.right": False,
-                "axes.linewidth": 0.8,
+                "axes.linewidth": axes_linewidth,
                 "xtick.direction": "out",
                 "ytick.direction": "out",
                 "font.family": "Arial",
                 "font.sans-serif": ["Arial"],
-                "font.size": 10,
+                "font.size": base_font,
+                "xtick.major.width": tick_width,
+                "ytick.major.width": tick_width,
+                "xtick.minor.width": tick_width,
+                "ytick.minor.width": tick_width,
+                "xtick.major.size": tick_length,
+                "ytick.major.size": tick_length,
+                "xtick.minor.size": tick_length * 0.7,
+                "ytick.minor.size": tick_length * 0.7,
             }
         )
 
         n_rows = len(trial_curves)
-        fig_h = max(3.0, n_rows * 1.6 + 1.5)
-        fig, axes = plt.subplots(n_rows, 1, figsize=(10, fig_h), sharex=True)
+        fig_h = max(3.0, n_rows * 1.6 * plot_size_scale + 1.5)
+        fig_w = 10 * plot_size_scale
+        fig, axes = plt.subplots(n_rows, 1, figsize=(fig_w, fig_h), sharex=True)
         if n_rows == 1:
             axes = [axes]
         if share_ylabel:
-            fig.text(0.02, 0.5, y_label, va="center", rotation="vertical", fontsize=10)
-
-        # Force consistent y-axis scaling for PER RMS and combined-base envelopes.
-        fixed_y_max = 100.0
+            fig.text(
+                0.02,
+                0.5,
+                y_label,
+                va="center",
+                rotation="vertical",
+                fontsize=shared_ylabel_font,
+            )
 
         for ax, (
             odor_name,
@@ -1912,10 +2033,11 @@ def generate_envelope_plots(cfg: EnvelopePlotConfig) -> None:
             trial_off_effective,
             light_start_s,
             is_discriminate_odor,
+            trial_num,
         ) in zip(axes, trial_curves):
-            ax.plot(t, env, linewidth=1.2, color="black")
-            ax.axvline(trial_on_effective, linestyle="--", linewidth=1.0, color="black")
-            ax.axvline(trial_off_effective, linestyle="--", linewidth=1.0, color="black")
+            ax.plot(t, env, linewidth=trace_lw, color="black")
+            ax.axvline(trial_on_effective, linestyle="--", linewidth=odor_marker_lw, color="black")
+            ax.axvline(trial_off_effective, linestyle="--", linewidth=odor_marker_lw, color="black")
 
             transit_on_end = min(trial_on_effective, x_max_limit)
             steady_off_end = min(trial_off_effective, x_max_limit)
@@ -1963,28 +2085,95 @@ def generate_envelope_plots(cfg: EnvelopePlotConfig) -> None:
                 ax.axvline(
                     light_start_s,
                     linestyle="-.",
-                    linewidth=1.3,
+                    linewidth=light_marker_lw,
                     color="tab:green",
                 )
 
             if math.isfinite(theta):
-                ax.axhline(theta, linestyle="-", linewidth=1.0, color="tab:red", alpha=0.9)
+                ax.axhline(theta, linestyle="-", linewidth=threshold_lw, color="tab:red", alpha=0.9)
 
             ax.set_ylim(0, fixed_y_max)
             ax.set_xlim(0, x_max_limit)
             ax.margins(x=0, y=0.02)
-            if not share_ylabel:
-                ax.set_ylabel(y_label, fontsize=10)
+            ax.tick_params(axis="both", which="both", labelsize=base_font, width=tick_width, length=tick_length)
+            show_ylabel = (
+                not share_ylabel
+                and (
+                    single_ylabel_trial_num is None
+                    or trial_num == single_ylabel_trial_num
+                )
+            )
+            if show_ylabel:
+                ax.set_ylabel(y_label, fontsize=ylabel_font)
+            elif not share_ylabel:
+                ax.set_ylabel("")
+
+            panel_title_transform = (
+                transforms.blended_transform_factory(ax.transAxes, ax.transData)
+                if cfg.panel_title_use_data_y
+                else ax.transAxes
+            )
+            panel_title_y = float(cfg.panel_title_y)
+            panel_title_va = str(cfg.panel_title_va)
 
             if is_trained:
-                ax.set_title(odor_name.upper(), loc="left", fontsize=11, weight="bold", pad=2, color="tab:blue")
+                ax.text(
+                    float(cfg.panel_title_x),
+                    panel_title_y,
+                    odor_name.upper(),
+                    transform=panel_title_transform,
+                    ha="left",
+                    va=panel_title_va,
+                    fontsize=panel_title_font,
+                    weight="bold",
+                    color="tab:blue",
+                    clip_on=False,
+                )
             else:
-                ax.set_title(odor_name, loc="left", fontsize=11, weight="bold", pad=2, color="black")
+                ax.text(
+                    float(cfg.panel_title_x),
+                    panel_title_y,
+                    odor_name,
+                    transform=panel_title_transform,
+                    ha="left",
+                    va=panel_title_va,
+                    fontsize=panel_title_font,
+                    weight="bold",
+                    color="black",
+                    clip_on=False,
+                )
 
-        axes[-1].set_xlabel("Time (s)", fontsize=11)
+            odor_on_label_trial_num = (
+                int(cfg.odor_on_label_trial_num)
+                if cfg.odor_on_label_trial_num is not None
+                else None
+            )
+            if (
+                cfg.odor_on_label_text
+                and odor_on_label_trial_num is not None
+                and trial_num == odor_on_label_trial_num
+                and trial_on_effective < trial_off_effective
+            ):
+                odor_on_label_y = (
+                    float(cfg.odor_on_label_y)
+                    if cfg.odor_on_label_y is not None
+                    else fixed_y_max * 0.82
+                )
+                ax.text(
+                    (trial_on_effective + trial_off_effective) / 2.0,
+                    odor_on_label_y,
+                    str(cfg.odor_on_label_text),
+                    ha="center",
+                    va="center",
+                    fontsize=odor_on_label_font,
+                    weight="bold",
+                    color="black",
+                )
+
+        axes[-1].set_xlabel("Time (s)", fontsize=xlabel_font)
 
         legend_handles = [
-            plt.Line2D([0], [0], linestyle="--", linewidth=1.0, color="black", label="Odor at fly"),
+            plt.Line2D([0], [0], linestyle="--", linewidth=odor_marker_lw, color="black", label="Odor at fly"),
             plt.Rectangle(
                 (0, 0),
                 1,
@@ -2011,7 +2200,7 @@ def generate_envelope_plots(cfg: EnvelopePlotConfig) -> None:
                     [0],
                     [0],
                     linestyle="-.",
-                    linewidth=1.3,
+                    linewidth=light_marker_lw,
                     color="tab:green",
                     label="Light pulsing starts",
                 )
@@ -2032,47 +2221,66 @@ def generate_envelope_plots(cfg: EnvelopePlotConfig) -> None:
                 [0],
                 [0],
                 linestyle="-",
-                linewidth=1.0,
+                linewidth=threshold_lw,
                 color="tab:red",
                 label=r"$\theta = \mathrm{median}_{before} + k\cdot\mathrm{MAD}_{before}$",
             )
         )
-        fig.legend(
-            handles=legend_handles,
-            loc="upper right",
-            bbox_to_anchor=(0.98, 0.97),
-            frameon=True,
-            fontsize=9,
-            title=f"Threshold: k = {cfg.threshold_std_mult:g}",
-            title_fontsize=9,
-        )
+        if cfg.show_legend:
+            fig.legend(
+                handles=legend_handles,
+                loc="upper right",
+                bbox_to_anchor=(float(cfg.legend_anchor_x), float(cfg.legend_anchor_y)),
+                frameon=True,
+                fontsize=legend_font,
+                title=f"Threshold: k = {cfg.threshold_std_mult:g}",
+                title_fontsize=legend_font,
+            )
 
         fly_caption = fly
         if fly_number_label.upper() != "UNKNOWN":
             fly_caption = f"{fly} - Fly {fly_number_label}"
         fly_flagged = bool(non_reactive_mask(fly_df).any())
-        title_y = 0.995
-        subtitle_y = title_y - 0.035
+        title_y = float(cfg.figure_title_y)
+        subtitle_y = (
+            float(cfg.figure_subtitle_y)
+            if cfg.figure_subtitle_y is not None
+            else title_y - 0.035
+        )
         phase_label = "Training" if trial_type == "training" else "Testing"
-        fig.suptitle(
-            f"Proboscis Distance Across {phase_label} Trials",
-            y=title_y,
-            fontsize=14,
-            weight="bold",
-            color="black",
-        )
-        fig.text(
-            0.5,
-            subtitle_y,
-            fly_caption,
-            ha="center",
-            va="center",
-            fontsize=12,
-            weight="bold",
-            color="tab:red" if fly_flagged else "black",
-        )
+        if cfg.show_figure_title:
+            fig.text(
+                float(cfg.figure_title_x),
+                title_y,
+                f"Proboscis Distance Across {phase_label} Trials",
+                ha=str(cfg.figure_title_ha),
+                va="center",
+                fontsize=figure_title_font,
+                weight="bold",
+                color="black",
+            )
+        if cfg.show_figure_subtitle:
+            fig.text(
+                float(cfg.figure_subtitle_x),
+                subtitle_y,
+                fly_caption,
+                ha=str(cfg.figure_subtitle_ha),
+                va="center",
+                fontsize=figure_subtitle_font,
+                weight="bold",
+                color="tab:red" if fly_flagged else "black",
+            )
         left_pad = 0.04 if share_ylabel else 0.0
-        fig.tight_layout(rect=[left_pad, 0, 1, 0.93])
+        has_top_decoration = cfg.show_legend or cfg.show_figure_title or cfg.show_figure_subtitle
+        layout_top = (
+            max(0.84, 0.93 - 0.03 * max(ui_scale - 1.0, 0.0))
+            if has_top_decoration
+            else 0.985
+        )
+        tight_layout_kwargs = {"rect": [left_pad, 0, 1, layout_top]}
+        if cfg.tight_h_pad is not None:
+            tight_layout_kwargs["h_pad"] = float(cfg.tight_h_pad)
+        fig.tight_layout(**tight_layout_kwargs)
 
         if should_write(out_path, cfg.overwrite):
             fig.savefig(out_path, dpi=300, bbox_inches="tight")
@@ -2160,6 +2368,145 @@ def _parse_envelopes_args(subparser: argparse.ArgumentParser) -> None:
         default=None,
         help="Optional cap for number of fly figures to render (useful for quick samples).",
     )
+    subparser.add_argument("--fly", type=str, default=None, help="Optional exact fly label to render.")
+    subparser.add_argument("--fly-number", type=str, default=None, help="Optional exact fly number to render.")
+    subparser.add_argument(
+        "--style-scale",
+        type=float,
+        default=1.0,
+        help="Multiplier for fonts, ticks, and axis line widths.",
+    )
+    subparser.add_argument(
+        "--trace-linewidth-scale",
+        type=float,
+        default=1.0,
+        help="Multiplier for envelope and annotation line widths.",
+    )
+    subparser.add_argument(
+        "--panel-title-scale",
+        type=float,
+        default=1.0,
+        help="Multiplier for per-trial odor label font size.",
+    )
+    subparser.add_argument(
+        "--figure-title-scale",
+        type=float,
+        default=1.0,
+        help="Multiplier for the main figure title font size.",
+    )
+    subparser.add_argument(
+        "--figure-subtitle-scale",
+        type=float,
+        default=1.0,
+        help="Multiplier for the fly subtitle font size.",
+    )
+    subparser.add_argument(
+        "--legend-scale",
+        type=float,
+        default=1.0,
+        help="Multiplier for legend font sizes.",
+    )
+    subparser.add_argument(
+        "--plot-size-scale",
+        type=float,
+        default=1.0,
+        help="Multiplier for the rendered figure width and per-row height.",
+    )
+    subparser.add_argument(
+        "--single-ylabel-trial-num",
+        type=int,
+        default=None,
+        help="If set, only show the y-axis label on the subplot for this trial number.",
+    )
+    subparser.add_argument(
+        "--fixed-y-max",
+        type=float,
+        default=100.0,
+        help="Upper y-axis limit shared across all subplots.",
+    )
+    subparser.add_argument(
+        "--y-label-override",
+        type=str,
+        default=None,
+        help="Optional replacement text for the y-axis label.",
+    )
+    subparser.add_argument(
+        "--legend-anchor-x",
+        type=float,
+        default=0.98,
+        help="Legend bbox anchor x position in figure coordinates.",
+    )
+    subparser.add_argument(
+        "--legend-anchor-y",
+        type=float,
+        default=0.97,
+        help="Legend bbox anchor y position in figure coordinates.",
+    )
+    subparser.add_argument(
+        "--figure-title-x",
+        type=float,
+        default=0.5,
+        help="Main title x position in figure coordinates.",
+    )
+    subparser.add_argument(
+        "--figure-title-y",
+        type=float,
+        default=0.995,
+        help="Main title y position in figure coordinates.",
+    )
+    subparser.add_argument(
+        "--figure-title-ha",
+        choices=("left", "center", "right"),
+        default="center",
+        help="Horizontal alignment for the main title.",
+    )
+    subparser.add_argument(
+        "--figure-subtitle-x",
+        type=float,
+        default=0.5,
+        help="Subtitle x position in figure coordinates.",
+    )
+    subparser.add_argument(
+        "--figure-subtitle-y",
+        type=float,
+        default=None,
+        help="Optional subtitle y position in figure coordinates.",
+    )
+    subparser.add_argument(
+        "--figure-subtitle-ha",
+        choices=("left", "center", "right"),
+        default="center",
+        help="Horizontal alignment for the subtitle.",
+    )
+    subparser.add_argument(
+        "--panel-title-x",
+        type=float,
+        default=0.0,
+        help="Per-panel odor label x position in axes coordinates.",
+    )
+    subparser.add_argument(
+        "--panel-title-y",
+        type=float,
+        default=1.02,
+        help="Per-panel odor label y position in axes coordinates unless --panel-title-use-data-y is set.",
+    )
+    subparser.add_argument(
+        "--panel-title-va",
+        choices=("top", "center", "bottom", "baseline", "center_baseline"),
+        default="bottom",
+        help="Vertical alignment for the per-panel odor label.",
+    )
+    subparser.add_argument(
+        "--panel-title-use-data-y",
+        action="store_true",
+        help="Interpret --panel-title-y in data coordinates while keeping x in axes coordinates.",
+    )
+    subparser.add_argument(
+        "--tight-h-pad",
+        type=float,
+        default=None,
+        help="Optional vertical padding passed to tight_layout between stacked subplots.",
+    )
     subparser.add_argument("--overwrite", action="store_true", help="Rebuild plots even if the target files exist.")
 
 
@@ -2219,6 +2566,31 @@ def main(argv: Sequence[str] | None = None) -> None:
             light_annotation_mode=args.light_annotation_mode,
             max_flies=args.max_flies,
             overwrite=args.overwrite,
+            fly_filter=args.fly,
+            fly_number_filter=args.fly_number,
+            style_scale=args.style_scale,
+            trace_linewidth_scale=args.trace_linewidth_scale,
+            panel_title_scale=args.panel_title_scale,
+            figure_title_scale=args.figure_title_scale,
+            figure_subtitle_scale=args.figure_subtitle_scale,
+            legend_scale=args.legend_scale,
+            plot_size_scale=args.plot_size_scale,
+            single_ylabel_trial_num=args.single_ylabel_trial_num,
+            fixed_y_max=args.fixed_y_max,
+            y_label_override=args.y_label_override,
+            legend_anchor_x=args.legend_anchor_x,
+            legend_anchor_y=args.legend_anchor_y,
+            figure_title_x=args.figure_title_x,
+            figure_title_y=args.figure_title_y,
+            figure_title_ha=args.figure_title_ha,
+            figure_subtitle_x=args.figure_subtitle_x,
+            figure_subtitle_y=args.figure_subtitle_y,
+            figure_subtitle_ha=args.figure_subtitle_ha,
+            panel_title_x=args.panel_title_x,
+            panel_title_y=args.panel_title_y,
+            panel_title_va=args.panel_title_va,
+            panel_title_use_data_y=args.panel_title_use_data_y,
+            tight_h_pad=args.tight_h_pad,
         )
         generate_envelope_plots(cfg)
         return

@@ -16,6 +16,10 @@ from ..utils.columns import (
     PROBOSCIS_MIN_DISTANCE_COL,
     find_proboscis_distance_column,
 )
+from ..utils.distance_sanity import (
+    csv_requires_three_fly_distance_sanitization,
+    sanitize_three_fly_distance_dataframe,
+)
 from ..utils.fly_files import iter_fly_distance_csvs
 
 
@@ -105,6 +109,10 @@ def main(cfg: Settings) -> None:
                     f"threshold={threshold:.3f}, effective_max={effective_max:.3f}"
                 )
 
+                needs_sanitization = csv_requires_three_fly_distance_sanitization(
+                    csv_path,
+                    cfg.class2_max,
+                )
                 if not force_recompute:
                     try:
                         header = pd.read_csv(csv_path, nrows=0)
@@ -129,17 +137,30 @@ def main(cfg: Settings) -> None:
                             )
                         except Exception:
                             snapshot = pd.DataFrame()
-                        if _is_already_normalized(
-                            list(header.columns),
-                            snapshot,
-                            gmin=gmin,
-                            gmax=gmax,
-                            effective_max=effective_max,
+                        if (
+                            not needs_sanitization
+                            and _is_already_normalized(
+                                list(header.columns),
+                                snapshot,
+                                gmin=gmin,
+                                gmax=gmax,
+                                effective_max=effective_max,
+                            )
                         ):
                             print(f"[NORM] Skipping already-normalized CSV: {csv_path.name}")
                             continue
 
                 df = pd.read_csv(csv_path)
+                df, sanitized_count = sanitize_three_fly_distance_dataframe(
+                    df,
+                    csv_path,
+                    cfg.class2_max,
+                )
+                if sanitized_count:
+                    print(
+                        f"[NORM] Sanitized {sanitized_count} over-limit 3-fly rows in {csv_path.name} "
+                        f"(>{cfg.class2_max}px)."
+                    )
                 dist_col = find_proboscis_distance_column(df)
                 if dist_col is None:
                     print(

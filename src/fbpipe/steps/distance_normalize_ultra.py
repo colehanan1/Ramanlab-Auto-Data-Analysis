@@ -32,6 +32,10 @@ from ..utils.columns import (
     PROBOSCIS_MIN_DISTANCE_COL,
     find_proboscis_distance_column,
 )
+from ..utils.distance_sanity import (
+    csv_requires_three_fly_distance_sanitization,
+    sanitize_three_fly_distance_dataframe,
+)
 from ..utils.fly_files import iter_fly_distance_csvs
 from ..utils.gpu_batch_optimizer import BatchFileProcessor, estimate_optimal_batch_size
 
@@ -128,14 +132,23 @@ def main(cfg: Settings) -> None:
                 threshold = float(stats.get("effective_max_threshold", 95.0))
                 effective_max = max(fly_max, threshold)
 
+                needs_sanitization = csv_requires_three_fly_distance_sanitization(
+                    csv_path,
+                    cfg.class2_max,
+                )
+
                 # Quick check for distance column + skip already-normalized files.
                 df_temp = pd.read_csv(csv_path, nrows=1)
-                if not force_recompute and _is_already_normalized(
-                    list(df_temp.columns),
-                    df_temp,
-                    gmin=gmin,
-                    gmax=gmax,
-                    effective_max=effective_max,
+                if (
+                    not force_recompute
+                    and not needs_sanitization
+                    and _is_already_normalized(
+                        list(df_temp.columns),
+                        df_temp,
+                        gmin=gmin,
+                        gmax=gmax,
+                        effective_max=effective_max,
+                    )
                 ):
                     continue
                 dist_col = find_proboscis_distance_column(df_temp)
@@ -157,7 +170,8 @@ def main(cfg: Settings) -> None:
                 batch_files,
                 batch_stats,
                 batch_dist_cols,
-                processor
+                processor,
+                cfg.class2_max,
             )
 
             total_files += processed
@@ -169,7 +183,8 @@ def _process_fly_batch(
     csv_paths: List[Path],
     stats: List[Tuple[float, float, float]],
     dist_cols: Dict[Path, str],
-    processor: BatchFileProcessor
+    processor: BatchFileProcessor,
+    max_distance_px: float,
 ) -> int:
     """
     Process all CSV files for a single fly using batch GPU operations.
@@ -193,6 +208,16 @@ def _process_fly_batch(
         for idx, csv_path in enumerate(batch_paths):
             try:
                 df = pd.read_csv(csv_path)
+                df, sanitized_count = sanitize_three_fly_distance_dataframe(
+                    df,
+                    csv_path,
+                    max_distance_px,
+                )
+                if sanitized_count:
+                    print(
+                        f"[NORM-ULTRA] Sanitized {sanitized_count} over-limit 3-fly rows in {csv_path.name} "
+                        f"(>{max_distance_px}px)."
+                    )
                 dist_col = dist_cols[csv_path]
 
                 if dist_col not in df.columns:
