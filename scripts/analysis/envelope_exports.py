@@ -268,15 +268,41 @@ def _find_trial_csvs(fly_dir: Path) -> Iterator[Path]:
     )
     patterns = ("**/*testing*.csv", "**/*training*.csv")
     seen: set[Path] = set()
-    yielded = False
+    all_paths: list[Path] = []
     for pattern in patterns:
         for csv_path in search_root.glob(pattern):
             if csv_path.is_file():
                 resolved = csv_path.resolve()
                 if resolved not in seen:
                     seen.add(resolved)
-                    yielded = True
-                    yield resolved
+                    all_paths.append(resolved)
+
+    # Deduplicate: when both short-form (e.g. testing_8_fly3_angle_distance_rms_envelope)
+    # and long-form (testing_8_fly3_distances_fly3_angle_distance_rms_envelope) exist,
+    # keep only the long-form "distances_fly" variant.
+    stems = {p.stem for p in all_paths}
+    yielded = False
+    for p in all_paths:
+        stem = p.stem
+        if "distances_fly" not in stem.lower():
+            # Check if a distances_fly variant exists in the same directory
+            match = re.match(
+                r"((?:testing|training)_\d+_fly\d+)_(.+)", stem, re.IGNORECASE
+            )
+            if match:
+                prefix = match.group(1)
+                # Look for a sibling with "distances_flyN_" inserted
+                has_long = any(
+                    s != stem
+                    and s.startswith(prefix)
+                    and "distances_fly" in s.lower()
+                    for s in stems
+                )
+                if has_long:
+                    print(f"[DEBUG]    Skipping short-form duplicate: {p.name}")
+                    continue
+        yielded = True
+        yield p
     if not yielded:
         print(f"[DEBUG]    No CSVs matched testing/training glob in {search_root}")
 

@@ -148,11 +148,10 @@ ODOR_CANON: Mapping[str, str] = {
     "acv-control": "ACV-Control",
     "acv_control": "ACV-Control",
     "acv control": "ACV-Control",
-    "3oct-control": "3Oct-Control",
-    "3oct_control": "3Oct-Control",
-    "3oct control": "3Oct-Control",
-    "3oct-training": "3Oct-Training",
-    "3oct_training": "3Oct-Training",
+    "3oct-control": "3OCT-Control",
+    "3oct_control": "3OCT-Control",
+    "3oct control": "3OCT-Control",
+    "3oct_training": "3OCT-Training",
 }
 
 DISPLAY_LABEL = {
@@ -182,8 +181,7 @@ DISPLAY_LABEL = {
     "Lin-Training": "Linalool",
     "Lin-Control": "Linalool",
     "ACV-Control": "Apple Cider Vinegar",
-    "3Oct-Training": "3-Octonol",
-    "3Oct-Control": "3-Octonol",
+    "3OCT-Control": "3-Octonol",
 }
 
 ODOR_ORDER = [
@@ -213,8 +211,7 @@ ODOR_ORDER = [
     "Lin-Training",
     "Lin-Control",
     "ACV-Control",
-    "3Oct-Training",
-    "3Oct-Control",
+    "3OCT-Control",
 ]
 
 REACTION_RATE_ODOR_ORDER = [
@@ -243,7 +240,7 @@ PRIMARY_ODOR_LABEL = {
     "Cit-Control": "Citral",
     "Lin-Control": "Linalool",
     "ACV-Control": "Apple Cider Vinegar",
-    "3Oct-Control": "3-Octonol",
+    "3OCT-Control": "3-Octonol",
 }
 
 TRAINING_ODOR_SCHEDULE_ACV = {
@@ -337,8 +334,7 @@ TESTING_DATASET_ALIAS = {
     "Cit-Training": "Cit-Control",
     "Lin-Training": "Lin-Control",
     "ACV-Control": "ACV-Control",
-    "3Oct-Training": "3Oct-Control",
-    "3Oct-Control": "3Oct-Control",
+    "3OCT-Control": "3OCT-Control",
 }
 NON_REACTIVE_SPAN_PX = 7.5
 TRAINING_EXTENDED_ODOR_TRIALS = frozenset({4, 6, 8})

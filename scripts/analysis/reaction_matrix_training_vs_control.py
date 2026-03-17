@@ -63,6 +63,7 @@ from scripts.analysis.envelope_visuals import (
 from scripts.analysis.reaction_matrix_from_spreadsheet import (
     SpreadsheetMatrixConfig,
     _filter_trial_types,
+    _normalise_trial_label,
 )
 
 # ---------------------------------------------------------------------------
@@ -71,9 +72,12 @@ from scripts.analysis.reaction_matrix_from_spreadsheet import (
 TRAINING_CONTROL_PAIRS = {
     "EB-Training": "EB-Control",
     "Hex-Training": "Hex-Control",
+    "Hex-Training-24": "Hex-Control-24",
+    "Hex-Training-36": "Hex-Control-36",
     "Benz-Training": "Benz-Control",
+    "Benz-Training-24": "Benz-Control",
     "ACV-Training": "ACV-Control",
-    "3Oct-Training": "3Oct-Control",
+    "3OCT-Training": "3OCT-Control",
     "Cit-Training": "Cit-Control",
     "Lin-Training": "Lin-Control",
 }
@@ -375,9 +379,13 @@ def generate_training_vs_control_matrices(cfg: SpreadsheetMatrixConfig) -> None:
         df = df.loc[~flagged_mask].copy()
 
     df["dataset_canon"] = df["dataset"].map(_canon_dataset)
-    df["trial"] = df["trial_label"]
+    df["trial"] = df["trial_label"].apply(_normalise_trial_label)
     df["trial_num"] = df["trial"].apply(_trial_num)
     df["during_hit"] = df["prediction"].fillna(0).astype(int)
+    # Drop duplicate rows created by trial label normalization (e.g.
+    # testing_1_fly1_distances_... and testing_1_fly1_angle_... both
+    # map to testing_1 with identical predictions).
+    df = df.drop_duplicates(subset=["dataset", "fly", "fly_number", "trial"], keep="first")
     df = _normalise_fly_columns(df)
 
     # --- Exclude flagged flies from matrix (before heatmap is built) ---

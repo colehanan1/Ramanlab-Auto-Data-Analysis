@@ -30,15 +30,15 @@ import pandas as pd
 
 # ── paths ──────────────────────────────────────────────────────────────────
 CSV_PATH = Path(
-    "/home/ramanlab/Documents/cole/Data/Opto/Combined/"
+    "/home/ramanlab/Documents/cole/Data/CSVs-ALL-Opto-Flys/"
     "all_envelope_rows_wide_combined_base.csv"
 )
 FLAGGED_CSV = Path(
-    "/home/ramanlab/Documents/cole/Data/Opto/Combined/"
+    "/home/ramanlab/Documents/cole/Data/CSVs-ALL-Opto-Flys/"
     "flagged-flys-truth.csv"
 )
 OUT_DIR = Path(
-    "/home/ramanlab/Documents/cole/Data/Opto/Combined/per_folder_traces"
+    "/home/ramanlab/Documents/cole/Data/CSVs-ALL-Opto-Flys/per_folder_traces"
 )
 
 # ── fly colours ────────────────────────────────────────────────────────────
