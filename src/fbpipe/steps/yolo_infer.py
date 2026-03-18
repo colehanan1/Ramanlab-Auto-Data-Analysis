@@ -138,7 +138,7 @@ def _max_valid_eye_prob_distance_px(settings: Settings, active_max_flies: int) -
     """Apply an extra distance sanity cap only for 3-fly videos."""
 
     if active_max_flies == 3:
-        return float(settings.class2_max)
+        return float(settings.three_fly_max_eye_prob_distance_px)
     return math.inf
 
 

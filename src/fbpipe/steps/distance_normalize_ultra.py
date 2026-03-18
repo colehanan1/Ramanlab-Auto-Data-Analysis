@@ -134,7 +134,7 @@ def main(cfg: Settings) -> None:
 
                 needs_sanitization = csv_requires_three_fly_distance_sanitization(
                     csv_path,
-                    cfg.class2_max,
+                    cfg.three_fly_max_eye_prob_distance_px,
                 )
 
                 # Quick check for distance column + skip already-normalized files.
@@ -171,7 +171,7 @@ def main(cfg: Settings) -> None:
                 batch_stats,
                 batch_dist_cols,
                 processor,
-                cfg.class2_max,
+                cfg.three_fly_max_eye_prob_distance_px,
             )
 
             total_files += processed

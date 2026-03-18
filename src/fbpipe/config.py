@@ -314,6 +314,7 @@ class Settings:
     # distance limits
     class2_min: float = 70.0
     class2_max: float = 250.0
+    three_fly_max_eye_prob_distance_px: float = 180.0
 
     # reaction prediction
     reaction_prediction: ReactionPredictionSettings = field(default_factory=ReactionPredictionSettings)
@@ -649,6 +650,12 @@ def load_settings(config_path: str | Path) -> Settings:
 
         class2_min=float(os.getenv("CLASS2_MIN", dist_limits.get("class2_min", 70.0))),
         class2_max=float(os.getenv("CLASS2_MAX", dist_limits.get("class2_max", 250.0))),
+        three_fly_max_eye_prob_distance_px=float(
+            os.getenv(
+                "THREE_FLY_MAX_EYE_PROB_DISTANCE_PX",
+                dist_limits.get("three_fly_max_eye_prob_distance_px", 180.0),
+            )
+        ),
         reaction_prediction=reaction_prediction,
         force=force,
         tracking=tracking,

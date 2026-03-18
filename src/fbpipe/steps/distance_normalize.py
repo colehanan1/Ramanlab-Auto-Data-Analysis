@@ -111,7 +111,7 @@ def main(cfg: Settings) -> None:
 
                 needs_sanitization = csv_requires_three_fly_distance_sanitization(
                     csv_path,
-                    cfg.class2_max,
+                    cfg.three_fly_max_eye_prob_distance_px,
                 )
                 if not force_recompute:
                     try:
@@ -154,12 +154,12 @@ def main(cfg: Settings) -> None:
                 df, sanitized_count = sanitize_three_fly_distance_dataframe(
                     df,
                     csv_path,
-                    cfg.class2_max,
+                    cfg.three_fly_max_eye_prob_distance_px,
                 )
                 if sanitized_count:
                     print(
                         f"[NORM] Sanitized {sanitized_count} over-limit 3-fly rows in {csv_path.name} "
-                        f"(>{cfg.class2_max}px)."
+                        f"(>{cfg.three_fly_max_eye_prob_distance_px}px)."
                     )
                 dist_col = find_proboscis_distance_column(df)
                 if dist_col is None:

@@ -65,7 +65,7 @@ def test_process_frame_invalidates_far_proboscis_match_for_three_fly_video(monke
         dtype=np.float32,
     )
     eye_scores = np.array([0.95, 0.9, 0.85], dtype=np.float32)
-    prob_box = np.array([[355.0, 95.0, 365.0, 105.0]], dtype=np.float32)
+    prob_box = np.array([[295.0, 95.0, 305.0, 105.0]], dtype=np.float32)
     prob_scores = np.array([0.98], dtype=np.float32)
 
     monkeypatch.setattr(
@@ -88,6 +88,7 @@ def test_process_frame_invalidates_far_proboscis_match_for_three_fly_video(monke
         main_directories="/tmp/videos",
         max_flies=3,
         class2_max=250.0,
+        three_fly_max_eye_prob_distance_px=180.0,
         use_optical_flow=False,
     )
 
@@ -123,7 +124,7 @@ def test_process_frame_keeps_far_proboscis_match_when_video_is_not_three_fly(mon
         dtype=np.float32,
     )
     eye_scores = np.array([0.95, 0.9], dtype=np.float32)
-    prob_box = np.array([[355.0, 95.0, 365.0, 105.0]], dtype=np.float32)
+    prob_box = np.array([[295.0, 95.0, 305.0, 105.0]], dtype=np.float32)
     prob_scores = np.array([0.98], dtype=np.float32)
 
     monkeypatch.setattr(
@@ -146,6 +147,7 @@ def test_process_frame_keeps_far_proboscis_match_when_video_is_not_three_fly(mon
         main_directories="/tmp/videos",
         max_flies=2,
         class2_max=250.0,
+        three_fly_max_eye_prob_distance_px=180.0,
         use_optical_flow=False,
     )
 
@@ -165,6 +167,6 @@ def test_process_frame_keeps_far_proboscis_match_when_video_is_not_three_fly(mon
     )
 
     assert row["cls8_0_track_id"] == 17
-    assert row["dist_eye_0_cls8_0"] == pytest.approx(260.0)
+    assert row["dist_eye_0_cls8_0"] == pytest.approx(200.0)
     assert not np.isnan(row["angle_eye_0_cls8_vs_anchor"])
     assert pairer.eye_to_cls8[eye_mgr.anchor_ids[0]] == 17

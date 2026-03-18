@@ -200,14 +200,14 @@ def test_recalculation_sanitizes_existing_three_fly_overlimit_distances(tmp_path
     fly2_csv = rms_dir / f"{trial_prefix}_fly2_distances.csv"
     fly3_csv = rms_dir / f"{trial_prefix}_fly3_distances.csv"
 
-    _write_existing_processed_csv(fly1_csv, [100.0, 260.0, 240.0])
+    _write_existing_processed_csv(fly1_csv, [100.0, 200.0, 170.0])
     _write_existing_processed_csv(fly2_csv, [110.0, 120.0, 130.0])
     _write_existing_processed_csv(fly3_csv, [140.0, 150.0, 160.0])
 
     _write_existing_stats(
         fly_dir / f"fly1_global_distance_stats_class_{EYE_CLASS}.json",
         gmin=100.0,
-        gmax=260.0,
+        gmax=200.0,
     )
     _write_existing_stats(
         fly_dir / f"fly2_global_distance_stats_class_{EYE_CLASS}.json",
@@ -225,6 +225,7 @@ def test_recalculation_sanitizes_existing_three_fly_overlimit_distances(tmp_path
         main_directories=str(root),
         class2_min=10.0,
         class2_max=250.0,
+        three_fly_max_eye_prob_distance_px=180.0,
     )
 
     distance_stats.main(settings)
@@ -242,7 +243,7 @@ def test_recalculation_sanitizes_existing_three_fly_overlimit_distances(tmp_path
     assert np.isnan(df.loc[1, angle_col])
 
     stats = json.loads((fly_dir / f"fly1_global_distance_stats_class_{EYE_CLASS}.json").read_text())
-    assert stats["global_max"] == 240.0
+    assert stats["global_max"] == 170.0
 
     distance_normalize.main(settings)
 

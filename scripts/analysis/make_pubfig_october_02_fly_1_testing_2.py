@@ -40,11 +40,11 @@ FRAME_NUMS = [800, 1500, 1800, 2200]
 
 DIST_CSV_TOP = (
     Path("/securedstorage/DATAsec/cole/Data-secured/Hex-Training/october_08_batch_2")
-    / "angle_distance_rms_envelope/testing_2_fly1_angle_distance_rms_envelope.csv"
+    / "angle_distance_rms_envelope/testing_2_fly1_distances_fly1_angle_distance_rms_envelope.csv"
 )
 DIST_CSV_BOTTOM = (
     Path("/securedstorage/DATAsec/cole/Data-secured/Hex-Training/october_08_batch_2")
-    / "angle_distance_rms_envelope/testing_1_fly1_angle_distance_rms_envelope.csv"
+    / "angle_distance_rms_envelope/testing_1_fly1_distances_fly1_angle_distance_rms_envelope.csv"
 )
 
 OUT_PATH = FRAME_DIR_TOP / "october_08_batch_2_testing_2_and_1_fly1_pubfig.png"

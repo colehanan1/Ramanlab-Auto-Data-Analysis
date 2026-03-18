@@ -52,7 +52,10 @@ def main(cfg: Settings) -> None:
                     if not stats_path.exists():
                         tokens_to_refresh.add(token)
                         continue
-                    if csv_requires_three_fly_distance_sanitization(csv_path, cfg.class2_max):
+                    if csv_requires_three_fly_distance_sanitization(
+                        csv_path,
+                        cfg.three_fly_max_eye_prob_distance_px,
+                    ):
                         tokens_to_refresh.add(token)
                         continue
                     if _needs_stats_refresh(csv_path, force_recompute=force_recompute):
@@ -80,13 +83,13 @@ def main(cfg: Settings) -> None:
                 df, sanitized_count = sanitize_three_fly_distance_dataframe(
                     df,
                     csv_path,
-                    cfg.class2_max,
+                    cfg.three_fly_max_eye_prob_distance_px,
                 )
                 if sanitized_count:
                     df.to_csv(csv_path, index=False)
                     print(
                         f"[DIST] Sanitized {sanitized_count} over-limit 3-fly rows in {csv_path.name} "
-                        f"(>{cfg.class2_max}px)."
+                        f"(>{cfg.three_fly_max_eye_prob_distance_px}px)."
                     )
 
                 dist_col = find_proboscis_distance_column(df)
