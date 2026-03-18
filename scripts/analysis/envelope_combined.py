@@ -1943,7 +1943,14 @@ def combine_distance_angle(cfg: CombineConfig) -> None:
                         if local_max > current_max:
                             fly_weighted_max_by_number[fly_number_label] = local_max
 
-                    slot_suffix = f"_{slot_label}" if slot_label else ""
+                    # Generate long-form filename: base_key_flyN_distances_flyN_angle_distance_rms_envelope.csv
+                    # slot_label = "flyN" (extracted from regex group 1), so we need to add "_distances_flyN"
+                    if slot_label:
+                        slot_suffix = f"_{slot_label}_distances_{slot_label}"
+                    elif fly_number is not None:
+                        slot_suffix = f"_fly{fly_number}_distances_fly{fly_number}"
+                    else:
+                        slot_suffix = ""
                     trial_id = f"{base_key}{slot_suffix}".replace("__", "_")
 
                     trial_data_cache.append({

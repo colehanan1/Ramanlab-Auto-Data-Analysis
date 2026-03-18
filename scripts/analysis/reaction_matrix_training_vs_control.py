@@ -314,7 +314,7 @@ def plot_training_vs_control_bars(
             tick.set_weight("bold")
 
     # Y-axis: 0-100% with headroom for annotations + brackets
-    ax.set_ylim(0.0, 130 if p_values else 105)
+    ax.set_ylim(0.0, 110)
     ax.set_ylabel("PER %")
     ax.set_xlabel("Odor")
     ax.set_title(title, fontsize=12, weight="bold")
@@ -413,6 +413,10 @@ def generate_training_vs_control_matrices(cfg: SpreadsheetMatrixConfig) -> None:
         order_suffix = _order_suffix(order)
 
         for train_ds, ctrl_ds in TRAINING_CONTROL_PAIRS.items():
+            # Skip training datasets with no control data
+            if train_ds in ("ACV-Training", "3OCT-Training"):
+                print(f"[INFO] {train_ds} has no control data, skipping train vs control plots.")
+                continue
             if train_ds not in present:
                 print(f"[INFO] {train_ds} not in predictions CSV, skipping.")
                 continue

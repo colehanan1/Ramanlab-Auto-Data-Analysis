@@ -1243,8 +1243,8 @@ def plot_reaction_rate_bars(
         if bool(is_trained):
             tick.set_color("tab:blue")
             tick.set_weight("bold")
-    ax.set_ylim(0.0, 1.05)
-    ax.set_ylabel("Reaction Rate")
+    ax.set_ylim(0.0, 1.10)
+    ax.set_ylabel("PER %")
     ax.set_xlabel("Odor")
     ax.set_title(title, fontsize=12, weight="bold")
     ax.grid(axis="y", linestyle="--", linewidth=0.6, alpha=0.35)
