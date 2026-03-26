@@ -349,6 +349,46 @@ def test_build_wide_csv_accepts_renamed_combined_pct_column(tmp_path):
     )
 
 
+def test_build_wide_csv_prefers_distance_labelled_trial_alias(tmp_path):
+    """Duplicate trial aliases should keep only the distances-labelled combined CSV."""
+
+    dataset_root = tmp_path / "acv_training"
+    fly_dir = dataset_root / "march_05_batch_1"
+    out_dir = fly_dir / "angle_distance_rms_envelope"
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    short_values = np.array([10.0, 20.0, 30.0], dtype=float)
+    long_values = np.array([40.0, 50.0, 60.0], dtype=float)
+
+    pd.DataFrame({"combined_pct": short_values}).to_csv(
+        out_dir / "testing_1_fly1_angle_distance_rms_envelope.csv",
+        index=False,
+    )
+    pd.DataFrame({"combined_pct": long_values}).to_csv(
+        out_dir / "testing_1_fly1_distances_fly1_angle_distance_rms_envelope.csv",
+        index=False,
+    )
+
+    output_csv = tmp_path / "wide_combined_base.csv"
+    ec.build_wide_csv(
+        [str(dataset_root)],
+        str(output_csv),
+        measure_cols=["combined_pct"],
+    )
+
+    wide_df = pd.read_csv(output_csv)
+
+    assert len(wide_df) == 1
+    assert (
+        wide_df.loc[0, "trial_label"]
+        == "testing_1_fly1_distances_fly1_angle_distance_rms_envelope"
+    )
+    np.testing.assert_allclose(
+        wide_df.loc[0, ["dir_val_0", "dir_val_1", "dir_val_2"]].to_numpy(dtype=float),
+        long_values,
+    )
+
+
 def test_extract_env_row_preserves_internal_nan_gaps():
     """Trace extraction should preserve timebase gaps instead of compacting them away."""
 

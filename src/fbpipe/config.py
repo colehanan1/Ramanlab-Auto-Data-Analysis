@@ -165,6 +165,8 @@ class ReactionPredictionSettings:
     python: str = ""
     threshold: float | None = None
     run_prediction: bool = True
+    model_type: str = "binary"  # "binary" (logistic regression) or "ordinal" (XGBoost -1..5)
+    binary_threshold: int = 2   # ordinal score >= this → reaction (only used when model_type="ordinal")
     matrix: ReactionMatrixSettings = field(default_factory=ReactionMatrixSettings)
 
 
@@ -466,6 +468,8 @@ def load_settings(config_path: str | Path) -> Settings:
         python=reaction_python,
         threshold=threshold_value,
         run_prediction=bool(run_prediction_cfg),
+        model_type=str(reaction_cfg.get("model_type", "binary")),
+        binary_threshold=int(reaction_cfg.get("binary_threshold", 2)),
         matrix=matrix,
     )
 

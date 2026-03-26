@@ -264,18 +264,32 @@ def main(cfg: Settings) -> None:
         data_csv_for_cli = Path(tmp.name)
         temp_path = data_csv_for_cli
 
-    cmd = [
-        "flybehavior-response",
-        "predict",
-        "--data-csv",
-        str(data_csv_for_cli),
-        "--model-path",
-        str(model_path),
-        "--output-csv",
-        str(output_csv),
-    ]
-    if settings.threshold is not None:
-        cmd.extend(["--threshold", str(settings.threshold)])
+    if settings.model_type == "ordinal":
+        cmd = [
+            "flybehavior-response",
+            "predict-ordinal",
+            "--data-csv",
+            str(data_csv_for_cli),
+            "--model-path",
+            str(model_path),
+            "--output-csv",
+            str(output_csv),
+            "--binary-threshold",
+            str(settings.binary_threshold),
+        ]
+    else:
+        cmd = [
+            "flybehavior-response",
+            "predict",
+            "--data-csv",
+            str(data_csv_for_cli),
+            "--model-path",
+            str(model_path),
+            "--output-csv",
+            str(output_csv),
+        ]
+        if settings.threshold is not None:
+            cmd.extend(["--threshold", str(settings.threshold)])
 
     repo_root = Path(__file__).resolve().parents[3]
     env = os.environ.copy()

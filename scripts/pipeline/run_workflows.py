@@ -80,6 +80,29 @@ def _ensure_path(value: str | Path, field: str) -> Path:
     return path
 
 
+def _resolve_folder(folder_name: str, dataset_roots: Sequence[str]) -> str:
+    """Find the dataset root whose directory name matches *folder_name* (case-insensitive).
+
+    Raises ValueError with available folder names when no match is found.
+    """
+    target = folder_name.strip().lower()
+    matches = [
+        root for root in dataset_roots
+        if Path(root).name.lower() == target
+    ]
+    if not matches:
+        available = sorted(Path(root).name for root in dataset_roots)
+        raise ValueError(
+            f"Folder '{folder_name}' not found in main_directories. "
+            f"Available: {available}"
+        )
+    if len(matches) > 1:
+        LOGGER.warning(
+            "Multiple roots match folder '%s': %s; using first.", folder_name, matches
+        )
+    return matches[0]
+
+
 def _cache_root(settings: Settings) -> Path:
     path = Path(settings.cache_dir or (REPO_ROOT / "cache"))
     path = path.expanduser().resolve()
@@ -645,7 +668,12 @@ def _render_pair_visuals(
         generate_envelope_plots(cfg)
 
 
-def _run_combined(cfg: Mapping[str, Any] | None, settings: Settings | None) -> None:
+def _run_combined(
+    cfg: Mapping[str, Any] | None,
+    settings: Settings | None,
+    *,
+    folder_filter: str | None = None,
+) -> None:
     if not cfg:
         return
 
@@ -689,6 +717,13 @@ def _run_combined(cfg: Mapping[str, Any] | None, settings: Settings | None) -> N
 
         for entry in roots_iter:
             entry_path = _ensure_path(entry, "combine.root")
+            # In single-folder mode, skip combine for non-target folders.
+            if folder_filter and entry_path.name.lower() != folder_filter.strip().lower():
+                LOGGER.info(
+                    "[analysis] combined.combine → SKIP %s (single-folder mode)",
+                    entry_path.name,
+                )
+                continue
             run_opts = dict(opts)
             run_opts["root"] = entry_path
             if "odor_on" in run_opts and "odor_on_s" not in run_opts:
@@ -726,6 +761,14 @@ def _run_combined(cfg: Mapping[str, Any] | None, settings: Settings | None) -> N
             for fd in flagged_dirs:
                 if fd.name.lower() in existing_names:
                     continue
+                # In single-folder mode, skip flagged dirs that aren't the target.
+                if folder_filter and fd.name.lower() != folder_filter.strip().lower():
+                    # Still add to wide_root_paths so build_wide_csv reads existing data.
+                    if flagged_secured is not None:
+                        wide_root_paths.append(flagged_secured / fd.name)
+                    else:
+                        wide_root_paths.append(fd)
+                    continue
                 if flagged_secured is not None:
                     secured_dest = flagged_secured / fd.name
                     secured_dest.mkdir(parents=True, exist_ok=True)
@@ -749,6 +792,13 @@ def _run_combined(cfg: Mapping[str, Any] | None, settings: Settings | None) -> N
             entries = mirror_cfg if isinstance(mirror_cfg, Sequence) else [mirror_cfg]
             for entry in entries:
                 src = _ensure_path(entry.get("source"), "mirror.source")
+                # In single-folder mode, skip mirrors for non-target folders.
+                if folder_filter and src.name.lower() != folder_filter.strip().lower():
+                    LOGGER.info(
+                        "[analysis] combined.mirror → SKIP %s (single-folder mode)", src.name
+                    )
+                    handled_datasets.append(src.name.lower())
+                    continue
                 dest = _ensure_path(entry.get("destination"), "mirror.destination")
                 print(f"[analysis] combined.mirror → {dest}")
                 copied, bytes_copied = mirror_directory(str(src), str(dest))
@@ -1153,28 +1203,47 @@ def _run_combined(cfg: Mapping[str, Any] | None, settings: Settings | None) -> N
         dest = _ensure_path(secure_cfg.get("destination"), "secure_cleanup.destination")
         resolved_sources = [str(_ensure_path(src, "secure_cleanup.sources")) for src in sources]
 
+        # In single-folder mode, only sync the target folder to secured storage.
+        if folder_filter:
+            target = folder_filter.strip().lower()
+            resolved_sources = [
+                src for src in resolved_sources
+                if Path(src).name.lower() == target
+            ]
+            if not resolved_sources:
+                LOGGER.info(
+                    "[analysis] combined.secure_cleanup → SKIP (target folder '%s' not in sources)",
+                    folder_filter,
+                )
+
         perform_cleanup = bool(secure_cfg.get("perform_cleanup", True))
-        print(
-            f"[analysis] combined.secure_cleanup → dest={dest} sources={resolved_sources} perform_cleanup={perform_cleanup}"
-        )
-        secure_copy_and_cleanup(
-            resolved_sources,
-            str(dest),
-            perform_cleanup=perform_cleanup,
-        )
+        if resolved_sources:
+            print(
+                f"[analysis] combined.secure_cleanup → dest={dest} sources={resolved_sources} perform_cleanup={perform_cleanup}"
+            )
+            secure_copy_and_cleanup(
+                resolved_sources,
+                str(dest),
+                perform_cleanup=perform_cleanup,
+            )
 
     # Secure-copy flagged experiments to their own secured storage folder.
     if flagged_dirs:
+        # In single-folder mode, only sync the target flagged dir.
+        sync_flagged = flagged_dirs
+        if folder_filter:
+            target = folder_filter.strip().lower()
+            sync_flagged = [fd for fd in flagged_dirs if fd.name.lower() == target]
         if settings is not None and settings.flagged_secured_root:
             flagged_dest: Path | None = Path(settings.flagged_secured_root).expanduser().resolve()
         else:
             flagged_dest = None
-        if flagged_dest is not None:
+        if flagged_dest is not None and sync_flagged:
             flagged_dest.mkdir(parents=True, exist_ok=True)
-            flagged_sources = [str(fd) for fd in flagged_dirs]
+            flagged_sources = [str(fd) for fd in sync_flagged]
             print(
                 f"[analysis] combined.secure_cleanup (flagged) → dest={flagged_dest} "
-                f"sources={[fd.name for fd in flagged_dirs]}"
+                f"sources={[fd.name for fd in sync_flagged]}"
             )
             secure_copy_and_cleanup(
                 flagged_sources,
@@ -1362,6 +1431,27 @@ def _run_reactions(settings: Settings) -> None:
     else:
         print("[analysis] reactions.train_vs_ctrl script not found, skipping.")
 
+    # --- Ordinal score summary plots (only when model_type=ordinal) ---
+    if reaction_cfg.model_type == "ordinal":
+        score_script = REPO_ROOT / "scripts" / "analysis" / "score_summary.py"
+        if score_script.exists():
+            score_out_dir = out_dir / "score_summary"
+            score_cmd = [
+                str(Path(python_exec).expanduser()),
+                str(score_script),
+                "--csv-path",
+                str(csv_path.resolve()),
+                "--out-dir",
+                str(score_out_dir.resolve()),
+                "--overwrite",
+            ]
+            if flagged_csv:
+                score_cmd.extend(["--flagged-flies-csv", flagged_csv])
+            print("[analysis] score_summary →", " ".join(score_cmd))
+            subprocess.run(score_cmd, check=True, env=env)
+        else:
+            print("[analysis] score_summary script not found, skipping.")
+
     matrix_expected["version"] = STATE_VERSION
     _write_state(settings, "reaction_matrix", "reaction_prediction", matrix_expected)
 
@@ -1403,6 +1493,19 @@ def main(argv: Sequence[str] | None = None) -> None:
         default=str(Path("config") / "config.yaml"),
         help="Path to pipeline configuration YAML.",
     )
+    parser.add_argument(
+        "--folder",
+        default=None,
+        help="Process only this dataset folder (e.g., 'Hex-Training-24'). "
+             "Other datasets are left untouched; combined CSVs are rebuilt from all roots.",
+    )
+    parser.add_argument(
+        "--figures-only",
+        action="store_true",
+        default=False,
+        help="Skip YOLO and pipeline processing; regenerate all figures/plots "
+             "from existing CSVs and data. Forces overwrite of all cached states.",
+    )
     args = parser.parse_args(argv)
 
     config_path = resolve_config_path(args.config)
@@ -1434,52 +1537,92 @@ def main(argv: Sequence[str] | None = None) -> None:
 
     dataset_roots = tuple(dataset_roots) if dataset_roots else None
 
-    if dataset_roots:
-        remaining_steps = [step.name for step in ORDERED_STEPS if step.name != "yolo"]
+    # --- Figures-only mode ---
+    figures_only: bool = args.figures_only
+    if figures_only:
+        LOGGER.info("=" * 70)
+        LOGGER.info("FIGURES-ONLY MODE: skipping YOLO & pipeline, regenerating all figures")
+        LOGGER.info("=" * 70)
+        # Force all figure/analysis cache flags so nothing is skipped
+        settings = dc_replace(
+            settings,
+            force=dc_replace(
+                settings.force,
+                combined=True,
+                reaction_matrix=True,
+                reaction_prediction=True,
+            ),
+        )
 
-        pipeline_expectation = {
-            "non_reactive_span_px": settings.non_reactive_span_px,
-            "class2_min": settings.class2_min,
-            "class2_max": settings.class2_max,
-        }
-
-        yolo_targets: list[str] = []
-        pipeline_targets: list[tuple[str, dict[str, Any]]] = []
-
-        for root in dataset_roots:
-            resolved = str(Path(root).expanduser())
-            skip_pipeline = _should_skip_with_manifest(
-                settings,
-                category="pipeline",
-                key=resolved,
-                expected=pipeline_expectation,
-                force_flag=settings.force.pipeline,
-                dataset_root=Path(resolved),
+    # --- Single-folder mode filtering ---
+    folder_filter: str | None = args.folder
+    if not figures_only:
+        if folder_filter and dataset_roots:
+            target_root = _resolve_folder(folder_filter, dataset_roots)
+            LOGGER.info(
+                "Single-folder mode: processing only '%s' (%s)", folder_filter, target_root
             )
-            if skip_pipeline and not settings.force.yolo:
-                print(
-                    f"[analysis] pipeline cached → skipping full run for {resolved}. Set force.pipeline=true to recompute."
+            pipeline_dataset_roots: Sequence[str] = (target_root,)
+            # Force reprocessing for the target folder
+            settings = dc_replace(
+                settings,
+                force=dc_replace(settings.force, pipeline=True, combined=True),
+            )
+        elif folder_filter and not dataset_roots:
+            raise ValueError(
+                f"--folder '{folder_filter}' specified but no dataset roots found in config."
+            )
+        else:
+            pipeline_dataset_roots = dataset_roots  # type: ignore[assignment]
+
+        if dataset_roots:
+            remaining_steps = [step.name for step in ORDERED_STEPS if step.name != "yolo"]
+
+            pipeline_expectation = {
+                "non_reactive_span_px": settings.non_reactive_span_px,
+                "class2_min": settings.class2_min,
+                "class2_max": settings.class2_max,
+            }
+
+            yolo_targets: list[str] = []
+            pipeline_targets: list[tuple[str, dict[str, Any]]] = []
+
+            for root in pipeline_dataset_roots:
+                resolved = str(Path(root).expanduser())
+                skip_pipeline = _should_skip_with_manifest(
+                    settings,
+                    category="pipeline",
+                    key=resolved,
+                    expected=pipeline_expectation,
+                    force_flag=settings.force.pipeline,
+                    dataset_root=Path(resolved),
                 )
-            else:
-                yolo_targets.append(resolved)
+                if skip_pipeline and not settings.force.yolo:
+                    print(
+                        f"[analysis] pipeline cached → skipping full run for {resolved}. Set force.pipeline=true to recompute."
+                    )
+                else:
+                    yolo_targets.append(resolved)
 
-            if not skip_pipeline:
-                pipeline_targets.append((resolved, dict(pipeline_expectation)))
+                if not skip_pipeline:
+                    pipeline_targets.append((resolved, dict(pipeline_expectation)))
 
-        if yolo_targets:
-            for resolved in yolo_targets:
-                _run_pipeline(config_path, main_directory=resolved, steps=("yolo",))
+            if yolo_targets:
+                for resolved in yolo_targets:
+                    _run_pipeline(config_path, main_directory=resolved, steps=("yolo",))
 
-        if pipeline_targets:
-            for resolved, expected in pipeline_targets:
-                _run_pipeline(config_path, main_directory=resolved, steps=remaining_steps)
-                payload = dict(expected)
-                payload["version"] = STATE_VERSION
-                _write_state(settings, "pipeline", resolved, payload)
-        elif not yolo_targets:
-            print("[analysis] pipeline skipped for all datasets (cached).")
+            if pipeline_targets:
+                for resolved, expected in pipeline_targets:
+                    _run_pipeline(config_path, main_directory=resolved, steps=remaining_steps)
+                    payload = dict(expected)
+                    payload["version"] = STATE_VERSION
+                    _write_state(settings, "pipeline", resolved, payload)
+            elif not yolo_targets:
+                print("[analysis] pipeline skipped for all datasets (cached).")
+        else:
+            _run_pipeline(config_path)
     else:
-        _run_pipeline(config_path)
+        LOGGER.info("[figures-only] Skipping YOLO inference and pipeline processing.")
 
     analysis_cfg = data.get("analysis") or {}
 
@@ -1524,12 +1667,19 @@ def main(argv: Sequence[str] | None = None) -> None:
                 "[analysis] combined analysis cached → skipping. Set force.combined=true to recompute."
             )
         else:
-            _run_combined(combined_cfg_input, settings)
-            payload = dict(combined_expected)
-            payload["version"] = STATE_VERSION
-            _write_state(settings, "combined", "analysis", payload)
+            _run_combined(combined_cfg_input, settings, folder_filter=folder_filter)
+            # Only write combined cache when running ALL folders; a single-folder
+            # run is partial so the next full run must recompute.
+            if not folder_filter:
+                payload = dict(combined_expected)
+                payload["version"] = STATE_VERSION
+                _write_state(settings, "combined", "analysis", payload)
+            else:
+                LOGGER.info(
+                    "Single-folder mode: skipping combined cache write so next full run recomputes."
+                )
     else:
-        _run_combined(None, settings)
+        _run_combined(None, settings, folder_filter=folder_filter)
     _run_envelope_visuals(analysis_cfg.get("envelope_visuals"))
     _run_training(analysis_cfg.get("training"))
     _run_reactions(settings)

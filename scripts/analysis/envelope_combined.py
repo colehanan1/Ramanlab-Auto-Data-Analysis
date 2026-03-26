@@ -1545,12 +1545,45 @@ def _has_training_trials(*trial_groups: Sequence[tuple[str, Path, str]]) -> bool
     return False
 
 
+def _trial_csv_alias_key(csv_path: Path, fly_dir: Path) -> tuple[str, str]:
+    """Group duplicate short/long envelope aliases for the same trial and fly."""
+
+    stem = csv_path.stem.lower()
+    match = TRIAL_REGEX.search(stem)
+    if match:
+        trial_key = f"{match.group(1).lower()}_{match.group(2)}"
+    else:
+        trial_key = _trial_label(csv_path).strip().lower()
+
+    slot_match = FLY_SLOT_REGEX.search(stem)
+    slot_label = slot_match.group(1).strip().lower() if slot_match else None
+    fly_number = _extract_fly_number(slot_label, stem, fly_dir.name)
+    fly_key = str(fly_number) if fly_number is not None else ""
+    return (trial_key, fly_key)
+
+
+def _prefers_distance_labelled_trial_csv(csv_path: Path) -> bool:
+    stem = csv_path.stem.lower()
+    return "_distances_" in stem or "distances_fly" in stem
+
+
+def _trial_csv_rank(csv_path: Path) -> tuple[int, int, str]:
+    """Prefer canonical distance-labelled aliases when duplicate trial CSVs exist."""
+
+    return (
+        1 if _prefers_distance_labelled_trial_csv(csv_path) else 0,
+        -len(csv_path.stem),
+        csv_path.name.lower(),
+    )
+
+
 def _find_trial_csvs(fly_dir: Path) -> Iterator[Path]:
     base = fly_dir / "angle_distance_rms_envelope"
     if not base.is_dir():
         return
 
     seen: set[Path] = set()
+    all_paths: list[Path] = []
     for pattern in ("**/*testing*.csv", "**/*training*.csv"):
         for csv in base.glob(pattern):
             if not csv.is_file():
@@ -1559,7 +1592,38 @@ def _find_trial_csvs(fly_dir: Path) -> Iterator[Path]:
             if real in seen:
                 continue
             seen.add(real)
-            yield real
+            all_paths.append(real)
+
+    groups: dict[tuple[str, str], list[Path]] = {}
+    for csv_path in all_paths:
+        groups.setdefault(_trial_csv_alias_key(csv_path, fly_dir), []).append(csv_path)
+
+    skipped: set[Path] = set()
+    for alias_key, paths in groups.items():
+        if len(paths) < 2:
+            continue
+        if not any(_prefers_distance_labelled_trial_csv(path) for path in paths):
+            continue
+        if not any(not _prefers_distance_labelled_trial_csv(path) for path in paths):
+            continue
+
+        chosen = max(paths, key=_trial_csv_rank)
+        trial_key, fly_key = alias_key
+        fly_desc = f" fly_number={fly_key}" if fly_key else ""
+        for path in paths:
+            if path == chosen:
+                continue
+            skipped.add(path)
+            print(
+                "[DEBUG] _find_trial_csvs: skipping duplicate alias "
+                f"{path.name} in favor of {chosen.name} "
+                f"for trial={trial_key}{fly_desc}"
+            )
+
+    for csv_path in all_paths:
+        if csv_path in skipped:
+            continue
+        yield csv_path
 
 
 def _pick_timestamp(df: pd.DataFrame) -> str | None:

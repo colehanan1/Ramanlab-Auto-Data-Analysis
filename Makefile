@@ -1,13 +1,19 @@
-.PHONY: help setup run run-manual all yolo backup clean
+.PHONY: help setup run run-manual all yolo backup figures clean
 
 PYTHON ?= python3
 PIP ?= $(PYTHON) -m pip
+CONFIG ?= config/config.yaml
 
 help:
 	@echo "Targets:"
 	@echo "  setup     - install requirements into the active environment"
 	@echo "  run       - run full pipeline (includes automatic backups)"
+	@echo "              use FOLDER=<name> to process a single dataset folder"
+	@echo "              e.g.: make run FOLDER=Hex-Training-24"
 	@echo "  all       - same as run"
+	@echo "  figures   - regenerate ALL figures/plots from existing data (no YOLO/pipeline)"
+	@echo "              use CONFIG=<path> to choose a config file"
+	@echo "              e.g.: make figures CONFIG=config/config-test-data.yaml"
 	@echo "  backup    - run backups to SMB/Box/Secured (manual only, no auto schedule)"
 	@echo "  yolo      - run YOLO inference only"
 	@echo "  run-manual - run pipeline for manual/sucrose-trained fly datasets"
@@ -25,13 +31,18 @@ setup:
 	$(PIP) install --upgrade pip && $(PIP) install -r requirements.txt
 
 run:
-	export MPLBACKEND=Agg && export ORT_LOGGING_LEVEL=3 && export PYTHONNOUSERSITE=1 && $(PYTHON) scripts/pipeline/run_workflows.py --config config/config.yaml
+	export MPLBACKEND=Agg && export ORT_LOGGING_LEVEL=3 && export PYTHONNOUSERSITE=1 && \
+	$(PYTHON) scripts/pipeline/run_workflows.py --config $(CONFIG) $(if $(FOLDER),--folder '$(FOLDER)')
 	$(MAKE) backup
 
 run-manual:
 	export MPLBACKEND=Agg && export ORT_LOGGING_LEVEL=3 && export PYTHONNOUSERSITE=1 && $(PYTHON) scripts/pipeline/run_workflows.py --config config/config_manual.yaml
 
 all: run
+
+figures:
+	export MPLBACKEND=Agg && export ORT_LOGGING_LEVEL=3 && export PYTHONNOUSERSITE=1 && \
+	$(PYTHON) scripts/pipeline/run_workflows.py --config $(CONFIG) --figures-only
 
 yolo:
 	$(PYTHON) -m fbpipe.steps.yolo_infer --config config/config.yaml
