@@ -75,14 +75,18 @@ DISPLAY_LABEL = {
     "ACV-Training": "Apple Cider Vinegar",
     "AIR-Training": "AIR",
     "Benz-Control": "Benzaldehyde",
+    "Benz-Control-24-2": "Benzaldehyde",
     "Benz-Training": "Benzaldehyde",
     "Benz-Training-24": "Benzaldehyde",
+    "Benz-Training-24-2": "Benzaldehyde",
     "EB-Control": "Ethyl Butyrate",
     "EB-Training": "Ethyl Butyrate",
     "EB-Training(No-Operant)": "Ethyl Butyrate (6-Training)",
     "Hex-Control": "Hexanol",
+    "Hex-Control-24-2": "Hexanol",
     "Hex-Training": "Hexanol",
     "Hex-Training-24": "Hexanol",
+    "Hex-Training-24-2": "Hexanol",
 }
 
 # Map legacy and lower-case dataset names to canonical data folder names.
@@ -107,14 +111,18 @@ DATASET_ALIAS = {
     "acv-training": "ACV-Training",
     "air-training": "AIR-Training",
     "benz-control": "Benz-Control",
+    "benz-control-24-2": "Benz-Control-24-2",
     "benz-training": "Benz-Training",
     "benz-training-24": "Benz-Training-24",
+    "benz-training-24-2": "Benz-Training-24-2",
     "eb-control": "EB-Control",
     "eb-training": "EB-Training",
     "eb-training(no-operant)": "EB-Training(No-Operant)",
     "hex-control": "Hex-Control",
+    "hex-control-24-2": "Hex-Control-24-2",
     "hex-training": "Hex-Training",
     "hex-training-24": "Hex-Training-24",
+    "hex-training-24-2": "Hex-Training-24-2",
 }
 
 # ── training odor schedules per dataset ───────────────────────────────────
@@ -185,7 +193,7 @@ def _resolve_training_odor(dataset: str, trial_label: str) -> str:
         return TRAINING_ODOR_SCHEDULE_EB.get(number, ds)
     if ds == "EB-Training(No-Operant)":
         return TRAINING_ODOR_SCHEDULE_EB_6TRAINING.get(number, ds)
-    if ds in ("Hex-Training", "Hex-Training-24", "Hex-Control"):
+    if ds in ("Hex-Training", "Hex-Training-24", "Hex-Training-24-2", "Hex-Control", "Hex-Control-24-2"):
         return TRAINING_ODOR_SCHEDULE_HEX.get(number, ds)
     if ds == "ACV-Training":
         return TRAINING_ODOR_SCHEDULE_ACV.get(number, ds)

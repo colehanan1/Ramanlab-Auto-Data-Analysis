@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Optional, Sequence
 
 import matplotlib
+import yaml
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
@@ -108,6 +109,7 @@ DEFAULT_FLAGGED_CSV_CANDIDATES = (
     DEFAULT_FLAGGED_CSV,
     LEGACY_FLAGGED_CSV,
 )
+DEFAULT_OUTDIR = Path("/home/ramanlab/Documents/cole/Results/Opto-Fly-Figures/Dataset_means")
 
 
 def _configure_logging(verbose: bool) -> None:
@@ -173,6 +175,74 @@ def _resolve_flagged_csv_path(path: Path) -> Path:
             )
             return fallback
     return resolved
+
+
+def _load_config_data(config_arg: Path) -> tuple[Path, dict]:
+    """Load the YAML config referenced by ``config_arg``."""
+
+    config_path = resolve_config_path(config_arg)
+    cfg_data: dict = {}
+    if config_path.exists():
+        with open(config_path, "r", encoding="utf-8") as fh:
+            cfg_data = yaml.safe_load(fh) or {}
+    return config_path, cfg_data
+
+
+def _get_nested(cfg_data: dict, *keys: str) -> object:
+    """Safely look up a nested key path in a config dictionary."""
+
+    current: object = cfg_data
+    for key in keys:
+        if not isinstance(current, dict):
+            return None
+        current = current.get(key)
+    return current
+
+
+def _get_config_path(cfg_data: dict, *keys: str) -> Path | None:
+    """Return a config value as a ``Path`` when present and non-empty."""
+
+    value = _get_nested(cfg_data, *keys)
+    if value in (None, ""):
+        return None
+    return Path(str(value))
+
+
+def _select_wide_csv_arg(cli_value: Path | None, cfg_data: dict) -> Path:
+    """Resolve the wide CSV source from CLI, config, or defaults."""
+
+    if cli_value is not None:
+        return cli_value
+
+    config_candidate = (
+        _get_config_path(cfg_data, "analysis", "dataset_means", "wide_csv")
+        or _get_config_path(cfg_data, "analysis", "combined", "combined_base", "wide", "output_csv")
+        or _get_config_path(cfg_data, "analysis", "combined", "wide", "output_csv")
+    )
+    return config_candidate or DEFAULT_WIDE_CSV
+
+
+def _select_flagged_csv_arg(cli_value: Path | None, cfg_data: dict) -> Path:
+    """Resolve the flagged-flies CSV from CLI, config, or defaults."""
+
+    if cli_value is not None:
+        return cli_value
+
+    config_candidate = (
+        _get_config_path(cfg_data, "analysis", "dataset_means", "flagged_csv")
+        or _get_config_path(cfg_data, "flagged_flies_csv")
+    )
+    return config_candidate or DEFAULT_FLAGGED_CSV
+
+
+def _select_outdir_arg(cli_value: Path | None, cfg_data: dict) -> Path:
+    """Resolve the output directory from CLI, config, or defaults."""
+
+    if cli_value is not None:
+        return cli_value
+
+    config_candidate = _get_config_path(cfg_data, "analysis", "dataset_means", "out_dir")
+    return config_candidate or DEFAULT_OUTDIR
 
 
 def _resolve_named_odor(dataset_canon: str, trial_label: str) -> str | None:
@@ -427,11 +497,20 @@ def plot_dataset_means(
     for odor in odors:
         data = results[odor]
         mean = data["mean"][:max_frames]
+        sem = data["sem"][:max_frames]
         n_flies = data["n_flies"]
         n_frames = len(mean)
         time = np.arange(n_frames) / fps
         colour = _odor_colour(odor)
 
+        ax.fill_between(
+            time,
+            mean - sem,
+            mean + sem,
+            color=colour,
+            alpha=0.18,
+            linewidth=0,
+        )
         ax.plot(time, mean, linewidth=1.3, color=colour, label=f"{odor} (n={n_flies})")
 
     # Odor window
@@ -516,20 +595,20 @@ def build_parser(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument(
         "--wide-csv",
         type=Path,
-        default=DEFAULT_WIDE_CSV,
-        help="Path to all_envelope_rows_wide.csv",
+        default=None,
+        help="Path to all_envelope_rows_wide.csv (defaults to config when available)",
     )
     parser.add_argument(
         "--flagged-csv",
         type=Path,
-        default=DEFAULT_FLAGGED_CSV,
-        help="Path to flagged-flys-truth.csv (flies with state 0/-1 are excluded)",
+        default=None,
+        help="Path to flagged-flys-truth.csv (defaults to config when available)",
     )
     parser.add_argument(
         "--outdir",
         type=Path,
-        default=Path("/home/ramanlab/Documents/cole/Results/Opto-Fly-Figures/Dataset_means"),
-        help="Output directory for plots and sidecars",
+        default=None,
+        help="Output directory for plots and sidecars (defaults to config when available)",
     )
     parser.add_argument("--fps", type=float, default=None, help="Override frames per second")
     parser.add_argument("--odor-on-s", type=float, default=None, help="Odor onset in seconds")
@@ -545,8 +624,6 @@ def build_parser(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
 
 def _read_timing(args: argparse.Namespace) -> tuple[float, float, float]:
     """Return (fps, odor_on_s, odor_off_s) from CLI overrides or config."""
-    import yaml
-
     fps = args.fps
     odor_on = args.odor_on_s
     odor_off = args.odor_off_s
@@ -554,11 +631,7 @@ def _read_timing(args: argparse.Namespace) -> tuple[float, float, float]:
     if fps is not None and odor_on is not None and odor_off is not None:
         return fps, odor_on, odor_off
 
-    config_path = resolve_config_path(args.config)
-    cfg_data: dict = {}
-    if config_path.exists():
-        with open(config_path, "r", encoding="utf-8") as fh:
-            cfg_data = yaml.safe_load(fh) or {}
+    _, cfg_data = _load_config_data(args.config)
 
     combine = cfg_data.get("analysis", {}).get("combined", {}).get("combine", {})
 
@@ -575,12 +648,14 @@ def _read_timing(args: argparse.Namespace) -> tuple[float, float, float]:
 def main(argv: Optional[Sequence[str]] = None) -> None:
     args = build_parser(argv)
     _configure_logging(args.verbose)
+    _, cfg_data = _load_config_data(args.config)
 
     # Load the wide CSV
-    wide_csv = _resolve_wide_csv_path(args.wide_csv)
+    wide_csv_arg = _select_wide_csv_arg(args.wide_csv, cfg_data)
+    wide_csv = _resolve_wide_csv_path(wide_csv_arg)
     if not wide_csv.exists():
         preferred_default = DEFAULT_WIDE_CSV.expanduser().resolve()
-        if args.wide_csv.expanduser().resolve() == preferred_default:
+        if wide_csv_arg.expanduser().resolve() == preferred_default:
             checked = ", ".join(str(path) for path in DEFAULT_WIDE_CSV_CANDIDATES)
             LOGGER.error("Wide CSV not found. Checked: %s", checked)
         else:
@@ -597,12 +672,13 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         LOGGER.info("After trial_type='%s' filter: %d rows", args.trial_type, len(wide_df))
 
     # Load excluded flies
-    excluded = load_excluded_flies(_resolve_flagged_csv_path(args.flagged_csv))
+    flagged_csv = _resolve_flagged_csv_path(_select_flagged_csv_arg(args.flagged_csv, cfg_data))
+    excluded = load_excluded_flies(flagged_csv)
 
     fps, odor_on_s, odor_off_s = _read_timing(args)
     LOGGER.info("FPS=%.1f  odor_on=%.1fs  odor_off=%.1fs", fps, odor_on_s, odor_off_s)
 
-    outdir = args.outdir.expanduser().resolve()
+    outdir = _select_outdir_arg(args.outdir, cfg_data).expanduser().resolve()
     _ensure_directory(outdir)
 
     processed = 0

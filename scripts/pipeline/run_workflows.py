@@ -1280,6 +1280,7 @@ def _run_reactions(settings: Settings) -> None:
         prediction_expected = {
             "data_csv": str(Path(reaction_cfg.data_csv).expanduser()),
             "model_path": str(Path(reaction_cfg.model_path).expanduser()),
+            "model_type": reaction_cfg.model_type,
         }
         data_path = Path(reaction_cfg.data_csv).expanduser()
         model_path = Path(reaction_cfg.model_path).expanduser()
@@ -1351,58 +1352,20 @@ def _run_reactions(settings: Settings) -> None:
         force_flag=settings.force.reaction_matrix,
     )
 
-    if skip_matrix:
-        print(
-            "[analysis] reactions.matrix cached → skipping. Set force.reaction_matrix=true to recompute."
-        )
-        return
-
-    cmd = [
-        str(Path(python_exec).expanduser()),
-        str(script_path),
-        "--csv-path",
-        str(csv_path.resolve()),
-        "--out-dir",
-        str(out_dir.resolve()),
-        "--latency-sec",
-        str(matrix_cfg.latency_sec),
-        "--after-window-sec",
-        str(matrix_cfg.after_window_sec),
-        "--row-gap",
-        str(matrix_cfg.row_gap),
-        "--height-per-gap-in",
-        str(matrix_cfg.height_per_gap_in),
-        "--bottom-shift-in",
-        str(matrix_cfg.bottom_shift_in),
-        "--non-reactive-threshold",
-        str(settings.non_reactive_span_px),
-    ]
-
     flagged_csv = str(getattr(settings, "flagged_flies_csv", "") or "")
-    if flagged_csv:
-        cmd.extend(["--flagged-flies-csv", flagged_csv])
-
-    for trial_order in matrix_cfg.trial_orders:
-        cmd.extend(["--trial-order", trial_order])
-
-    if not matrix_cfg.include_hexanol:
-        cmd.append("--exclude-hexanol")
-    if matrix_cfg.overwrite:
-        cmd.append("--overwrite")
-
-    print("[analysis] reactions.matrix →", " ".join(cmd))
     env = os.environ.copy()
     extra_path = str(REPO_ROOT / "src")
     pythonpath = env.get("PYTHONPATH")
     env["PYTHONPATH"] = os.pathsep.join(filter(None, [extra_path, pythonpath]))
-    subprocess.run(cmd, check=True, env=env)
 
-    # --- Training vs Control comparison plots ---
-    train_vs_ctrl_script = REPO_ROOT / "scripts" / "analysis" / "reaction_matrix_training_vs_control.py"
-    if train_vs_ctrl_script.exists():
-        tvc_cmd = [
+    if skip_matrix:
+        print(
+            "[analysis] reactions.matrix cached → skipping. Set force.reaction_matrix=true to recompute."
+        )
+    else:
+        cmd = [
             str(Path(python_exec).expanduser()),
-            str(train_vs_ctrl_script),
+            str(script_path),
             "--csv-path",
             str(csv_path.resolve()),
             "--out-dir",
@@ -1417,22 +1380,63 @@ def _run_reactions(settings: Settings) -> None:
             str(matrix_cfg.height_per_gap_in),
             "--bottom-shift-in",
             str(matrix_cfg.bottom_shift_in),
+            "--non-reactive-threshold",
+            str(settings.non_reactive_span_px),
         ]
-        for trial_order in matrix_cfg.trial_orders:
-            tvc_cmd.extend(["--trial-order", trial_order])
-        if flagged_csv:
-            tvc_cmd.extend(["--flagged-flies-csv", flagged_csv])
-        if not matrix_cfg.include_hexanol:
-            tvc_cmd.append("--exclude-hexanol")
-        if matrix_cfg.overwrite:
-            tvc_cmd.append("--overwrite")
-        print("[analysis] reactions.train_vs_ctrl →", " ".join(tvc_cmd))
-        subprocess.run(tvc_cmd, check=True, env=env)
-    else:
-        print("[analysis] reactions.train_vs_ctrl script not found, skipping.")
 
-    # --- Ordinal score summary plots (only when model_type=ordinal) ---
-    if reaction_cfg.model_type == "ordinal":
+        if flagged_csv:
+            cmd.extend(["--flagged-flies-csv", flagged_csv])
+
+        for trial_order in matrix_cfg.trial_orders:
+            cmd.extend(["--trial-order", trial_order])
+
+        if not matrix_cfg.include_hexanol:
+            cmd.append("--exclude-hexanol")
+        if matrix_cfg.overwrite:
+            cmd.append("--overwrite")
+
+        print("[analysis] reactions.matrix →", " ".join(cmd))
+        subprocess.run(cmd, check=True, env=env)
+
+        # --- Training vs Control comparison plots ---
+        train_vs_ctrl_script = REPO_ROOT / "scripts" / "analysis" / "reaction_matrix_training_vs_control.py"
+        if train_vs_ctrl_script.exists():
+            tvc_cmd = [
+                str(Path(python_exec).expanduser()),
+                str(train_vs_ctrl_script),
+                "--csv-path",
+                str(csv_path.resolve()),
+                "--out-dir",
+                str(out_dir.resolve()),
+                "--latency-sec",
+                str(matrix_cfg.latency_sec),
+                "--after-window-sec",
+                str(matrix_cfg.after_window_sec),
+                "--row-gap",
+                str(matrix_cfg.row_gap),
+                "--height-per-gap-in",
+                str(matrix_cfg.height_per_gap_in),
+                "--bottom-shift-in",
+                str(matrix_cfg.bottom_shift_in),
+            ]
+            for trial_order in matrix_cfg.trial_orders:
+                tvc_cmd.extend(["--trial-order", trial_order])
+            if flagged_csv:
+                tvc_cmd.extend(["--flagged-flies-csv", flagged_csv])
+            if not matrix_cfg.include_hexanol:
+                tvc_cmd.append("--exclude-hexanol")
+            if matrix_cfg.overwrite:
+                tvc_cmd.append("--overwrite")
+            print("[analysis] reactions.train_vs_ctrl →", " ".join(tvc_cmd))
+            subprocess.run(tvc_cmd, check=True, env=env)
+        else:
+            print("[analysis] reactions.train_vs_ctrl script not found, skipping.")
+
+        matrix_expected["version"] = STATE_VERSION
+        _write_state(settings, "reaction_matrix", "reaction_prediction", matrix_expected)
+
+    # --- Ordinal score summary plots (always runs when model_type=ordinal) ---
+    if reaction_cfg.model_type == "ordinal" and csv_path.exists():
         score_script = REPO_ROOT / "scripts" / "analysis" / "score_summary.py"
         if score_script.exists():
             score_out_dir = out_dir / "score_summary"
@@ -1451,9 +1455,6 @@ def _run_reactions(settings: Settings) -> None:
             subprocess.run(score_cmd, check=True, env=env)
         else:
             print("[analysis] score_summary script not found, skipping.")
-
-    matrix_expected["version"] = STATE_VERSION
-    _write_state(settings, "reaction_matrix", "reaction_prediction", matrix_expected)
 
 
 def _run_pipeline(
@@ -1752,6 +1753,13 @@ def _batch_copy_to_smb(raw_cfg: Dict[str, Any]) -> None:
                 smb_path = env_cfg.get("out_dir_smb")
                 if out_dir.exists() and smb_path:
                     copies_to_make.append((out_dir, smb_path))
+
+    dataset_means_cfg = analysis_cfg.get("dataset_means", {})
+    if dataset_means_cfg:
+        out_dir = Path(dataset_means_cfg.get("out_dir", ""))
+        smb_path = dataset_means_cfg.get("out_dir_smb")
+        if out_dir.exists() and smb_path:
+            copies_to_make.append((out_dir, smb_path))
 
     # Collect combined outputs
     combined_cfg = analysis_cfg.get("combined", {})

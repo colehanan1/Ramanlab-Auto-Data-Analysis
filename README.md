@@ -534,8 +534,9 @@ pytest tests/test_envelope_combined.py
 
 Generate per-dataset testing-odor mean traces of Distance %. Each odor trace is
 baseline-subtracted using the pre-odor window (`t < odor_on`) before flies are
-averaged, and unmapped testing labels (for example `testing_11`) are skipped so
-only named odors appear in the overlay:
+averaged, unmapped testing labels (for example `testing_11`) are skipped so
+only named odors appear in the overlay, and each mean trace is shown with a
+same-colour `mean ± SEM` band:
 
 ```bash
 python scripts/analysis/dataset_means.py \

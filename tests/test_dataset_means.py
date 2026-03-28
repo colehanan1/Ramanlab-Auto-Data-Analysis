@@ -26,6 +26,9 @@ from fbpipe.utils.nanstats import (  # noqa: E402
 import scripts.analysis.dataset_means as dataset_means_mod  # noqa: E402
 from scripts.analysis.dataset_means import (  # noqa: E402
     _odor_colour,
+    _select_flagged_csv_arg,
+    _select_outdir_arg,
+    _select_wide_csv_arg,
     _resolve_flagged_csv_path,
     _resolve_wide_csv_path,
     compute_dataset_means,
@@ -209,6 +212,48 @@ def test_resolve_flagged_csv_path_uses_fallback_default(monkeypatch, tmp_path):
     assert _resolve_flagged_csv_path(preferred) == legacy.resolve()
 
 
+def test_select_runtime_paths_from_config():
+    cfg_data = {
+        "analysis": {
+            "dataset_means": {
+                "wide_csv": "/tmp/dataset_means/wide.csv",
+                "flagged_csv": "/tmp/dataset_means/flagged.csv",
+                "out_dir": "/tmp/dataset_means/out",
+            },
+            "combined": {
+                "combined_base": {
+                    "wide": {
+                        "output_csv": "/tmp/dataset_means/combined_base.csv",
+                    }
+                }
+            },
+        },
+        "flagged_flies_csv": "/tmp/dataset_means/top_level_flagged.csv",
+    }
+
+    assert _select_wide_csv_arg(None, cfg_data) == Path("/tmp/dataset_means/wide.csv")
+    assert _select_flagged_csv_arg(None, cfg_data) == Path("/tmp/dataset_means/flagged.csv")
+    assert _select_outdir_arg(None, cfg_data) == Path("/tmp/dataset_means/out")
+
+
+def test_select_runtime_paths_fallback_to_shared_config_keys():
+    cfg_data = {
+        "analysis": {
+            "combined": {
+                "combined_base": {
+                    "wide": {
+                        "output_csv": "/tmp/dataset_means/combined_base.csv",
+                    }
+                }
+            }
+        },
+        "flagged_flies_csv": "/tmp/dataset_means/top_level_flagged.csv",
+    }
+
+    assert _select_wide_csv_arg(None, cfg_data) == Path("/tmp/dataset_means/combined_base.csv")
+    assert _select_flagged_csv_arg(None, cfg_data) == Path("/tmp/dataset_means/top_level_flagged.csv")
+
+
 def test_load_excluded_flies_excludes_nonpositive_states(tmp_path):
     flagged_csv = tmp_path / "flagged.csv"
     pd.DataFrame({
@@ -247,6 +292,7 @@ def test_plot_dataset_means_returns_baseline_labeled_figure():
     assert len(axes) == 1
     assert axes[0].get_ylabel() == "Distance % (baseline-subtracted)"
     assert "Pre-odor centered" in axes[0].get_title()
+    assert len(axes[0].collections) == 1
     assert len(axes[0].lines) >= 4
     plt.close(fig)
 

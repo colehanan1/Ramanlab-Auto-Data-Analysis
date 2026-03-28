@@ -118,6 +118,30 @@ def test_resolve_dataset_output_dir_separates_eb_variants(tmp_path):
     assert "EB-Training" in eb_training_dir.name
 
 
+def test_24_2_datasets_stay_distinct_but_share_existing_trial_schedules(tmp_path):
+    """New 24-2 folders stay distinct while reusing the matching trial schedules."""
+
+    expected = {
+        "Benz-Control-24-2": "Benz-Control-24-2",
+        "Benz-Training-24-2": "Benz-Training-24-2",
+        "Hex-Control-24-2": "Hex-Control-24-2",
+        "Hex-Training-24-2": "Hex-Training-24-2",
+    }
+
+    for raw_name, canonical in expected.items():
+        assert ec._canon_dataset(raw_name) == canonical
+        assert ev.canonical_dataset(raw_name) == canonical
+
+    out_24 = ev.resolve_dataset_output_dir(tmp_path, ["Hex-Training-24"])
+    out_24_2 = ev.resolve_dataset_output_dir(tmp_path, ["Hex-Training-24-2"])
+    assert out_24 != out_24_2
+
+    assert ec._display_odor("Hex-Control-24-2", "training_1") == "Hexanol"
+    assert ec._display_odor("Hex-Training-24-2", "testing_6") == "Benzaldehyde"
+    assert ec._display_odor("Benz-Control-24-2", "testing_7") == "3-Octonol"
+    assert ec._display_odor("Benz-Training-24-2", "testing_8") == "Ethyl Butyrate"
+
+
 def test_testing_aliases_follow_control_ordering():
     """Training datasets should share the same testing labels as their controls."""
 

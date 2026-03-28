@@ -182,6 +182,10 @@ analysis:
       threshold_std_mult: 4.0
       trial_type: testing
       overwrite: false
+  dataset_means:
+    wide_csv: "/path/to/Data/Opto/Combined/all_envelope_rows_wide_combined_base.csv"
+    flagged_csv: "/path/to/Data/Opto/Combined/flagged-flys-truth.csv"
+    out_dir: "/path/to/Results/Opto/Dataset-Means"
   training:
     envelopes:
       matrix_npy: "/path/to/Data/Opto/Combined/matrix/training/envelope_matrix_float16.npy"
