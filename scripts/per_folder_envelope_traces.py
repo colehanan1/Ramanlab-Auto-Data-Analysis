@@ -68,17 +68,21 @@ DISPLAY_LABEL = {
     "AIR-Training": "AIR",
     "Benz-Control": "Benzaldehyde",
     "Benz-Control-24-2": "Benzaldehyde",
+    "Benz-Control-24-02": "Benzaldehyde",
     "Benz-Training": "Benzaldehyde",
     "Benz-Training-24": "Benzaldehyde",
     "Benz-Training-24-2": "Benzaldehyde",
+    "Benz-Training-24-02": "Benzaldehyde",
     "EB-Control": "Ethyl Butyrate",
     "EB-Training": "Ethyl Butyrate",
     "EB-Training(No-Operant)": "Ethyl Butyrate (6-Training)",
     "Hex-Control": "Hexanol",
     "Hex-Control-24-2": "Hexanol",
+    "Hex-Control-24-02": "Hexanol",
     "Hex-Training": "Hexanol",
     "Hex-Training-24": "Hexanol",
     "Hex-Training-24-2": "Hexanol",
+    "Hex-Training-24-02": "Hexanol",
 }
 
 # Map legacy and lower-case dataset names to canonical data folder names.
