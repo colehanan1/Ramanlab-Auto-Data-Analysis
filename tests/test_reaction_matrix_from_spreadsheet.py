@@ -1,5 +1,4 @@
 import importlib.util
-import importlib.util
 import sys
 from pathlib import Path
 
@@ -7,7 +6,7 @@ import pandas as pd
 import pytest
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-for candidate in (PROJECT_ROOT / "scripts", PROJECT_ROOT / "src"):
+for candidate in (PROJECT_ROOT, PROJECT_ROOT / "scripts", PROJECT_ROOT / "src"):
     path_str = str(candidate)
     if path_str not in sys.path:
         sys.path.insert(0, path_str)

@@ -39,13 +39,13 @@ import pandas as pd
 from matplotlib import gridspec, transforms
 from matplotlib.colors import BoundaryNorm, ListedColormap
 
-# Ensure all plots use Arial to match lab styling.
-plt.rcParams.update(
-    {
-        "font.family": "Arial",
-        "font.sans-serif": ["Arial"],
-    }
+from fbpipe.odor_constants import (  # noqa: F401 — re-exported for backward compat
+    ODOR_CANON as _SHARED_ODOR_CANON,
+    DATASET_ALIAS as _SHARED_DATASET_ALIAS,
 )
+from fbpipe.plot_style import apply_lab_style
+
+apply_lab_style()
 
 logger = logging.getLogger(__name__)
 
@@ -62,8 +62,11 @@ def set_protocol(protocol: str) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Canonical mappings shared across visualisations
-
+# Canonical mappings – imported from fbpipe.odor_constants (single source of truth).
+# ODOR_CANON, DISPLAY_LABEL, ODOR_ORDER, TESTING_DATASET_ALIAS, DATASET_ALIAS,
+# _canon_dataset, _odor_dataset_key, resolve_dataset_label are all imported
+# at the top of this file.
+# ---------------------------------------------------------------------------
 
 ODOR_CANON: Mapping[str, str] = {
     "acv": "ACV",
@@ -103,6 +106,7 @@ ODOR_CANON: Mapping[str, str] = {
     "hex-control-24": "Hex-Control-24",
     "hex-control-24-2": "Hex-Control-24-2",
     "hex-control-24-02": "Hex-Control-24-02",
+    "hex-control-24-002": "Hex-Control-24-002",
     "hex-control-36": "Hex-Control-36",
     "hex-training": "Hex-Training",
     "hex-training-24": "Hex-Training-24",
@@ -117,6 +121,8 @@ ODOR_CANON: Mapping[str, str] = {
     "air-training": "AIR-Training",
     "3oct-training": "3OCT-Training",
     "3oct training": "3OCT-Training",
+    "3oct-training-24-2": "3OCT-Training-24-2",
+    "3oct training 24 2": "3OCT-Training-24-2",
     "optogenetics benzaldehyde": "Benz-Training",
     "optogenetics benzaldehyde 1": "Benz-Training",
     "optogenetics ethyl butyrate": "EB-Training",
@@ -159,6 +165,9 @@ ODOR_CANON: Mapping[str, str] = {
     "3oct-control": "3OCT-Control",
     "3oct_control": "3OCT-Control",
     "3oct control": "3OCT-Control",
+    "3oct-control-24-2": "3OCT-Control-24-2",
+    "3oct_control_24_2": "3OCT-Control-24-2",
+    "3oct control 24 2": "3OCT-Control-24-2",
     "3oct_training": "3OCT-Training",
 }
 
@@ -173,6 +182,7 @@ DISPLAY_LABEL = {
     "Hex-Control-24": "Hexanol",
     "Hex-Control-24-2": "Hexanol",
     "Hex-Control-24-02": "Hexanol",
+    "Hex-Control-24-002": "Hexanol",
     "Hex-Control-36": "Hexanol",
     "Benz-Control": "Benzaldehyde",
     "Benz-Control-24-2": "Benzaldehyde",
@@ -191,6 +201,7 @@ DISPLAY_LABEL = {
     "Hex-Training-36": "Hexanol",
     "AIR-Training": "AIR",
     "3OCT-Training": "3-Octonol",
+    "3OCT-Training-24-2": "3-Octonol",
     # v2 new datasets
     "Cit-Training": "Citral",
     "Cit-Control": "Citral",
@@ -198,6 +209,7 @@ DISPLAY_LABEL = {
     "Lin-Control": "Linalool",
     "ACV-Control": "Apple Cider Vinegar",
     "3OCT-Control": "3-Octonol",
+    "3OCT-Control-24-2": "3-Octonol",
 }
 
 ODOR_ORDER = [
@@ -222,9 +234,11 @@ ODOR_ORDER = [
     "Hex-Control",
     "Hex-Control-24",
     "Hex-Control-24-2",
+    "Hex-Control-24-002",
     "Hex-Control-36",
     "AIR-Training",
     "3OCT-Training",
+    "3OCT-Training-24-2",
     # v2 new datasets
     "Cit-Training",
     "Cit-Control",
@@ -232,6 +246,7 @@ ODOR_ORDER = [
     "Lin-Control",
     "ACV-Control",
     "3OCT-Control",
+    "3OCT-Control-24-2",
 ]
 
 REACTION_RATE_ODOR_ORDER = [
@@ -255,14 +270,18 @@ PRIMARY_ODOR_LABEL = {
     "Hex-Control": HEXANOL_LABEL,
     "Hex-Control-24": HEXANOL_LABEL,
     "Hex-Control-24-2": HEXANOL_LABEL,
+    "Hex-Control-24-02": HEXANOL_LABEL,
+    "Hex-Control-24-002": HEXANOL_LABEL,
     "Hex-Control-36": HEXANOL_LABEL,
     "Benz-Control": "Benzaldehyde",
     "Benz-Control-24-2": "Benzaldehyde",
+    "Benz-Control-24-02": "Benzaldehyde",
     # v2 datasets
     "Cit-Control": "Citral",
     "Lin-Control": "Linalool",
     "ACV-Control": "Apple Cider Vinegar",
     "3OCT-Control": "3-Octonol",
+    "3OCT-Control-24-2": "3-Octonol",
 }
 
 TRAINING_ODOR_SCHEDULE_ACV = {
@@ -346,14 +365,23 @@ TESTING_DATASET_ALIAS = {
     "Hex-Training-24-2": "Hex-Control",
     "Hex-Training-24-02": "Hex-Control",
     "Hex-Training-36": "Hex-Control",
+    "Hex-Control-24": "Hex-Control",
+    "Hex-Control-24-2": "Hex-Control",
+    "Hex-Control-24-02": "Hex-Control",
+    "Hex-Control-24-002": "Hex-Control",
+    "Hex-Control-36": "Hex-Control",
     "EB-Training": "EB-Control",
     "EB-Training(No-Operant)": "EB-Control",
     "Benz-Training": "Benz-Control",
     "Benz-Training-24": "Benz-Control",
     "Benz-Training-24-2": "Benz-Control",
     "Benz-Training-24-02": "Benz-Control",
+    "Benz-Control-24-2": "Benz-Control",
+    "Benz-Control-24-02": "Benz-Control",
     "ACV-Training": "ACV",
     "3OCT-Training": "3OCT-Training",
+    "3OCT-Training-24-2": "3OCT-Training",
+    "3OCT-Control-24-2": "3OCT-Control-24-2",
     # v2 datasets – training aliases to their control counterpart
     "Cit-Training": "Cit-Control",
     "Lin-Training": "Lin-Control",
@@ -588,7 +616,7 @@ def _display_odor(dataset_canon: str, trial_label: str) -> str:
             odor_name = TRAINING_ODOR_SCHEDULE_AIR.get(number)
             if odor_name:
                 return odor_name
-        elif dataset_key == "3OCT-Training":
+        elif dataset_key in ("3OCT-Training", "3OCT-Training-24-2", "3OCT-Control-24-2"):
             odor_name = TRAINING_ODOR_SCHEDULE_3OCT.get(number)
             if odor_name:
                 return odor_name
@@ -604,10 +632,13 @@ def _display_odor(dataset_canon: str, trial_label: str) -> str:
             "Hex-Training",
             "Hex-Training-24",
             "Hex-Training-24-2",
+            "Hex-Training-24-02",
             "Hex-Training-36",
             "Hex-Control",
             "Hex-Control-24",
             "Hex-Control-24-2",
+            "Hex-Control-24-02",
+            "Hex-Control-24-002",
             "Hex-Control-36",
         ):
             odor_name = TRAINING_ODOR_SCHEDULE_HEX.get(number)
@@ -641,7 +672,7 @@ def _display_odor(dataset_canon: str, trial_label: str) -> str:
             return "3-Octonol"
 
     # Handle 3OCT-Training testing trials
-    if dataset_key == "3OCT-Training":
+    if dataset_key in ("3OCT-Training", "3OCT-Training-24-2", "3OCT-Control-24-2"):
         if number in (1, 3):
             return HEXANOL_LABEL
         if number in (2, 4, 5):
@@ -1165,6 +1196,7 @@ def reaction_rate_stats_from_rows(
     context: str,
     trial_col: str = "trial",
     reaction_col: str = "during_hit",
+    separate_presentations: bool = False,
 ) -> pd.DataFrame:
     """Aggregate per-odor reaction rates from row-wise trial data."""
 
@@ -1176,6 +1208,7 @@ def reaction_rate_stats_from_rows(
         raise KeyError(f"Missing required columns for reaction stats: {', '.join(missing)}")
 
     working = df[[trial_col, reaction_col]].copy()
+    working["trial_num"] = working[trial_col].map(_trial_num)
     working["odor"] = working[trial_col].map(lambda trial: _display_odor(dataset_canon, trial))
 
     if not include_hexanol:
@@ -1185,8 +1218,9 @@ def reaction_rate_stats_from_rows(
             raise RuntimeError("All odors were removed after excluding Hexanol.")
 
     working["reaction_flag"] = pd.to_numeric(working[reaction_col], errors="coerce").fillna(0).astype(int)
+    group_cols = ["trial_num", "odor"] if separate_presentations else ["odor"]
     stats_df = (
-        working.groupby("odor", dropna=False)["reaction_flag"]
+        working.groupby(group_cols, dropna=False)["reaction_flag"]
         .agg(num_reactions="sum", num_trials="size")
         .reset_index()
     )
@@ -1205,15 +1239,24 @@ def reaction_rate_stats_from_rows(
     highlight_label = _trained_label(dataset_canon)
     stats_df["is_trained"] = stats_df["odor"].astype(str).str.casefold() == highlight_label.casefold()
 
-    stats_df = stats_df.assign(
-        _order_key=stats_df["odor"].map(
-            lambda value: REACTION_RATE_ODOR_INDEX.get(str(value).casefold(), len(REACTION_RATE_ODOR_INDEX))
-        ),
-        _order_label=stats_df["odor"].astype(str).str.casefold(),
-    )
-    stats_df = stats_df.sort_values(
-        ["_order_key", "_order_label"], ascending=[True, True], kind="mergesort"
-    ).drop(columns=["_order_key", "_order_label"])
+    if separate_presentations:
+        stats_df = stats_df.assign(
+            _order_trial=pd.to_numeric(stats_df["trial_num"], errors="coerce").fillna(10**9).astype(int),
+            _order_label=stats_df["odor"].astype(str).str.casefold(),
+        )
+        stats_df = stats_df.sort_values(
+            ["_order_trial", "_order_label"], ascending=[True, True], kind="mergesort"
+        ).drop(columns=["_order_trial", "_order_label"])
+    else:
+        stats_df = stats_df.assign(
+            _order_key=stats_df["odor"].map(
+                lambda value: REACTION_RATE_ODOR_INDEX.get(str(value).casefold(), len(REACTION_RATE_ODOR_INDEX))
+            ),
+            _order_label=stats_df["odor"].astype(str).str.casefold(),
+        )
+        stats_df = stats_df.sort_values(
+            ["_order_key", "_order_label"], ascending=[True, True], kind="mergesort"
+        ).drop(columns=["_order_key", "_order_label"])
     stats_df = stats_df.reset_index(drop=True)
 
     logger.debug(
@@ -1240,6 +1283,9 @@ def plot_reaction_rate_bars(
     if stats_df.empty:
         ax.set_visible(False)
         return
+
+    if "trial_num" in stats_df.columns:
+        stats_df = stats_df.sort_values(["trial_num", "odor"], kind="mergesort").reset_index(drop=True)
 
     x = np.arange(len(stats_df))
     colors = [
@@ -1269,7 +1315,7 @@ def plot_reaction_rate_bars(
             tick.set_weight("bold")
     ax.set_ylim(0.0, 1.10)
     ax.set_ylabel("PER %")
-    ax.set_xlabel("Odor")
+    ax.set_xlabel("Presented Odor")
     ax.set_title(title, fontsize=12, weight="bold")
     ax.grid(axis="y", linestyle="--", linewidth=0.6, alpha=0.35)
     ax.margins(x=0.02)
@@ -1583,6 +1629,7 @@ def generate_reaction_matrices(cfg: MatrixPlotConfig) -> None:
                     context=rate_context,
                     trial_col="trial",
                     reaction_col="during_hit",
+                    separate_presentations=True,
                 )
             except RuntimeError:
                 ax_dc.text(
@@ -1606,6 +1653,7 @@ def generate_reaction_matrices(cfg: MatrixPlotConfig) -> None:
                     all_rate_stats.append({
                         "dataset": odor,
                         "trial_order": order,
+                        "trial_num": int(row["trial_num"]) if "trial_num" in row else np.nan,
                         "odor_sent": str(row["odor"]),
                         "reaction_rate": float(row["rate"]),
                         "num_reactions": int(row["num_reactions"]),
@@ -1679,13 +1727,37 @@ def generate_reaction_matrices(cfg: MatrixPlotConfig) -> None:
             if order_stats.empty:
                 continue
 
-            # Create pivot table: rows = datasets, columns = odor_sent, values = reaction_rate
+            if "trial_num" in order_stats.columns:
+                order_stats["presentation"] = order_stats.apply(
+                    lambda row: (
+                        f"T{int(row['trial_num'])}_{row['odor_sent']}"
+                        if pd.notna(row["trial_num"])
+                        else str(row["odor_sent"])
+                    ),
+                    axis=1,
+                )
+                presentation_order = (
+                    order_stats[["presentation", "trial_num", "odor_sent"]]
+                    .drop_duplicates()
+                    .sort_values(["trial_num", "odor_sent"], kind="mergesort")["presentation"]
+                    .tolist()
+                )
+                pivot_columns = "presentation"
+            else:
+                presentation_order = (
+                    order_stats["odor_sent"].drop_duplicates().astype(str).tolist()
+                )
+                pivot_columns = "odor_sent"
+
+            # Create pivot table: rows = datasets, columns = presentation, values = reaction_rate
             pivot = order_stats.pivot_table(
                 index="dataset",
-                columns="odor_sent",
+                columns=pivot_columns,
                 values="reaction_rate",
                 aggfunc="first"  # Should only be one value per dataset-odor pair
             )
+            if presentation_order:
+                pivot = pivot.reindex(columns=presentation_order)
 
             # Sort datasets by ODOR_ORDER
             ordered_datasets = [d for d in ODOR_ORDER if d in pivot.index]

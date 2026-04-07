@@ -159,6 +159,139 @@ def test_compute_dataset_means_baseline_corrects_each_odor_and_skips_unmapped_te
     assert "testing_11" not in results
 
 
+def test_compute_dataset_means_training_maps_odors_correctly():
+    """Training trials use per-dataset odor schedules."""
+    wide_df = _make_wide_df([
+        {
+            "dataset": "Benz-Training",
+            "fly": "fly_a",
+            "fly_number": 1,
+            "trial_label": "training_1",
+            "trial_type": "training",
+            "trace": [10.0, 10.0, 15.0, 20.0],
+        },
+        {
+            "dataset": "Benz-Training",
+            "fly": "fly_a",
+            "fly_number": 1,
+            "trial_label": "training_5",
+            "trial_type": "training",
+            "trace": [10.0, 10.0, 12.0, 14.0],
+        },
+    ])
+
+    results = compute_dataset_means(
+        wide_df,
+        "Benz-Training",
+        fps=2.0,
+        odor_on_s=1.0,
+        subtract_baseline=True,
+    )
+
+    # training_1 → Benzaldehyde (default schedule), training_5 → Hexanol
+    assert "Benzaldehyde" in results
+    assert "Hexanol" in results
+
+
+def test_compute_dataset_means_training_skips_unmapped_trials():
+    """Training trials beyond the schedule (e.g. training_9) are skipped."""
+    wide_df = _make_wide_df([
+        {
+            "dataset": "Benz-Training",
+            "fly": "fly_a",
+            "fly_number": 1,
+            "trial_label": "training_1",
+            "trial_type": "training",
+            "trace": [10.0, 10.0, 15.0, 20.0],
+        },
+        {
+            "dataset": "Benz-Training",
+            "fly": "fly_a",
+            "fly_number": 1,
+            "trial_label": "training_9",
+            "trial_type": "training",
+            "trace": [99.0, 99.0, 99.0, 99.0],
+        },
+    ])
+
+    results = compute_dataset_means(
+        wide_df,
+        "Benz-Training",
+        fps=2.0,
+        odor_on_s=1.0,
+        subtract_baseline=True,
+    )
+
+    assert "Benzaldehyde" in results
+    assert "training_9" not in results
+
+
+def test_compute_dataset_means_24_02_variant_maps_correctly():
+    """The 24-02 dataset variants resolve their odor mappings."""
+    wide_df = _make_wide_df([
+        {
+            "dataset": "Benz-Training-24-02",
+            "fly": "fly_a",
+            "fly_number": 1,
+            "trial_label": "training_1",
+            "trial_type": "training",
+            "trace": [10.0, 10.0, 15.0, 20.0],
+        },
+        {
+            "dataset": "Benz-Control-24-02",
+            "fly": "fly_b",
+            "fly_number": 1,
+            "trial_label": "testing_2",
+            "trial_type": "testing",
+            "trace": [5.0, 5.0, 8.0, 12.0],
+        },
+    ])
+
+    training_results = compute_dataset_means(
+        wide_df[wide_df["dataset"] == "Benz-Training-24-02"],
+        "Benz-Training-24-02",
+        fps=2.0,
+        odor_on_s=1.0,
+        subtract_baseline=True,
+    )
+    assert "Benzaldehyde" in training_results
+
+    testing_results = compute_dataset_means(
+        wide_df[wide_df["dataset"] == "Benz-Control-24-02"],
+        "Benz-Control-24-02",
+        fps=2.0,
+        odor_on_s=1.0,
+        subtract_baseline=True,
+    )
+    assert "Benzaldehyde" in testing_results
+
+
+def test_plot_dataset_means_training_title():
+    """Training plots use 'Training Odors Mean' in the title."""
+    results = {
+        "Benzaldehyde": {
+            "mean": np.linspace(0, 100, 200),
+            "sem": np.full(200, 5.0),
+            "n_flies": 4,
+            "fly_names": ["fly_1", "fly_2", "fly_3", "fly_4"],
+        },
+    }
+    fig = plot_dataset_means(
+        results,
+        dataset_name="Benz-Training",
+        fps=40.0,
+        odor_on_s=30.0,
+        odor_off_s=60.0,
+        baseline_subtracted=True,
+        trial_type="training",
+    )
+    assert fig is not None
+    title = fig.get_axes()[0].get_title()
+    assert "Training" in title
+    assert "Testing" not in title
+    plt.close(fig)
+
+
 def test_compute_dataset_means_can_leave_raw_values_when_baseline_disabled():
     wide_df = _make_wide_df([
         {

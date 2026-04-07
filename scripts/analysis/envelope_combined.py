@@ -37,14 +37,6 @@ from matplotlib.colors import ListedColormap
 from matplotlib.patches import Patch
 from scipy.signal import hilbert
 
-# Ensure all plots use Arial to match lab styling.
-plt.rcParams.update(
-    {
-        "font.family": "Arial",
-        "font.sans-serif": ["Arial"],
-    }
-)
-
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SRC_ROOT = REPO_ROOT / "src"
 for path in (str(REPO_ROOT), str(SRC_ROOT)):
@@ -52,6 +44,13 @@ for path in (str(REPO_ROOT), str(SRC_ROOT)):
         sys.path.insert(0, path)
 
 from fbpipe.config import load_settings, resolve_config_path, load_raw_config
+from fbpipe.odor_constants import (
+    ODOR_CANON,
+    DISPLAY_LABEL,
+)
+from fbpipe.plot_style import apply_lab_style
+
+apply_lab_style()
 from fbpipe.utils.columns import (
     EYE_CLASS,
     PROBOSCIS_CLASS,
@@ -423,16 +422,22 @@ def _resolve_distance_limits(
 
 MANDATORY_WIDE_EXCLUDES: set[Path] = set()
 
-ODOR_CANON = {
+# ODOR_CANON and DISPLAY_LABEL are imported from fbpipe.odor_constants (top of file).
+_ODOR_CANON_LOCAL_REMOVED = {
     # ── Data folder names (identity mappings) ──
     "3oct-training": "3OCT-Training",
+    "3oct-training-24-2": "3OCT-Training-24-2",
+    "3oct-control-24-2": "3OCT-Control-24-2",
+    "3oct_control_24_2": "3OCT-Control-24-2",
     "acv-training": "ACV-Training",
     "air-training": "AIR-Training",
     "benz-control": "Benz-Control",
     "benz-control-24-2": "Benz-Control-24-2",
+    "benz-control-24-02": "Benz-Control-24-02",
     "benz-training": "Benz-Training",
     "benz-training-24": "Benz-Training-24",
     "benz-training-24-2": "Benz-Training-24-2",
+    "benz-training-24-02": "Benz-Training-24-02",
     "eb-control": "EB-Control",
     "eb-training": "EB-Training",
     "eb-training(no-operant)": "EB-Training(No-Operant)",
@@ -441,10 +446,15 @@ ODOR_CANON = {
     "hex-control-24": "Hex-Control-24",
     "hex-control-24-2": "Hex-Control-24-2",
     "hex-control-36": "Hex-Control-36",
+    "hex-control-24-02": "Hex-Control-24-02",
+    "hex-control-24-002": "Hex-Control-24-002",
+    "hex_control_24_002": "Hex-Control-24-002",
+    "hex control 24 002": "Hex-Control-24-002",
     "hex-training": "Hex-Training",
     "hex-training-24": "Hex-Training-24",
     "hex-training-24-2": "Hex-Training-24-2",
     "hex-training-36": "Hex-Training-36",
+    "hex-training-24-002": "Hex-Training-24-002",
     # ── Legacy / alternate spellings → data folder names ──
     "opto_eb": "EB-Training",
     "opto_eb(6-training)": "EB-Training(No-Operant)",
@@ -483,6 +493,8 @@ ODOR_CANON = {
     "hex training 24": "Hex-Training-24",
     "hex training 36": "Hex-Training-36",
     "3oct training": "3OCT-Training",
+    "3oct training 24 2": "3OCT-Training-24-2",
+    "3oct control 24 2": "3OCT-Control-24-2",
     "hexanol": "Hex-Training",
     "10s_odor_benz": "10s_Odor_Benz",
     "optogenetics benzaldehyde": "Benz-Training",
@@ -504,7 +516,7 @@ ODOR_CANON = {
     "ret_eb": "manual_ret_EB",
 }
 
-DISPLAY_LABEL = {
+_DISPLAY_LABEL_LOCAL_REMOVED = {
     "ACV": "Apple Cider Vinegar",
     "3-octonol": "3-Octonol",
     "Benz": "Benzaldehyde",
@@ -515,11 +527,15 @@ DISPLAY_LABEL = {
     "Hex-Control-24": "Hexanol",
     "Hex-Control-24-2": "Hexanol",
     "Hex-Control-36": "Hexanol",
+    "Hex-Control-24-02": "Hexanol",
+    "Hex-Control-24-002": "Hexanol",
     "Benz-Control": "Benzaldehyde",
     "Benz-Control-24-2": "Benzaldehyde",
+    "Benz-Control-24-02": "Benzaldehyde",
     "Benz-Training": "Benzaldehyde",
     "Benz-Training-24": "Benzaldehyde",
     "Benz-Training-24-2": "Benzaldehyde",
+    "Benz-Training-24-02": "Benzaldehyde",
     "EB-Training": "Ethyl Butyrate",
     "EB-Training(No-Operant)": "Ethyl Butyrate (No-Operant)",
     "ACV-Training": "Apple Cider Vinegar",
@@ -527,8 +543,11 @@ DISPLAY_LABEL = {
     "Hex-Training-24": "Hexanol",
     "Hex-Training-24-2": "Hexanol",
     "Hex-Training-36": "Hexanol",
+    "Hex-Training-24-002": "Hexanol",
     "AIR-Training": "AIR",
     "3OCT-Training": "3-Octonol",
+    "3OCT-Training-24-2": "3-Octonol",
+    "3OCT-Control-24-2": "3-Octonol",
     # Manual / sucrose-trained fly datasets
     "manual_3-octonol": "3-Octonol",
     "manual_10s_Odor_Benz": "Benzaldehyde",
@@ -546,8 +565,12 @@ PRIMARY_ODOR_LABEL = {
     "Hex-Control-24": HEXANOL,
     "Hex-Control-24-2": HEXANOL,
     "Hex-Control-36": HEXANOL,
+    "Hex-Control-24-02": HEXANOL,
+    "Hex-Control-24-002": HEXANOL,
     "Benz-Control": "Benzaldehyde",
     "Benz-Control-24-2": "Benzaldehyde",
+    "Benz-Control-24-02": "Benzaldehyde",
+    "3OCT-Control-24-2": "3-Octonol",
 }
 
 TRAINING_ODOR_SCHEDULE_DEFAULT = {
@@ -602,6 +625,26 @@ TRAINING_ODOR_SCHEDULE_OVERRIDES = {
         7: "Apple Cider Vinegar",
         8: HEXANOL,
     },
+    "Hex-Control-24-02": {
+        1: HEXANOL,
+        2: HEXANOL,
+        3: HEXANOL,
+        4: HEXANOL,
+        5: "Apple Cider Vinegar",
+        6: HEXANOL,
+        7: "Apple Cider Vinegar",
+        8: HEXANOL,
+    },
+    "Hex-Control-24-002": {
+        1: HEXANOL,
+        2: HEXANOL,
+        3: HEXANOL,
+        4: HEXANOL,
+        5: "Apple Cider Vinegar",
+        6: HEXANOL,
+        7: "Apple Cider Vinegar",
+        8: HEXANOL,
+    },
     "Hex-Training": {
         1: HEXANOL,
         2: HEXANOL,
@@ -633,6 +676,16 @@ TRAINING_ODOR_SCHEDULE_OVERRIDES = {
         8: HEXANOL,
     },
     "Hex-Training-36": {
+        1: HEXANOL,
+        2: HEXANOL,
+        3: HEXANOL,
+        4: HEXANOL,
+        5: "Apple Cider Vinegar",
+        6: HEXANOL,
+        7: "Apple Cider Vinegar",
+        8: HEXANOL,
+    },
+    "Hex-Training-24-002": {
         1: HEXANOL,
         2: HEXANOL,
         3: HEXANOL,
@@ -683,6 +736,26 @@ TRAINING_ODOR_SCHEDULE_OVERRIDES = {
         8: "AIR",
     },
     "3OCT-Training": {
+        1: "3-Octonol",
+        2: "3-Octonol",
+        3: "3-Octonol",
+        4: "3-Octonol",
+        5: HEXANOL,
+        6: "3-Octonol",
+        7: HEXANOL,
+        8: "3-Octonol",
+    },
+    "3OCT-Training-24-2": {
+        1: "3-Octonol",
+        2: "3-Octonol",
+        3: "3-Octonol",
+        4: "3-Octonol",
+        5: HEXANOL,
+        6: "3-Octonol",
+        7: HEXANOL,
+        8: "3-Octonol",
+    },
+    "3OCT-Control-24-2": {
         1: "3-Octonol",
         2: "3-Octonol",
         3: "3-Octonol",
@@ -746,19 +819,26 @@ TESTING_DATASET_ALIAS = {
     "Hex-Control-36": "Hex-Control",
     "Hex-Control-24": "Hex-Control",
     "Hex-Control-24-2": "Hex-Control",
+    "Hex-Control-24-02": "Hex-Control",
+    "Hex-Control-24-002": "Hex-Control",
     "Hex-Training": "Hex-Control",
     "Hex-Training-24": "Hex-Control",
     "Hex-Training-24-2": "Hex-Control",
     "Hex-Training-36": "Hex-Control",
+    "Hex-Training-24-002": "Hex-Control",
     "EB-Training": "EB-Control",
     "Benz-Control-24-2": "Benz-Control",
+    "Benz-Control-24-02": "Benz-Control",
     "EB-Training(No-Operant)": "EB-Control",
     "Benz-Training": "Benz-Control",
     "Benz-Training-24": "Benz-Control",
     "Benz-Training-24-2": "Benz-Control",
+    "Benz-Training-24-02": "Benz-Control",
     "AIR-Training": "AIR-Training",
     "ACV-Training": "ACV-Training",
     "3OCT-Training": "3OCT-Training",
+    "3OCT-Training-24-2": "3OCT-Training",
+    "3OCT-Control-24-2": "3OCT-Control-24-2",
     # Manual / sucrose-trained fly datasets (self-mappings)
     "manual_3-octonol": "manual_3-octonol",
     "manual_10s_Odor_Benz": "manual_10s_Odor_Benz",
@@ -902,6 +982,13 @@ def _display_odor(dataset_canon: str, trial_label: str) -> str:
             10: "Linalool",
         },
         "3OCT-Training": {
+            6: "Apple Cider Vinegar",
+            7: "Ethyl Butyrate",
+            8: "Benzaldehyde",
+            9: "Citral",
+            10: "Linalool",
+        },
+        "3OCT-Control-24-2": {
             6: "Apple Cider Vinegar",
             7: "Ethyl Butyrate",
             8: "Benzaldehyde",
@@ -2419,11 +2506,6 @@ def build_wide_csv(
                     print(
                         f"[DEBUG] build_wide_csv: {csv_path.name} fly_number={fly_number_label}"
                     )
-                try:
-                    n_rows = pd.read_csv(csv_path, usecols=[measure]).shape[0]
-                except Exception as exc:
-                    print(f"[WARN] Skip {csv_path.name}: count error: {exc}")
-                    continue
                 items.append(
                     {
                         "dataset": dataset,
@@ -2435,12 +2517,21 @@ def build_wide_csv(
                         "measure_col": measure,
                         "trial_type": trial_type,
                         "slot_label": slot_label,
+                        "_header_cols": list(header.columns),
                     }
                 )
-                max_len = max(max_len, n_rows)
 
     if not items:
         raise RuntimeError("No eligible testing/training CSVs found in provided roots.")
+
+    # Compute max_len via fast line count (avoids a full pd.read_csv per file).
+    for item in items:
+        try:
+            with open(item["csv_path"], "rb") as _fh:
+                n_rows = sum(1 for _ in _fh) - 1  # subtract header
+        except Exception:
+            n_rows = 0
+        max_len = max(max_len, n_rows)
 
     fly_before_samples: dict[str, list[np.ndarray]] = {}
     baseline_types = trial_type_allow or {"testing"}
@@ -2578,18 +2669,32 @@ def build_wide_csv(
 
         for item in group_items:
             csv_path = Path(item["csv_path"])
-            try:
-                header = pd.read_csv(csv_path, nrows=0)
-            except Exception:
-                header = pd.DataFrame()
+            measure = str(item["measure_col"])
+            cached_cols = item.get("_header_cols") or []
 
-            frame_col = _pick_frame(header) if not header.empty else None
-            ts_col = _pick_timestamp(header) if not header.empty else None
+            # Resolve frame/timestamp columns from cached header columns
+            _hdr = pd.DataFrame(columns=cached_cols)
+            frame_col = _pick_frame(_hdr) if cached_cols else None
+            ts_col = _pick_timestamp(_hdr) if cached_cols else None
+
+            # Single read: fetch measure + frame + timestamp columns together
+            read_cols = [measure]
+            if frame_col and frame_col not in read_cols:
+                read_cols.append(frame_col)
+            if ts_col and ts_col not in read_cols:
+                read_cols.append(ts_col)
+            try:
+                chunk = pd.read_csv(csv_path, usecols=read_cols)
+            except Exception as exc:
+                print(f"[WARN] Read failed {csv_path}: {exc}")
+                continue
+
+            values = pd.to_numeric(chunk[measure], errors="coerce").astype(float).to_numpy()
+
             fps = math.nan
-            if frame_col and ts_col:
+            if frame_col and ts_col and frame_col in chunk.columns and ts_col in chunk.columns:
                 try:
-                    ts_df = pd.read_csv(csv_path, usecols=[frame_col, ts_col])
-                    seconds = _seconds_from_timestamp(ts_df, ts_col)
+                    seconds = _seconds_from_timestamp(chunk, ts_col)
                     fps_est = _estimate_fps(seconds)
                     if fps_est and np.isfinite(fps_est) and fps_est > 0:
                         fps = float(fps_est)
@@ -2597,14 +2702,6 @@ def build_wide_csv(
                     print(f"[WARN] FPS inference failed for {csv_path.name}: {exc}")
             if not np.isfinite(fps):
                 fps = float(fps_fallback)
-
-            try:
-                measure = str(item["measure_col"])
-                df = pd.read_csv(csv_path, usecols=[measure])
-                values = pd.to_numeric(df[measure], errors="coerce").astype(float).to_numpy()
-            except Exception as exc:
-                print(f"[WARN] Read failed {csv_path}: {exc}")
-                continue
 
             trial_type = _infer_category(csv_path)
             label = _trial_label(csv_path)

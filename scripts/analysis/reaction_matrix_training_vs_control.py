@@ -42,7 +42,6 @@ if str(REPO_ROOT) not in sys.path:
 from scripts.analysis.envelope_visuals import (
     DISPLAY_LABEL,
     ODOR_ORDER,
-    REACTION_RATE_ODOR_INDEX,
     _canon_dataset,
     _display_odor,
     _drop_testing_11,
@@ -82,6 +81,7 @@ TRAINING_CONTROL_PAIRS = {
     "Benz-Training-24-02": "Benz-Control-24-02",
     "ACV-Training": "ACV-Control",
     "3OCT-Training": "3OCT-Control",
+    "3OCT-Training-24-2": "3OCT-Control-24-2",
     "Cit-Training": "Cit-Control",
     "Lin-Training": "Lin-Control",
 }
@@ -102,6 +102,8 @@ _RC_CONTEXT = {
 
 def _sig_stars(p: float) -> str:
     """Return significance stars for a p-value."""
+    if pd.isna(p):
+        return ""
     if p < 0.001:
         return "***"
     if p < 0.01:
@@ -127,21 +129,31 @@ def _load_raw_binary_csv(out_dir: Path, dataset: str) -> pd.DataFrame:
     df = pd.read_csv(csv_path)
     if "odor_sent" not in df.columns or "during_hit" not in df.columns:
         return pd.DataFrame()
+    if "trial_num" not in df.columns:
+        if "trial" in df.columns:
+            df["trial_num"] = df["trial"].map(_trial_num)
+        else:
+            return pd.DataFrame()
+    df["trial_num"] = pd.to_numeric(df["trial_num"], errors="coerce")
+    df = df[df["trial_num"].notna()].copy()
+    if df.empty:
+        return pd.DataFrame()
+    df["trial_num"] = df["trial_num"].astype(int)
     return df
 
 
-def _fisher_test_per_odor(
+def _fisher_test_per_presentation(
     train_raw: pd.DataFrame,
     ctrl_raw: pd.DataFrame,
-    odors: Sequence[str],
-) -> dict[str, float]:
-    """Run Fisher's exact test for each odor, return {odor: p_value}."""
+    presentations: Sequence[tuple[int, str]],
+) -> dict[tuple[int, str], float]:
+    """Run Fisher's exact test for each trial presentation."""
     results = {}
-    for odor in odors:
-        t = train_raw[train_raw["odor_sent"].str.casefold() == odor.casefold()]
-        c = ctrl_raw[ctrl_raw["odor_sent"].str.casefold() == odor.casefold()]
+    for trial_num, odor in presentations:
+        t = train_raw[train_raw["trial_num"] == int(trial_num)]
+        c = ctrl_raw[ctrl_raw["trial_num"] == int(trial_num)]
         if t.empty or c.empty:
-            results[odor] = 1.0
+            results[(int(trial_num), odor)] = np.nan
             continue
         # 2x2 table: [[train_react, train_no], [ctrl_react, ctrl_no]]
         t_react = int(t["during_hit"].sum())
@@ -151,7 +163,7 @@ def _fisher_test_per_odor(
         table = [[t_react, t_total - t_react],
                  [c_react, c_total - c_react]]
         _, p = fisher_exact(table)
-        results[odor] = p
+        results[(int(trial_num), odor)] = p
     return results
 
 
@@ -160,13 +172,15 @@ def _draw_significance_brackets(
     x_positions: np.ndarray,
     bar_w: float,
     merged: pd.DataFrame,
-    p_values: dict[str, float],
+    p_values: dict[tuple[int, str], float],
 ) -> None:
     """Draw bracket + stars between each train/control bar pair."""
     for i, (_, row) in enumerate(merged.iterrows()):
-        odor = str(row["odor"])
-        p = p_values.get(odor, 1.0)
+        key = (int(row["trial_num"]), str(row["odor"]))
+        p = p_values.get(key, np.nan)
         stars = _sig_stars(p)
+        if not stars:
+            continue
 
         # Height of bracket: well above the taller bar's annotation
         rate_train = float(row["rate_train"])
@@ -227,13 +241,25 @@ def _load_rates_from_binary_csv(
     if df.empty or "odor_sent" not in df.columns or "during_hit" not in df.columns:
         print(f"[WARN] Binary CSV for {dataset} is empty or missing columns")
         return pd.DataFrame()
+    if "trial_num" not in df.columns:
+        if "trial" in df.columns:
+            df["trial_num"] = df["trial"].map(_trial_num)
+        else:
+            print(f"[WARN] Binary CSV for {dataset} is missing trial_num/trial columns")
+            return pd.DataFrame()
+    df["trial_num"] = pd.to_numeric(df["trial_num"], errors="coerce")
+    df = df[df["trial_num"].notna()].copy()
+    if df.empty:
+        print(f"[WARN] Binary CSV for {dataset} has no valid trial numbers")
+        return pd.DataFrame()
+    df["trial_num"] = df["trial_num"].astype(int)
 
     hexanol_label = "Hexanol"
     if not include_hexanol:
         df = df[df["odor_sent"].str.strip().str.casefold() != hexanol_label.casefold()]
 
     stats = (
-        df.groupby("odor_sent")["during_hit"]
+        df.groupby(["trial_num", "odor_sent"])["during_hit"]
         .agg(num_reactions="sum", num_trials="size")
         .reset_index()
         .rename(columns={"odor_sent": "odor"})
@@ -246,11 +272,7 @@ def _load_rates_from_binary_csv(
 
     highlight = _trained_label(dataset_canon)
     stats["is_trained"] = stats["odor"].str.casefold() == highlight.casefold()
-
-    stats["_key"] = stats["odor"].map(
-        lambda v: REACTION_RATE_ODOR_INDEX.get(str(v).casefold(), len(REACTION_RATE_ODOR_INDEX))
-    )
-    stats = stats.sort_values(["_key", "odor"]).drop(columns="_key").reset_index(drop=True)
+    stats = stats.sort_values(["trial_num", "odor"], kind="mergesort").reset_index(drop=True)
     return stats
 
 
@@ -264,21 +286,19 @@ def plot_training_vs_control_bars(
     control_stats: pd.DataFrame,
     *,
     title: str,
-    p_values: dict[str, float] | None = None,
+    p_values: dict[tuple[int, str], float] | None = None,
 ) -> None:
-    """Side-by-side bars: dark-blue training, gray control, per odor."""
+    """Side-by-side bars: dark-blue training, gray control, per trial presentation."""
 
     merged = pd.merge(
-        training_stats[["odor", "rate", "num_trials", "is_trained"]],
-        control_stats[["odor", "rate", "num_trials"]],
-        on="odor",
+        training_stats[["trial_num", "odor", "rate", "num_trials", "is_trained"]],
+        control_stats[["trial_num", "odor", "rate", "num_trials"]],
+        on=["trial_num", "odor"],
         how="outer",
         suffixes=("_train", "_ctrl"),
     ).fillna(0)
-
-    order_map = {odor: i for i, odor in enumerate(training_stats["odor"])}
-    merged["_sort"] = merged["odor"].map(order_map).fillna(999)
-    merged = merged.sort_values("_sort").drop(columns="_sort").reset_index(drop=True)
+    merged["trial_num"] = pd.to_numeric(merged["trial_num"], errors="coerce").fillna(10**9).astype(int)
+    merged = merged.sort_values(["trial_num", "odor"], kind="mergesort").reset_index(drop=True)
 
     n = len(merged)
     x = np.arange(n)
@@ -320,7 +340,7 @@ def plot_training_vs_control_bars(
     # Y-axis: 0-100% with headroom for annotations + brackets
     ax.set_ylim(0.0, 110)
     ax.set_ylabel("PER %")
-    ax.set_xlabel("Odor")
+    ax.set_xlabel("Presented Odor")
     ax.set_title(title, fontsize=12, weight="bold")
     ax.grid(axis="y", linestyle="--", linewidth=0.6, alpha=0.35)
     ax.margins(x=0.04)
@@ -471,14 +491,21 @@ def generate_training_vs_control_matrices(cfg: SpreadsheetMatrixConfig) -> None:
             )
 
             # --- Fisher's exact test per odor ---
-            p_values: dict[str, float] = {}
+            p_values: dict[tuple[int, str], float] = {}
             train_raw = _load_raw_binary_csv(cfg.out_dir, train_ds)
             ctrl_raw = _load_raw_binary_csv(cfg.out_dir, ctrl_ds)
             if not train_raw.empty and not ctrl_raw.empty:
-                all_odors = list(train_rate["odor"]) if not train_rate.empty else []
-                p_values = _fisher_test_per_odor(train_raw, ctrl_raw, all_odors)
-                for odor, p in p_values.items():
-                    print(f"  Fisher's exact: {odor:25s} p={p:.4f} {_sig_stars(p)}")
+                presentations = (
+                    [(int(row.trial_num), str(row.odor)) for row in train_rate.itertuples(index=False)]
+                    if not train_rate.empty else []
+                )
+                p_values = _fisher_test_per_presentation(train_raw, ctrl_raw, presentations)
+                for (trial_num, odor), p in p_values.items():
+                    if pd.isna(p):
+                        continue
+                    print(
+                        f"  Fisher's exact: T{trial_num:<2d} {odor:25s} p={p:.4f} {_sig_stars(p)}"
+                    )
 
             # --- Figure layout ---
             odor_label = DISPLAY_LABEL.get(train_ds, train_ds)

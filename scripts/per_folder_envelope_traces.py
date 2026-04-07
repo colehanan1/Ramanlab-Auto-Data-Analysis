@@ -24,9 +24,26 @@ import math
 import re
 from pathlib import Path
 
+import sys
+from pathlib import Path as _Path
+
+_REPO = _Path(__file__).resolve().parents[1]
+for _p in (str(_REPO / "src"), str(_REPO)):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
+
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+
+from fbpipe.odor_constants import (
+    DISPLAY_LABEL,
+    DATASET_ALIAS,
+    TESTING_DATASET_ALIAS,
+)
+from fbpipe.plot_style import apply_lab_style
+
+apply_lab_style()
 
 # ── paths ──────────────────────────────────────────────────────────────────
 CSV_PATH = Path(
@@ -61,87 +78,20 @@ FIXED_Y_MAX = 100.0
 
 HEXANOL_LABEL = "Hexanol"
 
-# ── display labels ────────────────────────────────────────────────────────
-DISPLAY_LABEL = {
-    "3OCT-Training": "3-Octonol",
-    "ACV-Training": "Apple Cider Vinegar",
-    "AIR-Training": "AIR",
-    "Benz-Control": "Benzaldehyde",
-    "Benz-Control-24-2": "Benzaldehyde",
-    "Benz-Control-24-02": "Benzaldehyde",
-    "Benz-Training": "Benzaldehyde",
-    "Benz-Training-24": "Benzaldehyde",
-    "Benz-Training-24-2": "Benzaldehyde",
-    "Benz-Training-24-02": "Benzaldehyde",
-    "EB-Control": "Ethyl Butyrate",
-    "EB-Training": "Ethyl Butyrate",
-    "EB-Training(No-Operant)": "Ethyl Butyrate (6-Training)",
-    "Hex-Control": "Hexanol",
-    "Hex-Control-24-2": "Hexanol",
-    "Hex-Control-24-02": "Hexanol",
-    "Hex-Training": "Hexanol",
-    "Hex-Training-24": "Hexanol",
-    "Hex-Training-24-2": "Hexanol",
-    "Hex-Training-24-02": "Hexanol",
-}
-
-# Map legacy and lower-case dataset names to canonical data folder names.
-DATASET_ALIAS = {
-    # legacy opto_* / *_control names
-    "opto_3-oct": "3OCT-Training",
-    "opto_ACV": "ACV-Training",
-    "opto_AIR": "AIR-Training",
-    "Benz_control": "Benz-Control",
-    "benz_control": "Benz-Control",
-    "opto_benz": "Benz-Training",
-    "opto_benz_1": "Benz-Training",
-    "EB_control": "EB-Control",
-    "eb_control": "EB-Control",
-    "opto_EB": "EB-Training",
-    "opto_EB_6_training": "EB-Training(No-Operant)",
-    "opto_EB(6-training)": "EB-Training(No-Operant)",
-    "hex_control": "Hex-Control",
-    "opto_hex": "Hex-Training",
-    # lower-case folder-style aliases
-    "3oct-training": "3OCT-Training",
-    "acv-training": "ACV-Training",
-    "air-training": "AIR-Training",
-    "benz-control": "Benz-Control",
-    "benz-control-24-2": "Benz-Control-24-2",
-    "benz-training": "Benz-Training",
-    "benz-training-24": "Benz-Training-24",
-    "benz-training-24-2": "Benz-Training-24-2",
-    "eb-control": "EB-Control",
-    "eb-training": "EB-Training",
-    "eb-training(no-operant)": "EB-Training(No-Operant)",
-    "hex-control": "Hex-Control",
-    "hex-control-24-2": "Hex-Control-24-2",
-    "hex-training": "Hex-Training",
-    "hex-training-24": "Hex-Training-24",
-    "hex-training-24-2": "Hex-Training-24-2",
-}
-
-TESTING_DATASET_ALIAS = {
-    "Hex-Control-24-2": "Hex-Control",
-    "Hex-Training": "Hex-Control",
-    "Hex-Training-24": "Hex-Control",
-    "Hex-Training-24-2": "Hex-Control",
-    "EB-Training": "EB-Control",
-    "Benz-Control-24-2": "Benz-Control",
-    "EB-Training(No-Operant)": "EB-Control",
-    "Benz-Training": "Benz-Control",
-    "Benz-Training-24": "Benz-Control",
-    "Benz-Training-24-2": "Benz-Control",
-    "ACV-Training": "ACV-Training",
-    "3OCT-Training": "3OCT-Training",
-}
+# ── display labels / dataset aliases ──────────────────────────────────────
+# DISPLAY_LABEL, DATASET_ALIAS, and TESTING_DATASET_ALIAS are imported
+# from fbpipe.odor_constants (see top-of-file imports).
 
 PRIMARY_ODOR_LABEL = {
     "EB-Control": "Ethyl Butyrate",
     "Hex-Control": HEXANOL_LABEL,
+    "Hex-Control-24-02": HEXANOL_LABEL,
     "Benz-Control": "Benzaldehyde",
+    "Benz-Control-24-02": "Benzaldehyde",
     "Hex-Control-24-2": HEXANOL_LABEL,
+    "Hex-Control-24-002": HEXANOL_LABEL,
     "Benz-Control-24-2": "Benzaldehyde",
+    "3OCT-Control-24-2": "3-Octonol",
 }
 
 
@@ -181,7 +131,7 @@ def _resolve_odor_name(dataset: str, trial_label: str) -> str:
         return m.get(number, trial_label)
 
     # 3OCT-Training testing
-    if ds == "3OCT-Training":
+    if ds in ("3OCT-Training", "3OCT-Training-24-2", "3OCT-Control-24-2"):
         if number in (1, 3):
             return HEXANOL_LABEL
         if number in (2, 4, 5):

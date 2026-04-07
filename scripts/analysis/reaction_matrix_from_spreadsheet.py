@@ -327,6 +327,7 @@ def generate_reaction_matrices_from_csv(cfg: SpreadsheetMatrixConfig) -> None:
                         context=f"{odor_label} (spreadsheet/{order_suffix})",
                         trial_col="trial",
                         reaction_col="during_hit",
+                        separate_presentations=True,
                     )
                 except RuntimeError:
                     ax_dc.text(
@@ -350,6 +351,7 @@ def generate_reaction_matrices_from_csv(cfg: SpreadsheetMatrixConfig) -> None:
                         all_rate_stats.append({
                             "dataset": odor,
                             "trial_order": order,
+                            "trial_num": int(row["trial_num"]) if "trial_num" in row else np.nan,
                             "odor_sent": str(row["odor"]),
                             "reaction_rate": float(row["rate"]),
                             "num_reactions": int(row["num_reactions"]),
@@ -428,13 +430,37 @@ def generate_reaction_matrices_from_csv(cfg: SpreadsheetMatrixConfig) -> None:
             if order_stats.empty:
                 continue
 
-            # Create pivot table: rows = datasets, columns = odor_sent, values = reaction_rate
+            if "trial_num" in order_stats.columns:
+                order_stats["presentation"] = order_stats.apply(
+                    lambda row: (
+                        f"T{int(row['trial_num'])}_{row['odor_sent']}"
+                        if pd.notna(row["trial_num"])
+                        else str(row["odor_sent"])
+                    ),
+                    axis=1,
+                )
+                presentation_order = (
+                    order_stats[["presentation", "trial_num", "odor_sent"]]
+                    .drop_duplicates()
+                    .sort_values(["trial_num", "odor_sent"], kind="mergesort")["presentation"]
+                    .tolist()
+                )
+                pivot_columns = "presentation"
+            else:
+                presentation_order = (
+                    order_stats["odor_sent"].drop_duplicates().astype(str).tolist()
+                )
+                pivot_columns = "odor_sent"
+
+            # Create pivot table: rows = datasets, columns = presentation, values = reaction_rate
             pivot = order_stats.pivot_table(
                 index="dataset",
-                columns="odor_sent",
+                columns=pivot_columns,
                 values="reaction_rate",
                 aggfunc="first"  # Should only be one value per dataset-odor pair
             )
+            if presentation_order:
+                pivot = pivot.reindex(columns=presentation_order)
 
             # Sort datasets by ODOR_ORDER
             ordered_datasets = [d for d in ODOR_ORDER if d in pivot.index]

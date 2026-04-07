@@ -24,11 +24,17 @@ def _as_bool(value, default: bool) -> bool:
     return bool(value)
 
 
+_flagged_cache: dict[tuple[str, float], set[tuple[str, str, str]]] = {}
+
+
 def load_flagged_fly_exclusions(csv_path: str | Path) -> set[tuple[str, str, str]]:
     """Load the flagged-flies truth CSV and return (dataset, fly, fly_number) tuples to EXCLUDE.
 
     Flies with ``FLY-State`` == 1 are alive and kept; flies with 0 or -1 are
     excluded.  Flies not present in the CSV at all are *not* excluded.
+
+    Results are cached by (resolved path, mtime) so repeated calls within a
+    single pipeline run don't re-parse the CSV.
     """
     import pandas as pd
 
@@ -36,6 +42,11 @@ def load_flagged_fly_exclusions(csv_path: str | Path) -> set[tuple[str, str, str
     if not path.exists():
         print(f"[WARNING] Flagged flies CSV not found: {path}")
         return set()
+
+    mtime = path.stat().st_mtime
+    cache_key = (str(path), mtime)
+    if cache_key in _flagged_cache:
+        return _flagged_cache[cache_key]
 
     df = pd.read_csv(path)
 
@@ -61,6 +72,7 @@ def load_flagged_fly_exclusions(csv_path: str | Path) -> set[tuple[str, str, str
 
     if excluded:
         print(f"[INFO] Flagged flies CSV: {len(excluded)} flies marked for exclusion (state != 1)")
+    _flagged_cache[cache_key] = excluded
     return excluded
 
 
@@ -123,7 +135,8 @@ def get_main_directories(cfg: Settings) -> list[Path]:
     Normalize main_directories to always return a list of Path objects.
 
     Handles both single string and list of strings from config.
-    Automatically appends any subdirectories found under ``flagged_root``.
+    Automatically appends any subdirectories found under ``flagged_root``
+    unless auto_discover_flagged is set to False.
 
     Args:
         cfg: Settings object
@@ -136,7 +149,7 @@ def get_main_directories(cfg: Settings) -> list[Path]:
     else:
         dirs = [Path(cfg.main_directories).expanduser().resolve()]
 
-    if cfg.flagged_root:
+    if cfg.auto_discover_flagged and cfg.flagged_root:
         dirs.extend(discover_flagged_directories(cfg.flagged_root))
 
     return dirs
@@ -279,6 +292,9 @@ class ForceSettings:
     combined: bool = True
     reaction_prediction: bool = True
     reaction_matrix: bool = True
+    envelope_visuals: bool = True
+    training: bool = True
+    dataset_means: bool = True
 
 
 @dataclass
@@ -288,6 +304,7 @@ class Settings:
     cache_dir: str = ""
     flagged_root: str = ""  # Parent dir for flagged/bad experiments; subdirs auto-discovered
     flagged_secured_root: str = ""  # Secured storage mirror for flagged experiments
+    auto_discover_flagged: bool = True  # If False, only use directories explicitly listed in main_directories
     allow_cpu: bool = False
     cuda_allow_tf32: bool = True
     non_reactive_span_px: float = 5.0
@@ -480,6 +497,9 @@ def load_settings(config_path: str | Path) -> Settings:
         combined=_as_bool(force_cfg_raw.get("combined"), True),
         reaction_prediction=_as_bool(force_cfg_raw.get("reaction_prediction"), True),
         reaction_matrix=_as_bool(force_cfg_raw.get("reaction_matrix"), True),
+        envelope_visuals=_as_bool(force_cfg_raw.get("envelope_visuals"), True),
+        training=_as_bool(force_cfg_raw.get("training"), True),
+        dataset_means=_as_bool(force_cfg_raw.get("dataset_means"), True),
     )
 
     force.pipeline = _as_bool(os.getenv("FORCE_PIPELINE"), force.pipeline)
@@ -491,6 +511,11 @@ def load_settings(config_path: str | Path) -> Settings:
     force.reaction_matrix = _as_bool(
         os.getenv("FORCE_REACTION_MATRIX"), force.reaction_matrix
     )
+    force.envelope_visuals = _as_bool(
+        os.getenv("FORCE_ENVELOPE_VISUALS"), force.envelope_visuals
+    )
+    force.training = _as_bool(os.getenv("FORCE_TRAINING"), force.training)
+    force.dataset_means = _as_bool(os.getenv("FORCE_DATASET_MEANS"), force.dataset_means)
 
     non_reactive_span_px = float(
         os.getenv("NON_REACTIVE_SPAN_PX", _get(data, "non_reactive_span_px", 5.0))
@@ -621,6 +646,10 @@ def load_settings(config_path: str | Path) -> Settings:
     flagged_secured_root = str(
         os.getenv("FLAGGED_SECURED_ROOT", _get(data, "flagged_secured_root", ""))
     )
+    auto_discover_flagged = _as_bool(
+        os.getenv("AUTO_DISCOVER_FLAGGED", _get(data, "auto_discover_flagged", True)),
+        True
+    )
 
     return Settings(
         model_path=model_path,
@@ -628,6 +657,7 @@ def load_settings(config_path: str | Path) -> Settings:
         cache_dir=str(Path(cache_dir).expanduser()),
         flagged_root=flagged_root,
         flagged_secured_root=flagged_secured_root,
+        auto_discover_flagged=auto_discover_flagged,
         allow_cpu=allow_cpu,
         cuda_allow_tf32=cuda_allow_tf32,
         non_reactive_span_px=non_reactive_span_px,

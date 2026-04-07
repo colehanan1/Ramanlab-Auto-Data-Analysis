@@ -73,6 +73,53 @@ def _resolve_path(value: str | Path | None) -> Path | None:
     return Path(value).expanduser().resolve()
 
 
+def _file_mtime_key(path: Path | str | None) -> float | None:
+    """Return mtime of *path* as a cache fingerprint, or None if missing."""
+    if path is None:
+        return None
+    p = Path(path)
+    if p.exists():
+        return p.stat().st_mtime
+    return None
+
+
+def _analysis_expected(cfg: Mapping[str, Any] | None, extra: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Build a lightweight expected-state dict for an analysis stage.
+
+    Captures the mtimes of the input artifacts (matrix_npy, codes_json) so
+    that re-runs with unchanged inputs can be skipped.
+    """
+    out: dict[str, Any] = {}
+    if cfg:
+        matrix_npy = _resolve_path(cfg.get("matrix_npy") or (cfg.get("matrices") or {}).get("matrix_npy"))
+        codes_json = _resolve_path(cfg.get("codes_json") or (cfg.get("matrices") or {}).get("codes_json"))
+        out["matrix_npy_mtime"] = _file_mtime_key(matrix_npy)
+        out["codes_json_mtime"] = _file_mtime_key(codes_json)
+        # Include config keys that would change the outputs
+        out["overwrite"] = cfg.get("overwrite") or (cfg.get("matrices") or {}).get("overwrite")
+    if extra:
+        out.update(extra)
+    return out
+
+
+def _dataset_means_expected(analysis_cfg: Mapping[str, Any]) -> dict[str, Any]:
+    """Build expected-state for dataset_means from the wide CSV mtime."""
+    combined = analysis_cfg.get("combined") or {}
+    wide = combined.get("wide") or {}
+    wide_csv = _resolve_path(wide.get("output_csv"))
+    # Also check training export if present
+    training_csv_mtime: float | None = None
+    exports = wide.get("trial_type_exports") or []
+    if isinstance(exports, Sequence) and not isinstance(exports, (str, bytes)):
+        for entry in exports:
+            if isinstance(entry, Mapping) and str(entry.get("trial_type", "")).lower() == "training":
+                training_csv_mtime = _file_mtime_key(_resolve_path(entry.get("output_csv")))
+    return {
+        "wide_csv_mtime": _file_mtime_key(wide_csv),
+        "training_csv_mtime": training_csv_mtime,
+    }
+
+
 def _ensure_path(value: str | Path, field: str) -> Path:
     path = _resolve_path(value)
     if path is None:
@@ -1681,10 +1728,64 @@ def main(argv: Sequence[str] | None = None) -> None:
                 )
     else:
         _run_combined(None, settings, folder_filter=folder_filter)
-    _run_envelope_visuals(analysis_cfg.get("envelope_visuals"))
-    _run_training(analysis_cfg.get("training"))
+    # -- envelope_visuals with cache skip --
+    env_vis_cfg = analysis_cfg.get("envelope_visuals")
+    if env_vis_cfg:
+        ev_expected = _analysis_expected(env_vis_cfg)
+        skip_ev = _should_skip(
+            settings, "envelope_visuals", "analysis", ev_expected,
+            force_flag=settings.force.envelope_visuals,
+        )
+        if skip_ev:
+            print(
+                "[analysis] envelope_visuals cached → skipping. "
+                "Set force.envelope_visuals=true to recompute."
+            )
+        else:
+            _run_envelope_visuals(env_vis_cfg)
+            payload = dict(ev_expected, version=STATE_VERSION)
+            _write_state(settings, "envelope_visuals", "analysis", payload)
+    else:
+        _run_envelope_visuals(None)
+
+    # -- training with cache skip --
+    training_cfg = analysis_cfg.get("training")
+    if training_cfg:
+        tr_expected = _analysis_expected(training_cfg)
+        skip_tr = _should_skip(
+            settings, "training", "analysis", tr_expected,
+            force_flag=settings.force.training,
+        )
+        if skip_tr:
+            print(
+                "[analysis] training cached → skipping. "
+                "Set force.training=true to recompute."
+            )
+        else:
+            _run_training(training_cfg)
+            payload = dict(tr_expected, version=STATE_VERSION)
+            _write_state(settings, "training", "analysis", payload)
+    else:
+        _run_training(None)
+
     _run_reactions(settings)
-    _run_dataset_means(config_path)
+
+    # -- dataset_means with cache skip --
+    dm_expected = _dataset_means_expected(analysis_cfg)
+    skip_dm = _should_skip(
+        settings, "dataset_means", "analysis", dm_expected,
+        force_flag=settings.force.dataset_means,
+    )
+    if skip_dm:
+        print(
+            "[analysis] dataset_means cached → skipping. "
+            "Set force.dataset_means=true to recompute."
+        )
+    else:
+        _run_dataset_means(config_path, no_overwrite=True)
+        _run_dataset_means_training(config_path, no_overwrite=True)
+        payload = dict(dm_expected, version=STATE_VERSION)
+        _write_state(settings, "dataset_means", "analysis", payload)
 
     # Copy all analysis outputs to SMB at the end
     LOGGER.info("\n" + "=" * 70)
@@ -1697,7 +1798,7 @@ def main(argv: Sequence[str] | None = None) -> None:
     _run_data_secured_sync(data)
 
 
-def _run_dataset_means(config_path: Path) -> None:
+def _run_dataset_means(config_path: Path, *, no_overwrite: bool = False) -> None:
     """Generate dataset-level mean plots from the wide envelope CSV."""
     LOGGER.info("[analysis] Running dataset_means ...")
     repo_root = _find_repo_root(Path(__file__).resolve())
@@ -1707,6 +1808,8 @@ def _run_dataset_means(config_path: Path) -> None:
         "--config",
         str(config_path),
     ]
+    if no_overwrite:
+        cmd.append("--no-overwrite")
     env = os.environ.copy()
     env["MPLBACKEND"] = "Agg"
     result = subprocess.run(cmd, env=env, capture_output=False)
@@ -1714,6 +1817,27 @@ def _run_dataset_means(config_path: Path) -> None:
         LOGGER.warning("[analysis] dataset_means exited with code %d", result.returncode)
     else:
         LOGGER.info("[analysis] dataset_means complete.")
+
+
+def _run_dataset_means_training(config_path: Path, *, no_overwrite: bool = False) -> None:
+    """Generate dataset-level mean plots for training odors."""
+    LOGGER.info("[analysis] Running dataset_means_training ...")
+    repo_root = _find_repo_root(Path(__file__).resolve())
+    cmd = [
+        sys.executable,
+        str(repo_root / "scripts" / "analysis" / "dataset_means_training.py"),
+        "--config",
+        str(config_path),
+    ]
+    if no_overwrite:
+        cmd.append("--no-overwrite")
+    env = os.environ.copy()
+    env["MPLBACKEND"] = "Agg"
+    result = subprocess.run(cmd, env=env, capture_output=False)
+    if result.returncode != 0:
+        LOGGER.warning("[analysis] dataset_means_training exited with code %d", result.returncode)
+    else:
+        LOGGER.info("[analysis] dataset_means_training complete.")
 
 
 def _batch_copy_to_smb(raw_cfg: Dict[str, Any]) -> None:
@@ -1758,6 +1882,13 @@ def _batch_copy_to_smb(raw_cfg: Dict[str, Any]) -> None:
     if dataset_means_cfg:
         out_dir = Path(dataset_means_cfg.get("out_dir", ""))
         smb_path = dataset_means_cfg.get("out_dir_smb")
+        if out_dir.exists() and smb_path:
+            copies_to_make.append((out_dir, smb_path))
+
+    dataset_means_training_cfg = analysis_cfg.get("dataset_means_training", {})
+    if dataset_means_training_cfg:
+        out_dir = Path(dataset_means_training_cfg.get("out_dir", ""))
+        smb_path = dataset_means_training_cfg.get("out_dir_smb")
         if out_dir.exists() and smb_path:
             copies_to_make.append((out_dir, smb_path))
 

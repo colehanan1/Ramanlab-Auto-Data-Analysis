@@ -124,8 +124,12 @@ def _ensure_directory(path: Path) -> None:
     path.mkdir(parents=True, exist_ok=True)
 
 
-def _save_figure(fig: plt.Figure, base_path: Path) -> None:
+def _save_figure(fig: plt.Figure, base_path: Path, *, overwrite: bool = True) -> None:
     png = base_path.with_suffix(".png")
+    if not overwrite and png.exists():
+        LOGGER.info("Skipped (exists) %s", png)
+        plt.close(fig)
+        return
     fig.savefig(png, dpi=DPI, bbox_inches="tight")
     plt.close(fig)
     LOGGER.info("Saved %s", png)
@@ -208,11 +212,17 @@ def _get_config_path(cfg_data: dict, *keys: str) -> Path | None:
     return Path(str(value))
 
 
-def _select_wide_csv_arg(cli_value: Path | None, cfg_data: dict) -> Path:
+def _select_wide_csv_arg(cli_value: Path | None, cfg_data: dict, *, trial_type: str = "testing") -> Path:
     """Resolve the wide CSV source from CLI, config, or defaults."""
 
     if cli_value is not None:
         return cli_value
+
+    # For training, prefer the training-specific config section first.
+    if trial_type == "training":
+        training_candidate = _get_config_path(cfg_data, "analysis", "dataset_means_training", "wide_csv")
+        if training_candidate is not None:
+            return training_candidate
 
     config_candidate = (
         _get_config_path(cfg_data, "analysis", "dataset_means", "wide_csv")
@@ -235,11 +245,17 @@ def _select_flagged_csv_arg(cli_value: Path | None, cfg_data: dict) -> Path:
     return config_candidate or DEFAULT_FLAGGED_CSV
 
 
-def _select_outdir_arg(cli_value: Path | None, cfg_data: dict) -> Path:
+def _select_outdir_arg(cli_value: Path | None, cfg_data: dict, *, trial_type: str = "testing") -> Path:
     """Resolve the output directory from CLI, config, or defaults."""
 
     if cli_value is not None:
         return cli_value
+
+    # For training, prefer the training-specific config section first.
+    if trial_type == "training":
+        training_candidate = _get_config_path(cfg_data, "analysis", "dataset_means_training", "out_dir")
+        if training_candidate is not None:
+            return training_candidate
 
     config_candidate = _get_config_path(cfg_data, "analysis", "dataset_means", "out_dir")
     return config_candidate or DEFAULT_OUTDIR
@@ -251,9 +267,10 @@ def _resolve_named_odor(dataset_canon: str, trial_label: str) -> str | None:
     label = str(trial_label).strip()
     odor = _display_odor(dataset_canon, label)
 
-    # Unmapped testing trials fall back to the raw trial label (for example,
-    # ``testing_11``). Skip those so only named odors appear in the plots.
-    if "testing" in label.lower() and odor == label:
+    # Unmapped trials fall back to the raw trial label (for example,
+    # ``testing_11`` or ``training_9``). Skip those so only named odors
+    # appear in the plots.
+    if odor == label:
         return None
     return odor
 
@@ -484,6 +501,7 @@ def plot_dataset_means(
     odor_on_s: float,
     odor_off_s: float,
     baseline_subtracted: bool = False,
+    trial_type: str = "testing",
 ) -> Optional[plt.Figure]:
     """Create a single plot with all odors overlaid in different colours."""
     if not results:
@@ -526,7 +544,7 @@ def plot_dataset_means(
     if baseline_subtracted:
         ylabel = "Distance % (baseline-subtracted)"
     ax.set_ylabel(ylabel)
-    title = f"{dataset_name} \u2014 Testing Odors Mean"
+    title = f"{dataset_name} \u2014 {trial_type.capitalize()} Odors Mean"
     if baseline_subtracted:
         title += " (Pre-odor centered)"
     ax.set_title(title, fontsize=11)
@@ -619,6 +637,12 @@ def build_parser(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         help="Trial type to aggregate (default: testing)",
     )
     parser.add_argument("--verbose", action="store_true", help="Enable DEBUG logging")
+    parser.add_argument(
+        "--no-overwrite",
+        action="store_true",
+        default=False,
+        help="Skip figures that already exist on disk",
+    )
     return parser.parse_args(argv)
 
 
@@ -651,7 +675,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     _, cfg_data = _load_config_data(args.config)
 
     # Load the wide CSV
-    wide_csv_arg = _select_wide_csv_arg(args.wide_csv, cfg_data)
+    wide_csv_arg = _select_wide_csv_arg(args.wide_csv, cfg_data, trial_type=args.trial_type)
     wide_csv = _resolve_wide_csv_path(wide_csv_arg)
     if not wide_csv.exists():
         preferred_default = DEFAULT_WIDE_CSV.expanduser().resolve()
@@ -678,7 +702,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     fps, odor_on_s, odor_off_s = _read_timing(args)
     LOGGER.info("FPS=%.1f  odor_on=%.1fs  odor_off=%.1fs", fps, odor_on_s, odor_off_s)
 
-    outdir = _select_outdir_arg(args.outdir, cfg_data).expanduser().resolve()
+    outdir = _select_outdir_arg(args.outdir, cfg_data, trial_type=args.trial_type).expanduser().resolve()
     _ensure_directory(outdir)
 
     processed = 0
@@ -707,9 +731,10 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             odor_on_s=odor_on_s,
             odor_off_s=odor_off_s,
             baseline_subtracted=True,
+            trial_type=args.trial_type,
         )
         if fig is not None:
-            _save_figure(fig, base)
+            _save_figure(fig, base, overwrite=not args.no_overwrite)
 
         write_sidecar(
             base.with_suffix(".json"),

@@ -19,9 +19,26 @@ import math
 import re
 from pathlib import Path
 
+import sys
+from pathlib import Path as _Path
+
+_REPO = _Path(__file__).resolve().parents[1]
+for _p in (str(_REPO / "src"), str(_REPO)):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
+
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+
+from fbpipe.odor_constants import (
+    DISPLAY_LABEL,
+    DATASET_ALIAS,
+    TESTING_DATASET_ALIAS,
+)
+from fbpipe.plot_style import apply_lab_style
+
+apply_lab_style()
 
 # ── paths ──────────────────────────────────────────────────────────────────
 CSV_PATH = Path(
@@ -69,61 +86,9 @@ FIXED_Y_MAX = 100.0
 
 HEXANOL_LABEL = "Hexanol"
 
-# ── display labels ────────────────────────────────────────────────────────
-DISPLAY_LABEL = {
-    "3OCT-Training": "3-Octonol",
-    "ACV-Training": "Apple Cider Vinegar",
-    "AIR-Training": "AIR",
-    "Benz-Control": "Benzaldehyde",
-    "Benz-Control-24-2": "Benzaldehyde",
-    "Benz-Training": "Benzaldehyde",
-    "Benz-Training-24": "Benzaldehyde",
-    "Benz-Training-24-2": "Benzaldehyde",
-    "EB-Control": "Ethyl Butyrate",
-    "EB-Training": "Ethyl Butyrate",
-    "EB-Training(No-Operant)": "Ethyl Butyrate (6-Training)",
-    "Hex-Control": "Hexanol",
-    "Hex-Control-24-2": "Hexanol",
-    "Hex-Training": "Hexanol",
-    "Hex-Training-24": "Hexanol",
-    "Hex-Training-24-2": "Hexanol",
-}
-
-# Map legacy and lower-case dataset names to canonical data folder names.
-DATASET_ALIAS = {
-    # legacy opto_* / *_control names
-    "opto_3-oct": "3OCT-Training",
-    "opto_ACV": "ACV-Training",
-    "opto_AIR": "AIR-Training",
-    "Benz_control": "Benz-Control",
-    "benz_control": "Benz-Control",
-    "opto_benz": "Benz-Training",
-    "opto_benz_1": "Benz-Training",
-    "EB_control": "EB-Control",
-    "eb_control": "EB-Control",
-    "opto_EB": "EB-Training",
-    "opto_EB_6_training": "EB-Training(No-Operant)",
-    "opto_EB(6-training)": "EB-Training(No-Operant)",
-    "hex_control": "Hex-Control",
-    "opto_hex": "Hex-Training",
-    # lower-case folder-style aliases
-    "3oct-training": "3OCT-Training",
-    "acv-training": "ACV-Training",
-    "air-training": "AIR-Training",
-    "benz-control": "Benz-Control",
-    "benz-control-24-2": "Benz-Control-24-2",
-    "benz-training": "Benz-Training",
-    "benz-training-24": "Benz-Training-24",
-    "benz-training-24-2": "Benz-Training-24-2",
-    "eb-control": "EB-Control",
-    "eb-training": "EB-Training",
-    "eb-training(no-operant)": "EB-Training(No-Operant)",
-    "hex-control": "Hex-Control",
-    "hex-control-24-2": "Hex-Control-24-2",
-    "hex-training": "Hex-Training",
-    "hex-training-24": "Hex-Training-24",
-    "hex-training-24-2": "Hex-Training-24-2",
-}
+# ── display labels / dataset aliases ──────────────────────────────────────
+# DISPLAY_LABEL, DATASET_ALIAS, and TESTING_DATASET_ALIAS are imported
+# from fbpipe.odor_constants (see top-of-file imports).
 
 # ── training odor schedules per dataset ───────────────────────────────────
 TRAINING_ODOR_SCHEDULE = {
@@ -187,13 +152,22 @@ def _resolve_training_odor(dataset: str, trial_label: str) -> str:
 
     if ds == "AIR-Training":
         return TRAINING_ODOR_SCHEDULE_AIR.get(number, ds)
-    if ds == "3OCT-Training":
+    if ds in ("3OCT-Training", "3OCT-Training-24-2", "3OCT-Control-24-2"):
         return TRAINING_ODOR_SCHEDULE_3OCT.get(number, ds)
     if ds in ("EB-Training", "EB-Control"):
         return TRAINING_ODOR_SCHEDULE_EB.get(number, ds)
     if ds == "EB-Training(No-Operant)":
         return TRAINING_ODOR_SCHEDULE_EB_6TRAINING.get(number, ds)
-    if ds in ("Hex-Training", "Hex-Training-24", "Hex-Training-24-2", "Hex-Control", "Hex-Control-24-2"):
+    if ds in (
+        "Hex-Training",
+        "Hex-Training-24",
+        "Hex-Training-24-2",
+        "Hex-Training-24-02",
+        "Hex-Control",
+        "Hex-Control-24-2",
+        "Hex-Control-24-02",
+        "Hex-Control-24-002",
+    ):
         return TRAINING_ODOR_SCHEDULE_HEX.get(number, ds)
     if ds == "ACV-Training":
         return TRAINING_ODOR_SCHEDULE_ACV.get(number, ds)
