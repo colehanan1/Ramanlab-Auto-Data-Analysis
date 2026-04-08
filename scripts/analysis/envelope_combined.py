@@ -47,6 +47,9 @@ from fbpipe.config import load_settings, resolve_config_path, load_raw_config
 from fbpipe.odor_constants import (
     ODOR_CANON,
     DISPLAY_LABEL,
+    TESTING_DATASET_ALIAS,
+    canon_dataset as _canon_dataset,
+    odor_dataset_key as _odor_dataset_key,
 )
 from fbpipe.plot_style import apply_lab_style
 
@@ -422,141 +425,6 @@ def _resolve_distance_limits(
 
 MANDATORY_WIDE_EXCLUDES: set[Path] = set()
 
-# ODOR_CANON and DISPLAY_LABEL are imported from fbpipe.odor_constants (top of file).
-_ODOR_CANON_LOCAL_REMOVED = {
-    # ── Data folder names (identity mappings) ──
-    "3oct-training": "3OCT-Training",
-    "3oct-training-24-2": "3OCT-Training-24-2",
-    "3oct-control-24-2": "3OCT-Control-24-2",
-    "3oct_control_24_2": "3OCT-Control-24-2",
-    "acv-training": "ACV-Training",
-    "air-training": "AIR-Training",
-    "benz-control": "Benz-Control",
-    "benz-control-24-2": "Benz-Control-24-2",
-    "benz-control-24-02": "Benz-Control-24-02",
-    "benz-training": "Benz-Training",
-    "benz-training-24": "Benz-Training-24",
-    "benz-training-24-2": "Benz-Training-24-2",
-    "benz-training-24-02": "Benz-Training-24-02",
-    "eb-control": "EB-Control",
-    "eb-training": "EB-Training",
-    "eb-training(no-operant)": "EB-Training(No-Operant)",
-    "eb-training-no-operant": "EB-Training(No-Operant)",
-    "hex-control": "Hex-Control",
-    "hex-control-24": "Hex-Control-24",
-    "hex-control-24-2": "Hex-Control-24-2",
-    "hex-control-36": "Hex-Control-36",
-    "hex-control-24-02": "Hex-Control-24-02",
-    "hex-control-24-002": "Hex-Control-24-002",
-    "hex_control_24_002": "Hex-Control-24-002",
-    "hex control 24 002": "Hex-Control-24-002",
-    "hex-training": "Hex-Training",
-    "hex-training-24": "Hex-Training-24",
-    "hex-training-24-2": "Hex-Training-24-2",
-    "hex-training-36": "Hex-Training-36",
-    "hex-training-24-002": "Hex-Training-24-002",
-    # ── Legacy / alternate spellings → data folder names ──
-    "opto_eb": "EB-Training",
-    "opto_eb(6-training)": "EB-Training(No-Operant)",
-    "opto_eb_6_training": "EB-Training(No-Operant)",
-    "opto_hex": "Hex-Training",
-    "opto_acv": "ACV-Training",
-    "opto_air": "AIR-Training",
-    "opto_3-oct": "3OCT-Training",
-    "opto_benz": "Benz-Training",
-    "opto_benz_1": "Benz-Training",
-    "eb_control": "EB-Control",
-    "eb control": "EB-Control",
-    "hex_control": "Hex-Control",
-    "hex_control_24": "Hex-Control-24",
-    "hex_control_36": "Hex-Control-36",
-    "hex control": "Hex-Control",
-    "hex control 24": "Hex-Control-24",
-    "hex control 36": "Hex-Control-36",
-    "benz_control": "Benz-Control",
-    "benz control": "Benz-Control",
-    # ── Loose odor names ──
-    "acv": "ACV",
-    "apple cider vinegar": "ACV",
-    "apple-cider-vinegar": "ACV",
-    "3-octonol": "3-octonol",
-    "3 octonol": "3-octonol",
-    "3-octanol": "3-octonol",
-    "3 octanol": "3-octonol",
-    "benz": "Benz",
-    "benzaldehyde": "Benz",
-    "benz-ald": "Benz",
-    "benzadhyde": "Benz",
-    "benz training": "Benz-Training",
-    "benz training 24": "Benz-Training-24",
-    "ethyl butyrate": "EB",
-    "hex training 24": "Hex-Training-24",
-    "hex training 36": "Hex-Training-36",
-    "3oct training": "3OCT-Training",
-    "3oct training 24 2": "3OCT-Training-24-2",
-    "3oct control 24 2": "3OCT-Control-24-2",
-    "hexanol": "Hex-Training",
-    "10s_odor_benz": "10s_Odor_Benz",
-    "optogenetics benzaldehyde": "Benz-Training",
-    "optogenetics benzaldehyde 1": "Benz-Training",
-    "optogenetics ethyl butyrate": "EB-Training",
-    "optogenetics apple cider vinegar": "ACV-Training",
-    "optogenetics acv": "ACV-Training",
-    "optogenetics hexanol": "Hex-Training",
-    "optogenetics hex": "Hex-Training",
-    "optogenetics air": "AIR-Training",
-    "optogenetics 3-octanol": "3OCT-Training",
-    # ── Manual / sucrose-trained fly datasets ──
-    "manual_3-octonol": "manual_3-octonol",
-    "manual_10s_odor_benz": "manual_10s_Odor_Benz",
-    "manual_acv": "manual_ACV",
-    "manual_benz": "manual_Benz",
-    "manual_eb": "manual_EB",
-    "manual_ret_eb": "manual_ret_EB",
-    "ret_eb": "manual_ret_EB",
-}
-
-_DISPLAY_LABEL_LOCAL_REMOVED = {
-    "ACV": "Apple Cider Vinegar",
-    "3-octonol": "3-Octonol",
-    "Benz": "Benzaldehyde",
-    "10s_Odor_Benz": "Benzaldehyde",
-    "EB": "Ethyl Butyrate",
-    "EB-Control": "Ethyl Butyrate",
-    "Hex-Control": "Hexanol",
-    "Hex-Control-24": "Hexanol",
-    "Hex-Control-24-2": "Hexanol",
-    "Hex-Control-36": "Hexanol",
-    "Hex-Control-24-02": "Hexanol",
-    "Hex-Control-24-002": "Hexanol",
-    "Benz-Control": "Benzaldehyde",
-    "Benz-Control-24-2": "Benzaldehyde",
-    "Benz-Control-24-02": "Benzaldehyde",
-    "Benz-Training": "Benzaldehyde",
-    "Benz-Training-24": "Benzaldehyde",
-    "Benz-Training-24-2": "Benzaldehyde",
-    "Benz-Training-24-02": "Benzaldehyde",
-    "EB-Training": "Ethyl Butyrate",
-    "EB-Training(No-Operant)": "Ethyl Butyrate (No-Operant)",
-    "ACV-Training": "Apple Cider Vinegar",
-    "Hex-Training": "Hexanol",
-    "Hex-Training-24": "Hexanol",
-    "Hex-Training-24-2": "Hexanol",
-    "Hex-Training-36": "Hexanol",
-    "Hex-Training-24-002": "Hexanol",
-    "AIR-Training": "AIR",
-    "3OCT-Training": "3-Octonol",
-    "3OCT-Training-24-2": "3-Octonol",
-    "3OCT-Control-24-2": "3-Octonol",
-    # Manual / sucrose-trained fly datasets
-    "manual_3-octonol": "3-Octonol",
-    "manual_10s_Odor_Benz": "Benzaldehyde",
-    "manual_ACV": "Apple Cider Vinegar",
-    "manual_Benz": "Benzaldehyde",
-    "manual_EB": "Ethyl Butyrate",
-    "manual_ret_EB": "Ethyl Butyrate",
-}
-
 HEXANOL = "Hexanol"
 
 PRIMARY_ODOR_LABEL = {
@@ -815,38 +683,6 @@ TRAINING_ODOR_SCHEDULE_OVERRIDES = {
     },
 }
 
-TESTING_DATASET_ALIAS = {
-    "Hex-Control-36": "Hex-Control",
-    "Hex-Control-24": "Hex-Control",
-    "Hex-Control-24-2": "Hex-Control",
-    "Hex-Control-24-02": "Hex-Control",
-    "Hex-Control-24-002": "Hex-Control",
-    "Hex-Training": "Hex-Control",
-    "Hex-Training-24": "Hex-Control",
-    "Hex-Training-24-2": "Hex-Control",
-    "Hex-Training-36": "Hex-Control",
-    "Hex-Training-24-002": "Hex-Control",
-    "EB-Training": "EB-Control",
-    "Benz-Control-24-2": "Benz-Control",
-    "Benz-Control-24-02": "Benz-Control",
-    "EB-Training(No-Operant)": "EB-Control",
-    "Benz-Training": "Benz-Control",
-    "Benz-Training-24": "Benz-Control",
-    "Benz-Training-24-2": "Benz-Control",
-    "Benz-Training-24-02": "Benz-Control",
-    "AIR-Training": "AIR-Training",
-    "ACV-Training": "ACV-Training",
-    "3OCT-Training": "3OCT-Training",
-    "3OCT-Training-24-2": "3OCT-Training",
-    "3OCT-Control-24-2": "3OCT-Control-24-2",
-    # Manual / sucrose-trained fly datasets (self-mappings)
-    "manual_3-octonol": "manual_3-octonol",
-    "manual_10s_Odor_Benz": "manual_10s_Odor_Benz",
-    "manual_ACV": "manual_ACV",
-    "manual_Benz": "manual_Benz",
-    "manual_EB": "manual_EB",
-    "manual_ret_EB": "manual_ret_EB",
-}
 
 
 # ---------------------------------------------------------------------------
@@ -866,34 +702,6 @@ def _normalise_roots(roots: Sequence[str | os.PathLike[str]]) -> list[Path]:
 
 def _safe_dirname(value: str) -> str:
     return re.sub(r"[^A-Za-z0-9._-]+", "_", str(value)).strip("_") or "export"
-
-
-def _canon_dataset(value: str) -> str:
-    if not isinstance(value, str):
-        return "UNKNOWN"
-    stripped = value.strip()
-    key = stripped.lower()
-    if key.endswith("-flagged"):
-        base_key = key[: -len("-flagged")]
-        canon = ODOR_CANON.get(base_key)
-        if canon is not None:
-            return f"{canon}-flagged"
-        return stripped
-    canon = ODOR_CANON.get(key)
-    if canon is not None:
-        return canon
-    return stripped
-
-
-def _odor_dataset_key(dataset_canon: str) -> str:
-    dataset_text = str(dataset_canon).strip() if isinstance(dataset_canon, str) else "UNKNOWN"
-    if not dataset_text:
-        return "UNKNOWN"
-    lower = dataset_text.lower()
-    if lower.endswith("-flagged"):
-        base = dataset_text[: -len("-flagged")].strip()
-        return ODOR_CANON.get(base.lower(), base)
-    return ODOR_CANON.get(lower, dataset_text)
 
 
 def _trial_num(label: str) -> int:
