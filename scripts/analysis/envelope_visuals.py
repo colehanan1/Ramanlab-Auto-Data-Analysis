@@ -386,6 +386,7 @@ def _display_odor(dataset_canon: str, trial_label: str) -> str:
             "Hex-Control-24-0002",
             "Hex-Control-36",
             "Hex-Training-24-002",
+            "Hex-Training-24-0002",
         ):
             odor_name = TRAINING_ODOR_SCHEDULE_HEX.get(number)
             if odor_name:

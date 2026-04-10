@@ -57,6 +57,8 @@ TRAINING_CONTROL_PAIRS = {
     "Hex-Training-24-2": "Hex-Control-24-2",
     "Hex-Training-24-02": "Hex-Control-24-02",
     "Hex-Training-36": "Hex-Control-36",
+    "Hex-Training-24-002": "Hex-Control-24-002",
+    "Hex-Training-24-0002": "Hex-Control-24-0002",
     "Benz-Training": "Benz-Control",
     "Benz-Training-24": "Benz-Control",
     "Benz-Training-24-2": "Benz-Control-24-2",
@@ -356,7 +358,8 @@ def _plot_bar_charts(
             )
             ax.set_xticks(x)
             ax.set_xticklabels(
-                [f"T{int(t)}" for t in sub["trial_num"]], fontsize=9
+                [f"T{int(t)}\n(n={int(n)})" for t, n in zip(sub["trial_num"], sub["n_flies"])],
+                fontsize=9,
             )
             ax.set_ylim(-1.5, 5.5)
             ax.set_ylabel("Mean Score")
@@ -485,9 +488,13 @@ def _plot_training_vs_control_bars(
                 label="Control",
             )
 
+            n_train = sub["n_flies_train"].fillna(0).astype(int)
+            n_ctrl = sub["n_flies_ctrl"].fillna(0).astype(int)
             labels = [
-                str(odor).upper() if bool(is_trained) else str(odor)
-                for odor, is_trained in zip(sub["odor"], sub["is_trained"])
+                f"{str(odor).upper() if bool(is_trained) else str(odor)}\n(n={nt}/{nc})"
+                for odor, is_trained, nt, nc in zip(
+                    sub["odor"], sub["is_trained"], n_train, n_ctrl
+                )
             ]
             ax.set_xticks(x)
             ax.set_xticklabels(labels, rotation=35, ha="right")

@@ -435,6 +435,7 @@ PRIMARY_ODOR_LABEL = {
     "Hex-Control-36": HEXANOL,
     "Hex-Control-24-02": HEXANOL,
     "Hex-Control-24-002": HEXANOL,
+    "Hex-Control-24-0002": HEXANOL,
     "Benz-Control": "Benzaldehyde",
     "Benz-Control-24-2": "Benzaldehyde",
     "Benz-Control-24-02": "Benzaldehyde",
@@ -513,6 +514,16 @@ TRAINING_ODOR_SCHEDULE_OVERRIDES = {
         7: "Apple Cider Vinegar",
         8: HEXANOL,
     },
+    "Hex-Control-24-0002": {
+        1: HEXANOL,
+        2: HEXANOL,
+        3: HEXANOL,
+        4: HEXANOL,
+        5: "Apple Cider Vinegar",
+        6: HEXANOL,
+        7: "Apple Cider Vinegar",
+        8: HEXANOL,
+    },
     "Hex-Training": {
         1: HEXANOL,
         2: HEXANOL,
@@ -554,6 +565,16 @@ TRAINING_ODOR_SCHEDULE_OVERRIDES = {
         8: HEXANOL,
     },
     "Hex-Training-24-002": {
+        1: HEXANOL,
+        2: HEXANOL,
+        3: HEXANOL,
+        4: HEXANOL,
+        5: "Apple Cider Vinegar",
+        6: HEXANOL,
+        7: "Apple Cider Vinegar",
+        8: HEXANOL,
+    },
+    "Hex-Training-24-0002": {
         1: HEXANOL,
         2: HEXANOL,
         3: HEXANOL,
@@ -2137,28 +2158,32 @@ def secure_copy_and_cleanup(
         return
 
     for source in _normalise_roots(source_list):
-        print(f"\nCleaning up {source}...")
+        dest_mirror = dest_root / source.name
+        print(f"\nCleaning up {source} (secured mirror: {dest_mirror})...")
         for fly_folder in source.iterdir():
             if not fly_folder.is_dir():
                 continue
             lower = fly_folder.name.lower()
             if not any(lower.startswith(month) for month in MONTHS):
-                shutil.rmtree(fly_folder)
-                print(f"Deleted non-month folder: {fly_folder}")
+                print(f"Preserving non-month folder: {fly_folder}")
                 continue
-            for item in list(fly_folder.iterdir()):
-                if item.name == "RMS_calculations":
-                    print(f"Preserving folder: {item}")
+            # Only prune .mp4 files whose copy already exists in secured storage.
+            deleted_count = 0
+            for item in fly_folder.rglob("*"):
+                if not item.is_file():
                     continue
-                if item.is_file() and item.suffix.lower() == ".csv":
-                    print(f"Preserving CSV file: {item}")
+                if item.suffix.lower() != ".mp4":
                     continue
-                if item.is_file():
+                relative = item.relative_to(source)
+                secured_copy = dest_mirror / relative
+                if secured_copy.is_file():
                     item.unlink()
-                    print(f"Deleted file: {item}")
-                elif item.is_dir():
-                    shutil.rmtree(item)
-                    print(f"Deleted folder: {item}")
+                    deleted_count += 1
+                    print(f"Deleted video (secured copy exists): {item}")
+                else:
+                    print(f"Keeping video (no secured copy): {item}")
+            if deleted_count:
+                print(f"  Pruned {deleted_count} video(s) from {fly_folder.name}")
 
     print("\nCleanup completed successfully.")
 

@@ -75,6 +75,8 @@ TRAINING_CONTROL_PAIRS = {
     "Hex-Training-24-2": "Hex-Control-24-2",
     "Hex-Training-24-02": "Hex-Control-24-02",
     "Hex-Training-36": "Hex-Control-36",
+    "Hex-Training-24-002": "Hex-Control-24-002",
+    "Hex-Training-24-0002": "Hex-Control-24-0002",
     "Benz-Training": "Benz-Control",
     "Benz-Training-24": "Benz-Control",
     "Benz-Training-24-2": "Benz-Control-24-2",
