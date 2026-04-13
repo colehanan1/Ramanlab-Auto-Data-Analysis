@@ -41,9 +41,12 @@ from scripts.analysis.envelope_visuals import (
     plot_reaction_rate_bars,
     reaction_rate_stats_from_rows,
     resolve_dataset_output_dir,
+    set_protocol,
     should_write,
     _canon_dataset,
+    _display_label_ci,
     _display_odor,
+    _extract_odor_from_label,
     _fly_row_label,
     _fly_sort_key,
     _normalise_fly_columns,
@@ -51,19 +54,29 @@ from scripts.analysis.envelope_visuals import (
     NON_REACTIVE_SPAN_PX,
     _order_suffix,
     _style_trained_xticks,
+    _is_light_only_label,
     _is_testing_11_label,
     _trial_num,
     _trial_order_for,
     _drop_testing_11,
+    get_protocol,
 )
 
 
 def _normalise_trial_label(label: str) -> str:
-    """Strip fly-specific suffixes from trial labels.
+    """Strip fly-specific suffixes from trial labels, keeping odor name.
 
     ``testing_1_fly1_distances_fly1_angle_distance_rms_envelope`` → ``testing_1``
+    ``testing_3_benzaldehyde`` → ``testing_3_benzaldehyde``
+    ``testing_1_ethylbutyrate_fly1_distances...`` → ``testing_1_ethylbutyrate``
     """
-    m = _re.match(r"(testing_\d+)", str(label))
+    # Match testing/training_N, optionally followed by _OdorName (stops before _fly or _distances)
+    m = _re.match(
+        r"((?:testing|training)_\d+(?:_(?!fly\d|distances)[A-Za-z0-9._-]+?)?)"
+        r"(?:_fly\d|_distances|$)",
+        str(label),
+        _re.IGNORECASE,
+    )
     return m.group(1) if m else str(label)
 
 
@@ -258,20 +271,75 @@ def generate_reaction_matrices_from_csv(cfg: SpreadsheetMatrixConfig) -> None:
                 for row in subset[["fly", "fly_number"]].drop_duplicates().itertuples(index=False)
             ]
             fly_pairs.sort(key=lambda pair: _fly_sort_key(*pair))
-            trial_list = _trial_order_for(list(subset["trial"].unique()), order)
-            trial_list = _drop_testing_11(trial_list)
-            pretty_labels = [_display_odor(odor, trial) for trial in trial_list]
 
-            during_matrix = np.full((len(fly_pairs), len(trial_list)), np.nan, dtype=float)
+            # Drop light-only trials
+            drop_mask = subset["trial"].apply(_is_light_only_label)
+            if drop_mask.any():
+                subset = subset.loc[~drop_mask].copy()
 
-            fly_map = {pair: idx for idx, pair in enumerate(fly_pairs)}
-            trial_map = {trial: idx for idx, trial in enumerate(trial_list)}
-            for _, row in subset.iterrows():
-                key = (row["fly"], row["fly_number"])
-                i = fly_map[key]
-                j = trial_map[row["trial"]]
-                value = int(row["during_hit"])
-                during_matrix[i, j] = value
+            if get_protocol() == "v2":
+                # V2: build matrix by ODOR NAME (consistent across flies with randomized trial order)
+                subset = subset.copy()
+                subset["_odor"] = subset["trial"].apply(_extract_odor_from_label)
+                subset["_odor_display"] = subset["_odor"].apply(
+                    lambda o: _display_label_ci(o) if o.lower() != "lightonly" else None
+                )
+                subset = subset[subset["_odor_display"].notna()]
+
+                trained_display = DISPLAY_LABEL.get(odor, odor)
+                unique_odors = sorted(set(subset["_odor_display"]), key=str.lower)
+                n_fly_pairs = len(fly_pairs)
+                odor_occurrence_count: dict[str, int] = {}
+                for _, row in subset.iterrows():
+                    disp = row["_odor_display"]
+                    odor_occurrence_count[disp] = odor_occurrence_count.get(disp, 0) + 1
+                duplicated_odors = {o for o, c in odor_occurrence_count.items() if c > n_fly_pairs}
+
+                odor_columns: list[str] = []
+                for o in unique_odors:
+                    if o in duplicated_odors:
+                        odor_columns.append(f"{o} 1")
+                        odor_columns.append(f"{o} 2")
+                    else:
+                        odor_columns.append(o)
+
+                during_matrix = np.full((len(fly_pairs), len(odor_columns)), np.nan, dtype=float)
+                fly_map = {pair: idx for idx, pair in enumerate(fly_pairs)}
+                col_map = {col: idx for idx, col in enumerate(odor_columns)}
+
+                for (fly_val, fn_val), fly_subset in subset.groupby(["fly", "fly_number"]):
+                    i = fly_map.get((fly_val, fn_val))
+                    if i is None:
+                        continue
+                    seen_odors: dict[str, int] = {}
+                    for _, row in fly_subset.sort_values("trial", key=lambda s: s.map(_trial_num)).iterrows():
+                        disp = row["_odor_display"]
+                        seen_odors[disp] = seen_odors.get(disp, 0) + 1
+                        if disp in duplicated_odors:
+                            col_label = f"{disp} {seen_odors[disp]}"
+                        else:
+                            col_label = disp
+                        j = col_map.get(col_label)
+                        if j is not None:
+                            during_matrix[i, j] = int(row["during_hit"])
+
+                pretty_labels = list(odor_columns)
+                trial_list = odor_columns
+            else:
+                trial_list = _trial_order_for(list(subset["trial"].unique()), order)
+                trial_list = _drop_testing_11(trial_list)
+                trial_set = set(trial_list)
+                subset = subset[subset["trial"].isin(trial_set)]
+                pretty_labels = [_display_odor(odor, trial) for trial in trial_list]
+
+                during_matrix = np.full((len(fly_pairs), len(trial_list)), np.nan, dtype=float)
+                fly_map = {pair: idx for idx, pair in enumerate(fly_pairs)}
+                trial_map = {trial: idx for idx, trial in enumerate(trial_list)}
+                for _, row in subset.iterrows():
+                    key = (row["fly"], row["fly_number"])
+                    i = fly_map[key]
+                    j = trial_map[row["trial"]]
+                    during_matrix[i, j] = int(row["during_hit"])
 
             odor_label = DISPLAY_LABEL.get(odor, odor)
             trained_display = DISPLAY_LABEL.get(odor, odor)
@@ -532,12 +600,20 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         default="",
         help="Path to flagged-flies truth CSV for CSV-based exclusion.",
     )
+    parser.add_argument(
+        "--protocol",
+        type=str,
+        default="v2",
+        choices=["v2", "legacy"],
+        help="Protocol version for trial ordering (default: v2).",
+    )
     parser.set_defaults(overwrite=True)
     return parser.parse_args(argv)
 
 
 def main(argv: Sequence[str] | None = None) -> None:
     args = _parse_args(argv)
+    set_protocol(args.protocol)
     trial_orders: Sequence[str] = args.trial_order or ("observed", "trained-first")
     cfg = SpreadsheetMatrixConfig(
         csv_path=args.csv_path,

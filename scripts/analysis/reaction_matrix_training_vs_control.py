@@ -42,10 +42,14 @@ if str(REPO_ROOT) not in sys.path:
 from scripts.analysis.envelope_visuals import (
     DISPLAY_LABEL,
     ODOR_ORDER,
+    get_protocol,
     _canon_dataset,
+    _display_label_ci,
     _display_odor,
     _drop_testing_11,
+    _extract_odor_from_label,
     _fly_sort_key,
+    _is_light_only_label,
     _is_testing_11_label,
     _matrix_title,
     _normalise_fly_columns,
@@ -57,6 +61,7 @@ from scripts.analysis.envelope_visuals import (
     compute_non_reactive_flags,
     non_reactive_mask,
     resolve_dataset_output_dir,
+    set_protocol,
     should_write,
 )
 from scripts.analysis.reaction_matrix_from_spreadsheet import (
@@ -473,14 +478,69 @@ def generate_training_vs_control_matrices(cfg: SpreadsheetMatrixConfig) -> None:
                  for r in subset[["fly", "fly_number"]].drop_duplicates().itertuples(index=False)],
                 key=lambda p: _fly_sort_key(*p),
             )
-            trial_list = _drop_testing_11(_trial_order_for(list(subset["trial"].unique()), order))
-            pretty_labels = [_display_odor(train_ds, t) for t in trial_list]
 
-            during_matrix = np.full((len(fly_pairs), len(trial_list)), np.nan, dtype=float)
-            fly_map = {p: i for i, p in enumerate(fly_pairs)}
-            trial_map = {t: i for i, t in enumerate(trial_list)}
-            for _, row in subset.iterrows():
-                during_matrix[fly_map[(row["fly"], row["fly_number"])], trial_map[row["trial"]]] = int(row["during_hit"])
+            # Drop light-only trials
+            drop_mask = subset["trial"].apply(_is_light_only_label)
+            if drop_mask.any():
+                subset = subset.loc[~drop_mask].copy()
+
+            if get_protocol() == "v2":
+                subset = subset.copy()
+                subset["_odor"] = subset["trial"].apply(_extract_odor_from_label)
+                subset["_odor_display"] = subset["_odor"].apply(
+                    lambda o: _display_label_ci(o) if o.lower() != "lightonly" else None
+                )
+                subset = subset[subset["_odor_display"].notna()]
+
+                unique_odors = sorted(set(subset["_odor_display"]), key=str.lower)
+                n_fly_pairs = len(fly_pairs)
+                odor_occurrence_count: dict[str, int] = {}
+                for _, row in subset.iterrows():
+                    disp = row["_odor_display"]
+                    odor_occurrence_count[disp] = odor_occurrence_count.get(disp, 0) + 1
+                duplicated_odors = {o for o, c in odor_occurrence_count.items() if c > n_fly_pairs}
+
+                odor_columns: list[str] = []
+                for o in unique_odors:
+                    if o in duplicated_odors:
+                        odor_columns.append(f"{o} 1")
+                        odor_columns.append(f"{o} 2")
+                    else:
+                        odor_columns.append(o)
+
+                during_matrix = np.full((len(fly_pairs), len(odor_columns)), np.nan, dtype=float)
+                fly_map = {p: i for i, p in enumerate(fly_pairs)}
+                col_map = {col: idx for idx, col in enumerate(odor_columns)}
+
+                for (fly_val, fn_val), fly_subset in subset.groupby(["fly", "fly_number"]):
+                    i = fly_map.get((fly_val, fn_val))
+                    if i is None:
+                        continue
+                    seen_odors: dict[str, int] = {}
+                    for _, row in fly_subset.sort_values("trial", key=lambda s: s.map(_trial_num)).iterrows():
+                        disp = row["_odor_display"]
+                        seen_odors[disp] = seen_odors.get(disp, 0) + 1
+                        if disp in duplicated_odors:
+                            col_label = f"{disp} {seen_odors[disp]}"
+                        else:
+                            col_label = disp
+                        j = col_map.get(col_label)
+                        if j is not None:
+                            during_matrix[i, j] = int(row["during_hit"])
+
+                pretty_labels = list(odor_columns)
+                trial_list = odor_columns
+            else:
+                trial_list = _drop_testing_11(_trial_order_for(list(subset["trial"].unique()), order))
+                trial_set = set(trial_list)
+                subset = subset[subset["trial"].isin(trial_set)]
+                pretty_labels = [_display_odor(train_ds, t) for t in trial_list]
+
+                during_matrix = np.full((len(fly_pairs), len(trial_list)), np.nan, dtype=float)
+                fly_map = {p: i for i, p in enumerate(fly_pairs)}
+                trial_map = {t: i for i, t in enumerate(trial_list)}
+                for _, row in subset.iterrows():
+                    during_matrix[fly_map[(row["fly"], row["fly_number"])], trial_map[row["trial"]]] = int(row["during_hit"])
 
             # --- Load PRE-COMPUTED reaction rates from existing binary CSVs ---
             train_rate = _load_rates_from_binary_csv(
@@ -616,7 +676,10 @@ def main(argv: Sequence[str] | None = None) -> None:
     p.add_argument("--overwrite", action="store_true", default=True)
     p.add_argument("--flagged-flies-csv", type=str, default="",
                    help="Path to flagged-flies-truth CSV for excluding non-reactive flies.")
+    p.add_argument("--protocol", type=str, default="v2", choices=["v2", "legacy"],
+                   help="Protocol version for trial ordering (default: v2).")
     args = p.parse_args(argv)
+    set_protocol(args.protocol)
 
     trial_orders = tuple(args.trial_order) if args.trial_order else ("observed", "trained-first")
 

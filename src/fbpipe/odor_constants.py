@@ -49,6 +49,7 @@ ODOR_CANON: Mapping[str, str] = {
     "hex-training-36": "Hex-Training-36",
     "hex-training-24-002": "Hex-Training-24-002",
     "hex-training-24-0002": "Hex-Training-24-0002",
+    "hex-training-24-0.005": "Hex-Training-24-0.005",
     "hex training 24": "Hex-Training-24",
     "hex training 36": "Hex-Training-36",
     "acv-training": "ACV-Training",
@@ -72,6 +73,10 @@ ODOR_CANON: Mapping[str, str] = {
     "eb-control": "EB-Control",
     "eb_control": "EB-Control",
     "eb control": "EB-Control",
+    "eb-control-24-0.005": "EB-Control-24-0.005",
+    "eb_control_24_0.005": "EB-Control-24-0.005",
+    "eb-training-24-0.005": "EB-Training-24-0.005",
+    "eb_training_24_0.005": "EB-Training-24-0.005",
     "hex-control": "Hex-Control",
     "hex_control": "Hex-Control",
     "hexanol control": "Hex-Control",
@@ -87,6 +92,9 @@ ODOR_CANON: Mapping[str, str] = {
     "hex-control-24-0002": "Hex-Control-24-0002",
     "hex_control_24_0002": "Hex-Control-24-0002",
     "hex control 24 0002": "Hex-Control-24-0002",
+    "hex-control-24-0.005": "Hex-Control-24-0.005",
+    "hex_control_24_0.005": "Hex-Control-24-0.005",
+    "hex control 24 0.005": "Hex-Control-24-0.005",
     "hex-control-36": "Hex-Control-36",
     "hex_control_36": "Hex-Control-36",
     "hex control 36": "Hex-Control-36",
@@ -158,6 +166,7 @@ DISPLAY_LABEL: dict[str, str] = {
     "Hex-Control-24-02": "Hexanol",
     "Hex-Control-24-002": "Hexanol",
     "Hex-Control-24-0002": "Hexanol",
+    "Hex-Control-24-0.005": "Hexanol",
     "Hex-Control-36": "Hexanol",
     "Benz-Control": "Benzaldehyde",
     "Benz-Control-24-2": "Benzaldehyde",
@@ -167,7 +176,9 @@ DISPLAY_LABEL: dict[str, str] = {
     "Benz-Training-24-2": "Benzaldehyde",
     "Benz-Training-24-02": "Benzaldehyde",
     "EB-Training": "Ethyl Butyrate",
+    "EB-Training-24-0.005": "Ethyl Butyrate",
     "EB-Training(No-Operant)": "Ethyl Butyrate (6-Training)",
+    "EB-Control-24-0.005": "Ethyl Butyrate",
     "ACV-Training": "Apple Cider Vinegar",
     "Hex-Training": "Hexanol",
     "Hex-Training-24": "Hexanol",
@@ -176,6 +187,7 @@ DISPLAY_LABEL: dict[str, str] = {
     "Hex-Training-36": "Hexanol",
     "Hex-Training-24-002": "Hexanol",
     "Hex-Training-24-0002": "Hexanol",
+    "Hex-Training-24-0.005": "Hexanol",
     "AIR-Training": "AIR",
     "3OCT-Training": "3-Octonol",
     "3OCT-Training-24-2": "3-Octonol",
@@ -211,6 +223,8 @@ ODOR_ORDER: list[str] = [
     "EB-Training",
     "EB-Training(No-Operant)",
     "EB-Control",
+    "EB-Training-24-0.005",
+    "EB-Control-24-0.005",
     "Benz-Training-24",
     "Benz-Training-24-2",
     "Benz-Control",
@@ -221,11 +235,13 @@ ODOR_ORDER: list[str] = [
     "Hex-Training-36",
     "Hex-Training-24-002",
     "Hex-Training-24-0002",
+    "Hex-Training-24-0.005",
     "Hex-Control",
     "Hex-Control-24",
     "Hex-Control-24-2",
     "Hex-Control-24-002",
     "Hex-Control-24-0002",
+    "Hex-Control-24-0.005",
     "Hex-Control-36",
     "AIR-Training",
     "3OCT-Training",
@@ -258,8 +274,12 @@ TESTING_DATASET_ALIAS: dict[str, str] = {
     "Hex-Control-24-02": "Hex-Control",
     "Hex-Control-24-002": "Hex-Control",
     "Hex-Control-24-0002": "Hex-Control",
+    "Hex-Control-24-0.005": "Hex-Control",
+    "Hex-Training-24-0.005": "Hex-Control",
     "Hex-Control-36": "Hex-Control",
     "EB-Training": "EB-Control",
+    "EB-Training-24-0.005": "EB-Control",
+    "EB-Control-24-0.005": "EB-Control",
     "EB-Training(No-Operant)": "EB-Control",
     "Benz-Training": "Benz-Control",
     "Benz-Training-24": "Benz-Control",
@@ -332,7 +352,84 @@ DATASET_ALIAS: dict[str, str] = {
     "hex-training-24-002": "Hex-Training-24-002",
     "hex-training-24-0002": "Hex-Training-24-0002",
     "hex-control-24-0002": "Hex-Control-24-0002",
+    "hex-control-24-0.005": "Hex-Control-24-0.005",
+    "hex-training-24-0.005": "Hex-Training-24-0.005",
+    "eb-control-24-0.005": "EB-Control-24-0.005",
+    "eb-training-24-0.005": "EB-Training-24-0.005",
 }
+
+
+# ---------------------------------------------------------------------------
+# Auto-recognition for {Odor}-{Mode}[-{hours}[-{conc}]] folder names.
+# This avoids manually adding every starvation/concentration variant.
+# ---------------------------------------------------------------------------
+
+# Known base odor short names → (canonical prefix, display label)
+_BASE_ODORS: dict[str, tuple[str, str]] = {
+    "hex": ("Hex", "Hexanol"),
+    "eb": ("EB", "Ethyl Butyrate"),
+    "benz": ("Benz", "Benzaldehyde"),
+    "acv": ("ACV", "Apple Cider Vinegar"),
+    "3oct": ("3OCT", "3-Octonol"),
+    "cit": ("Cit", "Citral"),
+    "lin": ("Lin", "Linalool"),
+    "air": ("AIR", "AIR"),
+}
+
+# Pattern: {odor}-{training|control}[-{hours}[-{conc}]]
+# Examples: hex-control, hex-control-24, hex-control-24-0.005, eb-training-36-10
+_DATASET_FOLDER_RE = re.compile(
+    r"^([a-z0-9]+)[-_ ](training|control)(?:[-_ ](.+))?$",
+    re.IGNORECASE,
+)
+
+
+def _auto_canon(value: str) -> str | None:
+    """
+    Try to auto-canonicalize a dataset folder name from its structure.
+    Returns canonical name like 'Hex-Control-24-0.005' or None if unrecognized.
+    """
+    m = _DATASET_FOLDER_RE.match(value.strip().lower())
+    if not m:
+        return None
+    odor_raw, mode_raw, suffix = m.group(1), m.group(2), m.group(3)
+    base = _BASE_ODORS.get(odor_raw)
+    if base is None:
+        return None
+    prefix, _ = base
+    mode = mode_raw.capitalize()  # Training or Control
+    canon = f"{prefix}-{mode}"
+    if suffix:
+        # Preserve the suffix parts with hyphens: "24-0.005" stays as-is
+        canon += f"-{suffix.replace('_', '-').replace(' ', '-')}"
+    return canon
+
+
+def _auto_display_label(canon: str) -> str | None:
+    """Derive display label from a canonical name like 'Hex-Control-24-0.005' → 'Hexanol'."""
+    m = _DATASET_FOLDER_RE.match(canon.lower())
+    if not m:
+        return None
+    odor_raw = m.group(1)
+    base = _BASE_ODORS.get(odor_raw)
+    return base[1] if base else None
+
+
+def _auto_testing_alias(canon: str) -> str | None:
+    """
+    Derive the testing alias (base control dataset) from a canonical name.
+    e.g. 'Hex-Training-24-0.005' → 'Hex-Control',
+         'EB-Control-24-0.005' → 'EB-Control'
+    """
+    m = _DATASET_FOLDER_RE.match(canon.lower())
+    if not m:
+        return None
+    odor_raw = m.group(1)
+    base = _BASE_ODORS.get(odor_raw)
+    if base is None:
+        return None
+    prefix, _ = base
+    return f"{prefix}-Control"
 
 
 # ---------------------------------------------------------------------------
@@ -340,20 +437,28 @@ DATASET_ALIAS: dict[str, str] = {
 # ---------------------------------------------------------------------------
 
 def canon_dataset(value: str) -> str:
-    """Return the canonical ODOR identifier for *value*."""
+    """Return the canonical ODOR identifier for *value*.
+
+    Checks static ODOR_CANON first, then falls back to auto-recognition
+    for {Odor}-{Mode}[-{hours}[-{conc}]] folder name patterns.
+    """
     if not isinstance(value, str):
         return "UNKNOWN"
     stripped = value.strip()
     key = stripped.lower()
     if key.endswith("-flagged"):
         base_key = key[: -len("-flagged")]
-        canon = ODOR_CANON.get(base_key)
+        canon = ODOR_CANON.get(base_key) or _auto_canon(base_key)
         if canon is not None:
             return f"{canon}-flagged"
         return stripped
     canon = ODOR_CANON.get(key)
     if canon is not None:
         return canon
+    # Fallback: auto-recognize from folder name pattern
+    auto = _auto_canon(stripped)
+    if auto is not None:
+        return auto
     return stripped
 
 
@@ -365,8 +470,8 @@ def odor_dataset_key(dataset_canon: str) -> str:
     lower = dataset_text.lower()
     if lower.endswith("-flagged"):
         base = dataset_text[: -len("-flagged")].strip()
-        return ODOR_CANON.get(base.lower(), base)
-    return ODOR_CANON.get(lower, dataset_text)
+        return ODOR_CANON.get(base.lower()) or _auto_canon(base) or base
+    return ODOR_CANON.get(lower) or _auto_canon(dataset_text) or dataset_text
 
 
 def resolve_dataset_label(values: Sequence[str] | str) -> str:
@@ -381,6 +486,22 @@ def resolve_dataset_label(values: Sequence[str] | str) -> str:
         return "UNKNOWN"
     if len(candidates) == 1:
         key = next(iter(candidates))
-        return DISPLAY_LABEL.get(key, key)
-    pretty = [DISPLAY_LABEL.get(key, key) for key in sorted(candidates)]
+        label = DISPLAY_LABEL.get(key) or _auto_display_label(key)
+        return label or key
+    pretty = [DISPLAY_LABEL.get(key) or _auto_display_label(key) or key for key in sorted(candidates)]
     return f"Mixed ({'+'.join(pretty)})"
+
+
+def resolve_testing_alias(dataset_canon: str) -> str:
+    """Return the base control dataset for testing grouping.
+
+    Checks TESTING_DATASET_ALIAS first, then auto-derives from folder pattern.
+    e.g. 'Hex-Training-24-0.005' → 'Hex-Control'
+    """
+    alias = TESTING_DATASET_ALIAS.get(dataset_canon)
+    if alias is not None:
+        return alias
+    auto = _auto_testing_alias(dataset_canon)
+    if auto is not None:
+        return auto
+    return dataset_canon

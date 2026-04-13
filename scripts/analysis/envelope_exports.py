@@ -66,7 +66,10 @@ AFTER_FRAMES = 1200
 
 TIMESTAMP_CANDIDATES = ("UTC_ISO", "Timestamp", "Number", "MonoNs")
 FRAME_CANDIDATES = ("Frame", "FrameNumber", "Frame Number")
-TRIAL_REGEX = re.compile(r"(testing|training)_(\d+)(?:_(.+))?", re.IGNORECASE)
+TRIAL_REGEX = re.compile(
+    r"(testing|training)_(\d+)(?:_((?!fly\d|distances)[A-Za-z0-9._-]+?))?(?:_fly\d|_distances|$)",
+    re.IGNORECASE,
+)
 FLY_SLOT_REGEX = re.compile(r"(fly\d+)_distances", re.IGNORECASE)
 FLY_NUMBER_REGEX = re.compile(r"fly\s*[_-]?\s*(\d+)", re.IGNORECASE)
 
@@ -241,7 +244,52 @@ def _infer_trial_type(path: Path) -> str:
     return "unknown"
 
 
-def _trial_label(path: Path) -> str:
+def _build_odor_map(fly_dir: Path) -> dict[str, str]:
+    """Scan original recording CSVs in a fly directory to map trial labels to odor names.
+
+    Searches both the given directory and alternate base paths (flys_New ↔ Data-secured-New).
+    Returns: {"testing_3": "Benzaldehyde", "training_1": "Hexanol", ...}
+    """
+    odor_map: dict[str, str] = {}
+    pat = re.compile(r"(testing|training)_(\d+)_([A-Za-z0-9][A-Za-z0-9 .()-]+?)_\d{8}_", re.IGNORECASE)
+
+    search_dirs = [fly_dir]
+    fly_rel = fly_dir.name
+    dataset_name = fly_dir.parent.name
+    alt_bases = [
+        Path("/home/ramanlab/Documents/cole/Data/flys_New"),
+        Path("/securedstorage/DATAsec/cole/Data-secured-New"),
+    ]
+    for base in alt_bases:
+        alt = base / dataset_name / fly_rel
+        if alt != fly_dir and alt.is_dir():
+            search_dirs.append(alt)
+
+    for search_dir in search_dirs:
+        for csv_path in search_dir.glob("output_*.csv"):
+            if csv_path.name.startswith("sensors_"):
+                continue
+            m = pat.search(csv_path.stem)
+            if m:
+                key = f"{m.group(1).lower()}_{m.group(2)}"
+                if key not in odor_map:
+                    odor_map[key] = m.group(3)
+        if odor_map:
+            break
+    return odor_map
+
+
+_odor_map_cache: dict[str, dict[str, str]] = {}
+
+
+def _get_odor_map(fly_dir: Path) -> dict[str, str]:
+    key = str(fly_dir)
+    if key not in _odor_map_cache:
+        _odor_map_cache[key] = _build_odor_map(fly_dir)
+    return _odor_map_cache[key]
+
+
+def _trial_label(path: Path, odor_map: dict[str, str] | None = None) -> str:
     match = TRIAL_REGEX.search(path.stem)
     if not match:
         chain = (path.stem + "/" + "/".join(parent.name for parent in path.parents)).lower()
@@ -251,6 +299,10 @@ def _trial_label(path: Path) -> str:
         label = f"{kind}_{num}"
         if match.group(3):
             label += f"_{match.group(3)}"
+        elif odor_map:
+            odor = odor_map.get(label)
+            if odor:
+                label += f"_{odor}"
         return label
 
     trailing = re.search(r"(\d+)$", path.stem)
@@ -356,6 +408,9 @@ def collect_envelopes(cfg: CollectConfig) -> None:
         for fly_dir in sorted((p for p in root.iterdir() if p.is_dir())):
             print(f"[DEBUG]  ↳ Fly directory: {fly_dir}")
             fly = fly_dir.name
+            odor_map = _get_odor_map(fly_dir)
+            if odor_map:
+                print(f"[DEBUG]    odor map: {odor_map}")
             found_any = False
             for csv_path in _find_trial_csvs(fly_dir):
                 found_any = True
@@ -424,7 +479,7 @@ def collect_envelopes(cfg: CollectConfig) -> None:
                         "csv_path": csv_path,
                         "fly_number": fly_number_label,
                         "trial_type": _infer_trial_type(csv_path),
-                        "trial_label": _trial_label(csv_path),
+                        "trial_label": _trial_label(csv_path, odor_map=odor_map),
                         "measure_col": measure_col,
                         "n_frames": n_frames,
                     }

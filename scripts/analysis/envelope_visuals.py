@@ -48,6 +48,7 @@ from fbpipe.odor_constants import (
     canon_dataset as _canon_dataset,
     odor_dataset_key as _odor_dataset_key,
     resolve_dataset_label,
+    resolve_testing_alias,
 )
 from fbpipe.plot_style import apply_lab_style
 
@@ -65,6 +66,11 @@ def set_protocol(protocol: str) -> None:
     """Set the active experiment protocol ('legacy' or 'v2')."""
     global _ACTIVE_PROTOCOL
     _ACTIVE_PROTOCOL = protocol
+
+
+def get_protocol() -> str:
+    """Return the active experiment protocol."""
+    return _ACTIVE_PROTOCOL
 
 
 # ODOR_CANON, DISPLAY_LABEL, ODOR_ORDER, TESTING_DATASET_ALIAS, DATASET_ALIAS,
@@ -321,6 +327,26 @@ def _trained_label(dataset_canon: str) -> str:
     )
 
 
+# Case-insensitive display label lookup — includes bare odor names from recording filenames
+_DISPLAY_LABEL_LOWER = {k.lower(): v for k, v in DISPLAY_LABEL.items()}
+# Add bare odor names used in Pi recording filenames (from expand_config._PIN_DISPLAY)
+_DISPLAY_LABEL_LOWER.update({
+    "hexanol": "Hexanol",
+    "benzaldehyde": "Benzaldehyde",
+    "ethylbutyrate": "Ethyl Butyrate",
+    "acv": "Apple Cider Vinegar",
+    "3-octonol": "3-Octonol",
+    "citral": "Citral",
+    "linalool": "Linalool",
+    "lightonly": "Optogenetic Light Control",
+})
+
+
+def _display_label_ci(key: str) -> str:
+    """Case-insensitive DISPLAY_LABEL lookup."""
+    return _DISPLAY_LABEL_LOWER.get(key.lower(), key)
+
+
 def _display_odor_v2(dataset_canon: str, trial_label: str) -> str:
     """V2 protocol: extract odor name from trial label suffix or fall back to dataset label."""
     label_str = str(trial_label)
@@ -329,9 +355,9 @@ def _display_odor_v2(dataset_canon: str, trial_label: str) -> str:
     if match:
         odor_suffix = match.group(1)
         if odor_suffix.lower() == "lightonly":
-            return "Light Only"
-        # Map through DISPLAY_LABEL for consistency
-        return DISPLAY_LABEL.get(odor_suffix, odor_suffix)
+            return "Optogenetic Light Control"
+        # Map through DISPLAY_LABEL (case-insensitive) for consistency
+        return _display_label_ci(odor_suffix)
 
     # No suffix: for training trials, return the trained odor
     dataset_key = _odor_dataset_key(dataset_canon)
@@ -339,10 +365,10 @@ def _display_odor_v2(dataset_canon: str, trial_label: str) -> str:
     if "training" in label_lower:
         return DISPLAY_LABEL.get(dataset_key, dataset_key)
 
-    # testing_9 without suffix → Light Only
+    # testing_9 without suffix → Optogenetic Light Control
     number = _trial_num(label_str)
     if number == 9 and "testing" in label_lower:
-        return "Light Only"
+        return "Optogenetic Light Control"
 
     return DISPLAY_LABEL.get(dataset_key, dataset_key)
 
@@ -435,7 +461,7 @@ def _display_odor(dataset_canon: str, trial_label: str) -> str:
         if number == 10:
             return "Linalool"
 
-    dataset_for_testing = TESTING_DATASET_ALIAS.get(dataset_key, dataset_key)
+    dataset_for_testing = resolve_testing_alias(dataset_key)
 
     if dataset_for_testing == "Hex-Control":
         if number in (1, 3):
@@ -965,17 +991,79 @@ def reaction_rate_stats_from_rows(
             raise RuntimeError("All odors were removed after excluding Hexanol.")
 
     working["reaction_flag"] = pd.to_numeric(working[reaction_col], errors="coerce").fillna(0).astype(int)
-    group_cols = ["trial_num", "odor"] if separate_presentations else ["odor"]
-    stats_df = (
-        working.groupby(group_cols, dropna=False)["reaction_flag"]
-        .agg(num_reactions="sum", num_trials="size")
-        .reset_index()
-    )
-    stats_df["rate"] = np.where(
-        stats_df["num_trials"] > 0,
-        stats_df["num_reactions"] / stats_df["num_trials"],
-        0.0,
-    )
+
+    if _ACTIVE_PROTOCOL == "v2" and separate_presentations:
+        # V2: group by odor name, label duplicate presentations as "Name 1" / "Name 2"
+        # Assign odor_col: for each fly, number appearances of the same odor in trial order
+        rows_out = []
+        for (fly_val, fn_val), fly_sub in working.groupby(
+            [df["fly"].values, df["fly_number"].values]
+        ):
+            seen: dict[str, int] = {}
+            for _, row in fly_sub.sort_values("trial_num").iterrows():
+                odor_name = row["odor"]
+                seen[odor_name] = seen.get(odor_name, 0) + 1
+                rows_out.append({
+                    "odor": odor_name,
+                    "occurrence": seen[odor_name],
+                    "reaction_flag": row["reaction_flag"],
+                })
+        if not rows_out:
+            raise RuntimeError("No rows available after v2 odor grouping.")
+        w2 = pd.DataFrame(rows_out)
+        # Detect which odors have multiple presentations
+        max_occ = w2.groupby("odor")["occurrence"].max()
+        dup_odors = set(max_occ[max_occ > 1].index)
+        # Build display label: "Hexanol 1", "Hexanol 2" for duplicates, plain name for singles
+        w2["odor_label"] = w2.apply(
+            lambda r: f"{r['odor']} {r['occurrence']}" if r["odor"] in dup_odors else r["odor"],
+            axis=1,
+        )
+        stats_df = (
+            w2.groupby("odor_label", dropna=False)["reaction_flag"]
+            .agg(num_reactions="sum", num_trials="size")
+            .reset_index()
+            .rename(columns={"odor_label": "odor"})
+        )
+        stats_df["rate"] = np.where(
+            stats_df["num_trials"] > 0,
+            stats_df["num_reactions"] / stats_df["num_trials"],
+            0.0,
+        )
+        # Sort alphabetically
+        stats_df = stats_df.sort_values("odor", key=lambda s: s.str.casefold()).reset_index(drop=True)
+    else:
+        group_cols = ["trial_num", "odor"] if separate_presentations else ["odor"]
+        stats_df = (
+            working.groupby(group_cols, dropna=False)["reaction_flag"]
+            .agg(num_reactions="sum", num_trials="size")
+            .reset_index()
+        )
+        stats_df["rate"] = np.where(
+            stats_df["num_trials"] > 0,
+            stats_df["num_reactions"] / stats_df["num_trials"],
+            0.0,
+        )
+
+        if separate_presentations:
+            stats_df = stats_df.assign(
+                _order_trial=pd.to_numeric(stats_df["trial_num"], errors="coerce").fillna(10**9).astype(int),
+                _order_label=stats_df["odor"].astype(str).str.casefold(),
+            )
+            stats_df = stats_df.sort_values(
+                ["_order_trial", "_order_label"], ascending=[True, True], kind="mergesort"
+            ).drop(columns=["_order_trial", "_order_label"])
+        else:
+            stats_df = stats_df.assign(
+                _order_key=stats_df["odor"].map(
+                    lambda value: REACTION_RATE_ODOR_INDEX.get(str(value).casefold(), len(REACTION_RATE_ODOR_INDEX))
+                ),
+                _order_label=stats_df["odor"].astype(str).str.casefold(),
+            )
+            stats_df = stats_df.sort_values(
+                ["_order_key", "_order_label"], ascending=[True, True], kind="mergesort"
+            ).drop(columns=["_order_key", "_order_label"])
+        stats_df = stats_df.reset_index(drop=True)
 
     zero_trial_mask = stats_df["num_trials"] == 0
     if zero_trial_mask.any():
@@ -984,27 +1072,7 @@ def reaction_rate_stats_from_rows(
 
     # Use PRIMARY_ODOR_LABEL for control datasets to get the correct trained odor
     highlight_label = _trained_label(dataset_canon)
-    stats_df["is_trained"] = stats_df["odor"].astype(str).str.casefold() == highlight_label.casefold()
-
-    if separate_presentations:
-        stats_df = stats_df.assign(
-            _order_trial=pd.to_numeric(stats_df["trial_num"], errors="coerce").fillna(10**9).astype(int),
-            _order_label=stats_df["odor"].astype(str).str.casefold(),
-        )
-        stats_df = stats_df.sort_values(
-            ["_order_trial", "_order_label"], ascending=[True, True], kind="mergesort"
-        ).drop(columns=["_order_trial", "_order_label"])
-    else:
-        stats_df = stats_df.assign(
-            _order_key=stats_df["odor"].map(
-                lambda value: REACTION_RATE_ODOR_INDEX.get(str(value).casefold(), len(REACTION_RATE_ODOR_INDEX))
-            ),
-            _order_label=stats_df["odor"].astype(str).str.casefold(),
-        )
-        stats_df = stats_df.sort_values(
-            ["_order_key", "_order_label"], ascending=[True, True], kind="mergesort"
-        ).drop(columns=["_order_key", "_order_label"])
-    stats_df = stats_df.reset_index(drop=True)
+    stats_df["is_trained"] = stats_df["odor"].astype(str).str.casefold().str.startswith(highlight_label.casefold())
 
     logger.debug(
         "Per-odor reaction stats for %s:\n%s",
@@ -1097,7 +1165,17 @@ def _style_trained_xticks(ax, labels: Sequence[str], trained_display: str, fonts
     ax.tick_params(axis="x", pad=2)
 
 
+def _extract_odor_from_label(trial_label: str) -> str:
+    """Extract the odor suffix from a trial label like 'testing_3_Benzaldehyde' → 'Benzaldehyde'."""
+    m = re.match(r"(?:testing|training)_\d+_(.+)", str(trial_label), re.IGNORECASE)
+    if m:
+        return m.group(1)
+    return str(trial_label)
+
+
 def _trial_order_for(dataset_trials: Sequence[str], order: str) -> list[str]:
+    if _ACTIVE_PROTOCOL == "v2":
+        return _trial_order_v2(dataset_trials)
     if order == "observed":
         return sorted(dataset_trials, key=_trial_num)
     if order == "trained-first":
@@ -1111,6 +1189,29 @@ def _trial_order_for(dataset_trials: Sequence[str], order: str) -> list[str]:
         ordered.extend(sorted(extras, key=_trial_num))
         return ordered
     raise ValueError(f"Unsupported trial order: {order}")
+
+
+def _trial_order_v2(dataset_trials: Sequence[str]) -> list[str]:
+    """V2 protocol: order trials by odor name alphabetically.
+
+    The trained odor appears twice (testing 1 and 8); all others once.
+    Light-only trials are excluded (handled by _drop_testing_11).
+    Returns trials sorted by odor name, with duplicates kept in trial-number order.
+    """
+    # Group trials by their odor name
+    odor_trials: dict[str, list[str]] = {}
+    for trial in dataset_trials:
+        odor = _extract_odor_from_label(trial)
+        odor_trials.setdefault(odor, []).append(trial)
+
+    # Sort odor names alphabetically
+    sorted_odors = sorted(odor_trials.keys(), key=str.lower)
+
+    ordered: list[str] = []
+    for odor in sorted_odors:
+        trials = sorted(odor_trials[odor], key=_trial_num)
+        ordered.extend(trials)
+    return ordered
 
 
 def _is_testing_11_label(label: object) -> bool:
@@ -1295,19 +1396,88 @@ def generate_reaction_matrices(cfg: MatrixPlotConfig) -> None:
                 for row in subset[["fly", "fly_number"]].drop_duplicates().itertuples(index=False)
             ]
             fly_pairs.sort(key=lambda pair: _fly_sort_key(*pair))
-            trial_list = _trial_order_for(list(subset["trial"].unique()), order)
-            trial_list = _drop_testing_11(trial_list)
-            pretty_labels = [_display_odor(odor, trial) for trial in trial_list]
 
-            during_matrix = np.full((len(fly_pairs), len(trial_list)), -1, dtype=int)
+            # Drop light-only trials
+            drop_mask = subset["trial"].apply(_is_light_only_label)
+            if drop_mask.any():
+                subset = subset.loc[~drop_mask].copy()
 
-            fly_map = {pair: idx for idx, pair in enumerate(fly_pairs)}
-            trial_map = {trial: idx for idx, trial in enumerate(trial_list)}
-            for _, row in subset.iterrows():
-                key = (row["fly"], row["fly_number"])
-                i = fly_map[key]
-                j = trial_map[row["trial"]]
-                during_matrix[i, j] = int(row["during_hit"])
+            if _ACTIVE_PROTOCOL == "v2":
+                # V2: build matrix by ODOR NAME (consistent across flies with randomized trial order)
+                subset = subset.copy()
+                subset["_odor"] = subset["trial"].apply(_extract_odor_from_label)
+                subset["_odor_display"] = subset["_odor"].apply(
+                    lambda o: _display_label_ci(o) if o.lower() != "lightonly" else None
+                )
+                subset = subset[subset["_odor_display"].notna()]
+
+                # Build ordered odor columns: alphabetical, trained odor appears twice as "Name 1" / "Name 2"
+                trained_display = DISPLAY_LABEL.get(odor, odor)
+                odor_counts: dict[str, int] = {}
+                odor_columns: list[str] = []
+                for _, row in subset.sort_values("trial", key=lambda s: s.map(_trial_num)).iterrows():
+                    disp = row["_odor_display"]
+                    odor_counts[disp] = odor_counts.get(disp, 0) + 1
+
+                # Unique odor names, sorted alphabetically
+                unique_odors = sorted(set(subset["_odor_display"]), key=str.lower)
+                # Find which odor appears twice (the trained one)
+                odor_occurrence_count: dict[str, int] = {}
+                for _, row in subset.iterrows():
+                    disp = row["_odor_display"]
+                    odor_occurrence_count[disp] = odor_occurrence_count.get(disp, 0) + 1
+                # Normalize by number of flies
+                n_fly_pairs = len(fly_pairs)
+                duplicated_odors = {o for o, c in odor_occurrence_count.items() if c > n_fly_pairs}
+
+                # Build column list: alphabetical, duplicated odors get " 1" and " 2"
+                odor_columns = []
+                for o in unique_odors:
+                    if o in duplicated_odors:
+                        odor_columns.append(f"{o} 1")
+                        odor_columns.append(f"{o} 2")
+                    else:
+                        odor_columns.append(o)
+
+                during_matrix = np.full((len(fly_pairs), len(odor_columns)), -1, dtype=int)
+                fly_map = {pair: idx for idx, pair in enumerate(fly_pairs)}
+                col_map = {col: idx for idx, col in enumerate(odor_columns)}
+
+                # For each fly, assign during_hit to the correct odor column
+                for (fly_val, fn_val), fly_subset in subset.groupby(["fly", "fly_number"]):
+                    i = fly_map.get((fly_val, fn_val))
+                    if i is None:
+                        continue
+                    seen_odors: dict[str, int] = {}
+                    for _, row in fly_subset.sort_values("trial", key=lambda s: s.map(_trial_num)).iterrows():
+                        disp = row["_odor_display"]
+                        seen_odors[disp] = seen_odors.get(disp, 0) + 1
+                        if disp in duplicated_odors:
+                            col_label = f"{disp} {seen_odors[disp]}"
+                        else:
+                            col_label = disp
+                        j = col_map.get(col_label)
+                        if j is not None:
+                            during_matrix[i, j] = int(row["during_hit"])
+
+                pretty_labels = list(odor_columns)
+                trial_list = odor_columns  # for downstream code
+            else:
+                # Legacy: order by trial number
+                trial_list = _trial_order_for(list(subset["trial"].unique()), order)
+                trial_list = _drop_testing_11(trial_list)
+                trial_set = set(trial_list)
+                subset = subset[subset["trial"].isin(trial_set)]
+                pretty_labels = [_display_odor(odor, trial) for trial in trial_list]
+
+                during_matrix = np.full((len(fly_pairs), len(trial_list)), -1, dtype=int)
+                fly_map = {pair: idx for idx, pair in enumerate(fly_pairs)}
+                trial_map = {trial: idx for idx, trial in enumerate(trial_list)}
+                for _, row in subset.iterrows():
+                    key = (row["fly"], row["fly_number"])
+                    i = fly_map[key]
+                    j = trial_map[row["trial"]]
+                    during_matrix[i, j] = int(row["during_hit"])
 
             odor_label = DISPLAY_LABEL.get(odor, odor)
             trained_display = DISPLAY_LABEL.get(odor, odor)

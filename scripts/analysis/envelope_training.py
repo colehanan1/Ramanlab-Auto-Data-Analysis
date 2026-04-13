@@ -28,6 +28,7 @@ from fbpipe.odor_constants import (
     TESTING_DATASET_ALIAS,
     canon_dataset as _canon_dataset,
     odor_dataset_key as _odor_dataset_key,
+    resolve_testing_alias,
 )
 from fbpipe.plot_style import apply_lab_style
 
@@ -326,7 +327,7 @@ def _display_odor(dataset_canon: str, trial_label: str) -> str:
             return odor_name
         return DISPLAY_LABEL.get(dataset_key, dataset_key)
 
-    dataset_for_testing = TESTING_DATASET_ALIAS.get(dataset_key, dataset_key)
+    dataset_for_testing = resolve_testing_alias(dataset_key)
 
     if number in (1, 3):
         return HEXANOL_LABEL

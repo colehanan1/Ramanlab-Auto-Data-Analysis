@@ -40,6 +40,7 @@ from fbpipe.odor_constants import (
     DISPLAY_LABEL,
     DATASET_ALIAS,
     TESTING_DATASET_ALIAS,
+    resolve_testing_alias,
 )
 from fbpipe.plot_style import apply_lab_style
 
@@ -140,7 +141,7 @@ def _resolve_odor_name(dataset: str, trial_label: str) -> str:
              8: "Benzaldehyde", 9: "Citral", 10: "Linalool"}
         return m.get(number, trial_label)
 
-    ds_alias = TESTING_DATASET_ALIAS.get(ds, ds)
+    ds_alias = resolve_testing_alias(ds)
 
     if ds_alias == "Hex-Control":
         if number in (1, 3):
@@ -177,7 +178,7 @@ def _resolve_odor_name(dataset: str, trial_label: str) -> str:
 def _is_trained_odor(dataset: str, odor_name: str) -> bool:
     base = _strip_flagged(dataset).strip()
     ds = DATASET_ALIAS.get(base, DATASET_ALIAS.get(base.lower(), base))
-    ds_alias = TESTING_DATASET_ALIAS.get(ds, ds)
+    ds_alias = resolve_testing_alias(ds)
     trained = PRIMARY_ODOR_LABEL.get(ds_alias,
               DISPLAY_LABEL.get(ds_alias, DISPLAY_LABEL.get(ds, ds)))
     return str(odor_name).strip().lower() == str(trained).strip().lower()

@@ -35,6 +35,7 @@ from fbpipe.odor_constants import (
     DISPLAY_LABEL,
     DATASET_ALIAS,
     TESTING_DATASET_ALIAS,
+    resolve_testing_alias,
 )
 from fbpipe.plot_style import apply_lab_style
 

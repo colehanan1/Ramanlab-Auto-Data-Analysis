@@ -42,7 +42,7 @@ for path in (str(SRC_ROOT), str(REPO_ROOT)):
 
 STATE_VERSION = 1
 
-from fbpipe.config import Settings, discover_flagged_directories, load_settings, resolve_config_path
+from fbpipe.config import Settings, discover_flagged_directories, load_settings, resolve_config_path, _expand_datasets
 from fbpipe.pipeline import ORDERED_STEPS
 from fbpipe.steps import predict_reactions
 from fbpipe.utils.data_secured_sync import sync_data_secured
@@ -1561,7 +1561,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         raise FileNotFoundError(f"Configuration file not found: {config_path}")
 
     with config_path.open("r", encoding="utf-8") as fh:
-        data = yaml.safe_load(fh) or {}
+        data = _expand_datasets(yaml.safe_load(fh) or {})
 
     settings = load_settings(config_path)
     set_protocol(settings.protocol)

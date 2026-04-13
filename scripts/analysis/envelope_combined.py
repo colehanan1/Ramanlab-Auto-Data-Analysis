@@ -50,6 +50,7 @@ from fbpipe.odor_constants import (
     TESTING_DATASET_ALIAS,
     canon_dataset as _canon_dataset,
     odor_dataset_key as _odor_dataset_key,
+    resolve_testing_alias,
 )
 from fbpipe.plot_style import apply_lab_style
 
@@ -149,7 +150,13 @@ LOW_MAX_FLAG_THRESHOLD_PX = 50.0
 TIME_COLS = ["time_s", "time_seconds", "t_s", "time"]
 TIMESTAMP_COLS = ["UTC_ISO", "Timestamp", "Number", "MonoNs"]
 FRAME_COLS = ["Frame", "FrameNumber", "Frame Number"]
-TRIAL_REGEX = re.compile(r"(testing|training)_(\d+)(?:_(.+))?", re.IGNORECASE)
+# Group 3 captures the odor suffix but stops before _fly or _distances
+# e.g. "testing_3_Benzaldehyde_fly1_distances..." → ("testing", "3", "Benzaldehyde")
+# e.g. "testing_3_fly1_distances..." → ("testing", "3", None)
+TRIAL_REGEX = re.compile(
+    r"(testing|training)_(\d+)(?:_((?!fly\d|distances)[A-Za-z0-9._-]+?))?(?:_fly\d|_distances|$)",
+    re.IGNORECASE,
+)
 TESTING_REGEX = re.compile(r"testing_(\d+)(?:_(.+))?", re.IGNORECASE)
 TRAINING_REGEX = re.compile(r"training_(\d+)(?:_(.+))?", re.IGNORECASE)
 FLY_SLOT_REGEX = re.compile(r"(fly\d+)_distances", re.IGNORECASE)
@@ -755,7 +762,7 @@ def _display_odor(dataset_canon: str, trial_label: str) -> str:
             return odor_name
         return DISPLAY_LABEL.get(dataset_key, dataset_key)
 
-    dataset_for_testing = TESTING_DATASET_ALIAS.get(dataset_key, dataset_key)
+    dataset_for_testing = resolve_testing_alias(dataset_key)
 
     if dataset_for_testing == "Hex-Control":
         if number in (1, 3):
@@ -1064,7 +1071,56 @@ def _infer_category(path: Path) -> str:
     return "testing"
 
 
-def _trial_label(path: Path) -> str:
+def _build_odor_map(fly_dir: Path) -> dict[str, str]:
+    """Scan original recording CSVs in a fly directory to map trial labels to odor names.
+
+    Looks for files like: output_..._testing_3_Benzaldehyde_20260410_....csv
+    Searches both the given directory and alternate base paths (flys_New ↔ Data-secured-New).
+    Returns: {"testing_3": "Benzaldehyde", "training_1": "Hexanol", ...}
+    """
+    odor_map: dict[str, str] = {}
+    pat = re.compile(r"(testing|training)_(\d+)_([A-Za-z0-9][A-Za-z0-9 .()-]+?)_\d{8}_", re.IGNORECASE)
+
+    # Try the given directory and alternate base paths where recording CSVs may live
+    search_dirs = [fly_dir]
+    fly_rel = fly_dir.name  # e.g., "april_10_batch_3"
+    dataset_name = fly_dir.parent.name  # e.g., "Hex-Control-24-0.005"
+    alt_bases = [
+        Path("/home/ramanlab/Documents/cole/Data/flys_New"),
+        Path("/securedstorage/DATAsec/cole/Data-secured-New"),
+    ]
+    for base in alt_bases:
+        alt = base / dataset_name / fly_rel
+        if alt != fly_dir and alt.is_dir():
+            search_dirs.append(alt)
+
+    for search_dir in search_dirs:
+        for csv_path in search_dir.glob("output_*.csv"):
+            if csv_path.name.startswith("sensors_"):
+                continue
+            m = pat.search(csv_path.stem)
+            if m:
+                key = f"{m.group(1).lower()}_{m.group(2)}"
+                if key not in odor_map:
+                    odor_map[key] = m.group(3)
+        if odor_map:
+            break  # found in this directory, no need to check others
+    return odor_map
+
+
+# Module-level cache so we don't rescan for every trial in the same fly
+_odor_map_cache: dict[str, dict[str, str]] = {}
+
+
+def _get_odor_map(fly_dir: Path) -> dict[str, str]:
+    """Cached odor map for a fly directory."""
+    key = str(fly_dir)
+    if key not in _odor_map_cache:
+        _odor_map_cache[key] = _build_odor_map(fly_dir)
+    return _odor_map_cache[key]
+
+
+def _trial_label(path: Path, odor_map: dict[str, str] | None = None) -> str:
     match = TRIAL_REGEX.search(path.stem)
     if not match:
         chain = f"{path.stem}/" + "/".join(parent.name for parent in path.parents)
@@ -1073,6 +1129,11 @@ def _trial_label(path: Path) -> str:
         label = f"{match.group(1).lower()}_{match.group(2)}"
         if match.group(3):
             label += f"_{match.group(3)}"
+        elif odor_map:
+            # No odor suffix in filename — look up from recording CSV names
+            odor = odor_map.get(label)
+            if odor:
+                label += f"_{odor}"
         return label
     trailing = re.search(r"(\d+)(?:_[a-z]+)?$", path.stem, re.IGNORECASE)
     if trailing:
@@ -1144,9 +1205,14 @@ def _locate_trials(
         print(f"[WARN] {fly_dir.name}: no trial CSVs matched patterns {patterns}")
         return []
 
+    # Build odor map from original recording CSVs in this fly directory
+    odor_map = _get_odor_map(fly_dir)
+    if odor_map:
+        print(f"[DEBUG] {fly_dir.name}: odor map from recordings: {odor_map}")
+
     results: list[tuple[str, Path, str]] = []
     for real_path, (origin, csv_path) in sorted(candidates.items(), key=lambda item: str(item[0])):
-        label = _trial_label(csv_path)
+        label = _trial_label(csv_path, odor_map=odor_map)
         category_guess = _infer_category(csv_path)
         print(
             f"[DEBUG] {fly_dir.name}: evaluating {csv_path} (origin={origin}, label={label}, category~{category_guess})"

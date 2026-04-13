@@ -111,11 +111,89 @@ def resolve_env_path(config_path: str | Path | None = None) -> Path:
     return candidates[0]
 
 
+def _expand_datasets(data: dict) -> dict:
+    """Expand a top-level ``datasets`` list into all ``roots:``/``sources:`` lists.
+
+    If the config contains::
+
+        dataset_bases:
+          data: /home/ramanlab/Documents/cole/Data/flys_New
+          secured: /securedstorage/DATAsec/cole/Data-secured-New
+        datasets:
+          - 3Oct-Training
+          - Hex-Control-24-0.005
+          ...
+
+    Then every ``roots:`` / ``sources:`` list that currently contains paths
+    under one of those bases will be rebuilt from the ``datasets`` list,
+    and ``main_directories`` will be rebuilt as well.
+
+    If ``datasets`` is absent the config is returned unchanged.
+    """
+    datasets = data.get("datasets")
+    if not datasets:
+        return data
+
+    bases = data.get("dataset_bases", {})
+    data_base = bases.get("data", "/home/ramanlab/Documents/cole/Data/flys_New")
+    secured_base = bases.get("secured", "/securedstorage/DATAsec/cole/Data-secured-New")
+
+    # Only include directories that actually exist on disk
+    data_roots = [f"{data_base.rstrip('/')}/{ds}/"
+                  for ds in datasets if Path(data_base, ds).is_dir()]
+    secured_roots = [f"{secured_base.rstrip('/')}/{ds}/"
+                     for ds in datasets if Path(secured_base, ds).is_dir()]
+    skipped = [ds for ds in datasets
+               if not Path(data_base, ds).is_dir() and not Path(secured_base, ds).is_dir()]
+    if skipped:
+        print(f"[config] Skipping datasets not yet on disk: {', '.join(skipped)}")
+
+    # main_directories
+    data["main_directories"] = list(data_roots)
+
+    # analysis.combined.combine.roots
+    analysis = data.get("analysis", {})
+    combined = analysis.get("combined", {})
+    combine = combined.get("combine", {})
+    if "roots" in combine:
+        combine["roots"] = list(data_roots)
+
+    # analysis.combined.wide.roots
+    wide = combined.get("wide", {})
+    if "roots" in wide:
+        wide["roots"] = list(data_roots)
+
+    # analysis.combined.combined_base.wide.roots (secured)
+    combined_base = combined.get("combined_base", {})
+    cb_wide = combined_base.get("wide", {})
+    if "roots" in cb_wide:
+        cb_wide["roots"] = list(secured_roots)
+
+    # analysis.combined.secure_cleanup.sources
+    cleanup = combined.get("secure_cleanup", {})
+    if "sources" in cleanup:
+        cleanup["sources"] = list(data_roots)
+
+    # tools.collect_eye_prob_coords.sources (secured)
+    tools = data.get("tools", {})
+    eye_coords = tools.get("collect_eye_prob_coords", {})
+    if "sources" in eye_coords:
+        eye_coords["sources"] = list(secured_roots)
+
+    # yolo_curation.video_source_dirs (secured)
+    yolo_cur = data.get("yolo_curation", {})
+    if "video_source_dirs" in yolo_cur:
+        yolo_cur["video_source_dirs"] = list(secured_roots)
+
+    return data
+
+
 def load_raw_config(config_path: str | Path) -> Dict[str, Any]:
     path = resolve_config_path(config_path)
     if path.exists():
         with path.open("r", encoding="utf-8") as f:
-            return yaml.safe_load(f) or {}
+            data = yaml.safe_load(f) or {}
+        return _expand_datasets(data)
     return {}
 
 
@@ -374,6 +452,7 @@ def load_settings(config_path: str | Path) -> Settings:
     if p.exists():
         with open(p, "r", encoding="utf-8") as f:
             data = yaml.safe_load(f) or {}
+        data = _expand_datasets(data)
 
     # env overrides
     model_path = os.getenv("MODEL_PATH", _get(data, "model_path", ""))

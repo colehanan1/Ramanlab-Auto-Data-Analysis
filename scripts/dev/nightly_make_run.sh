@@ -62,4 +62,4 @@ if ! conda activate "${YOLO_ENV_NAME}" >/dev/null 2>&1; then
 fi
 
 cd "${PROJECT_ROOT}"
-exec make run
+exec make run CONFIG=config/config_new.yaml
