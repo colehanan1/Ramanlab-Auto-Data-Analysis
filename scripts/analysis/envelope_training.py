@@ -531,9 +531,10 @@ def _latency_profile(
     if before.size == 0:
         return None, None
 
-    odor_on_effective = odor_on_s + odor_latency_s
+    # Reaction window: start at odor-on command (30s), end at odor-off +
+    # latency (e.g. 62.15s). Baseline stays 0–30s.
     odor_off_effective = odor_off_s + odor_latency_s
-    response_start = min(int(round(odor_on_effective * fps)), env.size)
+    response_start = min(int(round(odor_on_s * fps)), env.size)
     response_end = min(int(round(odor_off_effective * fps)), env.size)
     if response_start >= env.size:
         return None, None

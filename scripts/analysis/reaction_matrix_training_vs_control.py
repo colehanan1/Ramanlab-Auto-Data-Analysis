@@ -73,7 +73,7 @@ from scripts.analysis.reaction_matrix_from_spreadsheet import (
 # ---------------------------------------------------------------------------
 # Training → Control mapping
 # ---------------------------------------------------------------------------
-TRAINING_CONTROL_PAIRS = {
+_STATIC_TRAINING_CONTROL_PAIRS = {
     "EB-Training": "EB-Control",
     "Hex-Training": "Hex-Control",
     "Hex-Training-24": "Hex-Control-24",
@@ -92,6 +92,30 @@ TRAINING_CONTROL_PAIRS = {
     "Cit-Training": "Cit-Control",
     "Lin-Training": "Lin-Control",
 }
+
+import re as _pair_re
+
+def _auto_training_control_pairs(datasets: list[str]) -> dict[str, str]:
+    """Auto-derive Training→Control pairs from dataset names in the data.
+
+    For any 'X-Training-Y' dataset, looks for a matching 'X-Control-Y' dataset.
+    Falls back to static pairs for legacy datasets.
+    """
+    pairs = dict(_STATIC_TRAINING_CONTROL_PAIRS)
+    pat = _pair_re.compile(r"^(.+)-Training(.*)$", _pair_re.IGNORECASE)
+    ds_set = set(datasets)
+    for ds in datasets:
+        if ds in pairs:
+            continue
+        m = pat.match(ds)
+        if m:
+            ctrl = f"{m.group(1)}-Control{m.group(2)}"
+            if ctrl in ds_set:
+                pairs[ds] = ctrl
+    return pairs
+
+# Will be populated from actual data at runtime
+TRAINING_CONTROL_PAIRS = dict(_STATIC_TRAINING_CONTROL_PAIRS)
 
 _RC_CONTEXT = {
     "figure.dpi": 300,
@@ -157,12 +181,19 @@ def _fisher_test_per_presentation(
     """Run Fisher's exact test for each trial presentation."""
     results = {}
     for trial_num, odor in presentations:
-        t = train_raw[train_raw["trial_num"] == int(trial_num)]
-        c = ctrl_raw[ctrl_raw["trial_num"] == int(trial_num)]
+        if trial_num == 0:
+            # V2: match by odor name across all trials.
+            # Strip occurrence suffix (e.g. "Hexanol 1" → "Hexanol") so we
+            # match the raw CSV's odor_sent column which has no suffix.
+            base_odor = _pair_re.sub(r"\s+\d+$", "", odor)
+            t = train_raw[train_raw["odor_sent"].str.casefold() == base_odor.casefold()]
+            c = ctrl_raw[ctrl_raw["odor_sent"].str.casefold() == base_odor.casefold()]
+        else:
+            t = train_raw[train_raw["trial_num"] == int(trial_num)]
+            c = ctrl_raw[ctrl_raw["trial_num"] == int(trial_num)]
         if t.empty or c.empty:
             results[(int(trial_num), odor)] = np.nan
             continue
-        # 2x2 table: [[train_react, train_no], [ctrl_react, ctrl_no]]
         t_react = int(t["during_hit"].sum())
         t_total = len(t)
         c_react = int(c["during_hit"].sum())
@@ -183,7 +214,10 @@ def _draw_significance_brackets(
 ) -> None:
     """Draw bracket + stars between each train/control bar pair."""
     for i, (_, row) in enumerate(merged.iterrows()):
-        key = (int(row["trial_num"]), str(row["odor"]))
+        if "trial_num" in row.index:
+            key = (int(row["trial_num"]), str(row["odor"]))
+        else:
+            key = (0, str(row["odor"]))
         p = p_values.get(key, np.nan)
         stars = _sig_stars(p)
         if not stars:
@@ -265,21 +299,63 @@ def _load_rates_from_binary_csv(
     if not include_hexanol:
         df = df[df["odor_sent"].str.strip().str.casefold() != hexanol_label.casefold()]
 
-    stats = (
-        df.groupby(["trial_num", "odor_sent"])["during_hit"]
-        .agg(num_reactions="sum", num_trials="size")
-        .reset_index()
-        .rename(columns={"odor_sent": "odor"})
-    )
-    stats["rate"] = np.where(
-        stats["num_trials"] > 0,
-        (stats["num_reactions"] / stats["num_trials"]) * 100.0,
-        0.0,
-    )
-
     highlight = _trained_label(dataset_canon)
-    stats["is_trained"] = stats["odor"].str.casefold() == highlight.casefold()
-    stats = stats.sort_values(["trial_num", "odor"], kind="mergesort").reset_index(drop=True)
+
+    if get_protocol() == "v2":
+        # V2: group by odor only, number duplicate presentations
+        # For each fly, count how many times each odor appears (in trial order)
+        rows_out = []
+        for (fly_val, fn_val), fly_sub in df.groupby(["fly", "fly_number"]):
+            seen: dict[str, int] = {}
+            for _, row in fly_sub.sort_values("trial_num").iterrows():
+                odor = row["odor_sent"]
+                seen[odor] = seen.get(odor, 0) + 1
+                rows_out.append({
+                    "odor": odor,
+                    "occurrence": seen[odor],
+                    "during_hit": row["during_hit"],
+                })
+        if not rows_out:
+            return pd.DataFrame()
+        w = pd.DataFrame(rows_out)
+        max_occ = w.groupby("odor")["occurrence"].max()
+        dup_odors = set(max_occ[max_occ > 1].index)
+        # Only number the trained odor; non-trained duplicates get aggregated
+        trained_dup_odors = {
+            o for o in dup_odors
+            if o.casefold() == highlight.casefold()
+        }
+        w["odor_label"] = w.apply(
+            lambda r: f"{r['odor']} {r['occurrence']}" if r["odor"] in trained_dup_odors else r["odor"],
+            axis=1,
+        )
+        stats = (
+            w.groupby("odor_label")["during_hit"]
+            .agg(num_reactions="sum", num_trials="size")
+            .reset_index()
+            .rename(columns={"odor_label": "odor"})
+        )
+        stats["rate"] = np.where(
+            stats["num_trials"] > 0,
+            (stats["num_reactions"] / stats["num_trials"]) * 100.0,
+            0.0,
+        )
+        stats["is_trained"] = stats["odor"].str.casefold().str.startswith(highlight.casefold())
+        stats = stats.sort_values("odor", key=lambda s: s.str.casefold()).reset_index(drop=True)
+    else:
+        stats = (
+            df.groupby(["trial_num", "odor_sent"])["during_hit"]
+            .agg(num_reactions="sum", num_trials="size")
+            .reset_index()
+            .rename(columns={"odor_sent": "odor"})
+        )
+        stats["rate"] = np.where(
+            stats["num_trials"] > 0,
+            (stats["num_reactions"] / stats["num_trials"]) * 100.0,
+            0.0,
+        )
+        stats["is_trained"] = stats["odor"].str.casefold() == highlight.casefold()
+        stats = stats.sort_values(["trial_num", "odor"], kind="mergesort").reset_index(drop=True)
     return stats
 
 
@@ -295,30 +371,44 @@ def plot_training_vs_control_bars(
     title: str,
     p_values: dict[tuple[int, str], float] | None = None,
 ) -> None:
-    """Side-by-side bars: dark-blue training, gray control, per trial presentation."""
+    """Side-by-side bars: dark-blue training, gray control, per odor."""
+
+    if "trial_num" in training_stats.columns and "trial_num" in control_stats.columns:
+        merge_keys = ["trial_num", "odor"]
+        train_cols = ["trial_num", "odor", "rate", "num_trials", "is_trained"]
+        ctrl_cols = ["trial_num", "odor", "rate", "num_trials"]
+    else:
+        merge_keys = ["odor"]
+        train_cols = ["odor", "rate", "num_trials", "is_trained"]
+        ctrl_cols = ["odor", "rate", "num_trials"]
 
     merged = pd.merge(
-        training_stats[["trial_num", "odor", "rate", "num_trials", "is_trained"]],
-        control_stats[["trial_num", "odor", "rate", "num_trials"]],
-        on=["trial_num", "odor"],
+        training_stats[train_cols],
+        control_stats[ctrl_cols],
+        on=merge_keys,
         how="outer",
         suffixes=("_train", "_ctrl"),
     ).fillna(0)
-    merged["trial_num"] = pd.to_numeric(merged["trial_num"], errors="coerce").fillna(10**9).astype(int)
-    merged = merged.sort_values(["trial_num", "odor"], kind="mergesort").reset_index(drop=True)
+    if "trial_num" in merged.columns:
+        merged["trial_num"] = pd.to_numeric(merged["trial_num"], errors="coerce").fillna(10**9).astype(int)
+        merged = merged.sort_values(["trial_num", "odor"], kind="mergesort").reset_index(drop=True)
+    else:
+        merged = merged.sort_values("odor", key=lambda s: s.str.casefold()).reset_index(drop=True)
 
     n = len(merged)
     x = np.arange(n)
     bar_w = 0.35
 
-    train_color = "#1a3a6b"   # dark blue
-    ctrl_color = "#b0b0b0"    # gray
+    train_color_trained = "#1a3a6b"   # dark blue (trained odor)
+    train_color_other = "#7bafd4"     # lighter blue (non-trained)
+    ctrl_color_trained = "#808080"    # dark gray (trained odor)
+    ctrl_color_other = "#c8c8c8"     # lighter gray (non-trained)
 
     bars_train = ax.bar(
         x - bar_w / 2,
         merged["rate_train"].to_numpy(float),
         width=bar_w,
-        color=[train_color if bool(t) else "#4a7fbf" for t in merged["is_trained"]],
+        color=[train_color_trained if bool(t) else train_color_other for t in merged["is_trained"]],
         edgecolor="black",
         linewidth=0.75,
         label="Training",
@@ -327,7 +417,7 @@ def plot_training_vs_control_bars(
         x + bar_w / 2,
         merged["rate_ctrl"].to_numpy(float),
         width=bar_w,
-        color=ctrl_color,
+        color=[ctrl_color_trained if bool(t) else ctrl_color_other for t in merged["is_trained"]],
         edgecolor="black",
         linewidth=0.75,
         label="Control",
@@ -341,7 +431,7 @@ def plot_training_vs_control_bars(
     ax.set_xticklabels(labels, rotation=35, ha="right")
     for tick, is_trained in zip(ax.get_xticklabels(), merged["is_trained"]):
         if bool(is_trained):
-            tick.set_color(train_color)
+            tick.set_color(train_color_trained)
             tick.set_weight("bold")
 
     # Y-axis: 0-100% with headroom for annotations + brackets
@@ -438,12 +528,14 @@ def generate_training_vs_control_matrices(cfg: SpreadsheetMatrixConfig) -> None:
     norm = BoundaryNorm([-0.5, 0.5, 1.5], cmap.N)
 
     present = df["dataset_canon"].unique().tolist()
+    # Auto-derive Training→Control pairs from datasets actually in the data
+    active_pairs = _auto_training_control_pairs(present)
     saved_unordered_pngs: list[Path] = []
 
     for order in cfg.trial_orders:
         order_suffix = _order_suffix(order)
 
-        for train_ds, ctrl_ds in TRAINING_CONTROL_PAIRS.items():
+        for train_ds, ctrl_ds in active_pairs.items():
             # Skip training datasets with no control data
             if train_ds in ("ACV-Training", "3OCT-Training"):
                 print(f"[INFO] {train_ds} has no control data, skipping train vs control plots.")
@@ -499,10 +591,16 @@ def generate_training_vs_control_matrices(cfg: SpreadsheetMatrixConfig) -> None:
                     disp = row["_odor_display"]
                     odor_occurrence_count[disp] = odor_occurrence_count.get(disp, 0) + 1
                 duplicated_odors = {o for o, c in odor_occurrence_count.items() if c > n_fly_pairs}
+                # Only number the trained odor in columns
+                highlight = _trained_label(train_ds)
+                trained_dup_odors = {
+                    o for o in duplicated_odors
+                    if o.casefold() == highlight.casefold()
+                }
 
                 odor_columns: list[str] = []
                 for o in unique_odors:
-                    if o in duplicated_odors:
+                    if o in trained_dup_odors:
                         odor_columns.append(f"{o} 1")
                         odor_columns.append(f"{o} 2")
                     else:
@@ -520,7 +618,7 @@ def generate_training_vs_control_matrices(cfg: SpreadsheetMatrixConfig) -> None:
                     for _, row in fly_subset.sort_values("trial", key=lambda s: s.map(_trial_num)).iterrows():
                         disp = row["_odor_display"]
                         seen_odors[disp] = seen_odors.get(disp, 0) + 1
-                        if disp in duplicated_odors:
+                        if disp in trained_dup_odors:
                             col_label = f"{disp} {seen_odors[disp]}"
                         else:
                             col_label = disp
@@ -557,16 +655,21 @@ def generate_training_vs_control_matrices(cfg: SpreadsheetMatrixConfig) -> None:
             train_raw = _load_raw_binary_csv(cfg.out_dir, train_ds)
             ctrl_raw = _load_raw_binary_csv(cfg.out_dir, ctrl_ds)
             if not train_raw.empty and not ctrl_raw.empty:
-                presentations = (
-                    [(int(row.trial_num), str(row.odor)) for row in train_rate.itertuples(index=False)]
-                    if not train_rate.empty else []
-                )
+                if get_protocol() == "v2":
+                    # V2: use odor label as key (no trial_num)
+                    presentations = [
+                        (0, str(row.odor)) for row in train_rate.itertuples(index=False)
+                    ] if not train_rate.empty else []
+                else:
+                    presentations = [
+                        (int(row.trial_num), str(row.odor)) for row in train_rate.itertuples(index=False)
+                    ] if not train_rate.empty else []
                 p_values = _fisher_test_per_presentation(train_raw, ctrl_raw, presentations)
                 for (trial_num, odor), p in p_values.items():
                     if pd.isna(p):
                         continue
                     print(
-                        f"  Fisher's exact: T{trial_num:<2d} {odor:25s} p={p:.4f} {_sig_stars(p)}"
+                        f"  Fisher's exact: {odor:25s} p={p:.4f} {_sig_stars(p)}"
                     )
 
             # --- Figure layout ---

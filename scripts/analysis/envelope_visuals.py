@@ -279,7 +279,12 @@ def _trial_odor_window_seconds(
     odor_off_s: float,
     odor_latency_s: float,
 ) -> tuple[float, float]:
-    """Return latency-shifted odor on/off times (seconds) for one trial."""
+    """Return commanded odor on/off times (seconds) for one trial.
+
+    Latency is NOT applied to visualization markers — per-fly PER traces
+    show the commanded window (30–60 s by default). The model's reaction
+    detection still applies latency to the end of the window separately.
+    """
 
     on_cmd = float(odor_on_s)
     off_cmd = float(odor_off_s)
@@ -289,8 +294,7 @@ def _trial_odor_window_seconds(
             off_cmd = TRAINING_EXTENDED_ODOR_OFF_S
 
     off_cmd = max(off_cmd, on_cmd)
-    latency = max(float(odor_latency_s), 0.0)
-    return on_cmd + latency, off_cmd + latency
+    return on_cmd, off_cmd
 
 
 def _trial_light_start_seconds(*, trial_label: str, trial_type: str) -> float | None:
@@ -322,9 +326,17 @@ def _is_discriminate_odor_trial(*, trial_label: str, trial_type: str) -> bool:
 
 def _trained_label(dataset_canon: str) -> str:
     dataset_key = _odor_dataset_key(dataset_canon)
-    return PRIMARY_ODOR_LABEL.get(
-        dataset_key, DISPLAY_LABEL.get(dataset_key, dataset_key)
-    )
+    result = PRIMARY_ODOR_LABEL.get(dataset_key)
+    if result:
+        return result
+    # Auto-derive: "EB-Control-24-0.1" → base odor "EB" → display "Ethyl Butyrate"
+    m = re.match(r"^([A-Za-z0-9]+)[-_](?:Training|Control)", dataset_canon, re.IGNORECASE)
+    if m:
+        base = m.group(1)
+        label = _display_label_ci(base)
+        if label != base:
+            return label
+    return DISPLAY_LABEL.get(dataset_key, dataset_key)
 
 
 # Case-insensitive display label lookup — includes bare odor names from recording filenames
@@ -930,8 +942,11 @@ def _score_trial(env: np.ndarray, fps: float, cfg: MatrixPlotConfig) -> tuple[in
     fps = fps if math.isfinite(fps) and fps > 0 else cfg.fps_default
     before_end = int(round(cfg.before_sec * fps))
     shift = int(round(cfg.latency_sec * fps))
-    during_start = before_end + shift
-    during_end = during_start + int(round(cfg.during_sec * fps))
+    # Reaction window: start at odor-on command (30s), end at odor-off + latency
+    # (e.g. 62.15s). Baseline stays 0–30s; window is slightly longer than
+    # during_sec because we extend the end to catch delayed responses.
+    during_start = before_end
+    during_end = before_end + int(round(cfg.during_sec * fps)) + shift
     after_end = during_end + int(round(cfg.after_window_sec * fps))
 
     total = env.size
@@ -1011,12 +1026,11 @@ def reaction_rate_stats_from_rows(
         if not rows_out:
             raise RuntimeError("No rows available after v2 odor grouping.")
         w2 = pd.DataFrame(rows_out)
-        # Detect which odors have multiple presentations
-        max_occ = w2.groupby("odor")["occurrence"].max()
-        dup_odors = set(max_occ[max_occ > 1].index)
-        # Build display label: "Hexanol 1", "Hexanol 2" for duplicates, plain name for singles
+        # Only the trained odor gets "1"/"2" numbering
+        trained = _trained_label(dataset_canon)
+        trained_set = {trained}
         w2["odor_label"] = w2.apply(
-            lambda r: f"{r['odor']} {r['occurrence']}" if r["odor"] in dup_odors else r["odor"],
+            lambda r: f"{r['odor']} {r['occurrence']}" if r["odor"] in trained_set else r["odor"],
             axis=1,
         )
         stats_df = (
@@ -1421,19 +1435,14 @@ def generate_reaction_matrices(cfg: MatrixPlotConfig) -> None:
 
                 # Unique odor names, sorted alphabetically
                 unique_odors = sorted(set(subset["_odor_display"]), key=str.lower)
-                # Find which odor appears twice (the trained one)
-                odor_occurrence_count: dict[str, int] = {}
-                for _, row in subset.iterrows():
-                    disp = row["_odor_display"]
-                    odor_occurrence_count[disp] = odor_occurrence_count.get(disp, 0) + 1
-                # Normalize by number of flies
-                n_fly_pairs = len(fly_pairs)
-                duplicated_odors = {o for o, c in odor_occurrence_count.items() if c > n_fly_pairs}
+                # Only the trained odor gets "1"/"2" numbering
+                trained_label = _trained_label(odor)
+                trained_set = {trained_label}
 
-                # Build column list: alphabetical, duplicated odors get " 1" and " 2"
+                # Build column list: alphabetical, trained odor gets " 1" and " 2"
                 odor_columns = []
                 for o in unique_odors:
-                    if o in duplicated_odors:
+                    if o in trained_set:
                         odor_columns.append(f"{o} 1")
                         odor_columns.append(f"{o} 2")
                     else:
@@ -1452,7 +1461,7 @@ def generate_reaction_matrices(cfg: MatrixPlotConfig) -> None:
                     for _, row in fly_subset.sort_values("trial", key=lambda s: s.map(_trial_num)).iterrows():
                         disp = row["_odor_display"]
                         seen_odors[disp] = seen_odors.get(disp, 0) + 1
-                        if disp in duplicated_odors:
+                        if disp in trained_set:
                             col_label = f"{disp} {seen_odors[disp]}"
                         else:
                             col_label = disp

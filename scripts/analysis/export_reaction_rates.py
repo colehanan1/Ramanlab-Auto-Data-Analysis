@@ -100,8 +100,10 @@ def export_reaction_rates_from_matrix(
         during_frames = int(during_sec * fps)
         after_frames = int(after_window_sec * fps)
 
-        odor_on_frame = before_frames + latency_frames
-        odor_off_frame = odor_on_frame + during_frames
+        # Reaction window: start at odor-on command (30s), end at odor-off +
+        # latency (e.g. 62.15s). Baseline stays 0–30s.
+        odor_on_frame = before_frames
+        odor_off_frame = before_frames + during_frames + latency_frames
         after_end_frame = odor_off_frame + after_frames
 
         before_seg = env[:before_frames]

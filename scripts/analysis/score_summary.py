@@ -32,12 +32,17 @@ from scripts.analysis.envelope_visuals import (
     DISPLAY_LABEL,
     ODOR_ORDER,
     _canon_dataset,
+    _display_label_ci,
     _display_odor,
+    _extract_odor_from_label,
+    _is_light_only_label,
     _is_testing_11_label,
     _normalise_fly_columns,
     _trained_label,
     _trial_num,
     compute_non_reactive_flags,
+    get_protocol,
+    set_protocol,
     should_write,
 )
 
@@ -50,7 +55,7 @@ _RC_CONTEXT = {
     "font.sans-serif": ["Arial"],
 }
 
-TRAINING_CONTROL_PAIRS = {
+_STATIC_PAIRS = {
     "EB-Training": "EB-Control",
     "Hex-Training": "Hex-Control",
     "Hex-Training-24": "Hex-Control-24",
@@ -71,13 +76,35 @@ TRAINING_CONTROL_PAIRS = {
 }
 
 
+def _auto_pairs(datasets: list[str]) -> dict[str, str]:
+    pairs = dict(_STATIC_PAIRS)
+    pat = re.compile(r"^(.+)-Training(.*)$", re.IGNORECASE)
+    ds_set = set(datasets)
+    for ds in datasets:
+        if ds in pairs:
+            continue
+        m = pat.match(ds)
+        if m:
+            ctrl = f"{m.group(1)}-Control{m.group(2)}"
+            if ctrl in ds_set:
+                pairs[ds] = ctrl
+    return pairs
+
+TRAINING_CONTROL_PAIRS = dict(_STATIC_PAIRS)
+
+
 # ---------------------------------------------------------------------------
 # Data loading
 # ---------------------------------------------------------------------------
 
 
 def _normalise_trial_label(label: str) -> str:
-    m = re.match(r"(testing_\d+)", str(label))
+    """Keep odor suffix for v2: testing_3_benzaldehyde → testing_3_benzaldehyde."""
+    m = re.match(
+        r"((?:testing|training)_\d+(?:_(?!fly\d|distances)[A-Za-z0-9._-]+?)?)"
+        r"(?:_fly\d|_distances|$)",
+        str(label), re.IGNORECASE,
+    )
     return m.group(1) if m else str(label)
 
 
@@ -120,9 +147,41 @@ def _load_scores(
     df["trial"] = df["trial_label"].astype(str).apply(_normalise_trial_label)
     df["trial_num"] = df["trial"].apply(_trial_num)
 
-    # Drop testing_11
-    t11_mask = df["trial"].apply(_is_testing_11_label)
-    df = df.loc[~t11_mask].copy()
+    # Drop light-only trials (testing_11 legacy, testing_9 v2)
+    light_mask = df["trial"].apply(_is_light_only_label)
+    df = df.loc[~light_mask].copy()
+
+    # Add odor display name from trial label
+    df["odor_display"] = df.apply(
+        lambda r: _display_label_ci(_extract_odor_from_label(r["trial"])), axis=1
+    )
+
+    # For v2: build odor_col with "Name 1"/"Name 2" for trained odor only
+    if get_protocol() == "v2":
+        _odor_col_rows = []
+        for (ds, fly, fn), grp in df.groupby(["dataset_canon", "fly", "fly_number"]):
+            seen: dict[str, int] = {}
+            for idx, row in grp.sort_values("trial_num").iterrows():
+                od = row["odor_display"]
+                seen[od] = seen.get(od, 0) + 1
+                _odor_col_rows.append((idx, seen[od]))
+        occ_series = pd.Series(dict(_odor_col_rows), name="occurrence")
+        df = df.join(occ_series)
+        # Find which odors appear more than once per fly
+        max_occ = df.groupby(["dataset_canon", "odor_display"])["occurrence"].max()
+        dup_set = set(max_occ[max_occ > 1].reset_index()["odor_display"])
+        # Only number the trained odor; non-trained duplicates stay unnumbered
+        def _should_number(row):
+            if row["odor_display"] not in dup_set:
+                return False
+            trained = _trained_label(row["dataset_canon"])
+            return row["odor_display"].casefold() == trained.casefold()
+        df["odor_col"] = df.apply(
+            lambda r: f"{r['odor_display']} {int(r['occurrence'])}" if _should_number(r) else r["odor_display"],
+            axis=1,
+        )
+    else:
+        df["odor_col"] = df["odor_display"]
 
     # De-duplicate (same logic as reaction matrix)
     df = df.drop_duplicates(
@@ -138,14 +197,17 @@ def _load_scores(
 
 
 def _compute_summary(df: pd.DataFrame) -> pd.DataFrame:
-    """Group by (dataset_canon, trial_num) and compute mean/sem/n."""
+    """Group by (dataset_canon, odor_col) and compute mean/sem/n."""
+    group_key = "odor_col" if "odor_col" in df.columns and get_protocol() == "v2" else "trial_num"
     grouped = (
-        df.groupby(["dataset_canon", "trial_num"])["score"]
+        df.groupby(["dataset_canon", group_key])["score"]
         .agg(["mean", "sem", "count"])
         .rename(columns={"mean": "mean_score", "sem": "sem_score", "count": "n_flies"})
         .reset_index()
     )
     grouped["sem_score"] = grouped["sem_score"].fillna(0.0)
+    if group_key == "odor_col":
+        grouped = grouped.sort_values(["dataset_canon", "odor_col"], key=lambda s: s.str.casefold() if s.dtype == object else s)
     return grouped
 
 
@@ -186,15 +248,19 @@ def _compute_training_vs_control_summary(df: pd.DataFrame) -> pd.DataFrame:
         return _empty_train_control_summary()
 
     compare = df.copy()
-    compare["odor"] = [
-        _display_odor(dataset, trial)
-        for dataset, trial in zip(compare["dataset_canon"], compare["trial"])
-    ]
+    if get_protocol() == "v2" and "odor_col" in compare.columns:
+        compare["odor"] = compare["odor_col"]
+    else:
+        compare["odor"] = [
+            _display_odor(dataset, trial)
+            for dataset, trial in zip(compare["dataset_canon"], compare["trial"])
+        ]
 
     present = set(compare["dataset_canon"])
+    active_pairs = _auto_pairs(list(present))
     summaries: list[pd.DataFrame] = []
 
-    for train_ds, ctrl_ds in TRAINING_CONTROL_PAIRS.items():
+    for train_ds, ctrl_ds in active_pairs.items():
         if train_ds not in present or ctrl_ds not in present:
             continue
 
@@ -202,20 +268,22 @@ def _compute_training_vs_control_summary(df: pd.DataFrame) -> pd.DataFrame:
         if pair_df.empty:
             continue
 
+        group_key = "odor" if get_protocol() == "v2" else "trial_num"
+        group_cols = ["dataset_canon", group_key, "odor", "fly", "fly_number"] if group_key == "trial_num" else ["dataset_canon", "odor", "fly", "fly_number"]
         fly_level = (
-            pair_df.groupby(
-                ["dataset_canon", "trial_num", "odor", "fly", "fly_number"]
-            )["score"]
+            pair_df.groupby(group_cols)["score"]
             .mean()
             .rename("fly_mean_score")
             .reset_index()
         )
+        sample_group_cols = ["dataset_canon", "odor"] if get_protocol() == "v2" else ["dataset_canon", "trial_num"]
         fly_samples = {
-            (dataset, trial_num): group["fly_mean_score"].to_numpy(float)
-            for (dataset, trial_num), group in fly_level.groupby(["dataset_canon", "trial_num"])
+            tuple(key): group["fly_mean_score"].to_numpy(float)
+            for key, group in fly_level.groupby(sample_group_cols)
         }
+        stats_group = ["dataset_canon", "odor"] if get_protocol() == "v2" else ["dataset_canon", "trial_num", "odor"]
         score_stats = (
-            fly_level.groupby(["dataset_canon", "trial_num", "odor"])["fly_mean_score"]
+            fly_level.groupby(stats_group)["fly_mean_score"]
             .agg(["mean", "sem", "count"])
             .rename(
                 columns={
@@ -251,7 +319,8 @@ def _compute_training_vs_control_summary(df: pd.DataFrame) -> pd.DataFrame:
             )
         )
 
-        merged = pd.merge(train_scores, ctrl_scores, on=["trial_num", "odor"], how="outer")
+        merge_on = ["odor"] if get_protocol() == "v2" else ["trial_num", "odor"]
+        merged = pd.merge(train_scores, ctrl_scores, on=merge_on, how="outer")
 
         if merged.empty:
             continue
@@ -260,7 +329,7 @@ def _compute_training_vs_control_summary(df: pd.DataFrame) -> pd.DataFrame:
         merged["control_dataset"] = ctrl_ds
         merged["is_trained"] = (
             merged["odor"].astype(str).str.casefold()
-            == _trained_label(train_ds).casefold()
+            .str.startswith(_trained_label(train_ds).casefold())
         )
 
         for col in (
@@ -277,8 +346,12 @@ def _compute_training_vs_control_summary(df: pd.DataFrame) -> pd.DataFrame:
         p_values: list[float] = []
         significance: list[str] = []
         for row in merged.itertuples(index=False):
-            train_vals = fly_samples.get((train_ds, row.trial_num), np.array([], dtype=float))
-            ctrl_vals = fly_samples.get((ctrl_ds, row.trial_num), np.array([], dtype=float))
+            if get_protocol() == "v2":
+                train_vals = fly_samples.get((train_ds, row.odor), np.array([], dtype=float))
+                ctrl_vals = fly_samples.get((ctrl_ds, row.odor), np.array([], dtype=float))
+            else:
+                train_vals = fly_samples.get((train_ds, row.trial_num), np.array([], dtype=float))
+                ctrl_vals = fly_samples.get((ctrl_ds, row.trial_num), np.array([], dtype=float))
             if len(train_vals) == 0 or len(ctrl_vals) == 0:
                 p = np.nan
             else:
@@ -293,27 +366,21 @@ def _compute_training_vs_control_summary(df: pd.DataFrame) -> pd.DataFrame:
 
         merged["score_p_value"] = p_values
         merged["significance"] = significance
-        merged = merged.sort_values(["trial_num", "odor"]).reset_index(drop=True)
+        if get_protocol() == "v2":
+            merged = merged.sort_values("odor", key=lambda s: s.str.casefold()).reset_index(drop=True)
+        else:
+            merged = merged.sort_values(["trial_num", "odor"]).reset_index(drop=True)
 
-        summaries.append(
-            merged[
-                [
-                    "training_dataset",
-                    "control_dataset",
-                    "trial_num",
-                    "odor",
-                    "is_trained",
-                    "mean_score_train",
-                    "sem_score_train",
-                    "n_flies_train",
-                    "mean_score_ctrl",
-                    "sem_score_ctrl",
-                    "n_flies_ctrl",
-                    "score_p_value",
-                    "significance",
-                ]
-            ]
-        )
+        out_cols = ["training_dataset", "control_dataset"]
+        if "trial_num" in merged.columns:
+            out_cols.append("trial_num")
+        out_cols += [
+            "odor", "is_trained",
+            "mean_score_train", "sem_score_train", "n_flies_train",
+            "mean_score_ctrl", "sem_score_ctrl", "n_flies_ctrl",
+            "score_p_value", "significance",
+        ]
+        summaries.append(merged[[c for c in out_cols if c in merged.columns]])
 
     if not summaries:
         return _empty_train_control_summary()
@@ -335,7 +402,10 @@ def _plot_bar_charts(
     extras = sorted(o for o in present if o not in ODOR_ORDER)
 
     for odor in ordered + extras:
-        sub = summary[summary["dataset_canon"] == odor].sort_values("trial_num")
+        sort_col = "odor_col" if "odor_col" in summary.columns and get_protocol() == "v2" else "trial_num"
+        sub = summary[summary["dataset_canon"] == odor].sort_values(
+            sort_col, key=lambda s: s.str.casefold() if s.dtype == object else s
+        )
         if sub.empty:
             continue
 
@@ -347,23 +417,38 @@ def _plot_bar_charts(
         with plt.rc_context(_RC_CONTEXT):
             fig, ax = plt.subplots(figsize=(max(6, len(sub) * 0.7 + 2), 5))
             x = np.arange(len(sub))
+            # Color trained odor blue, non-trained gray
+            trained = _trained_label(odor)
+            if get_protocol() == "v2" and "odor_col" in sub.columns:
+                is_trained = sub["odor_col"].str.casefold().str.startswith(trained.casefold())
+            else:
+                is_trained = pd.Series([False] * len(sub), index=sub.index)
+            bar_colors = [
+                "#1a3a6b" if t else "#b0b0b0" for t in is_trained
+            ]
             bars = ax.bar(
                 x,
                 sub["mean_score"].values,
                 yerr=sub["sem_score"].values,
                 capsize=4,
-                color="#5B9BD5",
+                color=bar_colors,
                 edgecolor="white",
                 linewidth=0.5,
             )
             ax.set_xticks(x)
-            ax.set_xticklabels(
-                [f"T{int(t)}\n(n={int(n)})" for t, n in zip(sub["trial_num"], sub["n_flies"])],
-                fontsize=9,
-            )
+            if get_protocol() == "v2" and "odor_col" in sub.columns:
+                ax.set_xticklabels(
+                    [f"{o}\n(n={int(n)})" for o, n in zip(sub["odor_col"], sub["n_flies"])],
+                    fontsize=8, rotation=35, ha="right",
+                )
+            else:
+                ax.set_xticklabels(
+                    [f"T{int(t)}\n(n={int(n)})" for t, n in zip(sub["trial_num"], sub["n_flies"])],
+                    fontsize=9,
+                )
             ax.set_ylim(-1.5, 5.5)
             ax.set_ylabel("Mean Score")
-            ax.set_xlabel("Testing Trial")
+            ax.set_xlabel("Presented Odor" if get_protocol() == "v2" else "Testing Trial")
             ax.set_title(f"Mean Ordinal Score - {label}", fontsize=13, weight="bold")
             ax.axhline(y=0, color="gray", linewidth=0.5, linestyle="--")
             # Mark the reaction boundary
@@ -429,7 +514,8 @@ def _plot_training_vs_control_bars(
     if summary.empty:
         return
 
-    for train_ds in TRAINING_CONTROL_PAIRS:
+    all_train_ds = set(summary["training_dataset"].unique()) if not summary.empty else set()
+    for train_ds in all_train_ds:
         sub = summary[summary["training_dataset"] == train_ds].copy()
         if sub.empty:
             continue
@@ -439,7 +525,10 @@ def _plot_training_vs_control_bars(
         if not should_write(png_path, overwrite):
             continue
 
-        sub = sub.sort_values(["trial_num", "odor"]).reset_index(drop=True)
+        if "trial_num" in sub.columns:
+            sub = sub.sort_values(["trial_num", "odor"]).reset_index(drop=True)
+        else:
+            sub = sub.sort_values("odor", key=lambda s: s.str.casefold()).reset_index(drop=True)
         x = np.arange(len(sub))
         bar_w = 0.35
         train_vals = sub["mean_score_train"].fillna(0.0).to_numpy(float)
@@ -460,6 +549,11 @@ def _plot_training_vs_control_bars(
                 )
             )
 
+        train_color_trained = "#1a3a6b"   # dark blue (trained odor)
+        train_color_other = "#7bafd4"     # lighter blue (non-trained)
+        ctrl_color_trained = "#808080"    # dark gray (trained odor)
+        ctrl_color_other = "#c8c8c8"     # lighter gray (non-trained)
+
         with plt.rc_context(_RC_CONTEXT):
             fig, ax = plt.subplots(figsize=(max(7, len(sub) * 1.0 + 2), 5.5))
             ax.bar(
@@ -469,7 +563,7 @@ def _plot_training_vs_control_bars(
                 yerr=train_err,
                 capsize=4,
                 color=[
-                    "#1a3a6b" if bool(is_trained) else "#4a7fbf"
+                    train_color_trained if bool(is_trained) else train_color_other
                     for is_trained in sub["is_trained"]
                 ],
                 edgecolor="black",
@@ -482,7 +576,10 @@ def _plot_training_vs_control_bars(
                 width=bar_w,
                 yerr=ctrl_err,
                 capsize=4,
-                color="#b0b0b0",
+                color=[
+                    ctrl_color_trained if bool(is_trained) else ctrl_color_other
+                    for is_trained in sub["is_trained"]
+                ],
                 edgecolor="black",
                 linewidth=0.75,
                 label="Control",
@@ -500,7 +597,7 @@ def _plot_training_vs_control_bars(
             ax.set_xticklabels(labels, rotation=35, ha="right")
             for tick, is_trained in zip(ax.get_xticklabels(), sub["is_trained"]):
                 if bool(is_trained):
-                    tick.set_color("#1a3a6b")
+                    tick.set_color(train_color_trained)
                     tick.set_weight("bold")
 
             ax.set_ylabel("Mean Score")
@@ -538,9 +635,10 @@ def _plot_heatmap(
     if not should_write(png_path, overwrite):
         return
 
+    col_key = "odor_col" if "odor_col" in summary.columns and get_protocol() == "v2" else "trial_num"
     pivot = summary.pivot_table(
         index="dataset_canon",
-        columns="trial_num",
+        columns=col_key,
         values="mean_score",
         aggfunc="first",
     )
@@ -550,8 +648,11 @@ def _plot_heatmap(
     extras = sorted(o for o in pivot.index if o not in ODOR_ORDER)
     pivot = pivot.reindex(ordered + extras)
 
-    # Sort columns numerically
-    pivot = pivot.reindex(sorted(pivot.columns), axis=1)
+    # Sort columns
+    if col_key == "odor_col":
+        pivot = pivot.reindex(sorted(pivot.columns, key=str.casefold), axis=1)
+    else:
+        pivot = pivot.reindex(sorted(pivot.columns), axis=1)
 
     display_idx = [DISPLAY_LABEL.get(o, o) for o in pivot.index]
 
@@ -568,10 +669,13 @@ def _plot_heatmap(
             interpolation="nearest",
         )
         ax.set_xticks(range(len(pivot.columns)))
-        ax.set_xticklabels([f"T{int(c)}" for c in pivot.columns], fontsize=9)
+        if get_protocol() == "v2":
+            ax.set_xticklabels([str(c) for c in pivot.columns], fontsize=8, rotation=35, ha="right")
+        else:
+            ax.set_xticklabels([f"T{int(c)}" for c in pivot.columns], fontsize=9)
         ax.set_yticks(range(len(display_idx)))
         ax.set_yticklabels(display_idx, fontsize=9)
-        ax.set_xlabel("Testing Trial")
+        ax.set_xlabel("Presented Odor" if get_protocol() == "v2" else "Testing Trial")
         ax.set_title("Mean Ordinal Score by Dataset and Trial", fontsize=13, weight="bold")
 
         cbar = fig.colorbar(im, ax=ax, shrink=0.8)
@@ -657,11 +761,16 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         "--flagged-flies-csv", type=str, default="",
         help="Path to flagged-flies CSV for exclusion.",
     )
+    parser.add_argument(
+        "--protocol", type=str, default="v2", choices=["v2", "legacy"],
+        help="Protocol version (default: v2).",
+    )
     return parser.parse_args(argv)
 
 
 def main(argv: Sequence[str] | None = None) -> None:
     args = _parse_args(argv)
+    set_protocol(args.protocol)
     generate_score_summary(
         csv_path=args.csv_path,
         out_dir=args.out_dir,

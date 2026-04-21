@@ -1853,8 +1853,10 @@ def combine_distance_angle(cfg: CombineConfig) -> None:
     odor_latency = max(cfg.odor_latency_s, 0.0)
     odor_on_cmd = cfg.odor_on_s
     odor_off_cmd = cfg.odor_off_s
-    odor_on_effective = odor_on_cmd + odor_latency
-    odor_off_effective = odor_off_cmd + odor_latency
+    # PER-trace visualization uses commanded odor window (30-60 s). Latency
+    # offset is applied only to the model's reaction detection window.
+    odor_on_effective = odor_on_cmd
+    odor_off_effective = odor_off_cmd
     dataset_canon = _canon_dataset(cfg.root.name)
 
     for fly_dir in sorted(p for p in cfg.root.iterdir() if p.is_dir()):
@@ -3090,8 +3092,10 @@ def overlay_sources(
     odor_latency = max(odor_latency_s, 0.0)
     odor_on_cmd = odor_on_s
     odor_off_cmd = odor_off_s
-    odor_on_effective = odor_on_cmd + odor_latency
-    odor_off_effective = odor_off_cmd + odor_latency
+    # PER-trace visualization uses commanded odor window (30-60 s). Latency
+    # offset is reflected only in the linger tail + after-show range.
+    odor_on_effective = odor_on_cmd
+    odor_off_effective = odor_off_cmd
     linger = max(latency_sec, 0.0)
     x_max = odor_off_effective + linger + after_show_sec
 
