@@ -100,6 +100,9 @@ PRIMARY_ODOR_LABEL = {
     "Hex-Control-24-2": HEXANOL_LABEL,
     "Hex-Control-24-02": HEXANOL_LABEL,
     "Hex-Control-24-002": HEXANOL_LABEL,
+    "Hex-Control-24-0002": HEXANOL_LABEL,
+    "Hex-Control-24-0.005": HEXANOL_LABEL,
+    "Hex-Control-24-0.01": HEXANOL_LABEL,
     "Hex-Control-36": HEXANOL_LABEL,
     "Benz-Control": "Benzaldehyde",
     "Benz-Control-24-2": "Benzaldehyde",
@@ -422,9 +425,13 @@ def _display_odor(dataset_canon: str, trial_label: str) -> str:
             "Hex-Control-24-02",
             "Hex-Control-24-002",
             "Hex-Control-24-0002",
+            "Hex-Control-24-0.005",
+            "Hex-Control-24-0.01",
             "Hex-Control-36",
             "Hex-Training-24-002",
             "Hex-Training-24-0002",
+            "Hex-Training-24-0.005",
+            "Hex-Training-24-0.01",
         ):
             odor_name = TRAINING_ODOR_SCHEDULE_HEX.get(number)
             if odor_name:

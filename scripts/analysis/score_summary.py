@@ -64,6 +64,8 @@ _STATIC_PAIRS = {
     "Hex-Training-36": "Hex-Control-36",
     "Hex-Training-24-002": "Hex-Control-24-002",
     "Hex-Training-24-0002": "Hex-Control-24-0002",
+    "Hex-Training-24-0.005": "Hex-Control-24-0.005",
+    "Hex-Training-24-0.01": "Hex-Control-24-0.01",
     "Benz-Training": "Benz-Control",
     "Benz-Training-24": "Benz-Control",
     "Benz-Training-24-2": "Benz-Control-24-2",
