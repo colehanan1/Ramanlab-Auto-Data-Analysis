@@ -36,8 +36,14 @@ for path in (str(REPO_ROOT), str(SRC_ROOT)):
     if path not in sys.path:
         sys.path.insert(0, path)
 
-from fbpipe.config import load_raw_config
+from fbpipe.config import (
+    DatasetOverride,
+    Settings,
+    get_dataset_override,
+    load_raw_config,
+)
 from fbpipe.utils.columns import PROBOSCIS_DISTANCE_PCT_COL
+from fbpipe.utils.trial_metadata import TrialMetadata, load_trial_metadata
 
 
 # ---------------------------------------------------------------------------
@@ -58,6 +64,41 @@ AUC_COLUMNS = (
 BEFORE_FRAMES = 1260
 DURING_FRAMES = 1200
 AFTER_FRAMES = 1200
+
+
+# Pipeline-wide Settings holder so per-dataset overrides (and fps / odor
+# defaults) propagate without touching every helper signature.
+_RUNTIME_SETTINGS: Settings | None = None
+
+
+def set_runtime_settings(cfg: Settings | None) -> None:
+    """Stash a loaded ``Settings`` for downstream trial-metadata lookups."""
+
+    global _RUNTIME_SETTINGS
+    _RUNTIME_SETTINGS = cfg
+
+
+def _resolve_trial_meta_for_csv(csv_path: Path | str | None, n_frames_hint: int | None = None) -> TrialMetadata:
+    """Return ``TrialMetadata`` for the trial folder containing ``csv_path``."""
+
+    if csv_path is None:
+        raise ValueError("csv_path is required to resolve trial metadata")
+    path = Path(csv_path).resolve()
+    trial_dir = path.parent
+    cfg = _RUNTIME_SETTINGS
+    override: DatasetOverride | None = (
+        get_dataset_override(cfg, trial_dir) if cfg is not None else None
+    )
+    return load_trial_metadata(
+        trial_dir,
+        fps_default=float(cfg.fps_default) if cfg is not None else 40.0,
+        odor_on_s_default=float(cfg.odor_on_s) if cfg is not None else 30.0,
+        odor_off_s_default=float(cfg.odor_off_s) if cfg is not None else 60.0,
+        n_frames_fallback=n_frames_hint,
+        dataset_override=override,
+        known_datasets=tuple(cfg.datasets) if cfg is not None else (),
+        use_cache=True,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -88,10 +129,24 @@ def _effective_fps(value: float, *, fallback: float, default: float) -> float:
     return 0.0
 
 
-def _segment_bounds(total_len: int) -> tuple[int, int, int, int]:
-    before_end = max(0, min(BEFORE_FRAMES, total_len))
+def _segment_bounds(
+    total_len: int,
+    *,
+    odor_on_frame: int | None = None,
+    odor_off_frame: int | None = None,
+) -> tuple[int, int, int, int]:
+    """Return ``(before_end, during_start, during_end, after_end)`` clipped to ``total_len``.
+
+    When per-trial ``odor_on_frame`` / ``odor_off_frame`` are passed in (from
+    ``TrialMetadata``) they override the pipeline-wide defaults.
+    """
+
+    before_default = BEFORE_FRAMES
+    during_default_end = BEFORE_FRAMES + DURING_FRAMES
+    before_end = max(0, min(int(odor_on_frame if odor_on_frame is not None else before_default), total_len))
     during_start = before_end
-    during_end = max(during_start, min(during_start + DURING_FRAMES, total_len))
+    during_end_in = int(odor_off_frame) if odor_off_frame is not None else during_default_end
+    during_end = max(during_start, min(during_end_in, total_len))
     after_end = max(during_end, min(during_end + AFTER_FRAMES, total_len))
     return before_end, during_start, during_end, after_end
 
@@ -117,9 +172,15 @@ def _compute_trial_metrics(
     default_fps: float,
     fly_before_median: float,
     use_per_trial_baseline: bool = False,
+    odor_on_frame: int | None = None,
+    odor_off_frame: int | None = None,
 ) -> dict[str, float]:
     total_len = env.size
-    before_end, during_start, during_end, after_end = _segment_bounds(total_len)
+    before_end, during_start, during_end, after_end = _segment_bounds(
+        total_len,
+        odor_on_frame=odor_on_frame,
+        odor_off_frame=odor_off_frame,
+    )
 
     before = env[:before_end]
     during = env[during_start:during_end]
@@ -565,11 +626,23 @@ def collect_envelopes(cfg: CollectConfig) -> None:
                 "trial_label": item["trial_label"],
                 "fps": fps,
                 "env": env,
+                "csv_path": item.get("csv_path"),
             }
         )
 
+        # Per-trial odor-on frame so the baseline pool stays inside the
+        # actual before-window for short trials. Falls back to BEFORE_FRAMES.
+        try:
+            _meta_pre = _resolve_trial_meta_for_csv(item["csv_path"], n_frames_hint=int(env.size))
+            _baseline_end = (
+                int(_meta_pre.odor_on_frame)
+                if _meta_pre.odor_on_frame is not None
+                else BEFORE_FRAMES
+            )
+        except Exception:
+            _baseline_end = BEFORE_FRAMES
         if item["trial_type"].lower() == "testing":
-            before_len = min(BEFORE_FRAMES, env.size)
+            before_len = min(_baseline_end, env.size)
             if before_len > 0:
                 before_segment = env[:before_len]
                 finite_mask = np.isfinite(before_segment)
@@ -590,6 +663,10 @@ def collect_envelopes(cfg: CollectConfig) -> None:
     records: List[dict] = []
     for row in trial_rows:
         env = row["env"]
+        try:
+            _meta = _resolve_trial_meta_for_csv(row.get("csv_path"), n_frames_hint=int(env.size)) if row.get("csv_path") else None
+        except Exception:
+            _meta = None
         metrics = _compute_trial_metrics(
             env,
             row["fps"],
@@ -597,6 +674,8 @@ def collect_envelopes(cfg: CollectConfig) -> None:
             default_fps=cfg.fps_default,
             fly_before_median=fly_before_medians.get(row["fly"], float("nan")),
             use_per_trial_baseline=cfg.use_per_trial_baseline,
+            odor_on_frame=(_meta.odor_on_frame if _meta is not None else None),
+            odor_off_frame=(_meta.odor_off_frame if _meta is not None else None),
         )
 
         padded = np.full(max_len, np.nan, dtype=float)

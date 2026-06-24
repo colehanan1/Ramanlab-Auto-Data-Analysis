@@ -343,6 +343,10 @@ def test_build_wide_csv_exports_training_subset(tmp_path):
     assert set(training_df["trial_type"].str.lower()) == {"training"}
     assert len(wide_df) == 1
     assert len(training_df) == 1
+    # Per-trial light-on column must be present in the schema (NaN when no
+    # sensors_output_*.csv exists for the fixture, populated otherwise).
+    assert "trial_light_on_s" in wide_df.columns
+    assert "trial_light_on_s" in training_df.columns
 
 
 def test_build_wide_csv_accepts_renamed_combined_pct_column(tmp_path):
@@ -545,6 +549,68 @@ def test_generate_envelope_plots_filters_to_requested_fly(tmp_path):
     assert not other_png.exists()
 
 
+def test_training_light_line_uses_measured_trial_light_on_s(tmp_path, monkeypatch):
+    """The green light line is drawn at the measured trial_light_on_s, not the
+    hardcoded per-trial schedule."""
+    import matplotlib.axes
+
+    wide_csv = tmp_path / "wide_training.csv"
+    pd.DataFrame(
+        {
+            "dataset": ["Hex-Training"],
+            "fly": ["october_10_batch_1"],
+            "fly_number": ["1"],
+            "trial_type": ["training"],
+            "trial_label": ["training_1"],  # schedule would hardcode 35.0s
+            "fps": [40.0],
+            "global_min": [1.0],
+            "global_max": [20.0],
+            "trimmed_global_min": [1.0],
+            "trimmed_global_max": [20.0],
+            "trace_len": [4],
+            "trial_odor_on_s": [30.0],
+            "trial_odor_off_s": [60.0],
+            "trial_duration_s": [90.0],
+            "trial_light_on_s": [42.0],  # measured; must win over 35.0
+            "dir_val_0": [0.0],
+            "dir_val_1": [8.0],
+            "dir_val_2": [16.0],
+            "dir_val_3": [4.0],
+        }
+    ).to_csv(wide_csv, index=False)
+
+    matrix_dir = tmp_path / "matrix"
+    ec.wide_to_matrix(str(wide_csv), str(matrix_dir))
+
+    green_lines: list[float] = []
+    real_axvline = matplotlib.axes.Axes.axvline
+
+    def _spy_axvline(self, x=0, *args, **kwargs):
+        color = kwargs.get("color")
+        ls = kwargs.get("linestyle", kwargs.get("ls"))
+        if color == "tab:green" and ls == "-.":
+            green_lines.append(float(x))
+        return real_axvline(self, x, *args, **kwargs)
+
+    monkeypatch.setattr(matplotlib.axes.Axes, "axvline", _spy_axvline)
+
+    cfg = ev.EnvelopePlotConfig(
+        matrix_npy=matrix_dir / "envelope_matrix_float16.npy",
+        codes_json=matrix_dir / "code_maps.json",
+        out_dir=tmp_path / "plots",
+        latency_sec=0.0,
+        odor_latency_s=0.0,
+        trial_type="training",
+        overwrite=True,
+        light_annotation_mode="line",
+    )
+    ev.generate_envelope_plots(cfg)
+
+    assert green_lines, "no green dash-dot light line was drawn"
+    assert any(abs(x - 42.0) < 1e-6 for x in green_lines)
+    assert all(abs(x - 35.0) > 1e-6 for x in green_lines)
+
+
 def test_select_trial_rows_prefers_distance_label_alias():
     """Duplicate raw aliases should collapse to the canonical distance-labelled trial row."""
 
@@ -676,6 +742,84 @@ def test_run_combined_creates_training_matrix(tmp_path):
     assert matrix_path.exists()
     matrix = np.load(matrix_path)
     assert matrix.shape[0] == 1
+
+
+def test_run_combined_processes_distance_base(tmp_path, monkeypatch):
+    """A ``distance_base`` block must export the raw distance_percentage column
+    (NOT the angle-weighted combined_pct) through wide -> matrix -> envelopes."""
+
+    dataset_root = tmp_path / "hex_control"
+    csv_dir = dataset_root / "october_01_fly1" / "angle_distance_rms_envelope"
+    csv_dir.mkdir(parents=True, exist_ok=True)
+
+    n = 4000
+    # Make distance and combined occupy disjoint ranges so we can prove which
+    # column ended up in the matrix.
+    distance = np.linspace(0.0, 50.0, n, dtype=float)
+    combined = np.linspace(50.0, 100.0, n, dtype=float)
+    stem = "october_01_fly1_testing_1_angle_distance_rms_envelope"
+    pd.DataFrame(
+        {
+            "distance_percentage": distance,
+            "combined_pct": combined,
+            "envelope_of_rms": combined,
+        }
+    ).to_csv(csv_dir / f"{stem}.csv", index=False)
+
+    wide_csv = tmp_path / "wide_distance.csv"
+    matrix_dir = tmp_path / "distance_matrix"
+    out_dir = tmp_path / "Raw-Testing-PER-Traces-Distance"
+
+    captured: list = []
+    monkeypatch.setattr(rw, "generate_envelope_plots", lambda cfg: captured.append(cfg))
+
+    rw._run_combined(
+        {
+            "distance_base": {
+                "wide": {
+                    "roots": [str(dataset_root)],
+                    "output_csv": str(wide_csv),
+                    "measure_cols": ["distance_percentage"],
+                },
+                "matrix": {
+                    "input_csv": str(wide_csv),
+                    "out_dir": str(matrix_dir),
+                },
+                "envelopes": [
+                    {
+                        "matrix_npy": str(matrix_dir / "envelope_matrix_float16.npy"),
+                        "codes_json": str(matrix_dir / "code_maps.json"),
+                        "out_dir": str(out_dir),
+                        "latency_sec": 0.0,
+                        "trial_type": "testing",
+                        "y_label_override": "Distance %",
+                    }
+                ],
+            }
+        },
+        settings=None,
+    )
+
+    matrix_path = matrix_dir / "envelope_matrix_float16.npy"
+    assert matrix_path.exists(), "distance_base.matrix should be materialised"
+    matrix = np.load(matrix_path)
+    assert matrix.shape[0] == 1
+
+    # Read the trace samples the way the plotting code does (dir_val_* columns
+    # only, excluding metadata such as the frame count). distance_percentage
+    # tops out at 50; the angle-weighted combined_pct would reach ~100, so this
+    # proves the un-angle-weighted column was exported.
+    df, env_cols = ev._load_matrix(matrix_path, matrix_dir / "code_maps.json")
+    signal = df[env_cols].to_numpy(dtype=float)
+    signal = signal[np.isfinite(signal)]
+    assert signal.size > 0
+    assert np.nanmax(signal) <= 60.0, (
+        "distance_base must export distance_percentage (<=50), not combined_pct"
+    )
+
+    assert len(captured) == 1, "the distance_base envelope block should render once"
+    assert str(captured[0].out_dir) == str(out_dir)
+    assert captured[0].y_label_override == "Distance %"
 
 
 def test_auto_sync_wide_roots_copies_training_outputs(tmp_path):

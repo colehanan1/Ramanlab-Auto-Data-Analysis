@@ -55,6 +55,30 @@ _PROBOSCIS_Y_ALIASES = (
     "class6_y",
 )
 
+_EYE_X_ALIASES = (
+    f"x_class{EYE_CLASS}",
+    f"x_class_{EYE_CLASS}",
+    f"class{EYE_CLASS}_x",
+    "x_eye",
+    "eye_x",
+    # legacy
+    f"x_class{LEGACY_EYE_CLASS}",
+    f"x_class_{LEGACY_EYE_CLASS}",
+    f"class{LEGACY_EYE_CLASS}_x",
+)
+
+_EYE_Y_ALIASES = (
+    f"y_class{EYE_CLASS}",
+    f"y_class_{EYE_CLASS}",
+    f"class{EYE_CLASS}_y",
+    "y_eye",
+    "eye_y",
+    # legacy
+    f"y_class{LEGACY_EYE_CLASS}",
+    f"y_class_{LEGACY_EYE_CLASS}",
+    f"class{LEGACY_EYE_CLASS}_y",
+)
+
 _PROBOSCIS_DISTANCE_ALIASES = (
     PROBOSCIS_DISTANCE_COL,
     f"distance_class{EYE_CLASS}_class{PROBOSCIS_CLASS}",
@@ -124,6 +148,10 @@ def find_proboscis_xy_columns(df: pd.DataFrame) -> Tuple[Optional[str], Optional
     return _resolve_column(df, _PROBOSCIS_X_ALIASES), _resolve_column(df, _PROBOSCIS_Y_ALIASES)
 
 
+def find_eye_xy_columns(df: pd.DataFrame) -> Tuple[Optional[str], Optional[str]]:
+    return _resolve_column(df, _EYE_X_ALIASES), _resolve_column(df, _EYE_Y_ALIASES)
+
+
 def find_proboscis_distance_column(df: pd.DataFrame) -> Optional[str]:
     return _resolve_column(df, _PROBOSCIS_DISTANCE_ALIASES)
 
@@ -161,6 +189,7 @@ __all__ = [
     "PROBOSCIS_MIN_DISTANCE_COL",
     "PROBOSCIS_MAX_DISTANCE_COL",
     "find_proboscis_xy_columns",
+    "find_eye_xy_columns",
     "find_proboscis_distance_column",
     "find_proboscis_distance_percentage_column",
     "find_proboscis_min_distance_column",

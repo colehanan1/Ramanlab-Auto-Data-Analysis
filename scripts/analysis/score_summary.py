@@ -40,6 +40,7 @@ from scripts.analysis.envelope_visuals import (
     _normalise_fly_columns,
     _trained_label,
     _trial_num,
+    apply_dataset_odor_remap,
     compute_non_reactive_flags,
     get_protocol,
     set_protocol,
@@ -153,12 +154,32 @@ def _load_scores(
     light_mask = df["trial"].apply(_is_light_only_label)
     df = df.loc[~light_mask].copy()
 
-    # Add odor display name from trial label
+    # Also drop trials where the rig recording filename had a non-parseable
+    # odor token (e.g. RandomPanel's training_15 / training_16 light-only
+    # trials carry no odor suffix because the rig name has underscores). For
+    # these the extracted "odor" is the trial label itself.
+    def _has_no_odor_suffix(trial: str) -> bool:
+        return _extract_odor_from_label(trial) == str(trial)
+
+    no_odor_mask = df["trial"].apply(_has_no_odor_suffix)
+    df = df.loc[~no_odor_mask].copy()
+
+    # Add odor display name from trial label, then apply any per-dataset
+    # remap (e.g. Hex-Control-24-0.1 swaps Citral -> "Sour Dough Yeast (25%)").
     df["odor_display"] = df.apply(
-        lambda r: _display_label_ci(_extract_odor_from_label(r["trial"])), axis=1
+        lambda r: apply_dataset_odor_remap(
+            r["dataset_canon"],
+            _display_label_ci(_extract_odor_from_label(r["trial"])),
+        ),
+        axis=1,
     )
 
-    # For v2: build odor_col with "Name 1"/"Name 2" for trained odor only
+    # For v2: build odor_col with "Name 1"/"Name 2" suffixes.
+    #
+    # Default behaviour numbers ONLY the trained odor (it's presented twice
+    # per fly in classic Hex/EB/etc. testing). For panels where every odor
+    # is presented twice (e.g. RandomPanel), we instead number ALL repeated
+    # odors so the bar plot shows exposure 1 vs exposure 2 side-by-side.
     if get_protocol() == "v2":
         _odor_col_rows = []
         for (ds, fly, fn), grp in df.groupby(["dataset_canon", "fly", "fly_number"]):
@@ -169,15 +190,29 @@ def _load_scores(
                 _odor_col_rows.append((idx, seen[od]))
         occ_series = pd.Series(dict(_odor_col_rows), name="occurrence")
         df = df.join(occ_series)
-        # Find which odors appear more than once per fly
+
+        # Per dataset: which odors are duplicated within any fly?
         max_occ = df.groupby(["dataset_canon", "odor_display"])["occurrence"].max()
-        dup_set = set(max_occ[max_occ > 1].reset_index()["odor_display"])
-        # Only number the trained odor; non-trained duplicates stay unnumbered
+        dup_per_ds: dict[str, set[str]] = {}
+        for (ds_canon, odor), val in max_occ.items():
+            if val > 1:
+                dup_per_ds.setdefault(ds_canon, set()).add(odor)
+
+        # "Panel" datasets are ones where more than one odor is duplicated.
+        # For these we number all duplicates. For single-trained-odor
+        # datasets, we only number the trained odor (legacy behaviour).
+        panel_datasets = {ds for ds, odors in dup_per_ds.items() if len(odors) > 1}
+
         def _should_number(row):
-            if row["odor_display"] not in dup_set:
+            ds_canon = row["dataset_canon"]
+            od = row["odor_display"]
+            if od not in dup_per_ds.get(ds_canon, set()):
                 return False
-            trained = _trained_label(row["dataset_canon"])
-            return row["odor_display"].casefold() == trained.casefold()
+            if ds_canon in panel_datasets:
+                return True
+            trained = _trained_label(ds_canon)
+            return od.casefold() == trained.casefold()
+
         df["odor_col"] = df.apply(
             lambda r: f"{r['odor_display']} {int(r['occurrence'])}" if _should_number(r) else r["odor_display"],
             axis=1,
@@ -767,12 +802,35 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         "--protocol", type=str, default="v2", choices=["v2", "legacy"],
         help="Protocol version (default: v2).",
     )
+    parser.add_argument(
+        "--config", type=str, default="",
+        help="Pipeline config YAML; used to load dataset_overrides.odor_remap.",
+    )
     return parser.parse_args(argv)
 
 
 def main(argv: Sequence[str] | None = None) -> None:
     args = _parse_args(argv)
     set_protocol(args.protocol)
+    try:
+        from fbpipe.figure_export import maybe_install_from_env
+        maybe_install_from_env()
+    except Exception:  # noqa: BLE001 — sidecar is optional
+        pass
+    if args.config:
+        try:
+            from fbpipe.config import load_settings
+            from scripts.analysis.envelope_visuals import set_dataset_odor_remap
+            settings = load_settings(args.config)
+            remap = {
+                str(ds): dict(ov.odor_remap)
+                for ds, ov in settings.dataset_overrides.items()
+                if getattr(ov, "odor_remap", None)
+            }
+            if remap:
+                set_dataset_odor_remap(remap)
+        except Exception as exc:  # noqa: BLE001 — defensive
+            print(f"[WARN] Failed to load odor_remap from {args.config}: {exc}")
     generate_score_summary(
         csv_path=args.csv_path,
         out_dir=args.out_dir,

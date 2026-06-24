@@ -321,6 +321,19 @@ def _display_odor(dataset_canon: str, trial_label: str) -> str:
     number = _trial_num(trial_label)
     label_lower = str(trial_label).lower()
 
+    # If the trial label already carries an odor token (e.g. "training_5_Citral"
+    # built from _build_odor_map / sidecar cycle name), trust it — this is the
+    # authoritative per-trial odor recorded by the rig and is correct for
+    # randomised-odor datasets like RandomPanel.
+    label_match = re.match(
+        r"^(?:training|testing)_\d+_(?P<odor>[A-Za-z0-9][A-Za-z0-9 .()_-]*)$",
+        str(trial_label).strip(),
+    )
+    if label_match:
+        odor_token = label_match.group("odor").strip()
+        if odor_token:
+            return odor_token
+
     if "training" in label_lower:
         odor_name = _training_odor(dataset_key, number)
         if odor_name:

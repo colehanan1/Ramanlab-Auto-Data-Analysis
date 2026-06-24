@@ -21,6 +21,10 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+from matplotlib.ticker import MultipleLocator
+
+# Time-axis tick spacing (seconds) for PER-over-time trace panels.
+PER_TIME_TICK_STEP_S = 15.0
 
 # ── Paths ─────────────────────────────────────────────────────────────────
 ALL_CSV = Path(
@@ -121,6 +125,16 @@ def _light_start(trial_num: int) -> float | None:
     return None
 
 
+def _mean_light_start(
+    trial_num: int, light_by_trial: dict[int, list[float]]
+) -> float | None:
+    """Mean measured first-light-on across flies; fall back to the schedule."""
+    vals = [v for v in light_by_trial.get(trial_num, []) if np.isfinite(v) and v > 0]
+    if vals:
+        return float(np.mean(vals))
+    return _light_start(trial_num)
+
+
 def _load_flagged() -> set[tuple[str, str, int]]:
     """Return {(dataset, fly, fly_number)} for state < 1."""
     df = pd.read_csv(FLAGGED_CSV)
@@ -136,8 +150,15 @@ def load_group(csv_path: Path, datasets: set[str],
                date_filter: str | None = None,
                after_day: tuple[int, int] | None = None,
                trial_nums: list[int] | None = None,
-               ) -> dict[str, dict[int, list[np.ndarray]]]:
+               ) -> tuple[
+                   dict[str, dict[int, list[np.ndarray]]],
+                   dict[str, dict[int, list[float]]],
+               ]:
     """Load traces grouped by rig and trial number.
+
+    Returns ``(traces, light_on_s)`` where ``light_on_s`` mirrors the trace
+    structure but holds each fly's first-light-on time (s) from the
+    ``trial_light_on_s`` column, for drawing the averaged green light line.
 
     date_filter: "before_jan" to only keep months before January
     after_day: (month_num, day) exclusive lower bound
@@ -199,6 +220,11 @@ def load_group(csv_path: Path, datasets: set[str],
         "rig_1": {t: [] for t in trial_set},
         "rig_2": {t: [] for t in trial_set},
     }
+    light_result: dict[str, dict[int, list[float]]] = {
+        "rig_1": {t: [] for t in trial_set},
+        "rig_2": {t: [] for t in trial_set},
+    }
+    has_light_col = "trial_light_on_s" in df.columns
 
     for _, row in df.iterrows():
         rig = row["_rig"]
@@ -214,13 +240,18 @@ def load_group(csv_path: Path, datasets: set[str],
             continue
         result[rig][tnum].append(vals)
 
+        if has_light_col:
+            light_val = pd.to_numeric(row["trial_light_on_s"], errors="coerce")
+            if np.isfinite(light_val) and light_val > 0:
+                light_result[rig][tnum].append(float(light_val))
+
     for rig in result:
         total = sum(len(result[rig][t]) for t in result[rig])
         if total > 0:
             for t in sorted(result[rig]):
                 print(f"    {rig} trial {t}: {len(result[rig][t])} traces")
 
-    return result
+    return result, light_result
 
 
 def _resample(traces: list[np.ndarray], fps: float,
@@ -237,7 +268,9 @@ def _resample(traces: list[np.ndarray], fps: float,
 
 def plot_group(group_name: str, rig: str,
                trials: dict[int, list[np.ndarray]],
-               trial_nums: list[int]) -> None:
+               trial_nums: list[int],
+               light_by_trial: dict[int, list[float]] | None = None) -> None:
+    light_by_trial = light_by_trial or {}
     if all(len(trials.get(t, [])) == 0 for t in trial_nums):
         print(f"  [{group_name}] No data for {rig}, skipping.")
         return
@@ -266,7 +299,7 @@ def plot_group(group_name: str, rig: str,
         ax = axes[i]
         trace_list = trials.get(tnum, [])
         trial_off_eff = _trial_odor_off(tnum)
-        light_s = _light_start(tnum)
+        light_s = _mean_light_start(tnum, light_by_trial)
 
         if len(trace_list) == 0:
             ax.text(0.5, 0.5, "No data", transform=ax.transAxes,
@@ -292,6 +325,7 @@ def plot_group(group_name: str, rig: str,
 
         ax.set_ylim(0, FIXED_Y_MAX)
         ax.set_xlim(0, x_max)
+        ax.xaxis.set_major_locator(MultipleLocator(PER_TIME_TICK_STEP_S))
         ax.margins(x=0, y=0.02)
 
         n_flies = matrix.shape[0]
@@ -339,7 +373,7 @@ def main() -> None:
     print("\n" + "=" * 60)
     print("Group: New Flys (Hex-Training-24-0.005 + EB-Training-24-0.1)")
     print("=" * 60)
-    new_data = load_group(
+    new_data, new_light = load_group(
         NEW_CSV,
         NEW_DATASETS,
         flagged=set(),           # no flagged filtering for new
@@ -347,13 +381,14 @@ def main() -> None:
         trial_nums=NEW_TRIALS,
     )
     for rig in ("rig_1", "rig_2"):
-        plot_group("New Flys", rig, new_data[rig], NEW_TRIALS)
+        plot_group("New Flys", rig, new_data[rig], NEW_TRIALS,
+                   light_by_trial=new_light[rig])
 
     # ── Old Flys ──────────────────────────────────────────────────────────
     print("\n" + "=" * 60)
     print("Group: Old Flys (Hex/Benz/3OCT/ACV/AIR/EB-Training)")
     print("=" * 60)
-    old_data = load_group(
+    old_data, old_light = load_group(
         ALL_CSV,
         OLD_DATASETS,
         flagged=flagged,
@@ -361,7 +396,8 @@ def main() -> None:
         trial_nums=OLD_TRIALS,
     )
     for rig in ("rig_1", "rig_2"):
-        plot_group("Old Flys", rig, old_data[rig], OLD_TRIALS)
+        plot_group("Old Flys", rig, old_data[rig], OLD_TRIALS,
+                   light_by_trial=old_light[rig])
 
 
 if __name__ == "__main__":

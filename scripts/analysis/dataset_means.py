@@ -72,13 +72,13 @@ FIGWIDTH = 8
 MAX_TIME_S = 90.0  # Only plot t=0 to t=90s
 ODOR_COLOURS = {
     "Hexanol": "#2ca02c",
-    "Benzaldehyde": "#1f77b4",
     "Apple Cider Vinegar": "#ff7f0e",
-    "3-Octonol": "#d62728",
-    "Ethyl Butyrate": "#9467bd",
-    "Ethyl Butyrate (6-Training)": "#9467bd",
-    "Citral": "#8c564b",
-    "Linalool": "#e377c2",
+    "Benzaldehyde": "#333333",
+    "Citral": "#d62728",
+    "Ethyl Butyrate": "#1f77b4",
+    "Ethyl Butyrate (6-Training)": "#1f77b4",
+    "Linalool": "#9467bd",
+    "3-Octonol": "#8c564b",
     "AIR": "#7f7f7f",
 }
 FALLBACK_ODOR_COLOURS = (
@@ -672,6 +672,11 @@ def _read_timing(args: argparse.Namespace) -> tuple[float, float, float]:
 def main(argv: Optional[Sequence[str]] = None) -> None:
     args = build_parser(argv)
     _configure_logging(args.verbose)
+    try:
+        from fbpipe.figure_export import maybe_install_from_env
+        maybe_install_from_env()
+    except Exception:  # noqa: BLE001 — sidecar is optional
+        pass
     _, cfg_data = _load_config_data(args.config)
 
     # Load the wide CSV

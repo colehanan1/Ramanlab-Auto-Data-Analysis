@@ -30,6 +30,10 @@ for _p in (str(_REPO / "src"), str(_REPO)):
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+from matplotlib.ticker import MultipleLocator
+
+# Time-axis tick spacing (seconds) for PER-over-time trace panels.
+PER_TIME_TICK_STEP_S = 15.0
 
 from fbpipe.odor_constants import (
     DISPLAY_LABEL,
@@ -57,7 +61,10 @@ OUT_DIR = Path(
 # ── fly colours ────────────────────────────────────────────────────────────
 FLY_COLORS = {1: "red", 2: "blue", 3: "green"}
 
-# ── odor timing (seconds) — matches pipeline defaults ─────────────────────
+# ── odor timing defaults (fall-through for legacy 30/30/30 training) ──────
+# These are the DEFAULTS used when no dataset-specific entry matches.
+# Per-dataset overrides live in DATASET_TIMING below — that's how shorter
+# protocols (random panel, light sweep, etc.) declare their own window.
 ODOR_ON_S = 30.0
 ODOR_OFF_S = 60.0
 ODOR_LATENCY_S = 0.0
@@ -65,7 +72,7 @@ LATENCY_SEC = 0.0
 AFTER_SHOW_SEC = 30.0
 THRESHOLD_STD_MULT = 3.0
 
-# ── training-specific timing ──────────────────────────────────────────────
+# ── training-specific timing (legacy 8-trial classical conditioning) ──────
 TRAINING_EXTENDED_ODOR_TRIALS = frozenset({4, 6, 8})
 TRAINING_EXTENDED_ODOR_OFF_S = 65.0
 TRAINING_DISCRIMINATE_ODOR_TRIALS = frozenset({5, 7})
@@ -73,6 +80,48 @@ LIGHT_START_EARLY_TRIALS = frozenset({1, 2, 3})
 LIGHT_START_LATE_TRIALS = frozenset({4, 6, 8})
 LIGHT_START_EARLY_S = 35.0
 LIGHT_START_LATE_S = 40.0
+
+# ── per-dataset timing overrides ──────────────────────────────────────────
+# Patterns are checked in order with `startswith` — first match wins. The
+# trailing "" entry is the universal fallback that preserves the legacy
+# 8-trial training defaults. Add new protocols by appending a dict here
+# rather than editing the hard-coded constants above.
+DATASET_TIMING: list[tuple[str, dict]] = [
+    ("RandomPanel", {
+        "odor_on_s": 15.0,        # baseline ends here
+        "odor_off_s": 25.0,       # odor off (10 s odor pulse)
+        "after_show_s": 15.0,     # post-odor recording
+        "extended_odor_off_s": 25.0,   # no extended trials
+        "extended_odor_trials": frozenset(),
+        "discriminate_trials": frozenset(),
+        "light_early_trials": frozenset(),
+        "light_late_trials": frozenset(),
+        "light_early_s": None,
+        "light_late_s": None,
+    }),
+    # Legacy 8-trial training default (Hex / EB / ACV / etc.)
+    ("", {
+        "odor_on_s": ODOR_ON_S,
+        "odor_off_s": ODOR_OFF_S,
+        "after_show_s": AFTER_SHOW_SEC,
+        "extended_odor_off_s": TRAINING_EXTENDED_ODOR_OFF_S,
+        "extended_odor_trials": TRAINING_EXTENDED_ODOR_TRIALS,
+        "discriminate_trials": TRAINING_DISCRIMINATE_ODOR_TRIALS,
+        "light_early_trials": LIGHT_START_EARLY_TRIALS,
+        "light_late_trials": LIGHT_START_LATE_TRIALS,
+        "light_early_s": LIGHT_START_EARLY_S,
+        "light_late_s": LIGHT_START_LATE_S,
+    }),
+]
+
+
+def _dataset_timing(dataset: str) -> dict:
+    """Look up timing for a dataset by name prefix. Falls back to legacy training."""
+    base = _strip_flagged(dataset)
+    for pattern, timing in DATASET_TIMING:
+        if pattern == "" or base.startswith(pattern):
+            return timing
+    return DATASET_TIMING[-1][1]
 
 # ── shading constants (from envelope_visuals.py) ──────────────────────────
 ODOR_PLUS_LIGHT_COLOR = "#9e9e9e"
@@ -183,23 +232,23 @@ def _is_trained_odor(dataset: str, odor_name: str) -> bool:
     return str(odor_name).strip().lower() == str(trained).strip().lower()
 
 
-def _trial_odor_off(trial_label: str) -> float:
+def _trial_odor_off(trial_label: str, timing: dict) -> float:
     number = _trial_num(trial_label)
-    if number in TRAINING_EXTENDED_ODOR_TRIALS:
-        return TRAINING_EXTENDED_ODOR_OFF_S
-    return ODOR_OFF_S
+    if number in timing["extended_odor_trials"]:
+        return float(timing["extended_odor_off_s"])
+    return float(timing["odor_off_s"])
 
 
-def _is_discriminate(trial_label: str) -> bool:
-    return _trial_num(trial_label) in TRAINING_DISCRIMINATE_ODOR_TRIALS
+def _is_discriminate(trial_label: str, timing: dict) -> bool:
+    return _trial_num(trial_label) in timing["discriminate_trials"]
 
 
-def _light_start(trial_label: str) -> float | None:
+def _light_start(trial_label: str, timing: dict) -> float | None:
     number = _trial_num(trial_label)
-    if number in LIGHT_START_EARLY_TRIALS:
-        return LIGHT_START_EARLY_S
-    if number in LIGHT_START_LATE_TRIALS:
-        return LIGHT_START_LATE_S
+    if number in timing["light_early_trials"]:
+        return float(timing["light_early_s"]) if timing["light_early_s"] is not None else None
+    if number in timing["light_late_trials"]:
+        return float(timing["light_late_s"]) if timing["light_late_s"] is not None else None
     return None
 
 
@@ -259,8 +308,13 @@ def _extract_env(row_vals: np.ndarray, trace_len: object = None) -> np.ndarray:
     return env
 
 
-def _compute_theta(env: np.ndarray, fps: float) -> float:
-    n_before = int(round(ODOR_ON_S * fps))
+def _compute_theta(env: np.ndarray, fps: float, pre_sec: float) -> float:
+    """Threshold = median + k·MAD computed over the pre-odor baseline.
+
+    pre_sec is the dataset-specific pre-odor recording length (e.g. 30 s
+    for legacy training, 15 s for random panel).
+    """
+    n_before = int(round(pre_sec * fps))
     before = env[:n_before]
     before = before[np.isfinite(before)]
     if before.size < 3:
@@ -295,11 +349,14 @@ def plot_folder(
 
     fly_numbers = sorted(folder_df["fly_number"].unique())
 
-    # Use the longest possible x range (extended odor off + after)
-    max_off = max(ODOR_OFF_S, TRAINING_EXTENDED_ODOR_OFF_S)
+    timing = _dataset_timing(dataset)
+    pre_sec = float(timing["odor_on_s"])
+
+    # x-axis upper bound = longest odor-off in this dataset + latency + post-window.
+    max_off = max(float(timing["odor_off_s"]), float(timing["extended_odor_off_s"]))
     odor_latency = max(ODOR_LATENCY_S, 0.0)
     linger = max(LATENCY_SEC, 0.0)
-    x_max_limit = max_off + odor_latency + linger + AFTER_SHOW_SEC
+    x_max_limit = max_off + odor_latency + linger + float(timing["after_show_s"])
 
     plt.rcParams.update({
         "figure.dpi": 300, "savefig.dpi": 300,
@@ -323,11 +380,11 @@ def plot_folder(
         trial_data = folder_df[folder_df["trial_label"] == trial_label]
         odor_name = _resolve_training_odor(dataset, trial_label)
         is_trained = _is_trained_odor(dataset, odor_name)
-        is_disc = _is_discriminate(trial_label)
-        trial_off = _trial_odor_off(trial_label)
-        light_s = _light_start(trial_label)
+        is_disc = _is_discriminate(trial_label, timing)
+        trial_off = _trial_odor_off(trial_label, timing)
+        light_s = _light_start(trial_label, timing)
 
-        odor_on_eff = ODOR_ON_S + odor_latency
+        odor_on_eff = pre_sec + odor_latency
         odor_off_eff = trial_off + odor_latency
 
         for fly_num in fly_numbers:
@@ -383,13 +440,14 @@ def plot_folder(
                 trace_len=ref_trace_len,
             )
             if ref_env.size > 0:
-                theta = _compute_theta(ref_env, fps)
+                theta = _compute_theta(ref_env, fps, pre_sec)
                 if math.isfinite(theta):
                     ax.axhline(theta, linestyle="-", linewidth=1.0,
                                color="tab:red", alpha=0.9)
 
         ax.set_ylim(0, FIXED_Y_MAX)
         ax.set_xlim(0, x_max_limit)
+        ax.xaxis.set_major_locator(MultipleLocator(PER_TIME_TICK_STEP_S))
         ax.margins(x=0, y=0.02)
 
         if is_trained:

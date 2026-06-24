@@ -13,12 +13,24 @@ from __future__ import annotations
 
 import glob
 import re
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+from matplotlib.ticker import MultipleLocator
+
+_REPO = Path(__file__).resolve().parents[2]
+for _p in (str(_REPO / "src"), str(_REPO)):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
+
+from fbpipe.utils.trial_metadata import find_sensors_csv, parse_light_on_seconds
+
+# Time-axis tick spacing (seconds) for PER-over-time trace panels.
+PER_TIME_TICK_STEP_S = 15.0
 
 # ── Timing constants (match existing pipeline) ────────────────────────────
 FPS_DEFAULT = 40.0
@@ -150,10 +162,24 @@ def _extract_fly_number(filename: str) -> int | None:
     return int(m.group(1)) if m else None
 
 
-def load_traces(cfg: DatasetConfig) -> dict[str, dict[int, list[np.ndarray]]]:
-    """Return {rig: {trial_num: [envelope_arrays]}}."""
+def load_traces(
+    cfg: DatasetConfig,
+) -> tuple[
+    dict[str, dict[int, list[np.ndarray]]],
+    dict[str, dict[int, list[float]]],
+]:
+    """Return ``(traces, light_on_s)``.
+
+    ``traces``    -> {rig: {trial_num: [envelope_arrays]}}
+    ``light_on_s`` -> {rig: {trial_num: [first-light-on seconds per fly]}}
+                      parsed from each batch's ``sensors_output_*.csv``.
+    """
     trial_set = set(cfg.trials)
     result: dict[str, dict[int, list[np.ndarray]]] = {
+        "rig_1": {t: [] for t in cfg.trials},
+        "rig_2": {t: [] for t in cfg.trials},
+    }
+    light_result: dict[str, dict[int, list[float]]] = {
         "rig_1": {t: [] for t in cfg.trials},
         "rig_2": {t: [] for t in cfg.trials},
     }
@@ -209,6 +235,16 @@ def load_traces(cfg: DatasetConfig) -> dict[str, dict[int, list[np.ndarray]]]:
         env = df["envelope_of_rms"].to_numpy(dtype=np.float64)
         result[rig][trial_num].append(env)
 
+        # First light-on time from this batch's sensors log (averaged later).
+        batch_dir = Path(fpath).parents[1]
+        sensors_csv = find_sensors_csv(
+            batch_dir=batch_dir, trial_type="training", trial_index=trial_num
+        )
+        if sensors_csv is not None:
+            light_s = parse_light_on_seconds(sensors_csv)
+            if light_s is not None and np.isfinite(light_s) and light_s > 0:
+                light_result[rig][trial_num].append(float(light_s))
+
     if skipped_flagged:
         print(f"  Skipped {skipped_flagged} files from flagged flies")
 
@@ -219,7 +255,17 @@ def load_traces(cfg: DatasetConfig) -> dict[str, dict[int, list[np.ndarray]]]:
         for t in cfg.trials:
             n = len(result[rig][t])
             print(f"  {rig}  trial {t}: {n} traces")
-    return result
+    return result, light_result
+
+
+def _mean_light_start(
+    trial_num: int, light_by_trial: dict[int, list[float]]
+) -> float | None:
+    """Mean measured first-light-on across flies; fall back to the schedule."""
+    vals = [v for v in light_by_trial.get(trial_num, []) if np.isfinite(v) and v > 0]
+    if vals:
+        return float(np.mean(vals))
+    return _light_start(trial_num)
 
 
 def _resample_to_common(traces: list[np.ndarray], fps: float,
@@ -235,7 +281,9 @@ def _resample_to_common(traces: list[np.ndarray], fps: float,
 
 
 def plot_rig(rig: str, trials: dict[int, list[np.ndarray]],
-             trial_nums: list[int], dataset_name: str, out_dir: Path) -> None:
+             trial_nums: list[int], dataset_name: str, out_dir: Path,
+             light_by_trial: dict[int, list[float]] | None = None) -> None:
+    light_by_trial = light_by_trial or {}
     if all(len(trials[t]) == 0 for t in trial_nums):
         print(f"  [{dataset_name}] No data for {rig}, skipping.")
         return
@@ -271,7 +319,7 @@ def plot_rig(rig: str, trials: dict[int, list[np.ndarray]],
         ax = axes[i]
         trace_list = trials[trial_num]
         trial_off_eff = _trial_odor_off(trial_num)
-        light_s = _light_start(trial_num)
+        light_s = _mean_light_start(trial_num, light_by_trial)
 
         if len(trace_list) == 0:
             ax.text(0.5, 0.5, "No data", transform=ax.transAxes,
@@ -298,6 +346,7 @@ def plot_rig(rig: str, trials: dict[int, list[np.ndarray]],
 
         ax.set_ylim(0, FIXED_Y_MAX)
         ax.set_xlim(0, x_max)
+        ax.xaxis.set_major_locator(MultipleLocator(PER_TIME_TICK_STEP_S))
         ax.margins(x=0, y=0.02)
 
         n_flies = matrix.shape[0]
@@ -347,9 +396,10 @@ def main() -> None:
         out_dir = RESULTS_ROOT / ds.name
         out_dir.mkdir(parents=True, exist_ok=True)
 
-        data = load_traces(ds)
+        data, light_data = load_traces(ds)
         for rig in ("rig_1", "rig_2"):
-            plot_rig(rig, data[rig], ds.trials, ds.name, out_dir)
+            plot_rig(rig, data[rig], ds.trials, ds.name, out_dir,
+                     light_by_trial=light_data[rig])
 
 
 if __name__ == "__main__":
