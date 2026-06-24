@@ -1,10 +1,10 @@
-"""Focused tests for the Parquet I/O layer in predict_reactions.
+"""Tests for predict_reactions I/O.
 
-Covers:
-- _write_empty_predictions writes .parquet (not .csv)
-- _augment_prediction_csv uses resolve_existing for the existence check so it
-  finds the parquet output and reads/writes via read_table/write_table
-- main reads data_csv via read_table (parquet-transparent)
+model_predictions.csv is an EXTERNAL/human-facing output: it is written by the
+external flybehavior-response CLI and read by literal-`.csv` consumers (the
+run_workflows reaction-prediction gate + SMB sync, the reaction_matrix analysis,
+and backup scripts). It therefore stays CSV. The data_csv INPUT may be Parquet
+or CSV and is read via read_table.
 """
 
 from __future__ import annotations
@@ -23,20 +23,20 @@ from fbpipe.steps.predict_reactions import (
     _augment_prediction_csv,
     _write_empty_predictions,
 )
-from fbpipe.utils.tables import table_path, write_table
+from fbpipe.utils.tables import table_path
 
 
 # ---------------------------------------------------------------------------
-# _write_empty_predictions -> write_table -> .parquet
+# _write_empty_predictions -> CSV (external output), never Parquet
 # ---------------------------------------------------------------------------
 
 
-def test_write_empty_predictions_creates_parquet(tmp_path):
-    out = tmp_path / "predictions.csv"  # caller still supplies .csv name
+def test_write_empty_predictions_creates_csv_not_parquet(tmp_path):
+    out = tmp_path / "predictions.csv"
     _write_empty_predictions(out, ["dataset", "fly", "prediction"])
-    parquet_out = table_path(out)
-    assert parquet_out.exists(), "Expected .parquet file to be written"
-    df = pd.read_parquet(parquet_out)
+    assert out.exists(), "Expected the .csv to be written"
+    assert not table_path(out).exists(), "Must NOT write a .parquet for an external output"
+    df = pd.read_csv(out)
     assert list(df.columns) == ["dataset", "fly", "prediction"]
     assert len(df) == 0
 
@@ -44,104 +44,59 @@ def test_write_empty_predictions_creates_parquet(tmp_path):
 def test_write_empty_predictions_adds_prediction_column(tmp_path):
     out = tmp_path / "predictions.csv"
     _write_empty_predictions(out, ["dataset", "fly"])
-    parquet_out = table_path(out)
-    assert parquet_out.exists()
-    df = pd.read_parquet(parquet_out)
+    assert out.exists()
+    df = pd.read_csv(out)
     assert "prediction" in df.columns
 
 
 # ---------------------------------------------------------------------------
-# _augment_prediction_csv existence check via resolve_existing
+# _augment_prediction_csv reads + rewrites the external CSV in place
 # ---------------------------------------------------------------------------
 
 
-def test_augment_prediction_csv_skips_when_no_output_exists(tmp_path, capsys):
-    """If neither .parquet nor .csv exists, augment should return early."""
+def test_augment_skips_when_no_output_exists(tmp_path, capsys):
     out = tmp_path / "predictions.csv"  # nothing written yet
     source_df = pd.DataFrame({"dataset": ["d1"], "fly": ["f1"], "fly_number": ["1"]})
-    # Should return without error or printing the annotation line
     _augment_prediction_csv(out, source_df, threshold=5.0)
     captured = capsys.readouterr()
     assert "Annotated predictions" not in captured.out
 
 
-def test_augment_prediction_csv_reads_and_rewrites_parquet(tmp_path):
-    """When the CLI writes a CSV, augment reads it (via read_table) and
-    rewrites the result as parquet."""
+def test_augment_reads_and_rewrites_csv(tmp_path):
     out = tmp_path / "predictions.csv"
-
-    # Simulate the external CLI writing a CSV at output_csv
-    pred_df = pd.DataFrame(
-        {
-            "dataset": ["d1"],
-            "fly": ["f1"],
-            "fly_number": ["1"],
-            "trial_label": ["t1"],
-            "prediction": [1],
-        }
-    )
-    pred_df.to_csv(out, index=False)
-    assert out.exists()
+    pd.DataFrame(
+        {"dataset": ["d1"], "fly": ["f1"], "fly_number": ["1"],
+         "trial_label": ["t1"], "prediction": [1]}
+    ).to_csv(out, index=False)
 
     source_df = pd.DataFrame(
-        {
-            "dataset": ["d1"],
-            "fly": ["f1"],
-            "fly_number": ["1"],
-            "trial_label": ["t1"],
-            "global_min": [10.0],
-            "global_max": [60.0],
-            "trial_type": ["testing"],
-        }
+        {"dataset": ["d1"], "fly": ["f1"], "fly_number": ["1"], "trial_label": ["t1"],
+         "global_min": [10.0], "global_max": [60.0], "trial_type": ["testing"]}
     )
-
     _augment_prediction_csv(out, source_df, threshold=5.0)
 
-    # After augmentation the result should be a parquet file
-    parquet_out = table_path(out)
-    assert parquet_out.exists(), "Expected parquet output after augmentation"
-    result = pd.read_parquet(parquet_out)
+    # Result stays CSV (no parquet sidecar) and carries the annotations.
+    assert out.exists()
+    assert not table_path(out).exists(), "augment must not produce a .parquet"
+    result = pd.read_csv(out)
     assert "non_reactive_flag" in result.columns
     assert "_non_reactive" in result.columns
     assert len(result) == 1
 
 
-def test_augment_prediction_csv_finds_existing_parquet(tmp_path):
-    """If the CLI output was already converted to parquet (e.g. second run),
-    resolve_existing should still find it and augment should succeed."""
+def test_augment_marks_non_reactive_low_span(tmp_path):
     out = tmp_path / "predictions.csv"
-
-    pred_df = pd.DataFrame(
-        {
-            "dataset": ["d1"],
-            "fly": ["f1"],
-            "fly_number": ["1"],
-            "trial_label": ["t1"],
-            "prediction": [0],
-        }
-    )
-    # Write directly as parquet (no csv on disk)
-    written = write_table(pred_df, out)
-    assert written == table_path(out)
-    assert not out.exists(), "Sanity: CSV should not exist"
+    pd.DataFrame(
+        {"dataset": ["d1"], "fly": ["f1"], "fly_number": ["1"],
+         "trial_label": ["t1"], "prediction": [0]}
+    ).to_csv(out, index=False)
 
     source_df = pd.DataFrame(
-        {
-            "dataset": ["d1"],
-            "fly": ["f1"],
-            "fly_number": ["1"],
-            "trial_label": ["t1"],
-            "global_min": [5.0],
-            "global_max": [8.0],  # span=3 < 5 -> non-reactive
-            "trial_type": ["testing"],
-        }
+        {"dataset": ["d1"], "fly": ["f1"], "fly_number": ["1"], "trial_label": ["t1"],
+         "global_min": [5.0], "global_max": [8.0],  # span 3 < 5 -> non-reactive
+         "trial_type": ["testing"]}
     )
-
     _augment_prediction_csv(out, source_df, threshold=5.0)
 
-    parquet_out = table_path(out)
-    assert parquet_out.exists()
-    result = pd.read_parquet(parquet_out)
-    assert "non_reactive_flag" in result.columns
-    # span = 3 < 5 -> non_reactive_flag should be 1.0
+    result = pd.read_csv(out)
     assert result["non_reactive_flag"].iloc[0] == 1.0

@@ -40,7 +40,7 @@ def main(cfg: Settings):
                 out_csv = None
                 for o in outs:
                     try:
-                        dfo = read_table(o).head(5)  # external rig output_*.csv (Rule 2)
+                        dfo = pd.read_csv(o, nrows=5)  # external rig output_*.csv; probe header only
                         if _find_ofm_col(dfo) is not None:
                             out_csv = o; break
                     except Exception:
