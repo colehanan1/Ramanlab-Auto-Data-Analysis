@@ -14,6 +14,7 @@ import torch
 import gc  # Add this import
 
 from ..config import Settings, get_main_directories
+from ..utils.tables import read_table, write_table, table_path
 from ..utils.timestamps import pick_timestamp_column, pick_frame_column, to_seconds_series
 from ..utils.vision import xyxy_to_cxcywh
 from ..utils.yolo_results import collect_detections
@@ -401,8 +402,8 @@ def _export_per_fly_csvs(
             continue
 
         csv_path = out_dir / f"{folder_name}_fly{idx + 1}_distances.csv"
-        slot_df.to_csv(csv_path, index=False)
-        per_fly_paths.append(csv_path)
+        written_path = write_table(slot_df, csv_path)
+        per_fly_paths.append(written_path)
 
     return per_fly_paths
 
@@ -537,7 +538,7 @@ def main(cfg: Settings):
                 calculated_fps = cap.get(cv2.CAP_PROP_FPS) or cfg.fps_default
 
                 if csv_file_path.exists():
-                    df_timestamps = pd.read_csv(csv_file_path)
+                    df_timestamps = read_table(csv_file_path)
                     frame_col = pick_frame_column(df_timestamps)
                     if frame_col is not None:
                         ts_col = pick_timestamp_column(df_timestamps)
@@ -638,7 +639,7 @@ def main(cfg: Settings):
 
                 df_rows = pd.DataFrame(rows)
                 merged_csv_path = out_dir / f"{folder_name}_distances_merged.csv"
-                df_rows.to_csv(merged_csv_path, index=False)
+                write_table(df_rows, merged_csv_path)
 
                 per_fly_paths = _export_per_fly_csvs(df_rows, out_dir, folder_name, cfg, active_max_flies)
 

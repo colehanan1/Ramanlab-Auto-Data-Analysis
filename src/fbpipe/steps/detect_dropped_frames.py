@@ -8,6 +8,7 @@ import pandas as pd
 from ..config import Settings, get_main_directories
 from ..utils.columns import find_proboscis_distance_column
 from ..utils.fly_files import iter_fly_distance_csvs
+from ..utils.tables import read_table, resolve_existing
 
 
 def _consecutive_runs(values: list[int], min_len: int = 10) -> list[tuple[int, int]]:
@@ -39,15 +40,16 @@ def main(cfg: Settings) -> None:
             print(f"[DROP] Checking fly directory: {fly_dir.name}")
             for csv_path, _, _ in iter_fly_distance_csvs(fly_dir, recursive=True):
                 out_path = Path(csv_path.with_suffix("").as_posix() + "_dropped_frames.txt")
+                actual_input = resolve_existing(csv_path) or csv_path
                 if (
                     not force_recompute
                     and out_path.exists()
-                    and out_path.stat().st_mtime >= csv_path.stat().st_mtime
+                    and out_path.stat().st_mtime >= actual_input.stat().st_mtime
                 ):
                     print(f"[DROP] Skipping up-to-date report: {out_path.name}")
                     continue
                 print(f"[DROP] Evaluating frames in {csv_path.name}")
-                df = pd.read_csv(csv_path)
+                df = read_table(csv_path)
                 df.columns = df.columns.str.strip()
                 if "frame" not in df.columns:
                     print(

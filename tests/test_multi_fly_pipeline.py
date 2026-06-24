@@ -23,6 +23,7 @@ from fbpipe.config import Settings
 from fbpipe.steps import detect_dropped_frames, distance_normalize, distance_stats
 from fbpipe.utils.columns import EYE_CLASS, PROBOSCIS_CLASS
 from fbpipe.utils.fly_files import iter_fly_distance_csvs
+from fbpipe.utils.tables import read_table
 
 
 def _write_dummy_csv(path: Path) -> None:
@@ -234,7 +235,7 @@ def test_recalculation_sanitizes_existing_three_fly_overlimit_distances(tmp_path
     dist_col = f"distance_{EYE_CLASS}_{PROBOSCIS_CLASS}"
     dist_pct_col = f"distance_percentage_{EYE_CLASS}_{PROBOSCIS_CLASS}"
     angle_col = f"angle_deg_c{EYE_CLASS}_c{PROBOSCIS_CLASS}_vs_anchor"
-    df = pd.read_csv(fly1_csv)
+    df = read_table(fly1_csv)  # resolves to the sanitized .parquet (legacy .csv removed)
     assert np.isnan(df.loc[1, dist_col])
     assert np.isnan(df.loc[1, "distance_percentage"])
     assert np.isnan(df.loc[1, dist_pct_col])
@@ -248,7 +249,7 @@ def test_recalculation_sanitizes_existing_three_fly_overlimit_distances(tmp_path
 
     distance_normalize.main(settings)
 
-    df = pd.read_csv(fly1_csv)
+    df = read_table(fly1_csv)  # resolves to the sanitized .parquet (legacy .csv removed)
     assert np.isnan(df.loc[1, dist_col])
     assert np.isnan(df.loc[1, "distance_percentage"])
     assert np.isnan(df.loc[1, dist_pct_col])

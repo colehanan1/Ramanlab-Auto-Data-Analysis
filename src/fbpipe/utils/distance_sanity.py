@@ -21,8 +21,12 @@ from .columns import (
     find_proboscis_distance_column,
     find_proboscis_xy_columns,
 )
+from .tables import read_schema_columns, read_table
 
-_TRIAL_SLOT_REGEX = re.compile(r"(?P<prefix>.+)_fly(?P<slot>\d+)_distances\.csv$", re.IGNORECASE)
+# Per-fly distance files may be on disk as either .csv (legacy) or .parquet.
+_TRIAL_SLOT_REGEX = re.compile(
+    r"(?P<prefix>.+)_fly(?P<slot>\d+)_distances\.(?:csv|parquet)$", re.IGNORECASE
+)
 _ANGLE_EYE_PROB_ANCHOR_COL = f"angle_deg_c{EYE_CLASS}_c{PROBOSCIS_CLASS}_vs_anchor"
 
 # Every column that describes a single proboscis detection. When a detection is
@@ -188,8 +192,12 @@ def is_three_fly_trial_csv(csv_path: Path) -> bool:
 
     prefix = match.group("prefix")
     slots: set[int] = set()
-    pattern = f"{prefix}_fly*_distances.csv"
-    for sibling in csv_path.parent.glob(pattern):
+    # Discover sibling fly slots in either on-disk format (.parquet preferred,
+    # .csv legacy). Slots are collected into a set, so a stem present as both
+    # formats is naturally de-duplicated.
+    siblings = list(csv_path.parent.glob(f"{prefix}_fly*_distances.parquet"))
+    siblings += list(csv_path.parent.glob(f"{prefix}_fly*_distances.csv"))
+    for sibling in siblings:
         sibling_match = _TRIAL_SLOT_REGEX.match(sibling.name)
         if sibling_match is None or sibling_match.group("prefix") != prefix:
             continue
@@ -205,7 +213,7 @@ def csv_requires_three_fly_distance_sanitization(csv_path: Path, max_distance_px
         return False
 
     try:
-        header = pd.read_csv(csv_path, nrows=0)
+        header = pd.DataFrame(columns=read_schema_columns(csv_path))
     except Exception:
         return False
 
@@ -214,7 +222,7 @@ def csv_requires_three_fly_distance_sanitization(csv_path: Path, max_distance_px
         return False
 
     try:
-        distances = pd.read_csv(csv_path, usecols=[dist_col])[dist_col]
+        distances = read_table(csv_path, columns=[dist_col])[dist_col]
     except Exception:
         return False
 

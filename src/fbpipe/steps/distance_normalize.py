@@ -21,6 +21,7 @@ from ..utils.distance_sanity import (
     sanitize_three_fly_distance_dataframe,
 )
 from ..utils.fly_files import iter_fly_distance_csvs
+from ..utils.tables import read_table, read_schema_columns, write_table
 
 
 def _is_already_normalized(
@@ -115,11 +116,11 @@ def main(cfg: Settings) -> None:
                 )
                 if not force_recompute:
                     try:
-                        header = pd.read_csv(csv_path, nrows=0)
+                        header_cols = read_schema_columns(csv_path)
                     except Exception as exc:
                         print(f"[NORM] Failed to read header for {csv_path.name}: {exc}")
-                        header = pd.DataFrame()
-                    if not header.empty:
+                        header_cols = []
+                    if header_cols:
                         check_cols = [
                             col
                             for col in (
@@ -127,11 +128,11 @@ def main(cfg: Settings) -> None:
                                 PROBOSCIS_MAX_DISTANCE_COL,
                                 f"effective_max_distance_{EYE_CLASS}_{PROBOSCIS_CLASS}",
                             )
-                            if col in header.columns
+                            if col in header_cols
                         ]
                         try:
                             snapshot = (
-                                pd.read_csv(csv_path, usecols=check_cols, nrows=1)
+                                read_table(csv_path, columns=check_cols).iloc[:1]
                                 if check_cols
                                 else pd.DataFrame()
                             )
@@ -140,7 +141,7 @@ def main(cfg: Settings) -> None:
                         if (
                             not needs_sanitization
                             and _is_already_normalized(
-                                list(header.columns),
+                                header_cols,
                                 snapshot,
                                 gmin=gmin,
                                 gmax=gmax,
@@ -150,7 +151,7 @@ def main(cfg: Settings) -> None:
                             print(f"[NORM] Skipping already-normalized CSV: {csv_path.name}")
                             continue
 
-                df = pd.read_csv(csv_path)
+                df = read_table(csv_path)
                 df, sanitized_count = sanitize_three_fly_distance_dataframe(
                     df,
                     csv_path,
@@ -207,8 +208,8 @@ def main(cfg: Settings) -> None:
                 if "max_distance_2_6" in df.columns:
                     df["max_distance_2_6"] = gmax
 
-                df.to_csv(csv_path, index=False)
+                written = write_table(df, csv_path)
                 print(
-                    f"[NORM] Normalized distances for {csv_path.name} with slot {slot_label}; "
+                    f"[NORM] Normalized distances for {written.name} with slot {slot_label}; "
                     f"updated {len(df)} rows."
                 )

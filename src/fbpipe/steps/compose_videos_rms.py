@@ -27,6 +27,7 @@ from ..utils.columns import (
     find_proboscis_xy_columns,
 )
 from ..utils.fly_files import iter_fly_distance_csvs
+from ..utils.tables import read_table, write_table
 
 # Display defaults mirror the notebook example
 plt.rcParams.update(
@@ -340,7 +341,7 @@ def find_fly_reference_angle(csvs_raw: List[Path], trimmed_min: Optional[float] 
     best: Optional[Tuple[int, float, float]] = None
     for path in csvs_raw:
         try:
-            df = pd.read_csv(path)
+            df = read_table(path)
         except Exception:
             continue
         try:
@@ -400,7 +401,7 @@ def compute_fly_max_abs_centered(csvs_raw: List[Path], ref_angle: float) -> floa
     fly_max = 0.0
     for path in csvs_raw:
         try:
-            df = pd.read_csv(path)
+            df = read_table(path)
         except Exception:
             continue
         try:
@@ -749,7 +750,7 @@ def _ead_compute_trim_min_max(fly_dir: Path) -> Optional[Tuple[float, float]]:
     values: List[np.ndarray] = []
     for path, _, _ in iter_fly_distance_csvs(base, recursive=True):
         try:
-            df = pd.read_csv(path)
+            df = read_table(path)
             # Use flexible column finder instead of hardcoded column name
             dist_col = find_proboscis_distance_percentage_column(df)
             if dist_col is None:
@@ -806,8 +807,15 @@ def _process_fly_angles(fly_dir: Path) -> None:
     trimmed_stats = _ead_compute_trim_min_max(fly_dir)
     trimmed_min = trimmed_stats[0] if trimmed_stats else None
 
-    # Find all CSVs in RMS_calculations
-    csv_paths = list(rms_dir.glob("*.csv"))
+    # Find all pipeline table files in RMS_calculations (.parquet preferred, .csv for legacy)
+    _seen_stems: set[str] = set()
+    csv_paths: List[Path] = []
+    for p in sorted(rms_dir.glob("*.parquet")):
+        _seen_stems.add(p.stem)
+        csv_paths.append(p)
+    for p in sorted(rms_dir.glob("*.csv")):
+        if p.stem not in _seen_stems:
+            csv_paths.append(p)
     if not csv_paths:
         return
 
@@ -819,10 +827,10 @@ def _process_fly_angles(fly_dir: Path) -> None:
     else:
         print(f"[ANGLES] {fly_dir.name}: Reference angle = {reference_angle:.2f}°")
 
-    # Process each CSV to add angle columns
+    # Process each pipeline table file to add angle columns
     for csv_path in csv_paths:
         try:
-            df = pd.read_csv(csv_path)
+            df = read_table(csv_path)
 
             # Skip if already processed
             if "angle_multiplier" in df.columns:
@@ -846,8 +854,8 @@ def _process_fly_angles(fly_dir: Path) -> None:
             df["angle_centered_deg"] = centered_angles
             df["angle_multiplier"] = multipliers
 
-            # Save back to CSV
-            df.to_csv(csv_path, index=False)
+            # Save back as Parquet (pipeline artifact)
+            write_table(df, csv_path)
             print(f"[ANGLES] {csv_path.name}: Added angle columns (ref={reference_angle:.2f}°)")
 
         except Exception as e:
@@ -1003,7 +1011,7 @@ def _series_rms_from_rmscalc(
         if not csv_path.exists():
             return None
 
-        df = pd.read_csv(csv_path)
+        df = read_table(csv_path)
         df.columns = df.columns.str.strip()
 
         frame_col = find_col(df, ["frame", "Frame", "frame_num", "frame_index"])

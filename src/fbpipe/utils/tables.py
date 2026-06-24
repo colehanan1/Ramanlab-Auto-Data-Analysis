@@ -121,7 +121,13 @@ def read_table(path: str | Path, **kwargs) -> pd.DataFrame:
         )
 
 
-def write_table(df: pd.DataFrame, path: str | Path, **kwargs) -> Path:
+def write_table(
+    df: pd.DataFrame,
+    path: str | Path,
+    *,
+    replace_legacy_csv: bool = True,
+    **kwargs,
+) -> Path:
     """Write *df* to Parquet at *path* (suffix normalised to ``.parquet``).
 
     Always writes Parquet via pyarrow regardless of the suffix of *path*.  The
@@ -129,11 +135,26 @@ def write_table(df: pd.DataFrame, path: str | Path, **kwargs) -> Path:
     the existing ``df.to_csv(index=False)`` call sites and no
     ``__index_level_0__`` column appears on read-back.
 
+    Single source of truth: when ``replace_legacy_csv`` is True (the default) a
+    same-stem ``.csv`` sibling left over from the legacy CSV pipeline is removed
+    after the Parquet is written.  This prevents a stale ``.csv`` from shadowing
+    the freshly-written ``.parquet`` for any consumer that resolves a literal
+    ``.csv`` path (``read_table`` dispatches on suffix and only falls back to the
+    Parquet when the ``.csv`` is absent).  Set ``replace_legacy_csv=False`` to
+    keep the CSV (e.g. the migration tool's keep-both mode).
+
     Parent directories are created automatically.  Returns the Path written.
     """
     out = table_path(path)
     out.parent.mkdir(parents=True, exist_ok=True)
     df.to_parquet(out, engine="pyarrow", index=False, **kwargs)
+    if replace_legacy_csv:
+        legacy_csv = out.with_suffix(".csv")
+        if legacy_csv != out and legacy_csv.exists():
+            try:
+                legacy_csv.unlink()
+            except OSError:
+                pass
     return out
 
 

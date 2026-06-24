@@ -11,6 +11,7 @@ from ..utils.columns import (
     find_proboscis_xy_columns,
 )
 from ..utils.fly_files import iter_fly_distance_csvs
+from ..utils.tables import read_table, table_path, write_table
 
 
 def main(cfg: Settings) -> None:
@@ -25,7 +26,7 @@ def main(cfg: Settings) -> None:
                     continue
 
                 try:
-                    df = pd.read_csv(csv_path)
+                    df = read_table(csv_path)
                 except Exception as exc:
                     print(f"[RMS] Skip {csv_path}: {exc}")
                     continue
@@ -66,15 +67,16 @@ def main(cfg: Settings) -> None:
                     cols.append(pct_col)
 
                 out_path = dest / ("updated_" + csv_path.name)
+                out_parquet = table_path(out_path)
                 if (
                     not force_recompute
-                    and out_path.exists()
-                    and out_path.stat().st_mtime >= csv_path.stat().st_mtime
+                    and out_parquet.exists()
+                    and out_parquet.stat().st_mtime >= csv_path.stat().st_mtime
                 ):
-                    print(f"[RMS] Skipping up-to-date output: {out_path.name}")
+                    print(f"[RMS] Skipping up-to-date output: {out_parquet.name}")
                     continue
                 try:
-                    df[cols].to_csv(out_path, index=False)
-                    print(f"[RMS] {csv_path.name} → {out_path.name}")
+                    written = write_table(df[cols], out_path)
+                    print(f"[RMS] {csv_path.name} → {written.name}")
                 except Exception as exc:
                     print(f"[RMS] Skip {csv_path}: {exc}")

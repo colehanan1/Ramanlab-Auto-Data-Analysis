@@ -80,7 +80,9 @@ def migrate(
 
             try:
                 df = pd.read_csv(csv_path)
-                actual_out = write_table(df, parquet_path)
+                # Let this tool control CSV retention via --delete-csv; do not
+                # let write_table's single-source-of-truth cleanup remove it.
+                actual_out = write_table(df, parquet_path, replace_legacy_csv=False)
                 csv_bytes = csv_path.stat().st_size
                 pq_bytes = actual_out.stat().st_size
                 saved = csv_bytes - pq_bytes

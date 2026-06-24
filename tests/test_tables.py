@@ -135,6 +135,24 @@ class TestWriteTable:
         assert out == tmp_path / "data.parquet"
         assert not csv_path.exists()  # should NOT have written a CSV
 
+    def test_removes_legacy_csv_sibling_by_default(self, tmp_path):
+        # A stale legacy CSV must not shadow the freshly written parquet.
+        csv_path = tmp_path / "trial_fly1_distances.csv"
+        pd.DataFrame({"distance_0_1": [1.0]}).to_csv(csv_path, index=False)
+        assert csv_path.exists()
+        out = write_table(pd.DataFrame({"distance_0_1": [2.0]}), csv_path)
+        assert out.suffix == ".parquet" and out.exists()
+        assert not csv_path.exists(), "stale legacy .csv should be removed"
+        # read_table on the .csv path now resolves to the parquet's fresh value.
+        assert read_table(csv_path)["distance_0_1"].iloc[0] == 2.0
+
+    def test_keeps_legacy_csv_when_replace_disabled(self, tmp_path):
+        csv_path = tmp_path / "data.csv"
+        pd.DataFrame({"v": [1]}).to_csv(csv_path, index=False)
+        out = write_table(pd.DataFrame({"v": [2]}), csv_path, replace_legacy_csv=False)
+        assert out.exists()
+        assert csv_path.exists(), "CSV must be retained when replace_legacy_csv=False"
+
 
 # ---------------------------------------------------------------------------
 # read_table

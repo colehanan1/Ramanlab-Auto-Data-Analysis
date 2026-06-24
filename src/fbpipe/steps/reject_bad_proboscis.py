@@ -25,6 +25,7 @@ import pandas as pd
 from ..config import Settings, get_main_directories
 from ..utils.distance_sanity import sanitize_proboscis_dataframe
 from ..utils.fly_files import iter_fly_distance_csvs
+from ..utils.tables import read_table, write_table
 
 log = logging.getLogger("fbpipe.reject_proboscis")
 
@@ -58,7 +59,7 @@ def main(cfg: Settings) -> None:
         for fly_dir in [p for p in root.iterdir() if p.is_dir()]:
             for csv_path, token, _ in iter_fly_distance_csvs(fly_dir, recursive=True):
                 try:
-                    df = pd.read_csv(csv_path)
+                    df = read_table(csv_path)
                 except Exception as exc:
                     log.warning("[PROB-FILTER] Failed to read %s: %s", csv_path, exc)
                     continue
@@ -71,7 +72,7 @@ def main(cfg: Settings) -> None:
                 )
 
                 if geo_count or vel_count:
-                    cleaned.to_csv(csv_path, index=False)
+                    write_table(cleaned, csv_path)
                     files_modified += 1
                     total_geo += geo_count
                     total_vel += vel_count

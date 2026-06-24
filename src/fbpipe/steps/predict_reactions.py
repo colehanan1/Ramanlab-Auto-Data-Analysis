@@ -13,6 +13,7 @@ import pandas as pd
 
 from ..config import Settings, load_flagged_fly_exclusions
 from ..utils.smb_copy import copy_to_smb
+from ..utils.tables import read_table, resolve_existing, write_table
 
 logger = logging.getLogger(__name__)
 
@@ -127,7 +128,7 @@ def _write_empty_predictions(output_csv: Path, columns: Sequence[str]) -> None:
     cols = list(columns)
     if "prediction" not in cols:
         cols.append("prediction")
-    pd.DataFrame(columns=cols).to_csv(output_csv, index=False)
+    write_table(pd.DataFrame(columns=cols), output_csv)
 
 
 def _augment_prediction_csv(
@@ -139,11 +140,11 @@ def _augment_prediction_csv(
 ) -> None:
     """Append span metadata + flags so downstream plots can drop non-reactive flies."""
 
-    if not output_csv.exists() or source_df.empty:
+    if resolve_existing(output_csv) is None or source_df.empty:
         return
 
     try:
-        pred_df = pd.read_csv(output_csv)
+        pred_df = read_table(output_csv)
     except Exception as exc:  # pragma: no cover - defensive logging
         print(f"[REACTION] Failed to read prediction CSV for augmentation: {exc}")
         return
@@ -197,7 +198,7 @@ def _augment_prediction_csv(
     merged["_non_reactive"] = csv_mask
     merged["non_reactive_flag"] = csv_mask.astype(float)
 
-    merged.to_csv(output_csv, index=False)
+    write_table(merged, output_csv)
     print(f"[REACTION] Annotated predictions with span metadata ({len(merged)} rows)")
 
 
@@ -220,7 +221,7 @@ def main(cfg: Settings) -> None:
     if not model_path.exists():
         raise FileNotFoundError(f"Model file not found: {model_path}")
 
-    df = pd.read_csv(data_csv)
+    df = read_table(data_csv)
     df = _filter_trial_types(df, allowed=("testing",))
     if df.empty:
         print(

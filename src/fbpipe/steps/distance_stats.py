@@ -13,6 +13,7 @@ from ..utils.distance_sanity import (
     sanitize_three_fly_distance_dataframe,
 )
 from ..utils.fly_files import iter_fly_distance_csvs
+from ..utils.tables import read_schema_columns, read_table, write_table
 
 
 def _stats_path_for_token(fly_dir: Path, token: str) -> Path:
@@ -24,10 +25,9 @@ def _needs_stats_refresh(csv_path: Path, *, force_recompute: bool) -> bool:
     if force_recompute:
         return True
     try:
-        header = pd.read_csv(csv_path, nrows=0)
+        columns = set(read_schema_columns(csv_path))
     except Exception:
         return True
-    columns = set(header.columns)
     return "distance_percentage" not in columns
 
 
@@ -73,7 +73,7 @@ def main(cfg: Settings) -> None:
                     f"[DIST] Reading {csv_path.name} for slot '{token}' in {fly_dir.name}"
                 )
                 try:
-                    df = pd.read_csv(csv_path)
+                    df = read_table(csv_path)
                 except Exception as exc:
                     print(
                         f"[DIST] Failed to read {csv_path.name} (slot {token}): {exc}"
@@ -86,7 +86,7 @@ def main(cfg: Settings) -> None:
                     cfg.three_fly_max_eye_prob_distance_px,
                 )
                 if sanitized_count:
-                    df.to_csv(csv_path, index=False)
+                    write_table(df, csv_path)
                     print(
                         f"[DIST] Sanitized {sanitized_count} over-limit 3-fly rows in {csv_path.name} "
                         f"(>{cfg.three_fly_max_eye_prob_distance_px}px)."
