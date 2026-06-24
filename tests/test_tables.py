@@ -78,9 +78,6 @@ class TestResolveExisting:
         csv = tmp_path / "data.csv"
         pq = tmp_path / "data.parquet"
         csv.write_text("a,b\n1,2\n")
-        pq.write_bytes(b"")  # content doesn't matter for this test
-        # actual parquet bytes needed; write a real one
-        pq.unlink()
         df = pd.DataFrame({"a": [1], "b": [2]})
         df.to_parquet(pq, engine="pyarrow", index=False)
         assert resolve_existing(tmp_path / "data.csv") == pq
@@ -280,6 +277,25 @@ class TestReadSchemaColumns:
         assert isinstance(result, list)
         assert all(isinstance(c, str) for c in result)
 
+    def test_resolves_to_parquet_when_csv_requested(self, tmp_path):
+        """Mirrors read_table: a missing path falls through to resolve_existing."""
+        df = pd.DataFrame({"p": [1], "q": [2.0], "r": ["x"]})
+        pq = tmp_path / "data.parquet"
+        df.to_parquet(pq, engine="pyarrow", index=False)
+        # Request the .csv name; should resolve to the existing parquet.
+        cols = read_schema_columns(tmp_path / "data.csv")
+        assert cols == ["p", "q", "r"]
+
+    def test_resolves_to_csv_when_only_csv_exists(self, tmp_path):
+        csv = tmp_path / "data.csv"
+        csv.write_text("m,n\n1,2\n")
+        cols = read_schema_columns(tmp_path / "data.parquet")
+        assert cols == ["m", "n"]
+
+    def test_raises_fnf_when_neither_exists(self, tmp_path):
+        with pytest.raises(FileNotFoundError):
+            read_schema_columns(tmp_path / "ghost.parquet")
+
 
 # ---------------------------------------------------------------------------
 # iter_fly_distance_csvs — extended to Parquet
@@ -374,3 +390,39 @@ class TestIterFlyDistanceCsvs:
         assert path == csv_file
         assert token == "fly1_distances"
         assert slot_idx == 1
+
+    def test_yielded_path_is_unresolved_through_symlink(self, tmp_path):
+        """The yielded path must be the UNRESOLVED glob path, not .resolve()'d.
+
+        Callers (e.g. rms_copy_filter) compare the yielded path against
+        unresolved sibling paths; a resolved path would silently break those
+        guards when the data is reached through a symlink (the secured storage
+        mounts here are symlinked). We place a symlinked distance file inside
+        ``base`` whose real target lives elsewhere, and assert the iterator
+        yields the symlink path under ``base`` rather than the collapsed real
+        location.
+        """
+        from fbpipe.utils.fly_files import iter_fly_distance_csvs
+
+        base = tmp_path / "base"
+        base.mkdir()
+        store = tmp_path / "store"
+        store.mkdir()
+
+        real_csv = store / "real_fly1_distances.csv"
+        self._write_distances(real_csv)
+
+        # Symlinked distance file inside base, with a valid fly-slot name.
+        link_csv = base / "session_fly1_distances.csv"
+        link_csv.symlink_to(real_csv)
+
+        results = list(iter_fly_distance_csvs(base, recursive=False))
+        assert len(results) == 1
+        yielded_path = results[0][0]
+
+        # The yielded path must be the unresolved symlink path inside base,
+        # NOT the resolved real target.
+        assert yielded_path == base.resolve() / "session_fly1_distances.csv"
+        assert yielded_path != real_csv.resolve()
+        # Sanity: resolving the yielded path still lands on the real file.
+        assert yielded_path.resolve() == real_csv.resolve()

@@ -66,6 +66,9 @@ def export(
         print("[EXPORT] No .parquet files found.")
         return
 
+    if out_dir is not None:
+        out_dir.mkdir(parents=True, exist_ok=True)
+
     for pq_path in parquet_files:
         if out_dir is not None:
             csv_path = out_dir / (pq_path.stem + ".csv")
@@ -74,8 +77,6 @@ def export(
 
         try:
             df = read_table(pq_path)
-            if out_dir is not None:
-                out_dir.mkdir(parents=True, exist_ok=True)
             df.to_csv(csv_path, index=False)
             print(
                 f"[EXPORT] OK: '{pq_path.name}' -> '{csv_path}' "

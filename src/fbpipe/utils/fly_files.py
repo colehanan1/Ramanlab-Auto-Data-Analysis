@@ -11,10 +11,6 @@ _FLY_SLOT_REGEX = re.compile(
     r"(fly(\d+)_distances)\.(csv|parquet)$", re.IGNORECASE
 )
 
-# Legacy regex kept for backward compatibility — callers that rely on the old
-# .csv-only pattern should migrate to _FLY_SLOT_REGEX.
-_FLY_SLOT_REGEX_CSV_ONLY = re.compile(r"(fly(\d+)_distances)\.csv$", re.IGNORECASE)
-
 
 def fly_slot_from_name(name: str) -> Optional[Tuple[str, int]]:
     """Return the fly slot token and index from a CSV or Parquet file name.
@@ -59,7 +55,8 @@ def iter_fly_distance_csvs(
 
     base = base.expanduser().resolve()
     print(
-        f"[FLYFILES] Scanning {base} for flyN_distances CSVs (recursive={recursive})."
+        f"[FLYFILES] Scanning {base} for flyN_distances CSV/Parquet files "
+        f"(recursive={recursive})."
     )
 
     # Collect all candidate paths (both .csv and .parquet).
@@ -72,8 +69,12 @@ def iter_fly_distance_csvs(
             candidates.extend(base.glob(pattern))
 
     # Deduplicate by (resolved_parent, stem), preferring .parquet over .csv.
-    # best_by_stem: (parent, stem) -> (preferred_path, slot)
-    best_by_stem: Dict[Tuple[Path, str], Tuple[Path, Tuple[str, int]]] = {}
+    # We key/dedup on the RESOLVED path (so symlinks collapse correctly) but
+    # remember the ORIGINAL glob path so we can yield it unresolved — callers
+    # such as rms_copy_filter compare against unresolved sibling paths and a
+    # resolved path would silently break those guards on symlinked mounts.
+    # best_by_stem: (resolved_parent, stem) -> (original_path, resolved, slot)
+    best_by_stem: Dict[Tuple[Path, str], Tuple[Path, Path, Tuple[str, int]]] = {}
     for path in candidates:
         if not path.is_file():
             continue
@@ -83,16 +84,15 @@ def iter_fly_distance_csvs(
         resolved = path.resolve()
         key = (resolved.parent, resolved.stem)
         if key not in best_by_stem:
-            best_by_stem[key] = (resolved, slot)
+            best_by_stem[key] = (path, resolved, slot)
         else:
-            existing_path, _ = best_by_stem[key]
-            # Prefer .parquet over .csv
+            # Prefer .parquet over .csv (keep the parquet's original path).
             if resolved.suffix.lower() == ".parquet":
-                best_by_stem[key] = (resolved, slot)
+                best_by_stem[key] = (path, resolved, slot)
 
     # Deduplicate by resolved path (handles symlinks etc.) and yield.
     seen_resolved: Dict[Path, Tuple[str, int]] = {}
-    for (parent, stem), (resolved, slot) in best_by_stem.items():
+    for (parent, stem), (original_path, resolved, slot) in best_by_stem.items():
         if resolved in seen_resolved:
             print(f"[FLYFILES] Already yielded {resolved}; skipping duplicate reference.")
             continue
@@ -105,6 +105,6 @@ def iter_fly_distance_csvs(
         print(
             f"[FLYFILES] Found '{token}' (index {slot_idx}) at {rel_path}."
         )
-        yield resolved, token, slot_idx
+        yield original_path, token, slot_idx
 
 

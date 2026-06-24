@@ -149,16 +149,27 @@ def read_schema_columns(path: str | Path) -> list[str]:
     only the file footer (O(1) vs row count).  For CSV files this uses
     ``pd.read_csv(path, nrows=0)`` which reads only the header line.
 
+    Path resolution mirrors :func:`read_table`: if the literal *path* does not
+    exist on disk, :func:`resolve_existing` is used to locate a sibling
+    ``.parquet`` or ``.csv`` file (preferring ``.parquet``).
+
     Raises
     ------
     FileNotFoundError
-        If *path* does not exist.
+        If neither a ``.parquet`` nor a ``.csv`` sibling can be found.
     ValueError
         If the suffix is not supported.
     """
     p = Path(path)
     if not p.is_file():
-        raise FileNotFoundError(f"[TABLES] File not found: '{p}'.")
+        resolved = resolve_existing(p)
+        if resolved is None:
+            raise FileNotFoundError(
+                f"[TABLES] No file found for '{p}' "
+                f"(tried {p.with_suffix('.parquet')} and {p.with_suffix('.csv')})."
+            )
+        print(f"[TABLES] '{p.name}' not found; resolved to '{resolved.name}'.")
+        p = resolved
 
     suffix = p.suffix.lower()
     if suffix == ".parquet":

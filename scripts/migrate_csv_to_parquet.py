@@ -120,7 +120,16 @@ def main() -> None:
         "--delete-csv",
         action="store_true",
         default=False,
-        help="Delete the source CSV after successful conversion.",
+        help=(
+            "Delete the source CSV after successful conversion. "
+            "REQUIRES --yes to actually run (pipeline steps still read CSV directly)."
+        ),
+    )
+    parser.add_argument(
+        "--yes",
+        action="store_true",
+        default=False,
+        help="Confirm a destructive --delete-csv run.",
     )
     parser.add_argument(
         "--glob",
@@ -140,6 +149,30 @@ def main() -> None:
         help="Re-convert even if an up-to-date .parquet already exists.",
     )
     args = parser.parse_args()
+
+    # Safety gate for --delete-csv: pipeline steps still call pd.read_csv
+    # directly until a later task wires them to read_table, so deleting CSVs
+    # now would break them. Require an explicit --yes, and never delete during
+    # a dry-run.
+    if args.delete_csv:
+        print(
+            "[MIGRATE] !! CAUTION: --delete-csv is set; source CSV files will be "
+            "removed after conversion."
+        )
+        if not args.dry_run and not args.yes:
+            print(
+                "\n"
+                "############################################################\n"
+                "## ABORTING: --delete-csv requires --yes                   ##\n"
+                "##                                                        ##\n"
+                "## Pipeline steps still read CSV files directly (they are ##\n"
+                "## NOT yet parquet-aware). Deleting the CSVs now would     ##\n"
+                "## break those steps. Re-run with --yes only if you are    ##\n"
+                "## certain nothing still depends on the CSV files, or use  ##\n"
+                "## --dry-run to preview.                                   ##\n"
+                "############################################################\n"
+            )
+            sys.exit(2)
 
     migrate(
         [Path(r) for r in args.roots],
