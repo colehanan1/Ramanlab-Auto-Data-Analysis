@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import logging
 import os
@@ -41,7 +42,9 @@ for path in (str(SRC_ROOT), str(REPO_ROOT)):
     if path not in sys.path:
         sys.path.insert(0, path)
 
-STATE_VERSION = 1
+# v2: manifest tracks Parquet + CSV, records content hashes, and uses
+# fly_dir/trial_dir/file depth (>=3 parts). Bumping invalidates v1 caches.
+STATE_VERSION = 2
 
 from fbpipe.config import Settings, discover_flagged_directories, load_settings, resolve_config_path, _expand_datasets
 from fbpipe.pipeline import ORDERED_STEPS
@@ -221,9 +224,10 @@ def _write_state(settings: Settings, category: str, key: str, payload: dict[str,
 
 def _should_track_file(file_path: Path, dataset_root: Path) -> bool:
     """
-    Determine if a CSV file should be tracked in the manifest.
+    Determine if a pipeline table file should be tracked in the manifest.
 
-    Tracks all CSV files in dataset subdirectories, excluding metadata files.
+    Tracks per-trial pipeline tables (CSV legacy or Parquet) that live at
+    ``fly_dir/trial_dir/file`` depth, excluding metadata/sensor/temp files.
 
     Args:
         file_path: Path to the file
@@ -232,19 +236,20 @@ def _should_track_file(file_path: Path, dataset_root: Path) -> bool:
     Returns:
         True if file should be tracked
     """
-    # Must be CSV
-    if file_path.suffix.lower() != '.csv':
+    # Must be a pipeline table (CSV legacy or Parquet)
+    if file_path.suffix.lower() not in ('.csv', '.parquet'):
         return False
 
     # Exclude metadata and temp files
     if file_path.name.startswith(('sensors_', '.', '~')):
         return False
 
-    # Must be in nested structure (not directly in dataset root)
+    # Must live at fly_dir/trial_dir/file depth (>= 3 path parts relative to the
+    # dataset root). Shallower files (e.g. a stats sidecar directly in fly_dir)
+    # are not per-trial pipeline outputs and must not be tracked.
     try:
         relative = file_path.relative_to(dataset_root)
-        # Need at least fly_dir/trial_dir/file.csv (2+ parts)
-        if len(relative.parts) < 2:
+        if len(relative.parts) < 3:
             return False
         return True
     except ValueError:
@@ -252,40 +257,55 @@ def _should_track_file(file_path: Path, dataset_root: Path) -> bool:
         return False
 
 
+def _file_content_hash(path: Path, *, chunk_size: int = 1 << 20) -> str:
+    """Return a fast content hash (blake2b, 16-byte digest) of *path*.
+
+    Read in chunks so large files do not spike memory. Used so a file that is
+    merely *touched* (mtime bumped) but whose bytes are unchanged does NOT
+    invalidate the cache — only a real content change does.
+    """
+    h = hashlib.blake2b(digest_size=16)
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(chunk_size), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
 def _build_file_manifest(dataset_root: Path) -> Dict[str, Dict[str, Any]]:
     """
-    Build manifest of all trackable CSV files in dataset.
+    Build manifest of all trackable pipeline tables (CSV legacy + Parquet).
 
-    Recursively scans dataset directory for CSV files and captures their
-    modification time and size for change detection.
+    Recursively scans the dataset for per-trial table files and captures size,
+    mtime, and a content hash for change detection. The content hash makes the
+    cache robust to mtime-only "touches" (re-sync, chmod) that leave bytes
+    unchanged.
 
     Args:
         dataset_root: Root directory of dataset (e.g., /Data/flys/opto_EB/)
 
     Returns:
-        Dict mapping absolute file path to {mtime: float, size: int}
-
-    Performance: ~0.2ms per file (180ms for 900 files)
+        Dict mapping absolute file path to {mtime: float, size: int, hash: str}
     """
     manifest = {}
     file_count = 0
 
     start_time = time.time()
 
-    # Recursive walk through dataset
-    for csv_file in dataset_root.rglob("*.csv"):
-        if not _should_track_file(csv_file, dataset_root):
+    # Recursive walk through dataset (both legacy .csv and migrated .parquet)
+    for table_file in (*dataset_root.rglob("*.csv"), *dataset_root.rglob("*.parquet")):
+        if not _should_track_file(table_file, dataset_root):
             continue
 
         try:
-            stat = csv_file.stat()
-            manifest[str(csv_file.absolute())] = {
+            stat = table_file.stat()
+            manifest[str(table_file.absolute())] = {
                 "mtime": stat.st_mtime,
-                "size": stat.st_size
+                "size": stat.st_size,
+                "hash": _file_content_hash(table_file),
             }
             file_count += 1
         except (OSError, PermissionError) as e:
-            LOGGER.warning(f"Failed to stat {csv_file}: {e}")
+            LOGGER.warning(f"Failed to read {table_file}: {e}")
             continue
 
     elapsed = time.time() - start_time
@@ -336,15 +356,25 @@ def _compare_manifests(
                 changes.append(f"New file: {file_path}")
         else:
             cached_info = cached[file_path]
-            # Check if modified (mtime or size changed)
-            if (current_info["mtime"] != cached_info["mtime"] or
-                current_info["size"] != cached_info["size"]):
+            # Content-aware change detection:
+            #   * size differs                -> modified
+            #   * both sides carry a hash     -> modified iff hashes differ
+            #                                    (mtime-only "touches" are ignored)
+            #   * no hash (legacy manifests)  -> fall back to mtime comparison
+            size_changed = current_info["size"] != cached_info["size"]
+            cur_hash = current_info.get("hash")
+            cached_hash = cached_info.get("hash")
+            if cur_hash is not None and cached_hash is not None:
+                content_changed = cur_hash != cached_hash
+            else:
+                content_changed = current_info.get("mtime") != cached_info.get("mtime")
+            if size_changed or content_changed:
                 modified_count += 1
                 if LOGGER.level <= logging.DEBUG:
                     changes.append(
                         f"Modified file: {file_path} "
-                        f"(mtime: {cached_info['mtime']:.0f} → {current_info['mtime']:.0f}, "
-                        f"size: {cached_info['size']} → {current_info['size']})"
+                        f"(size: {cached_info['size']} → {current_info['size']}, "
+                        f"hash: {str(cached_hash)[:8]} → {str(cur_hash)[:8]})"
                     )
 
     # Check for deleted files
@@ -363,6 +393,9 @@ def _compare_manifests(
         changes.insert(0, summary)  # Prepend summary
         is_valid = False
     else:
+        # Valid cache: report an explicit "unchanged" summary (callers and tests
+        # rely on a non-empty changes list describing the no-change outcome).
+        changes.append(f"unchanged: {len(current)} files")
         is_valid = True
 
     return is_valid, changes

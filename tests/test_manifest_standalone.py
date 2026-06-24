@@ -99,7 +99,9 @@ def test_manifest_comparison_unchanged():
     is_valid, changes = _compare_manifests(manifest, manifest)
 
     assert is_valid is True, "Identical manifests should be valid"
-    assert len(changes) == 0, f"Should have no changes, got: {changes}"
+    assert any("unchanged" in c.lower() for c in changes), (
+        f"Expected an 'unchanged' summary, got: {changes}"
+    )
 
     print("✅ Manifest comparison detects unchanged files correctly")
 
@@ -250,7 +252,9 @@ def test_end_to_end_no_changes():
         is_valid, changes = _compare_manifests(manifest2, manifest1)
 
         assert is_valid is True, "No changes should keep cache valid"
-        assert len(changes) == 0, f"Should have no changes, got: {changes}"
+        assert any("unchanged" in c.lower() for c in changes), (
+            f"Expected an 'unchanged' summary, got: {changes}"
+        )
 
     print("✅ End-to-end cache stability works correctly")
 

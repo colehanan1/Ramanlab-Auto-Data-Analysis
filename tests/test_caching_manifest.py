@@ -12,6 +12,7 @@ Tests the caching logic in scripts/run_workflows.py including:
 from __future__ import annotations
 
 import json
+import os
 import tempfile
 import time
 from pathlib import Path
@@ -56,12 +57,6 @@ class TestFileTracking:
 
         assert _should_track_file(csv_file, dataset_root) is False
 
-    @pytest.mark.xfail(
-        reason="Pre-existing: _should_track_file uses len(parts) < 2, so it tracks "
-        "fly_dir/file.csv (2 parts) even though its docstring + this test require "
-        "fly_dir/trial_dir/file.csv (3 parts). Deferred to Phase 3 cache redesign.",
-        strict=True,
-    )
     def test_excludes_csv_one_level_deep(self, tmp_path: Path):
         """CSV files one level deep should NOT be tracked (need fly_dir/trial_dir/)."""
         dataset_root = tmp_path / "dataset"
@@ -184,12 +179,6 @@ class TestManifestBuilding:
 class TestManifestComparison:
     """Tests for _compare_manifests() logic."""
 
-    @pytest.mark.xfail(
-        reason="Pre-existing: _compare_manifests returns an empty changes list when "
-        "nothing changed, but this test expects an 'unchanged' summary entry. "
-        "Deferred to Phase 3 cache redesign.",
-        strict=True,
-    )
     def test_identical_manifests_are_valid(self):
         """Identical manifests should return is_valid=True."""
         manifest = {
@@ -341,12 +330,6 @@ class TestManifestIntegration:
         assert is_valid is False
         assert any("new" in c.lower() for c in changes)
 
-    @pytest.mark.xfail(
-        reason="Pre-existing: _compare_manifests returns an empty changes list when "
-        "nothing changed, but this test expects an 'unchanged' summary entry. "
-        "Deferred to Phase 3 cache redesign.",
-        strict=True,
-    )
     def test_manifest_stable_when_no_changes(self, tmp_path: Path):
         """End-to-end test: no changes should result in valid cache."""
         dataset_root = tmp_path / "dataset"
@@ -389,6 +372,50 @@ class TestPerformance:
 
         assert len(manifest) == 100
         assert elapsed < 1.0  # Should complete in under 1 second
+
+
+class TestContentHashSkip:
+    """Phase 3: content-hash makes the cache robust to mtime-only touches and
+    tracks Parquet outputs."""
+
+    def test_tracks_parquet_files(self, tmp_path: Path):
+        dataset_root = tmp_path / "dataset"
+        pq = dataset_root / "fly1" / "trial1" / "fly1_distances.parquet"
+        pq.parent.mkdir(parents=True)
+        pq.write_bytes(b"PAR1fakeparquetbytes")
+        assert _should_track_file(pq, dataset_root) is True
+        manifest = _build_file_manifest(dataset_root)
+        assert str(pq.absolute()) in manifest
+        assert "hash" in manifest[str(pq.absolute())]
+
+    def test_mtime_touch_without_content_change_is_valid(self, tmp_path: Path):
+        dataset_root = tmp_path / "dataset"
+        f = dataset_root / "fly1" / "trial1" / "coords.csv"
+        f.parent.mkdir(parents=True)
+        f.write_text("stable content")
+        manifest1 = _build_file_manifest(dataset_root)
+
+        # Touch: bump mtime far into the future WITHOUT changing bytes.
+        future = manifest1[str(f.absolute())]["mtime"] + 10_000
+        os.utime(f, (future, future))
+        manifest2 = _build_file_manifest(dataset_root)
+        assert manifest2[str(f.absolute())]["mtime"] != manifest1[str(f.absolute())]["mtime"]
+
+        is_valid, changes = _compare_manifests(manifest2, manifest1)
+        assert is_valid is True, "mtime-only touch must NOT invalidate the cache"
+        assert "unchanged" in changes[0].lower()
+
+    def test_same_size_content_change_invalidates(self, tmp_path: Path):
+        dataset_root = tmp_path / "dataset"
+        f = dataset_root / "fly1" / "trial1" / "coords.csv"
+        f.parent.mkdir(parents=True)
+        f.write_text("AAAAAAAA")
+        manifest1 = _build_file_manifest(dataset_root)
+        f.write_text("BBBBBBBB")  # same byte count, different content
+        manifest2 = _build_file_manifest(dataset_root)
+        is_valid, changes = _compare_manifests(manifest2, manifest1)
+        assert is_valid is False
+        assert any("modified" in c.lower() for c in changes)
 
 
 if __name__ == "__main__":
