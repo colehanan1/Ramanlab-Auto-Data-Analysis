@@ -437,6 +437,19 @@ class ForceSettings:
 
 
 @dataclass
+class ParallelSettings:
+    """Opt-in CPU parallelism for the per-fly/per-CSV pipeline stages.
+
+    Disabled by default so behaviour is identical to the historical serial
+    pipeline unless explicitly enabled. ``n_jobs <= 0`` resolves to
+    ``max(1, cpu_count - 2)`` at runtime.
+    """
+
+    enabled: bool = False
+    n_jobs: int = 0  # 0 -> auto (cpu_count - 2)
+
+
+@dataclass
 class DatasetOverride:
     """Per-dataset overrides resolved at trial-loading time.
 
@@ -509,6 +522,9 @@ class Settings:
     # reaction prediction
     reaction_prediction: ReactionPredictionSettings = field(default_factory=ReactionPredictionSettings)
     force: ForceSettings = field(default_factory=ForceSettings)
+
+    # opt-in CPU parallelism for per-fly/per-CSV stages
+    parallel: ParallelSettings = field(default_factory=ParallelSettings)
 
     # tracking quality
     tracking: TrackingConfig = field(default_factory=TrackingConfig)
@@ -909,6 +925,12 @@ def load_settings(config_path: str | Path) -> Settings:
         True
     )
 
+    parallel_cfg_raw = data.get("parallel") if isinstance(data.get("parallel"), dict) else {}
+    parallel = ParallelSettings(
+        enabled=_as_bool(os.getenv("PARALLEL_ENABLED", parallel_cfg_raw.get("enabled")), False),
+        n_jobs=int(os.getenv("PARALLEL_N_JOBS", parallel_cfg_raw.get("n_jobs", 0))),
+    )
+
     return Settings(
         model_path=model_path,
         main_directories=main_directories,
@@ -953,6 +975,7 @@ def load_settings(config_path: str | Path) -> Settings:
         ),
         reaction_prediction=reaction_prediction,
         force=force,
+        parallel=parallel,
         tracking=tracking,
         yolo_curation=yolo_curation,
         proboscis_filter=proboscis_filter,

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from functools import partial
 from pathlib import Path
 from typing import Dict, Tuple
 
@@ -13,6 +14,7 @@ from ..utils.distance_sanity import (
     sanitize_three_fly_distance_dataframe,
 )
 from ..utils.fly_files import iter_fly_distance_csvs
+from ..utils.parallel import parallel_map
 from ..utils.tables import read_schema_columns, read_table, write_table
 
 
@@ -31,111 +33,127 @@ def _needs_stats_refresh(csv_path: Path, *, force_recompute: bool) -> bool:
     return "distance_percentage" not in columns
 
 
-def main(cfg: Settings) -> None:
+def _process_fly_dir(fly_dir: Path, cfg: Settings) -> None:
+    """Process a single fly directory: compute and write per-slot distance stats JSON.
+
+    This is a module-level function so it is picklable by joblib's loky backend.
+    All cfg-derived values are computed here so workers have no dependency on
+    outer-scope variables.
+    """
     force_recompute = bool(getattr(getattr(cfg, "force", None), "pipeline", False))
+
+    print(f"[DIST] Inspecting fly directory: {fly_dir.name}")
+    entries = list(iter_fly_distance_csvs(fly_dir, recursive=True))
+    if not entries:
+        return
+
+    tokens_to_refresh: set[str] = set()
+    if force_recompute:
+        tokens_to_refresh = {token for _, token, _ in entries}
+    else:
+        for csv_path, token, _ in entries:
+            stats_path = _stats_path_for_token(fly_dir, token)
+            if not stats_path.exists():
+                tokens_to_refresh.add(token)
+                continue
+            if csv_requires_three_fly_distance_sanitization(
+                csv_path,
+                cfg.three_fly_max_eye_prob_distance_px,
+            ):
+                tokens_to_refresh.add(token)
+                continue
+            if _needs_stats_refresh(csv_path, force_recompute=force_recompute):
+                tokens_to_refresh.add(token)
+
+    if not tokens_to_refresh:
+        print(f"[DIST] {fly_dir.name}: all slot stats are up-to-date; skipping.")
+        return
+
+    slot_ranges: Dict[str, Tuple[float, float]] = {}
+    for csv_path, token, _ in entries:
+        if token not in tokens_to_refresh:
+            continue
+        print(
+            f"[DIST] Reading {csv_path.name} for slot '{token}' in {fly_dir.name}"
+        )
+        try:
+            df = read_table(csv_path)
+        except Exception as exc:
+            print(
+                f"[DIST] Failed to read {csv_path.name} (slot {token}): {exc}"
+            )
+            continue
+
+        df, sanitized_count = sanitize_three_fly_distance_dataframe(
+            df,
+            csv_path,
+            cfg.three_fly_max_eye_prob_distance_px,
+        )
+        if sanitized_count:
+            write_table(df, csv_path)
+            print(
+                f"[DIST] Sanitized {sanitized_count} over-limit 3-fly rows in {csv_path.name} "
+                f"(>{cfg.three_fly_max_eye_prob_distance_px}px)."
+            )
+
+        dist_col = find_proboscis_distance_column(df)
+        if dist_col is None:
+            print(
+                f"[DIST] No proboscis distance column found in {csv_path.name};"
+                f" expected aliases such as '{PROBOSCIS_DISTANCE_COL}' or 'proboscis_distance'."
+            )
+            continue
+
+        distances = pd.to_numeric(df[dist_col], errors="coerce")
+        mask = distances.between(cfg.class2_min, cfg.class2_max, inclusive="both")
+        vals = distances[mask]
+        if vals.empty:
+            print(
+                f"[DIST] Slot {token} in {csv_path.name} had no values within "
+                f"[{cfg.class2_min}, {cfg.class2_max}]; skipping."
+            )
+            continue
+
+        local_min = float(vals.min())
+        local_max = float(vals.max())
+        print(
+            f"[DIST] Slot {token}: local min={local_min:.3f}, max={local_max:.3f}"
+        )
+        current = slot_ranges.get(token)
+        if current is None:
+            slot_ranges[token] = (local_min, local_max)
+        else:
+            slot_ranges[token] = (min(current[0], local_min), max(current[1], local_max))
+
+    if not slot_ranges:
+        print(f"[DIST] No in-range distances for {fly_dir.name}")
+        return
+
+    for token, (gmin, gmax) in sorted(slot_ranges.items(), key=lambda item: item[0]):
+        slot_label = token.replace("_distances", "")
+        # Modification #1: Add fly_max_distance and effective_max_threshold
+        stats = {
+            "global_min": gmin,
+            "global_max": gmax,
+            "fly_max_distance": gmax,  # Actual max before 95px floor
+            "effective_max_threshold": 95.0  # Minimum threshold for normalization
+        }
+        stats_path = fly_dir / f"{slot_label}_global_distance_stats_class_{EYE_CLASS}.json"
+        with open(stats_path, "w", encoding="utf-8") as fp:
+            json.dump(stats, fp)
+        print(f"[DIST] {fly_dir.name}/{slot_label}: min={gmin:.3f} max={gmax:.3f} fly_max={gmax:.3f}")
+        print(f"[DIST] Wrote stats JSON → {stats_path}")
+
+
+def main(cfg: Settings) -> None:
     roots = get_main_directories(cfg)
     print(f"[DIST] Starting distance stats scan in {len(roots)} directories")
     for root in roots:
         print(f"[DIST] Processing root directory: {root}")
-        for fly_dir in [p for p in root.iterdir() if p.is_dir()]:
-            print(f"[DIST] Inspecting fly directory: {fly_dir.name}")
-            entries = list(iter_fly_distance_csvs(fly_dir, recursive=True))
-            if not entries:
-                continue
-
-            tokens_to_refresh: set[str] = set()
-            if force_recompute:
-                tokens_to_refresh = {token for _, token, _ in entries}
-            else:
-                for csv_path, token, _ in entries:
-                    stats_path = _stats_path_for_token(fly_dir, token)
-                    if not stats_path.exists():
-                        tokens_to_refresh.add(token)
-                        continue
-                    if csv_requires_three_fly_distance_sanitization(
-                        csv_path,
-                        cfg.three_fly_max_eye_prob_distance_px,
-                    ):
-                        tokens_to_refresh.add(token)
-                        continue
-                    if _needs_stats_refresh(csv_path, force_recompute=force_recompute):
-                        tokens_to_refresh.add(token)
-
-            if not tokens_to_refresh:
-                print(f"[DIST] {fly_dir.name}: all slot stats are up-to-date; skipping.")
-                continue
-
-            slot_ranges: Dict[str, Tuple[float, float]] = {}
-            for csv_path, token, _ in entries:
-                if token not in tokens_to_refresh:
-                    continue
-                print(
-                    f"[DIST] Reading {csv_path.name} for slot '{token}' in {fly_dir.name}"
-                )
-                try:
-                    df = read_table(csv_path)
-                except Exception as exc:
-                    print(
-                        f"[DIST] Failed to read {csv_path.name} (slot {token}): {exc}"
-                    )
-                    continue
-
-                df, sanitized_count = sanitize_three_fly_distance_dataframe(
-                    df,
-                    csv_path,
-                    cfg.three_fly_max_eye_prob_distance_px,
-                )
-                if sanitized_count:
-                    write_table(df, csv_path)
-                    print(
-                        f"[DIST] Sanitized {sanitized_count} over-limit 3-fly rows in {csv_path.name} "
-                        f"(>{cfg.three_fly_max_eye_prob_distance_px}px)."
-                    )
-
-                dist_col = find_proboscis_distance_column(df)
-                if dist_col is None:
-                    print(
-                        f"[DIST] No proboscis distance column found in {csv_path.name};"
-                        f" expected aliases such as '{PROBOSCIS_DISTANCE_COL}' or 'proboscis_distance'."
-                    )
-                    continue
-
-                distances = pd.to_numeric(df[dist_col], errors="coerce")
-                mask = distances.between(cfg.class2_min, cfg.class2_max, inclusive="both")
-                vals = distances[mask]
-                if vals.empty:
-                    print(
-                        f"[DIST] Slot {token} in {csv_path.name} had no values within "
-                        f"[{cfg.class2_min}, {cfg.class2_max}]; skipping."
-                    )
-                    continue
-
-                local_min = float(vals.min())
-                local_max = float(vals.max())
-                print(
-                    f"[DIST] Slot {token}: local min={local_min:.3f}, max={local_max:.3f}"
-                )
-                current = slot_ranges.get(token)
-                if current is None:
-                    slot_ranges[token] = (local_min, local_max)
-                else:
-                    slot_ranges[token] = (min(current[0], local_min), max(current[1], local_max))
-
-            if not slot_ranges:
-                print(f"[DIST] No in-range distances for {fly_dir.name}")
-                continue
-
-            for token, (gmin, gmax) in sorted(slot_ranges.items(), key=lambda item: item[0]):
-                slot_label = token.replace("_distances", "")
-                # Modification #1: Add fly_max_distance and effective_max_threshold
-                stats = {
-                    "global_min": gmin,
-                    "global_max": gmax,
-                    "fly_max_distance": gmax,  # Actual max before 95px floor
-                    "effective_max_threshold": 95.0  # Minimum threshold for normalization
-                }
-                stats_path = fly_dir / f"{slot_label}_global_distance_stats_class_{EYE_CLASS}.json"
-                with open(stats_path, "w", encoding="utf-8") as fp:
-                    json.dump(stats, fp)
-                print(f"[DIST] {fly_dir.name}/{slot_label}: min={gmin:.3f} max={gmax:.3f} fly_max={gmax:.3f}")
-                print(f"[DIST] Wrote stats JSON → {stats_path}")
+        fly_dirs = [p for p in root.iterdir() if p.is_dir()]
+        parallel_map(
+            partial(_process_fly_dir, cfg=cfg),
+            fly_dirs,
+            enabled=cfg.parallel.enabled,
+            n_jobs=cfg.parallel.n_jobs,
+        )
