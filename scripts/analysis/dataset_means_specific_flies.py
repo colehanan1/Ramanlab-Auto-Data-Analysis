@@ -48,6 +48,8 @@ for _p in (str(ROOT), str(ROOT / "src")):
         sys.path.insert(0, _p)
 
 from fbpipe.config import resolve_config_path  # noqa: E402
+from fbpipe.analysis.traces import baseline_correct, read_wide_table  # noqa: E402
+from fbpipe.utils.tables import resolve_existing  # noqa: E402
 from fbpipe.utils.nanstats import (  # noqa: E402
     count_finite_contributors,
     nan_pad_stack,
@@ -163,13 +165,8 @@ def _filter_to_flies(
 
 
 def _baseline_correct(trace: np.ndarray, baseline_frames: int) -> np.ndarray:
-    if baseline_frames <= 0:
-        return trace
-    window = trace[: min(len(trace), baseline_frames)]
-    finite = window[np.isfinite(window)]
-    if finite.size == 0:
-        return trace
-    return trace - float(finite.mean())
+    # Single source of truth: fbpipe.analysis.traces.baseline_correct
+    return baseline_correct(trace, baseline_frames)
 
 
 def _odor_first_presentation_trial(
@@ -919,12 +916,12 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     LOGGER.info("Config: %s", cfg_path)
 
     wide_csv = _select_wide_csv(cfg)
-    if not wide_csv.exists():
+    if resolve_existing(wide_csv) is None:
         LOGGER.error("Wide CSV not found: %s", wide_csv)
         sys.exit(1)
     LOGGER.info("Wide CSV: %s", wide_csv)
 
-    wide_df = pd.read_csv(wide_csv)
+    wide_df = read_wide_table(wide_csv)  # Parquet-preferred (3-4x faster), CSV fallback
     LOGGER.info("Loaded %d rows", len(wide_df))
 
     fps, odor_on_s, odor_off_s = _timing_from_cfg(args, cfg)

@@ -52,6 +52,8 @@ if _src_str not in sys.path:
     sys.path.insert(0, _src_str)
 
 from fbpipe.config import resolve_config_path  # noqa: E402
+from fbpipe.analysis.traces import baseline_correct, read_wide_table  # noqa: E402
+from fbpipe.utils.tables import resolve_existing  # noqa: E402
 from fbpipe.utils.nanstats import (  # noqa: E402
     count_finite_contributors,
     nan_pad_stack,
@@ -276,16 +278,12 @@ def _resolve_named_odor(dataset_canon: str, trial_label: str) -> str | None:
 
 
 def _baseline_correct_trace(trace: np.ndarray, baseline_frames: int | None) -> np.ndarray:
-    """Subtract the pre-odor mean from a 1-D trace."""
+    """Subtract the pre-odor mean from a 1-D trace.
 
-    if baseline_frames is None or baseline_frames <= 0:
-        return trace
-
-    baseline = trace[: min(len(trace), baseline_frames)]
-    finite = baseline[np.isfinite(baseline)]
-    if finite.size == 0:
-        return trace
-    return trace - float(finite.mean())
+    Thin wrapper over the shared :func:`fbpipe.analysis.traces.baseline_correct`
+    (single source of truth, also used by dataset_means_specific_flies).
+    """
+    return baseline_correct(trace, baseline_frames)
 
 
 def _odor_colour(odor: str) -> str:
@@ -682,7 +680,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     # Load the wide CSV
     wide_csv_arg = _select_wide_csv_arg(args.wide_csv, cfg_data, trial_type=args.trial_type)
     wide_csv = _resolve_wide_csv_path(wide_csv_arg)
-    if not wide_csv.exists():
+    if resolve_existing(wide_csv) is None:
         preferred_default = DEFAULT_WIDE_CSV.expanduser().resolve()
         if wide_csv_arg.expanduser().resolve() == preferred_default:
             checked = ", ".join(str(path) for path in DEFAULT_WIDE_CSV_CANDIDATES)
@@ -692,7 +690,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         sys.exit(1)
 
     LOGGER.info("Reading %s ...", wide_csv)
-    wide_df = pd.read_csv(wide_csv)
+    wide_df = read_wide_table(wide_csv)  # Parquet-preferred (3-4x faster), CSV fallback
     LOGGER.info("Loaded %d rows across %d datasets", len(wide_df), wide_df["dataset"].nunique())
 
     # Filter by trial type
