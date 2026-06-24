@@ -13,10 +13,12 @@ import time
 from pathlib import Path
 import sys
 
-# Import functions from run_workflows
-sys.path.insert(0, str(Path(__file__).resolve().parent / "scripts"))
+# Import manifest-caching helpers from the canonical implementation module.
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
 
-from run_workflows import (
+from scripts.pipeline.run_workflows import (
     _should_track_file,
     _build_file_manifest,
     _compare_manifests,

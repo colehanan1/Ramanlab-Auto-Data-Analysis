@@ -7,6 +7,7 @@ import numpy as np
 import pandas as pd
 
 sys.path.append(str(Path(__file__).resolve().parents[1] / "src"))
+sys.path.append(str(Path(__file__).resolve().parents[1] / "scripts" / "analysis"))
 
 from envelope_combined import (
     AUC_COLUMNS,
