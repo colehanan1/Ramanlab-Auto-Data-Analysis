@@ -448,3 +448,142 @@ def test_chunked_inference_matches_sequential_reference(monkeypatch, batch_size)
             f"batch_size={batch_size}: row {i} diverged from sequential reference\n"
             f"  reference={ref}\n  chunked  ={got}"
         )
+
+
+# ===========================================================================
+# Task 5 Step 2: Edge / mitigation tests for _run_chunked_inference
+# ===========================================================================
+
+class _CountingWriter:
+    """Minimal writer that counts write() calls (no frame storage needed)."""
+
+    def __init__(self):
+        self.call_count = 0
+
+    def write(self, frame):
+        self.call_count += 1
+
+    def release(self):
+        pass
+
+
+def _trivial_predict(frames, conf):
+    """Stub batched_predict_fn returning one _CannedResult per frame.
+    Keys off the index marker pixel (frame[0,0,0]), same as _batched_predict_stub.
+    Extended CANNED list is not needed here because we only use frame indices 0..9;
+    we build a local result on the fly."""
+    return [_CannedResult(int(f[0, 0, 0])) for f in frames]
+
+
+def _run_edge(
+    monkeypatch,
+    n_frames: int,
+    batch_size: int,
+    max_frame: int = None,
+    predict_fn=None,
+):
+    """Drive _run_chunked_inference with a fresh cap/writer/collaborators and
+    return (rows, writer) so callers can assert row counts and write counts."""
+    _install_collect_detections(monkeypatch)
+    cfg = _make_settings()
+    active_max_flies = 2
+    fps = 30.0
+    timestamps = {}
+    if max_frame is None:
+        max_frame = n_frames - 1
+    if predict_fn is None:
+        predict_fn = _trivial_predict
+
+    track_module.Track._next_id = 1
+    single_trackers, eye_mgr, cls8_tracker, pairer = _make_collaborators(cfg, active_max_flies)
+    cap = _FakeVideoCapture(n_frames)
+    writer = _CountingWriter()
+
+    rows = _run_chunked_inference(
+        cap,
+        max_frame,
+        (W, H),
+        writer,
+        timestamps,
+        fps,
+        (AX, AY),
+        cfg,
+        predict_fn,
+        single_trackers,
+        None,
+        eye_mgr,
+        cls8_tracker,
+        pairer,
+        active_max_flies,
+        batch_size,
+    )
+    return rows, writer
+
+
+# ---------------------------------------------------------------------------
+# Test: partial last batch (N=10, B=3 → chunks 3,3,3,1 → 10 rows)
+# ---------------------------------------------------------------------------
+
+def test_partial_last_batch(monkeypatch):
+    """N=10, batch_size=3 → 4 chunks (3,3,3,1); all 10 frames processed."""
+    rows, writer = _run_edge(monkeypatch, n_frames=10, batch_size=3)
+    assert len(rows) == 10, f"Expected 10 rows, got {len(rows)}"
+    assert writer.call_count == 10, (
+        f"writer.write expected 10 calls, got {writer.call_count}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Test: EOF on a chunk boundary (N=9, B=3 → exactly 3 full chunks, no 4th call)
+# ---------------------------------------------------------------------------
+
+def test_eof_on_chunk_boundary(monkeypatch):
+    """N=9, batch_size=3 → exactly 3 calls to predict (3,3,3); the loop fills
+    a 4th batch and gets empty → ``if not batch_frames: break`` fires without
+    ever calling predict([]).  The stub asserts it is never called with [].
+    """
+    call_count = {"n": 0}
+
+    def strict_predict(frames, conf):
+        assert len(frames) > 0, "predict must never be called with an empty list"
+        call_count["n"] += 1
+        return [_CannedResult(int(f[0, 0, 0])) for f in frames]
+
+    rows, writer = _run_edge(monkeypatch, n_frames=9, batch_size=3, predict_fn=strict_predict)
+    assert len(rows) == 9, f"Expected 9 rows, got {len(rows)}"
+    assert call_count["n"] == 3, (
+        f"Expected predict called exactly 3 times, got {call_count['n']}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Test: max_frame cap (N=10 decodable, max_frame=5 → frames 0..5 → 6 rows)
+# ---------------------------------------------------------------------------
+
+def test_max_frame_cap(monkeypatch):
+    """max_frame=5 stops processing after frame index 5; the cap could yield 10
+    frames but the per-frame guard ``frame_idx <= max_frame`` prevents reading
+    past index 5.  Exactly 6 frames (indices 0–5 inclusive) must be processed."""
+    rows, writer = _run_edge(monkeypatch, n_frames=10, batch_size=3, max_frame=5)
+    assert len(rows) == 6, f"Expected 6 rows (frames 0..5), got {len(rows)}"
+    assert writer.call_count == 6, (
+        f"writer.write expected 6 calls, got {writer.call_count}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Test: truncated results → AssertionError (fail-loud guard)
+# ---------------------------------------------------------------------------
+
+def test_truncated_results_raises(monkeypatch):
+    """If batched_predict_fn returns fewer results than frames in the batch the
+    helper must raise AssertionError (from ``assert len(results) == len(batch_frames)``).
+    """
+
+    def short_predict(frames, conf):
+        results = [_CannedResult(int(f[0, 0, 0])) for f in frames]
+        # Drop the last result to simulate a truncated engine response.
+        return results[:-1] if len(results) > 1 else results
+
+    with pytest.raises(AssertionError):
+        _run_edge(monkeypatch, n_frames=4, batch_size=4, predict_fn=short_predict)
