@@ -126,18 +126,47 @@ def test_cycle3_light_only_training():
     print("PASS: test_cycle3_light_only_training")
 
 def test_cycle3_light_only_control():
-    """Cycle 3 in control: no light, no odor."""
+    """Cycle 3 in control: light fires (light_schedule present), no odor.
+
+    The light-only trial exists to test the conditioned response to light alone;
+    suppressing the light in a 'light only' trial would make it meaningless.
+    The expander now emits light_schedule for both training and control modes in
+    Cycle 3 — this is intentional per the _build_light_only_cycle comment.
+    """
     result = expand_config(_make_v2("OFM_B"), control=True)
     c3 = result["cycles"][2]
     light_step = [s for s in c3["steps"] if "Light Only" in s.get("name", "")]
-    assert "light_schedule" not in light_step[0]
+    assert len(light_step) == 1
+    # Light fires even in control mode for the light-only trial
+    assert "light_schedule" in light_step[0]
+    # Still no odor actions in control mode
+    assert light_step[0]["actions"] == []
     print("PASS: test_cycle3_light_only_control")
 
 def test_control_no_light_anywhere():
+    """In control mode, light is suppressed in Cycles 1 and 2 (conditioning/testing),
+    but Cycle 3 (light-only trial) still fires light in both modes — it is the
+    light response probe and would be meaningless without light."""
     result = expand_config(_make_v2("OFM_B"), control=True)
     for c in result["cycles"]:
+        cycle_num = c["cycle"]
         for s in c["steps"]:
-            assert "light_schedule" not in s
+            if cycle_num in (1, 2):
+                # Conditioning and odor-testing cycles: no light in control mode
+                assert "light_schedule" not in s, (
+                    f"Cycle {cycle_num} step '{s.get('name')}' should have no "
+                    f"light_schedule in control mode"
+                )
+            else:
+                # Cycle 3 (light-only): light fires even in control
+                # (only the named light-only step will have light_schedule;
+                #  other steps in cycle 3 remain light-free)
+                pass
+    # Verify Cycle 3 light-only step has light_schedule
+    c3 = result["cycles"][2]
+    light_steps = [s for s in c3["steps"] if "light_schedule" in s]
+    assert len(light_steps) == 1
+    assert "Light Only" in light_steps[0]["name"]
     print("PASS: test_control_no_light_anywhere")
 
 def test_iti_timing():

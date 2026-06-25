@@ -7,8 +7,9 @@ physically implausible rapid changes in proboscis position.
 
 from __future__ import annotations
 
+from functools import partial
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -16,6 +17,8 @@ import pandas as pd
 from ..config import Settings, get_main_directories
 from ..utils.columns import PROBOSCIS_DISTANCE_PCT_COL
 from ..utils.fly_files import iter_fly_distance_csvs
+from ..utils.parallel import parallel_map
+from ..utils.tables import read_table, write_table, read_schema_columns
 
 # Acceleration threshold for flagging suspicious frames (% per frame)
 ACCELERATION_THRESHOLD = 20.0
@@ -37,7 +40,7 @@ def calculate_acceleration_for_csv(csv_path: Path) -> Optional[pd.DataFrame]:
         DataFrame with new columns added, or None if missing required columns
     """
     try:
-        df = pd.read_csv(csv_path)
+        df = read_table(csv_path)
     except Exception as e:
         print(f"[ACCEL] Error reading {csv_path.name}: {e}")
         return None
@@ -83,6 +86,49 @@ def calculate_acceleration_for_csv(csv_path: Path) -> Optional[pd.DataFrame]:
     return df
 
 
+def _process_fly_dir(fly_dir: Path, cfg: Settings) -> Tuple[int, int]:
+    """Process a single fly directory: compute acceleration for all RMS CSVs.
+
+    This is a module-level function so it is picklable by joblib's loky backend.
+    Returns (fly_processed, fly_flagged) counts for the caller to aggregate.
+    """
+    rms_dir = fly_dir / "RMS_calculations"
+    if not rms_dir.is_dir():
+        return 0, 0
+
+    fly_processed = 0
+    fly_flagged = 0
+
+    for csv_path, token, _ in iter_fly_distance_csvs(rms_dir, recursive=False):
+        # Skip if already processed (has acceleration column)
+        try:
+            if "acceleration_pct_per_frame" in read_schema_columns(csv_path):
+                continue
+        except Exception:
+            pass
+
+        # Calculate acceleration
+        df = calculate_acceleration_for_csv(csv_path)
+        if df is None:
+            continue
+
+        # Count flagged frames
+        n_flagged = int(df["acceleration_flag"].sum())
+        fly_flagged += n_flagged
+
+        # Save updated Parquet
+        write_table(df, csv_path)
+        fly_processed += 1
+
+        if n_flagged > 0:
+            print(f"[ACCEL] {csv_path.name}: {n_flagged} high-acceleration frames flagged")
+
+    if fly_processed > 0:
+        print(f"[ACCEL] {fly_dir.name}: {fly_processed} files processed, {fly_flagged} suspicious frames")
+
+    return fly_processed, fly_flagged
+
+
 def main(cfg: Settings) -> None:
     """
     Calculate acceleration for all RMS calculation CSVs.
@@ -105,43 +151,16 @@ def main(cfg: Settings) -> None:
 
     for root in roots:
         print(f"[ACCEL] Processing root directory: {root}")
-        for fly_dir in [p for p in root.iterdir() if p.is_dir()]:
-            rms_dir = fly_dir / "RMS_calculations"
-            if not rms_dir.is_dir():
-                continue
-
-            fly_processed = 0
-            fly_flagged = 0
-
-            for csv_path, token, _ in iter_fly_distance_csvs(rms_dir, recursive=False):
-                # Skip if already processed (has acceleration column)
-                try:
-                    temp_df = pd.read_csv(csv_path, nrows=1)
-                    if "acceleration_pct_per_frame" in temp_df.columns:
-                        continue
-                except Exception:
-                    pass
-
-                # Calculate acceleration
-                df = calculate_acceleration_for_csv(csv_path)
-                if df is None:
-                    continue
-
-                # Count flagged frames
-                n_flagged = int(df["acceleration_flag"].sum())
-                fly_flagged += n_flagged
-
-                # Save updated CSV
-                df.to_csv(csv_path, index=False)
-                fly_processed += 1
-
-                if n_flagged > 0:
-                    print(f"[ACCEL] {csv_path.name}: {n_flagged} high-acceleration frames flagged")
-
-            if fly_processed > 0:
-                total_processed += fly_processed
-                total_flagged += fly_flagged
-                print(f"[ACCEL] {fly_dir.name}: {fly_processed} files processed, {fly_flagged} suspicious frames")
+        fly_dirs = [p for p in root.iterdir() if p.is_dir()]
+        results = parallel_map(
+            partial(_process_fly_dir, cfg=cfg),
+            fly_dirs,
+            enabled=cfg.parallel.enabled,
+            n_jobs=cfg.parallel.n_jobs,
+        )
+        for fly_processed, fly_flagged in results:
+            total_processed += fly_processed
+            total_flagged += fly_flagged
 
     print(f"[ACCEL] Complete: {total_processed} CSVs processed, {total_flagged} total flagged frames")
 

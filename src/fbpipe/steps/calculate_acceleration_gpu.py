@@ -30,6 +30,7 @@ from ..config import Settings, get_main_directories
 from ..utils.columns import PROBOSCIS_DISTANCE_PCT_COL
 from ..utils.fly_files import iter_fly_distance_csvs
 from ..utils.gpu_accelerated import get_default_processor
+from ..utils.tables import read_table, write_table, read_schema_columns
 
 # Acceleration threshold for flagging suspicious frames (% per frame)
 ACCELERATION_THRESHOLD = 20.0
@@ -55,7 +56,7 @@ def calculate_acceleration_for_csv_gpu(
         DataFrame with new columns added, or None if missing required columns
     """
     try:
-        df = pd.read_csv(csv_path)
+        df = read_table(csv_path)
     except Exception as e:
         print(f"[ACCEL-GPU] Error reading {csv_path.name}: {e}")
         return None
@@ -137,8 +138,7 @@ def main(cfg: Settings) -> None:
             for csv_path, token, _ in iter_fly_distance_csvs(rms_dir, recursive=False):
                 # Skip if already processed (has acceleration column)
                 try:
-                    temp_df = pd.read_csv(csv_path, nrows=1)
-                    if "acceleration_pct_per_frame" in temp_df.columns:
+                    if "acceleration_pct_per_frame" in read_schema_columns(csv_path):
                         continue
                 except Exception:
                     pass
@@ -152,8 +152,8 @@ def main(cfg: Settings) -> None:
                 n_flagged = int(df["acceleration_flag"].sum())
                 fly_flagged += n_flagged
 
-                # Save updated CSV
-                df.to_csv(csv_path, index=False)
+                # Save updated Parquet
+                write_table(df, csv_path)
                 fly_processed += 1
 
                 if n_flagged > 0:

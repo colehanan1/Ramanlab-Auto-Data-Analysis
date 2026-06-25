@@ -6,6 +6,7 @@ from typing import Any
 __all__ = [
     "yolo_infer",
     "curate_yolo_dataset",
+    "reject_bad_proboscis",
     "pseudolabel_export",
     "distance_stats",
     "distance_normalize",

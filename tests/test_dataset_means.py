@@ -459,7 +459,7 @@ def test_plot_dataset_means_uses_stable_odor_palette():
     assert odor_lines["Hexanol"].get_color() == _odor_colour("Hexanol")
     assert odor_lines["Benzaldehyde"].get_color() == _odor_colour("Benzaldehyde")
     assert _odor_colour("Hexanol") == "#2ca02c"
-    assert _odor_colour("Benzaldehyde") == "#1f77b4"
+    assert _odor_colour("Benzaldehyde") == "#333333"
     plt.close(fig)
 
 

@@ -27,7 +27,6 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
-import pandas as pd
 import torch
 
 from .columns import (
@@ -175,91 +174,6 @@ class GPUBatchProcessor:
 
         # Transfer back to CPU
         return acceleration.cpu().numpy()
-
-    def process_csv_normalization(
-        self,
-        csv_path: Path,
-        dist_col: str,
-        gmin: float,
-        gmax: float,
-        effective_max: float,
-        output_cols: Dict[str, str]
-    ) -> pd.DataFrame:
-        """
-        Process a single CSV file with GPU-accelerated normalization.
-
-        Args:
-            csv_path: Path to CSV file
-            dist_col: Name of distance column
-            gmin: Global minimum
-            gmax: Global maximum
-            effective_max: Effective maximum (Modification #1)
-            output_cols: Dict of column names to write
-
-        Returns:
-            DataFrame with normalized columns added
-        """
-        df = pd.read_csv(csv_path)
-
-        # Extract distance array
-        d = pd.to_numeric(df[dist_col], errors="coerce").to_numpy()
-
-        # GPU-accelerated normalization
-        perc = self.normalize_distances_batch(d, gmin, gmax, effective_max)
-
-        # Update dataframe
-        df[output_cols.get("distance", PROBOSCIS_DISTANCE_COL)] = d
-        df[output_cols.get("percentage", PROBOSCIS_DISTANCE_PCT_COL)] = perc
-        df[output_cols.get("min", PROBOSCIS_MIN_DISTANCE_COL)] = gmin
-        df[output_cols.get("max", PROBOSCIS_MAX_DISTANCE_COL)] = gmax
-        df[
-            output_cols.get(
-                "effective_max",
-                f"effective_max_distance_{EYE_CLASS}_{PROBOSCIS_CLASS}",
-            )
-        ] = effective_max
-
-        return df
-
-    def process_csv_acceleration(
-        self,
-        csv_path: Path,
-        dist_pct_col: str,
-        angle_mult_col: str
-    ) -> Optional[pd.DataFrame]:
-        """
-        Process a single CSV file with GPU-accelerated acceleration calculation.
-
-        Args:
-            csv_path: Path to CSV file
-            dist_pct_col: Distance percentage column name
-            angle_mult_col: Angle multiplier column name
-
-        Returns:
-            DataFrame with acceleration columns added, or None if missing columns
-        """
-        try:
-            df = pd.read_csv(csv_path)
-        except Exception as e:
-            print(f"[GPU] Error reading {csv_path.name}: {e}")
-            return None
-
-        if dist_pct_col not in df.columns or angle_mult_col not in df.columns:
-            return None
-
-        # Extract arrays
-        dist_pct = pd.to_numeric(df[dist_pct_col], errors="coerce").to_numpy()
-        angle_mult = pd.to_numeric(df[angle_mult_col], errors="coerce").to_numpy()
-
-        # GPU-accelerated calculations
-        combined = dist_pct * angle_mult
-        acceleration = self.calculate_acceleration_batch(combined)
-
-        # Update dataframe
-        df["combined_distance_x_angle"] = combined
-        df["acceleration_pct_per_frame"] = acceleration
-
-        return df
 
     def compute_angle_at_point2_batch(
         self,

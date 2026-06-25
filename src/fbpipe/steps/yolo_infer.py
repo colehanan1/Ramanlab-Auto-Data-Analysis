@@ -3,7 +3,6 @@ from __future__ import annotations
 import logging
 import math
 import time
-import subprocess
 
 import cv2
 import numpy as np
@@ -15,9 +14,12 @@ import torch
 import gc  # Add this import
 
 from ..config import Settings, get_main_directories
+from ..utils.tables import read_table, write_table, table_path
 from ..utils.timestamps import pick_timestamp_column, pick_frame_column, to_seconds_series
 from ..utils.vision import xyxy_to_cxcywh
 from ..utils.yolo_results import collect_detections
+from ..utils.video_writer import FFmpegFrameWriter
+from ..utils.distance_sanity import anisotropic_boundary_offsets
 from ..utils.track import MultiObjectTracker, SingleClassTracker
 from ..utils.multi_fly import EyeAnchorManager, StablePairing, enforce_zero_iou_and_topk
 from ..utils.columns import (
@@ -126,18 +128,28 @@ def _limit_proboscis_detections(
 
 
 def _build_proboscis_tracker(settings: Settings, active_max_flies: int) -> MultiObjectTracker:
+    # The proboscis is a small, fast object: its box often has little or no
+    # overlap with its own previous-frame box, so IoU association fails and
+    # spawns spurious new tracks. Match by center distance instead.
     return MultiObjectTracker(
         iou_thres=settings.iou_match_thres,
         max_age=settings.max_age,
         ema_alpha=settings.ema_alpha,
         max_tracks=_active_proboscis_track_limit(active_max_flies),
+        match_mode="center",
+        max_match_dist=settings.proboscis_match_max_dist_px,
     )
 
 
 def _max_valid_eye_prob_distance_px(settings: Settings, active_max_flies: int) -> float:
-    """Apply an extra distance sanity cap only for 3-fly videos."""
+    """Apply an extra eye→proboscis distance sanity cap for crowded videos.
 
-    if active_max_flies == 3:
+    Originally gated on exactly 3 flies; now applies whenever there are 3 or
+    more fly slots (including 4-fly recordings), since the mispairing risk only
+    grows as the arena gets more crowded.
+    """
+
+    if active_max_flies >= 3:
         return float(settings.three_fly_max_eye_prob_distance_px)
     return math.inf
 
@@ -229,6 +241,19 @@ def _process_frame(
     pairer.step(eye_ids, eye_centers, tracks8)
 
     eye_mgr.draw(frame)
+    # Draw the proboscis geometry gate around each eye: any proboscis outside
+    # this anisotropic blob (generous left/down, tight right/up) is rejected
+    # downstream (see ProboscisFilterSettings).
+    pf = getattr(settings, "proboscis_filter", None)
+    gate_max_px = float(getattr(pf, "max_eye_prob_distance_px", 0) or 0)
+    if gate_max_px > 0:
+        up_divisor = float(getattr(pf, "up_divisor", 1.0) or 1.0)
+        offsets = anisotropic_boundary_offsets(gate_max_px, up_divisor)
+        for ex_c, ey_c in eye_centers:
+            poly = np.array(
+                [[int(ex_c + ox), int(ey_c + oy)] for ox, oy in offsets], dtype=np.int32
+            )
+            cv2.polylines(frame, [poly], isClosed=True, color=(0, 200, 0), thickness=2)
     for track in tracks8:
         x1, y1, x2, y2 = track.box_xyxy.astype(int)
         cv2.rectangle(frame, (x1, y1), (x2, y2), (255, 0, 0), 3)
@@ -377,8 +402,8 @@ def _export_per_fly_csvs(
             continue
 
         csv_path = out_dir / f"{folder_name}_fly{idx + 1}_distances.csv"
-        slot_df.to_csv(csv_path, index=False)
-        per_fly_paths.append(csv_path)
+        written_path = write_table(slot_df, csv_path)
+        per_fly_paths.append(written_path)
 
     return per_fly_paths
 
@@ -407,9 +432,11 @@ def main(cfg: Settings):
     if Path(engine_path).exists():
         log.info(f"Loading TensorRT engine: {engine_path}")
         model = YOLO(engine_path)
+        is_engine = True
     else:
         log.info(f"Loading PyTorch model: {cfg.model_path} (export to .engine for 2-5x speedup)")
         model = YOLO(cfg.model_path)
+        is_engine = False
     device_in_use: Optional[str] = None
 
     def _set_device(target: str):
@@ -420,7 +447,10 @@ def main(cfg: Settings):
             gc.collect()
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
-        model.to(target)
+        # TensorRT engines are bound to the GPU they were built for and reject
+        # .to(); the device is supplied per-call in predict() instead.
+        if not is_engine:
+            model.to(target)
         device_in_use = target
 
     target_device = "cuda" if use_cuda else "cpu"
@@ -508,7 +538,7 @@ def main(cfg: Settings):
                 calculated_fps = cap.get(cv2.CAP_PROP_FPS) or cfg.fps_default
 
                 if csv_file_path.exists():
-                    df_timestamps = pd.read_csv(csv_file_path)
+                    df_timestamps = read_table(csv_file_path)
                     frame_col = pick_frame_column(df_timestamps)
                     if frame_col is not None:
                         ts_col = pick_timestamp_column(df_timestamps)
@@ -526,24 +556,40 @@ def main(cfg: Settings):
                             if fps_from_csv and np.isfinite(fps_from_csv) and fps_from_csv > 0:
                                 calculated_fps = fps_from_csv
 
-                fps = calculated_fps
                 w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)) or 1080
                 h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) or 1080
-                # Use H.264 codec (avc1) for better compression - output videos will be similar size to input
-                # Try X264 (libx264) codec first, fall back to mp4v if not available
-                fourcc = cv2.VideoWriter_fourcc(*"X264")
-                writer = cv2.VideoWriter(str(out_mp4), fourcc, fps, (w, h))
+                # Frames are resized to 1080x1080 in the loop when the source
+                # differs, so the writer must use the *output* dimensions.
+                out_w, out_h = (1080, 1080) if (w, h) != (1080, 1080) else (w, h)
 
-                # If X264 fails, try mp4v as fallback
-                if not writer.isOpened():
-                    log.warning("X264 codec not available, falling back to mp4v")
+                # The annotated video is for human review only; its container
+                # framerate must be a sane playback rate. calculated_fps is
+                # derived from the CSV timestamps and can be garbage (e.g. when
+                # the source timestamps are mis-scaled), producing a video with
+                # an absurd fps that players refuse to open. Clamp to a sane
+                # range and fall back to the configured default otherwise.
+                video_fps = calculated_fps
+                if not (1.0 <= video_fps <= 240.0):
+                    log.warning(
+                        "Computed fps %.3f out of range for %s; using fps_default=%.1f for the annotated video",
+                        video_fps, out_mp4.name, cfg.fps_default,
+                    )
+                    video_fps = cfg.fps_default
+                fps = video_fps
+
+                # Encode H.264 in a single pass by piping annotated frames
+                # straight into ffmpeg (libx264, yuv420p, +faststart). This
+                # replaces the old write-then-re-encode flow: one encode instead
+                # of two (~half the CPU), and yuv420p/faststart keep the output
+                # broadly playable. Fall back to OpenCV mp4v if ffmpeg is absent.
+                writer = FFmpegFrameWriter(out_mp4, fps, out_w, out_h, crf=30, preset="medium")
+                if not writer.ok:
+                    log.warning("ffmpeg pipe unavailable; falling back to OpenCV mp4v writer")
                     fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-                    writer = cv2.VideoWriter(str(out_mp4), fourcc, fps, (w, h))
-
-                # Verify writer opened successfully
-                if not writer.isOpened():
-                    log.error(f"Failed to open VideoWriter for {out_mp4}, skipping video")
-                    continue
+                    writer = cv2.VideoWriter(str(out_mp4), fourcc, fps, (out_w, out_h))
+                    if not writer.isOpened():
+                        log.error(f"Failed to open VideoWriter for {out_mp4}, skipping video")
+                        continue
 
                 single_trackers = {
                     cls: SingleClassTracker(
@@ -587,38 +633,13 @@ def main(cfg: Settings):
                     frame_idx += 1
                 cap.release(); writer.release()
 
-                # Re-encode with H.264 using ffmpeg for better compression
-                temp_mp4 = out_mp4.with_name(out_mp4.stem + "_temp.mp4")
-                out_mp4.rename(temp_mp4)  # Rename original to temp
-
-                log.info(f"Re-encoding with H.264 for better compression...")
-                try:
-                    subprocess.run([
-                        '/usr/bin/ffmpeg',  # Use system ffmpeg with libx264 support
-                        '-y',  # Overwrite output file
-                        '-i', str(temp_mp4),
-                        '-c:v', 'libx264',
-                        '-preset', 'medium',
-                        '-crf', '30',  # Match user's compression preference
-                        '-c:a', 'copy',
-                        str(out_mp4)
-                    ], check=True, capture_output=True, text=True)
-
-                    # Delete temp file after successful re-encoding
-                    temp_mp4.unlink()
-
-                    # Log file size comparison
+                if out_mp4.exists():
                     final_size = out_mp4.stat().st_size / (1024**2)
-                    log.info(f"  Final output: {final_size:.1f} MB")
-                except subprocess.CalledProcessError as e:
-                    log.warning(f"  ffmpeg re-encoding failed, keeping original: {e.stderr}")
-                    # Restore original if ffmpeg fails
-                    if temp_mp4.exists():
-                        temp_mp4.rename(out_mp4)
+                    log.info(f"  Final output: {final_size:.1f} MB ({fps:.1f} fps)")
 
                 df_rows = pd.DataFrame(rows)
                 merged_csv_path = out_dir / f"{folder_name}_distances_merged.csv"
-                df_rows.to_csv(merged_csv_path, index=False)
+                write_table(df_rows, merged_csv_path)
 
                 per_fly_paths = _export_per_fly_csvs(df_rows, out_dir, folder_name, cfg, active_max_flies)
 

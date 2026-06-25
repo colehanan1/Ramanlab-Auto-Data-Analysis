@@ -38,6 +38,10 @@ import numpy as np
 import pandas as pd
 from matplotlib import gridspec, transforms
 from matplotlib.colors import BoundaryNorm, ListedColormap
+from matplotlib.ticker import MultipleLocator
+
+# Time-axis tick spacing (seconds) for all PER-over-time trace panels.
+PER_TIME_TICK_STEP_S = 15.0
 
 from fbpipe.odor_constants import (
     ODOR_CANON,
@@ -73,6 +77,81 @@ def get_protocol() -> str:
     return _ACTIVE_PROTOCOL
 
 
+# ---------------------------------------------------------------------------
+# Per-dataset light-only annotation overrides
+# ---------------------------------------------------------------------------
+# Pipeline driver populates this at startup from DatasetOverride.light_only
+# blocks. Values are (light_start_s, light_end_s) windows. When a trial's
+# dataset_canon matches a key here, the per-trial plotting code suppresses the
+# odor span and dashed odor-on/off markers and draws a single light-on span
+# instead.
+_DATASET_LIGHT_WINDOWS: dict[str, tuple[float, float]] = {}
+
+
+def set_dataset_light_windows(windows: dict[str, tuple[float, float]]) -> None:
+    """Register light-only datasets and their (start_s, end_s) windows."""
+    _DATASET_LIGHT_WINDOWS.clear()
+    _DATASET_LIGHT_WINDOWS.update(windows)
+
+
+def _dataset_light_window(dataset_canon: str) -> tuple[float, float] | None:
+    return _DATASET_LIGHT_WINDOWS.get(dataset_canon)
+
+
+# ---------------------------------------------------------------------------
+# Per-trial model-score annotations
+# ---------------------------------------------------------------------------
+# Pipeline driver populates this from reaction_prediction.output_csv after
+# the model has run. Keys are (dataset, fly, fly_number_str, trial_label).
+# Values are the ordinal score (e.g. -1..5). Per-axis plotting code draws the
+# score in the upper-right corner of each trial subplot when present.
+_MODEL_SCORES: dict[tuple[str, str, str, str], int] = {}
+
+
+def set_model_scores(scores: dict[tuple[str, str, str, str], int]) -> None:
+    """Register per-trial model scores keyed by (dataset, fly, fly_number, trial_label)."""
+    _MODEL_SCORES.clear()
+    _MODEL_SCORES.update(scores)
+
+
+def _lookup_model_score(
+    dataset_canon: str, fly: str, fly_number_label: str, trial_label: str
+) -> int | None:
+    """Return the registered score for a trial, or None if missing."""
+    key = (str(dataset_canon), str(fly), str(fly_number_label), str(trial_label))
+    return _MODEL_SCORES.get(key)
+
+
+# ---------------------------------------------------------------------------
+# Per-dataset odor-label remap
+# ---------------------------------------------------------------------------
+# Pipeline driver populates this from DatasetOverride.odor_remap. Keys are
+# canonical dataset names; values map a display odor name (e.g. "Citral")
+# to a substitute label (e.g. "Sour Dough Yeast (25%)"). Used when the rig
+# configuration delivered a different liquid than the trial-label suffix
+# claims. ``apply_dataset_odor_remap`` is called at the end of every
+# display-odor resolution path so figures, reaction matrices, and score
+# summaries show the substitute label for that dataset only.
+_DATASET_ODOR_REMAP: dict[str, dict[str, str]] = {}
+
+
+def set_dataset_odor_remap(remap: dict[str, dict[str, str]]) -> None:
+    """Register per-dataset odor display-label substitutions."""
+    _DATASET_ODOR_REMAP.clear()
+    _DATASET_ODOR_REMAP.update(
+        {str(ds): dict(mapping) for ds, mapping in remap.items() if mapping}
+    )
+
+
+def apply_dataset_odor_remap(dataset_canon: object, odor_name: object) -> str:
+    """Return ``odor_name`` mapped through the per-dataset remap, if any."""
+    name = "" if odor_name is None else str(odor_name)
+    mapping = _DATASET_ODOR_REMAP.get(str(dataset_canon))
+    if not mapping:
+        return name
+    return mapping.get(name, name)
+
+
 # ODOR_CANON, DISPLAY_LABEL, ODOR_ORDER, TESTING_DATASET_ALIAS, DATASET_ALIAS,
 # _canon_dataset, _odor_dataset_key, resolve_dataset_label are imported from
 # fbpipe.odor_constants (single source of truth).
@@ -103,6 +182,7 @@ PRIMARY_ODOR_LABEL = {
     "Hex-Control-24-0002": HEXANOL_LABEL,
     "Hex-Control-24-0.005": HEXANOL_LABEL,
     "Hex-Control-24-0.01": HEXANOL_LABEL,
+    "Hex-Control-24-0.1": HEXANOL_LABEL,
     "Hex-Control-36": HEXANOL_LABEL,
     "Benz-Control": "Benzaldehyde",
     "Benz-Control-24-2": "Benzaldehyde",
@@ -390,7 +470,9 @@ def _display_odor_v2(dataset_canon: str, trial_label: str) -> str:
 
 def _display_odor(dataset_canon: str, trial_label: str) -> str:
     if _ACTIVE_PROTOCOL == "v2":
-        return _display_odor_v2(dataset_canon, trial_label)
+        return apply_dataset_odor_remap(
+            dataset_canon, _display_odor_v2(dataset_canon, trial_label)
+        )
     dataset_key = _odor_dataset_key(dataset_canon)
     number = _trial_num(trial_label)
     label_lower = str(trial_label).lower()
@@ -427,11 +509,13 @@ def _display_odor(dataset_canon: str, trial_label: str) -> str:
             "Hex-Control-24-0002",
             "Hex-Control-24-0.005",
             "Hex-Control-24-0.01",
+            "Hex-Control-24-0.1",
             "Hex-Control-36",
             "Hex-Training-24-002",
             "Hex-Training-24-0002",
             "Hex-Training-24-0.005",
             "Hex-Training-24-0.01",
+            "Hex-Training-24-0.1",
         ):
             odor_name = TRAINING_ODOR_SCHEDULE_HEX.get(number)
             if odor_name:
@@ -1033,11 +1117,23 @@ def reaction_rate_stats_from_rows(
         if not rows_out:
             raise RuntimeError("No rows available after v2 odor grouping.")
         w2 = pd.DataFrame(rows_out)
-        # Only the trained odor gets "1"/"2" numbering
-        trained = _trained_label(dataset_canon)
-        trained_set = {trained}
+        # Determine which odors are duplicated within any fly: an odor with a
+        # max per-fly occurrence > 1 was presented more than once per fly.
+        # For panel datasets (more than one duplicated odor — e.g.
+        # RandomPanel), number ALL repeated odors so every presentation shows
+        # as its own bar (e.g. "Benzaldehyde 1", "Benzaldehyde 2"). For
+        # single-trained-odor datasets (e.g. Hex-Training, where only Hexanol
+        # is duplicated), preserve the existing behaviour and only number the
+        # trained odor.
+        max_occ_by_odor = w2.groupby("odor")["occurrence"].max()
+        duplicated_odors = {o for o, v in max_occ_by_odor.items() if v > 1}
+        if len(duplicated_odors) > 1:
+            number_set = duplicated_odors
+        else:
+            trained = _trained_label(dataset_canon)
+            number_set = {trained} if trained in duplicated_odors else duplicated_odors
         w2["odor_label"] = w2.apply(
-            lambda r: f"{r['odor']} {r['occurrence']}" if r["odor"] in trained_set else r["odor"],
+            lambda r: f"{r['odor']} {r['occurrence']}" if r["odor"] in number_set else r["odor"],
             axis=1,
         )
         stats_df = (
@@ -1427,8 +1523,14 @@ def generate_reaction_matrices(cfg: MatrixPlotConfig) -> None:
                 # V2: build matrix by ODOR NAME (consistent across flies with randomized trial order)
                 subset = subset.copy()
                 subset["_odor"] = subset["trial"].apply(_extract_odor_from_label)
+                # Per-dataset odor remap (e.g. Hex-Control-24-0.1 swaps
+                # Citral -> "Sour Dough Yeast (25%)").
                 subset["_odor_display"] = subset["_odor"].apply(
-                    lambda o: _display_label_ci(o) if o.lower() != "lightonly" else None
+                    lambda o: (
+                        None
+                        if o.lower() == "lightonly"
+                        else apply_dataset_odor_remap(odor, _display_label_ci(o))
+                    )
                 )
                 subset = subset[subset["_odor_display"].notna()]
 
@@ -1903,6 +2005,27 @@ def generate_envelope_plots(cfg: EnvelopePlotConfig) -> None:
     fps_lookup = {idx: fps for idx, fps in zip(df.index, fps_values, strict=False)}
     dataset_lookup = {idx: ds for idx, ds in zip(df.index, dataset_values, strict=False)}
     trial_lookup = {idx: tr for idx, tr in zip(df.index, trial_values, strict=False)}
+
+    # Per-trial window seconds from the Pi rig sidecar (populated by
+    # build_wide_csv / wide_to_matrix). When present, each trial's x-axis and
+    # odor-shading are computed from these instead of the pipeline-wide
+    # config defaults — so RandomPanel (40 s trials) and the legacy 90 s
+    # trials both render with the correct extent.
+    def _per_trial_seconds_lookup(column: str) -> dict:
+        if column in df.columns:
+            arr = pd.to_numeric(df[column], errors="coerce").to_numpy(float)
+            return {idx: val for idx, val in zip(df.index, arr, strict=False)}
+        return {}
+
+    trial_odor_on_lookup = _per_trial_seconds_lookup("trial_odor_on_s")
+    trial_odor_off_lookup = _per_trial_seconds_lookup("trial_odor_off_s")
+    trial_duration_lookup = _per_trial_seconds_lookup("trial_duration_s")
+    # First optogenetic light-on time (s from recording start) parsed from the
+    # rig sensors_output_*.csv. When present, this is the authoritative position
+    # for the green "Light pulsing starts" line (replacing the hardcoded
+    # per-trial schedule, which returns None entirely under the v2 protocol).
+    trial_light_on_lookup = _per_trial_seconds_lookup("trial_light_on_s")
+
     if "trace_len" in df.columns:
         trace_len_values = pd.to_numeric(df["trace_len"], errors="coerce").to_numpy(float)
         trace_len_lookup = {
@@ -1972,15 +2095,71 @@ def generate_envelope_plots(cfg: EnvelopePlotConfig) -> None:
             dataset_canon = dataset_lookup[idx]
             trial_label = trial_lookup[idx]
             odor_name = _display_odor(dataset_canon, trial_label)
+            ds_is_light_only = _dataset_light_window(dataset_canon) is not None
+
+            # Drop non-odor trials (e.g. light-only stim in RandomPanel where
+            # the rig recording name has underscores in the cycle token that
+            # the odor-map regex doesn't capture, so _display_odor falls back
+            # to the dataset's DISPLAY_LABEL). Skip this filter for datasets
+            # registered as light-only — for those every trial is a valid
+            # light-stim trial and ``odor_name`` legitimately collapses to the
+            # dataset name.
+            _odor_norm = re.sub(r"[^a-z0-9]+", "", str(odor_name).lower())
+            _dataset_norm = re.sub(r"[^a-z0-9]+", "", str(dataset_canon).lower())
+            _label_norm = str(trial_label).lower()
+            if not ds_is_light_only and (
+                (
+                    _odor_norm
+                    and _dataset_norm
+                    and _odor_norm == _dataset_norm
+                ) or ("light" in _label_norm and not any(
+                    tok in _label_norm
+                    for tok in ("hexanol", "citral", "linalool", "benzaldehyde",
+                                "ethylbutyrate", "ethyl_butyrate", "acv",
+                                "applecidervinegar", "apple_cider_vinegar",
+                                "3-octonol", "3octonol", "octonol")
+                ))
+            ):
+                continue
+            if ds_is_light_only:
+                # Show the rig-side trial label (e.g. "training_17") instead of
+                # the dataset name so panels remain distinguishable.
+                odor_name = str(trial_label)
+
             is_trained = _is_trained_odor(dataset_canon, odor_name)
-            trial_on_effective, trial_off_effective = _trial_odor_window_seconds(
-                trial_label=trial_label,
-                trial_type=trial_type,
-                odor_on_s=odor_on_cmd,
-                odor_off_s=odor_off_cmd,
-                odor_latency_s=odor_latency,
-            )
+            # Prefer per-trial values from the rig sidecar (carried through as
+            # trial_odor_on_s / trial_odor_off_s columns); fall back to the
+            # config-driven window when missing or non-finite.
+            #
+            # NOTE: ``odor_latency`` is intentionally NOT added here. The
+            # sidecar's ActiveOFM transitions are wall-clock observations of
+            # when the odor actually reaches the fly, so the legacy
+            # "commanded onset + transit latency" offset would double-count.
+            _per_on = float(trial_odor_on_lookup.get(idx, float("nan")))
+            _per_off = float(trial_odor_off_lookup.get(idx, float("nan")))
+            if math.isfinite(_per_on) and math.isfinite(_per_off) and _per_off > _per_on > 0:
+                trial_on_effective = _per_on
+                trial_off_effective = _per_off
+            else:
+                trial_on_effective, trial_off_effective = _trial_odor_window_seconds(
+                    trial_label=trial_label,
+                    trial_type=trial_type,
+                    odor_on_s=odor_on_cmd,
+                    odor_off_s=odor_off_cmd,
+                    odor_latency_s=odor_latency,
+                )
             light_start_s = _trial_light_start_seconds(trial_label=trial_label, trial_type=trial_type)
+            ds_light_window = _dataset_light_window(dataset_canon)
+            if ds_light_window is not None:
+                # Light-only dataset: force light_start_s to the registered
+                # start so legend/annotation helpers downstream pick it up.
+                light_start_s = float(ds_light_window[0])
+            # Measured first-light-on from the rig sensors log wins when present
+            # (also covers the v2 protocol, where the hardcoded schedule above
+            # returns None and no line would otherwise be drawn).
+            _per_light = float(trial_light_on_lookup.get(idx, float("nan")))
+            if math.isfinite(_per_light) and _per_light > 0:
+                light_start_s = _per_light
             is_discriminate_odor = _is_discriminate_odor_trial(
                 trial_label=trial_label,
                 trial_type=trial_type,
@@ -1990,6 +2169,16 @@ def generate_envelope_plots(cfg: EnvelopePlotConfig) -> None:
             if math.isfinite(theta):
                 max_local = max(max_local, theta)
             y_max = max(y_max, max_local)
+
+            # Per-trial x-axis upper bound: prefer the actual recording
+            # duration from the sidecar when available, then clamp to the
+            # global x_max_limit so rendering never overshoots the figure
+            # legend / decoration band.
+            _per_dur = float(trial_duration_lookup.get(idx, float("nan")))
+            if math.isfinite(_per_dur) and _per_dur > 0:
+                per_trial_x_max = min(_per_dur, x_max_limit)
+            else:
+                per_trial_x_max = x_max_limit
 
             trial_curves.append(
                 (
@@ -2003,6 +2192,10 @@ def generate_envelope_plots(cfg: EnvelopePlotConfig) -> None:
                     light_start_s,
                     is_discriminate_odor,
                     _trial_num(trial_label),
+                    per_trial_x_max,
+                    ds_light_window,
+                    trial_label,
+                    dataset_canon,
                 )
             )
 
@@ -2059,66 +2252,86 @@ def generate_envelope_plots(cfg: EnvelopePlotConfig) -> None:
             light_start_s,
             is_discriminate_odor,
             trial_num,
+            per_trial_x_max,
+            ds_light_window,
+            trial_label,
+            dataset_canon,
         ) in zip(axes, trial_curves):
             ax.plot(t, env, linewidth=trace_lw, color="black")
-            ax.axvline(trial_on_effective, linestyle="--", linewidth=odor_marker_lw, color="black")
-            ax.axvline(trial_off_effective, linestyle="--", linewidth=odor_marker_lw, color="black")
+            if ds_light_window is not None:
+                # Light-only dataset: suppress odor annotations and draw a
+                # single light-on span clipped to the per-trial x-axis bound.
+                light_start_eff = max(0.0, min(float(ds_light_window[0]), per_trial_x_max))
+                light_end_eff = max(light_start_eff, min(float(ds_light_window[1]), per_trial_x_max))
+                if light_end_eff > light_start_eff:
+                    ax.axvspan(
+                        light_start_eff,
+                        light_end_eff,
+                        alpha=0.25,
+                        color="tab:green",
+                    )
+                    ax.axvline(light_start_eff, linestyle="--", linewidth=odor_marker_lw, color="tab:green")
+                    ax.axvline(light_end_eff, linestyle="--", linewidth=odor_marker_lw, color="tab:green")
+            else:
+                ax.axvline(trial_on_effective, linestyle="--", linewidth=odor_marker_lw, color="black")
+                ax.axvline(trial_off_effective, linestyle="--", linewidth=odor_marker_lw, color="black")
 
-            transit_on_end = min(trial_on_effective, x_max_limit)
-            steady_off_end = min(trial_off_effective, x_max_limit)
-            linger_off_end = min(trial_off_effective + linger, x_max_limit)
-            odor_bar_color = DISCRIMINATE_ODOR_COLOR if is_discriminate_odor else ODOR_PLUS_LIGHT_COLOR
-            odor_bar_alpha = DISCRIMINATE_ODOR_ALPHA if is_discriminate_odor else ODOR_PLUS_LIGHT_ALPHA
-            odor_linger_alpha = (
-                DISCRIMINATE_ODOR_LINGER_ALPHA
-                if is_discriminate_odor
-                else ODOR_PLUS_LIGHT_LINGER_ALPHA
-            )
+                transit_on_end = min(trial_on_effective, per_trial_x_max)
+                steady_off_end = min(trial_off_effective, per_trial_x_max)
+                linger_off_end = min(trial_off_effective + linger, per_trial_x_max)
+                odor_bar_color = DISCRIMINATE_ODOR_COLOR if is_discriminate_odor else ODOR_PLUS_LIGHT_COLOR
+                odor_bar_alpha = DISCRIMINATE_ODOR_ALPHA if is_discriminate_odor else ODOR_PLUS_LIGHT_ALPHA
+                odor_linger_alpha = (
+                    DISCRIMINATE_ODOR_LINGER_ALPHA
+                    if is_discriminate_odor
+                    else ODOR_PLUS_LIGHT_LINGER_ALPHA
+                )
 
-            if light_annotation_mode == "paired-span" and light_start_s is not None:
-                light_start_eff = min(max(light_start_s, transit_on_end), steady_off_end)
-                if light_start_eff > transit_on_end:
+                if light_annotation_mode == "paired-span" and light_start_s is not None:
+                    light_start_eff = min(max(light_start_s, transit_on_end), steady_off_end)
+                    if light_start_eff > transit_on_end:
+                        ax.axvspan(
+                            transit_on_end,
+                            light_start_eff,
+                            alpha=odor_bar_alpha,
+                            color=odor_bar_color,
+                        )
+                    if steady_off_end > light_start_eff:
+                        ax.axvspan(
+                            light_start_eff,
+                            steady_off_end,
+                            alpha=0.22,
+                            color="#f4a261",
+                        )
+                    if linger_off_end > steady_off_end:
+                        ax.axvspan(
+                            steady_off_end,
+                            linger_off_end,
+                            alpha=odor_linger_alpha,
+                            color=odor_bar_color,
+                        )
+                elif linger_off_end > transit_on_end:
                     ax.axvspan(
                         transit_on_end,
-                        light_start_eff,
+                        linger_off_end,
                         alpha=odor_bar_alpha,
                         color=odor_bar_color,
                     )
-                if steady_off_end > light_start_eff:
-                    ax.axvspan(
-                        light_start_eff,
-                        steady_off_end,
-                        alpha=0.22,
-                        color="#f4a261",
-                    )
-                if linger_off_end > steady_off_end:
-                    ax.axvspan(
-                        steady_off_end,
-                        linger_off_end,
-                        alpha=odor_linger_alpha,
-                        color=odor_bar_color,
-                    )
-            elif linger_off_end > transit_on_end:
-                ax.axvspan(
-                    transit_on_end,
-                    linger_off_end,
-                    alpha=odor_bar_alpha,
-                    color=odor_bar_color,
-                )
 
-            if light_annotation_mode == "line" and light_start_s is not None and light_start_s <= x_max_limit:
-                ax.axvline(
-                    light_start_s,
-                    linestyle="-.",
-                    linewidth=light_marker_lw,
-                    color="tab:green",
-                )
+                if light_annotation_mode == "line" and light_start_s is not None and light_start_s <= x_max_limit:
+                    ax.axvline(
+                        light_start_s,
+                        linestyle="-.",
+                        linewidth=light_marker_lw,
+                        color="tab:green",
+                    )
 
             if math.isfinite(theta):
                 ax.axhline(theta, linestyle="-", linewidth=threshold_lw, color="tab:red", alpha=0.9)
 
             ax.set_ylim(0, fixed_y_max)
-            ax.set_xlim(0, x_max_limit)
+            ax.set_xlim(0, per_trial_x_max)
+            ax.xaxis.set_major_locator(MultipleLocator(PER_TIME_TICK_STEP_S))
             ax.margins(x=0, y=0.02)
             ax.tick_params(axis="both", which="both", labelsize=base_font, width=tick_width, length=tick_length)
             show_ylabel = (
@@ -2161,6 +2374,28 @@ def generate_envelope_plots(cfg: EnvelopePlotConfig) -> None:
                     odor_name,
                     transform=panel_title_transform,
                     ha="left",
+                    va=panel_title_va,
+                    fontsize=panel_title_font,
+                    weight="bold",
+                    color="black",
+                    clip_on=False,
+                )
+
+            # Per-trial model score (upper-right corner). Mirrors panel_title_x
+            # so it sits at the same vertical band as the odor label.
+            score_val = _lookup_model_score(
+                str(dataset_canon),
+                str(fly),
+                fly_number_label,
+                str(trial_label),
+            )
+            if score_val is not None:
+                ax.text(
+                    1.0 - float(cfg.panel_title_x),
+                    panel_title_y,
+                    f"Score: {score_val}",
+                    transform=panel_title_transform,
+                    ha="right",
                     va=panel_title_va,
                     fontsize=panel_title_font,
                     weight="bold",

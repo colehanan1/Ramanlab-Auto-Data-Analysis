@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import logging
 import os
@@ -16,6 +17,7 @@ from dataclasses import replace as dc_replace
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
+import pandas as pd
 import yaml
 
 # Configure logging
@@ -40,7 +42,9 @@ for path in (str(SRC_ROOT), str(REPO_ROOT)):
     if path not in sys.path:
         sys.path.insert(0, path)
 
-STATE_VERSION = 1
+# v2: manifest tracks Parquet + CSV, records content hashes, and uses
+# fly_dir/trial_dir/file depth (>=3 parts). Bumping invalidates v1 caches.
+STATE_VERSION = 2
 
 from fbpipe.config import Settings, discover_flagged_directories, load_settings, resolve_config_path, _expand_datasets
 from fbpipe.pipeline import ORDERED_STEPS
@@ -53,6 +57,9 @@ from scripts.analysis.envelope_visuals import (
     MatrixPlotConfig,
     generate_envelope_plots,
     generate_reaction_matrices,
+    set_dataset_light_windows,
+    set_dataset_odor_remap,
+    set_model_scores,
     set_protocol,
 )
 from scripts.analysis.envelope_training import latency_reports
@@ -217,9 +224,10 @@ def _write_state(settings: Settings, category: str, key: str, payload: dict[str,
 
 def _should_track_file(file_path: Path, dataset_root: Path) -> bool:
     """
-    Determine if a CSV file should be tracked in the manifest.
+    Determine if a pipeline table file should be tracked in the manifest.
 
-    Tracks all CSV files in dataset subdirectories, excluding metadata files.
+    Tracks per-trial pipeline tables (CSV legacy or Parquet) that live at
+    ``fly_dir/trial_dir/file`` depth, excluding metadata/sensor/temp files.
 
     Args:
         file_path: Path to the file
@@ -228,19 +236,20 @@ def _should_track_file(file_path: Path, dataset_root: Path) -> bool:
     Returns:
         True if file should be tracked
     """
-    # Must be CSV
-    if file_path.suffix.lower() != '.csv':
+    # Must be a pipeline table (CSV legacy or Parquet)
+    if file_path.suffix.lower() not in ('.csv', '.parquet'):
         return False
 
     # Exclude metadata and temp files
     if file_path.name.startswith(('sensors_', '.', '~')):
         return False
 
-    # Must be in nested structure (not directly in dataset root)
+    # Must live at fly_dir/trial_dir/file depth (>= 3 path parts relative to the
+    # dataset root). Shallower files (e.g. a stats sidecar directly in fly_dir)
+    # are not per-trial pipeline outputs and must not be tracked.
     try:
         relative = file_path.relative_to(dataset_root)
-        # Need at least fly_dir/trial_dir/file.csv (2+ parts)
-        if len(relative.parts) < 2:
+        if len(relative.parts) < 3:
             return False
         return True
     except ValueError:
@@ -248,40 +257,55 @@ def _should_track_file(file_path: Path, dataset_root: Path) -> bool:
         return False
 
 
+def _file_content_hash(path: Path, *, chunk_size: int = 1 << 20) -> str:
+    """Return a fast content hash (blake2b, 16-byte digest) of *path*.
+
+    Read in chunks so large files do not spike memory. Used so a file that is
+    merely *touched* (mtime bumped) but whose bytes are unchanged does NOT
+    invalidate the cache — only a real content change does.
+    """
+    h = hashlib.blake2b(digest_size=16)
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(chunk_size), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
 def _build_file_manifest(dataset_root: Path) -> Dict[str, Dict[str, Any]]:
     """
-    Build manifest of all trackable CSV files in dataset.
+    Build manifest of all trackable pipeline tables (CSV legacy + Parquet).
 
-    Recursively scans dataset directory for CSV files and captures their
-    modification time and size for change detection.
+    Recursively scans the dataset for per-trial table files and captures size,
+    mtime, and a content hash for change detection. The content hash makes the
+    cache robust to mtime-only "touches" (re-sync, chmod) that leave bytes
+    unchanged.
 
     Args:
         dataset_root: Root directory of dataset (e.g., /Data/flys/opto_EB/)
 
     Returns:
-        Dict mapping absolute file path to {mtime: float, size: int}
-
-    Performance: ~0.2ms per file (180ms for 900 files)
+        Dict mapping absolute file path to {mtime: float, size: int, hash: str}
     """
     manifest = {}
     file_count = 0
 
     start_time = time.time()
 
-    # Recursive walk through dataset
-    for csv_file in dataset_root.rglob("*.csv"):
-        if not _should_track_file(csv_file, dataset_root):
+    # Recursive walk through dataset (both legacy .csv and migrated .parquet)
+    for table_file in (*dataset_root.rglob("*.csv"), *dataset_root.rglob("*.parquet")):
+        if not _should_track_file(table_file, dataset_root):
             continue
 
         try:
-            stat = csv_file.stat()
-            manifest[str(csv_file.absolute())] = {
+            stat = table_file.stat()
+            manifest[str(table_file.absolute())] = {
                 "mtime": stat.st_mtime,
-                "size": stat.st_size
+                "size": stat.st_size,
+                "hash": _file_content_hash(table_file),
             }
             file_count += 1
         except (OSError, PermissionError) as e:
-            LOGGER.warning(f"Failed to stat {csv_file}: {e}")
+            LOGGER.warning(f"Failed to read {table_file}: {e}")
             continue
 
     elapsed = time.time() - start_time
@@ -332,15 +356,25 @@ def _compare_manifests(
                 changes.append(f"New file: {file_path}")
         else:
             cached_info = cached[file_path]
-            # Check if modified (mtime or size changed)
-            if (current_info["mtime"] != cached_info["mtime"] or
-                current_info["size"] != cached_info["size"]):
+            # Content-aware change detection:
+            #   * size differs                -> modified
+            #   * both sides carry a hash     -> modified iff hashes differ
+            #                                    (mtime-only "touches" are ignored)
+            #   * no hash (legacy manifests)  -> fall back to mtime comparison
+            size_changed = current_info["size"] != cached_info["size"]
+            cur_hash = current_info.get("hash")
+            cached_hash = cached_info.get("hash")
+            if cur_hash is not None and cached_hash is not None:
+                content_changed = cur_hash != cached_hash
+            else:
+                content_changed = current_info.get("mtime") != cached_info.get("mtime")
+            if size_changed or content_changed:
                 modified_count += 1
                 if LOGGER.level <= logging.DEBUG:
                     changes.append(
                         f"Modified file: {file_path} "
-                        f"(mtime: {cached_info['mtime']:.0f} → {current_info['mtime']:.0f}, "
-                        f"size: {cached_info['size']} → {current_info['size']})"
+                        f"(size: {cached_info['size']} → {current_info['size']}, "
+                        f"hash: {str(cached_hash)[:8]} → {str(cur_hash)[:8]})"
                     )
 
     # Check for deleted files
@@ -359,6 +393,9 @@ def _compare_manifests(
         changes.insert(0, summary)  # Prepend summary
         is_valid = False
     else:
+        # Valid cache: report an explicit "unchanged" summary (callers and tests
+        # rely on a non-empty changes list describing the no-change outcome).
+        changes.append(f"unchanged: {len(current)} files")
         is_valid = True
 
     return is_valid, changes
@@ -561,7 +598,96 @@ def _copy_output_to_smb(local_path: Path | str, smb_path: str | None) -> None:
         LOGGER.error(f"Error copying to SMB: {e}")
 
 
-def _run_envelope_visuals(cfg: Mapping[str, Any] | None) -> None:
+def _load_model_scores_for_envelopes(settings: Settings) -> None:
+    """Populate envelope_visuals._MODEL_SCORES from reaction_prediction.output_csv.
+
+    Called right before envelope plots are generated so each trial subplot can
+    show the model's ordinal score (e.g. ``Score: 3``) in the upper-right
+    corner. If the predictions CSV doesn't exist yet (e.g. fresh pipeline run
+    before reactions have produced it), the registry stays empty and no score
+    is drawn.
+    """
+    output_csv = getattr(settings.reaction_prediction, "output_csv", None)
+    if not output_csv:
+        set_model_scores({})
+        return
+    csv_path = Path(output_csv).expanduser()
+    if not csv_path.exists():
+        LOGGER.info(
+            "[analysis] envelope_visuals: model predictions CSV not found (%s); "
+            "score annotations will be skipped.",
+            csv_path,
+        )
+        set_model_scores({})
+        return
+    try:
+        df = pd.read_csv(
+            csv_path,
+            usecols=["dataset", "fly", "fly_number", "trial_label", "score"],
+        )
+    except Exception as exc:  # noqa: BLE001 — defensive load
+        LOGGER.warning(
+            "[analysis] envelope_visuals: failed to read %s for score annotations: %s",
+            csv_path,
+            exc,
+        )
+        set_model_scores({})
+        return
+    scores: dict[tuple[str, str, str, str], int] = {}
+    for row in df.itertuples(index=False):
+        try:
+            scores[(str(row.dataset), str(row.fly), str(row.fly_number), str(row.trial_label))] = int(row.score)
+        except (TypeError, ValueError):
+            continue
+    set_model_scores(scores)
+    LOGGER.info(
+        "[analysis] envelope_visuals: loaded %d per-trial model scores for annotation.",
+        len(scores),
+    )
+
+
+def _rerender_envelope_block_with_scores(
+    envelopes_cfg: Mapping[str, Any] | Sequence[Mapping[str, Any]],
+    label: str,
+) -> None:
+    """Re-render an envelope-config block with overwrite forced on.
+
+    Accepts either a single envelope-config mapping (e.g.
+    ``analysis.envelope_visuals.envelopes``) or a list of them (e.g.
+    ``analysis.combined.combined_base.envelopes``, ``analysis.combined.envelopes``).
+    Each entry is shallow-copied with ``overwrite=True`` injected so that
+    ``generate_envelope_plots`` rewrites every PNG in its target directory —
+    this is required because every envelopes block in ``config_new.yaml``
+    sets ``overwrite: False`` and the first render of these PNGs happens
+    before reactions writes ``model_predictions.csv``.
+    """
+    if isinstance(envelopes_cfg, Sequence) and not isinstance(envelopes_cfg, (str, bytes)):
+        entries: list[Mapping[str, Any]] = list(envelopes_cfg)
+    else:
+        entries = [envelopes_cfg]
+
+    for entry in entries:
+        if not isinstance(entry, Mapping):
+            LOGGER.warning(
+                "[analysis] %s: skipping non-mapping envelope entry: %r",
+                label,
+                entry,
+            )
+            continue
+        forced = {**dict(entry), "overwrite": True}
+        config, _smb_path = _envelope_plot_config(forced)
+        print(
+            f"[analysis] envelope_visuals: re-rendering {label} → {config.out_dir} "
+            "(scores annotated)."
+        )
+        generate_envelope_plots(config)
+
+
+def _run_envelope_visuals(
+    cfg: Mapping[str, Any] | None,
+    *,
+    defer_envelopes: bool = False,
+) -> None:
     if not cfg:
         return
 
@@ -572,7 +698,12 @@ def _run_envelope_visuals(cfg: Mapping[str, Any] | None) -> None:
         generate_reaction_matrices(config)
 
     envelopes_cfg = cfg.get("envelopes")
-    if envelopes_cfg:
+    if envelopes_cfg and defer_envelopes:
+        print(
+            "[analysis] envelope_visuals.envelopes → DEFERRED until after reactions "
+            "(model scores will be annotated)."
+        )
+    elif envelopes_cfg:
         config, smb_path = _envelope_plot_config(envelopes_cfg)
         print(f"[analysis] envelope_visuals.envelopes → {config.out_dir}")
         generate_envelope_plots(config)
@@ -720,6 +851,7 @@ def _run_combined(
     settings: Settings | None,
     *,
     folder_filter: str | None = None,
+    defer_envelopes: bool = False,
 ) -> None:
     if not cfg:
         return
@@ -729,6 +861,10 @@ def _run_combined(
     wide_measure_cols: Sequence[str] = ["envelope_of_rms"]
     wide_fps_fallback = 40.0
     wide_exclude_cfg: list[str] = []
+    # Default so the combined_base / distance_base helper below is safe even
+    # when no top-level `wide` block is configured (the `wide` block overrides
+    # this at load time when present).
+    use_per_trial_baseline = False
     non_reactive_threshold = settings.non_reactive_span_px if settings is not None else None
     limits = (settings.class2_min, settings.class2_max) if settings is not None else None
 
@@ -923,8 +1059,7 @@ def _run_combined(
             )
             wide_to_matrix(export_csv, matrix_dir)
 
-    combined_base_cfg = cfg.get("combined_base")
-    if combined_base_cfg:
+    def _process_base_block(combined_base_cfg, *, label, default_measure_cols):
         base_wide_cfg = combined_base_cfg.get("wide")
         if base_wide_cfg:
             roots_cfg = base_wide_cfg.get("roots")
@@ -967,7 +1102,7 @@ def _run_combined(
                 base_wide_cfg.get("output_csv"),
                 "combined_base.wide.output_csv",
             )
-            base_measure_cols = base_wide_cfg.get("measure_cols") or ["combined_pct", "combined_base"]
+            base_measure_cols = base_wide_cfg.get("measure_cols") or list(default_measure_cols)
             base_fps_fallback = float(
                 base_wide_cfg.get("fps_fallback", wide_fps_fallback)
             )
@@ -1014,7 +1149,7 @@ def _run_combined(
                         )
                         extra_matrix_dirs[trial_key] = str(matrix_path)
 
-            print(f"[analysis] combined_base.wide → {output_csv}")
+            print(f"[analysis] {label}.wide → {output_csv}")
             build_wide_csv(
                 roots,
                 str(output_csv),
@@ -1033,8 +1168,8 @@ def _run_combined(
                 if not export_csv:
                     continue
                 print(
-                    "[analysis] combined_base.wide.trial_type_matrix[{}] → {}".format(
-                        trial_key, matrix_dir
+                    "[analysis] {}.wide.trial_type_matrix[{}] → {}".format(
+                        label, trial_key, matrix_dir
                     )
                 )
                 wide_to_matrix(export_csv, matrix_dir)
@@ -1049,11 +1184,16 @@ def _run_combined(
                 base_matrix_cfg.get("out_dir"),
                 "combined_base.matrix.out_dir",
             )
-            print(f"[analysis] combined_base.matrix → {out_dir}")
+            print(f"[analysis] {label}.matrix → {out_dir}")
             wide_to_matrix(str(input_csv), str(out_dir))
 
         base_envelopes_cfg = combined_base_cfg.get("envelopes")
-        if base_envelopes_cfg:
+        if base_envelopes_cfg and defer_envelopes:
+            print(
+                f"[analysis] {label}.envelopes → DEFERRED until after reactions "
+                "(model scores will be annotated)."
+            )
+        elif base_envelopes_cfg:
             entries = (
                 base_envelopes_cfg
                 if isinstance(base_envelopes_cfg, Sequence)
@@ -1062,10 +1202,23 @@ def _run_combined(
             )
             for entry in entries:
                 if not isinstance(entry, Mapping):
-                    raise ValueError("combined_base.envelopes entries must be mappings.")
+                    raise ValueError(f"{label}.envelopes entries must be mappings.")
                 config, smb_path = _envelope_plot_config(entry)
-                print(f"[analysis] combined_base.envelopes → {config.out_dir}")
+                print(f"[analysis] {label}.envelopes → {config.out_dir}")
                 generate_envelope_plots(config)
+
+    # ``combined_base`` plots the angle-weighted combined_pct signal; ``distance_base``
+    # reuses the exact same wide -> matrix -> envelopes machinery to plot the raw
+    # distance_percentage column (no angle multiplier). Both are optional.
+    for _base_key, _default_cols in (
+        ("combined_base", ["combined_pct", "combined_base"]),
+        ("distance_base", ["distance_percentage"]),
+    ):
+        _base_cfg = cfg.get(_base_key)
+        if _base_cfg:
+            _process_base_block(
+                _base_cfg, label=_base_key, default_measure_cols=_default_cols
+            )
 
     pair_groups_cfg = cfg.get("pair_groups") or []
     if pair_groups_cfg:
@@ -1180,7 +1333,12 @@ def _run_combined(
         generate_reaction_matrices(config)
 
     envelopes_cfg = cfg.get("envelopes")
-    if envelopes_cfg:
+    if envelopes_cfg and defer_envelopes:
+        print(
+            "[analysis] combined.envelopes → DEFERRED until after reactions "
+            "(model scores will be annotated)."
+        )
+    elif envelopes_cfg:
         entries = (
             envelopes_cfg
             if isinstance(envelopes_cfg, Sequence)
@@ -1299,7 +1457,7 @@ def _run_combined(
             )
 
 
-def _run_reactions(settings: Settings) -> None:
+def _run_reactions(settings: Settings, config_path: Path | None = None) -> None:
     reaction_cfg = settings.reaction_prediction
 
     required_pairs: list[tuple[str, str]] = []
@@ -1441,6 +1599,8 @@ def _run_reactions(settings: Settings) -> None:
             cmd.append("--exclude-hexanol")
         if matrix_cfg.overwrite:
             cmd.append("--overwrite")
+        if config_path is not None:
+            cmd.extend(["--config", str(config_path)])
 
         print("[analysis] reactions.matrix →", " ".join(cmd))
         subprocess.run(cmd, check=True, env=env)
@@ -1474,6 +1634,8 @@ def _run_reactions(settings: Settings) -> None:
                 tvc_cmd.append("--exclude-hexanol")
             if matrix_cfg.overwrite:
                 tvc_cmd.append("--overwrite")
+            if config_path is not None:
+                tvc_cmd.extend(["--config", str(config_path)])
             print("[analysis] reactions.train_vs_ctrl →", " ".join(tvc_cmd))
             subprocess.run(tvc_cmd, check=True, env=env)
         else:
@@ -1498,6 +1660,8 @@ def _run_reactions(settings: Settings) -> None:
             ]
             if flagged_csv:
                 score_cmd.extend(["--flagged-flies-csv", flagged_csv])
+            if config_path is not None:
+                score_cmd.extend(["--config", str(config_path)])
             print("[analysis] score_summary →", " ".join(score_cmd))
             subprocess.run(score_cmd, check=True, env=env)
         else:
@@ -1554,7 +1718,22 @@ def main(argv: Sequence[str] | None = None) -> None:
         help="Skip YOLO and pipeline processing; regenerate all figures/plots "
              "from existing CSVs and data. Forces overwrite of all cached states.",
     )
+    parser.add_argument(
+        "--svg",
+        action="store_true",
+        default=False,
+        help="Emit an editable .svg next to every .png figure (vector, fully "
+             "editable in Illustrator/Inkscape). PNGs are still written.",
+    )
     args = parser.parse_args(argv)
+
+    # Install the SVG sidecar before any plotting happens (covers in-process
+    # renders); propagate to subprocesses via env var below.
+    if args.svg:
+        from fbpipe.figure_export import install_svg_sidecar
+        install_svg_sidecar()
+        os.environ["FBPIPE_FIGURE_SVG"] = "1"
+        LOGGER.info("[figures] SVG sidecar enabled — every PNG figure also written as .svg")
 
     config_path = resolve_config_path(args.config)
     if not config_path.exists():
@@ -1565,6 +1744,55 @@ def main(argv: Sequence[str] | None = None) -> None:
 
     settings = load_settings(config_path)
     set_protocol(settings.protocol)
+
+    # Register light-only datasets so envelope_visuals draws a light span
+    # instead of the odor span for those plots.
+    light_windows: dict[str, tuple[float, float]] = {}
+    for ds_name, ov in settings.dataset_overrides.items():
+        if not getattr(ov, "light_only", False):
+            continue
+        start = ov.light_start_s
+        duration = ov.light_duration_s
+        if start is None or duration is None:
+            LOGGER.warning(
+                "Dataset %s has light_only=true but light_start_s/light_duration_s are not both set; skipping.",
+                ds_name,
+            )
+            continue
+        light_windows[str(ds_name)] = (float(start), float(start) + float(duration))
+    set_dataset_light_windows(light_windows)
+
+    # Per-dataset odor display-label remap (e.g. Hex-Control-24-0.1 swaps
+    # Citral -> "Sour Dough Yeast (25%)" because the rig delivered the
+    # substitute liquid for that channel). Registered once at startup so
+    # every figure-producing call site picks it up.
+    odor_remap: dict[str, dict[str, str]] = {}
+    for ds_name, ov in settings.dataset_overrides.items():
+        mapping = getattr(ov, "odor_remap", None)
+        if mapping:
+            odor_remap[str(ds_name)] = dict(mapping)
+    set_dataset_odor_remap(odor_remap)
+    if odor_remap:
+        for ds_name, mapping in odor_remap.items():
+            LOGGER.info(
+                "[analysis] odor remap for %s: %s",
+                ds_name,
+                ", ".join(f"{k!r} -> {v!r}" for k, v in mapping.items()),
+            )
+
+    # Propagate Settings to the analysis modules so per-trial metadata lookups
+    # (TrialMetadata, dataset_overrides) work without threading cfg through
+    # every helper signature.
+    try:
+        from scripts.analysis import envelope_combined as _ec_mod
+        _ec_mod.set_runtime_settings(settings)
+    except Exception as exc:  # pragma: no cover - defensive
+        LOGGER.warning("Could not set runtime settings on envelope_combined: %s", exc)
+    try:
+        from scripts.analysis import envelope_exports as _ee_mod
+        _ee_mod.set_runtime_settings(settings)
+    except Exception as exc:  # pragma: no cover - defensive
+        LOGGER.warning("Could not set runtime settings on envelope_exports: %s", exc)
 
     dataset_cfg = data.get("main_directories")
     dataset_roots: Sequence[str] | None = None
@@ -1589,16 +1817,25 @@ def main(argv: Sequence[str] | None = None) -> None:
     figures_only: bool = args.figures_only
     if figures_only:
         LOGGER.info("=" * 70)
-        LOGGER.info("FIGURES-ONLY MODE: skipping YOLO & pipeline, regenerating all figures")
+        LOGGER.info(
+            "FIGURES-ONLY MODE: skipping YOLO & pipeline; combined CSV / matrix "
+            "rebuild stays cache-aware (runs only if new flies detected); all "
+            "figure-output steps re-render."
+        )
         LOGGER.info("=" * 70)
-        # Force all figure/analysis cache flags so nothing is skipped
+        # combined: cache-aware (force=False) so wide CSV / matrix are only
+        # rebuilt when settings or dataset_roots changed (i.e. new flies).
+        # Every downstream figure step is forced to re-render with overwrite.
         settings = dc_replace(
             settings,
             force=dc_replace(
                 settings.force,
-                combined=True,
-                reaction_matrix=True,
+                combined=False,
+                envelope_visuals=True,
+                training=True,
                 reaction_prediction=True,
+                reaction_matrix=True,
+                dataset_means=True,
             ),
         )
 
@@ -1674,6 +1911,22 @@ def main(argv: Sequence[str] | None = None) -> None:
 
     analysis_cfg = data.get("analysis") or {}
 
+    # When reactions is configured to produce a predictions CSV, defer every
+    # envelope-trace render until after reactions writes scores. Each render
+    # site logs a "DEFERRED" line on the first pass; the canonical render
+    # happens once, with model-score annotations, in the post-reactions block.
+    rx_cfg = settings.reaction_prediction
+    defer_envelopes = bool(
+        getattr(rx_cfg, "data_csv", None)
+        and getattr(rx_cfg, "model_path", None)
+        and getattr(rx_cfg, "output_csv", None)
+    )
+    if defer_envelopes:
+        print(
+            "[analysis] envelope rendering deferred to after reactions "
+            f"(predictions CSV: {rx_cfg.output_csv})."
+        )
+
     combined_cfg_input = analysis_cfg.get("combined")
     if combined_cfg_input:
         combined_expected = {
@@ -1703,19 +1956,36 @@ def main(argv: Sequence[str] | None = None) -> None:
                     }
                 )
         combined_expected["pair_groups"] = pair_expected
-        skip_combined = _should_skip_with_manifest(
-            settings,
-            category="combined",
-            key="analysis",
-            expected=combined_expected,
-            force_flag=settings.force.combined,
-        )
-        if skip_combined:
+        if figures_only:
+            # In --figures-only mode, trust the existing wide CSVs / matrix
+            # npy unconditionally. The file-manifest cache check is too
+            # sensitive (it re-runs combined on any source file mtime change,
+            # even if no new flies were added) — defeats the purpose of the
+            # mode. If the wide CSV is missing, the figure-output steps will
+            # raise with a clear error.
+            skip_combined = True
             print(
-                "[analysis] combined analysis cached → skipping. Set force.combined=true to recompute."
+                "[analysis] combined → SKIPPED (--figures-only: using existing wide CSVs / matrix)."
             )
         else:
-            _run_combined(combined_cfg_input, settings, folder_filter=folder_filter)
+            skip_combined = _should_skip_with_manifest(
+                settings,
+                category="combined",
+                key="analysis",
+                expected=combined_expected,
+                force_flag=settings.force.combined,
+            )
+            if skip_combined:
+                print(
+                    "[analysis] combined analysis cached → skipping. Set force.combined=true to recompute."
+                )
+        if not skip_combined:
+            _run_combined(
+                combined_cfg_input,
+                settings,
+                folder_filter=folder_filter,
+                defer_envelopes=defer_envelopes,
+            )
             # Only write combined cache when running ALL folders; a single-folder
             # run is partial so the next full run must recompute.
             if not folder_filter:
@@ -1727,7 +1997,17 @@ def main(argv: Sequence[str] | None = None) -> None:
                     "Single-folder mode: skipping combined cache write so next full run recomputes."
                 )
     else:
-        _run_combined(None, settings, folder_filter=folder_filter)
+        _run_combined(
+            None,
+            settings,
+            folder_filter=folder_filter,
+            defer_envelopes=defer_envelopes,
+        )
+    # Load per-trial model scores (if the reactions step has run on a prior
+    # invocation) so envelope plots can annotate each subplot with the score
+    # in the upper-right corner. Empty registry on a fresh pipeline run.
+    _load_model_scores_for_envelopes(settings)
+
     # -- envelope_visuals with cache skip --
     env_vis_cfg = analysis_cfg.get("envelope_visuals")
     if env_vis_cfg:
@@ -1742,11 +2022,11 @@ def main(argv: Sequence[str] | None = None) -> None:
                 "Set force.envelope_visuals=true to recompute."
             )
         else:
-            _run_envelope_visuals(env_vis_cfg)
+            _run_envelope_visuals(env_vis_cfg, defer_envelopes=defer_envelopes)
             payload = dict(ev_expected, version=STATE_VERSION)
             _write_state(settings, "envelope_visuals", "analysis", payload)
     else:
-        _run_envelope_visuals(None)
+        _run_envelope_visuals(None, defer_envelopes=defer_envelopes)
 
     # -- training with cache skip --
     training_cfg = analysis_cfg.get("training")
@@ -1768,7 +2048,43 @@ def main(argv: Sequence[str] | None = None) -> None:
     else:
         _run_training(None)
 
-    _run_reactions(settings)
+    _run_reactions(settings, config_path=config_path)
+
+    # Reactions just wrote model_predictions.csv. Re-render every envelope-
+    # trace site that fired earlier in the pipeline (Raw + RMS testing/training
+    # under analysis.combined.combined_base.envelopes and analysis.combined.envelopes,
+    # plus analysis.envelope_visuals.envelopes) so each trial subplot picks up
+    # its Score annotation in the upper-right corner. Skipped if reactions did
+    # not produce a predictions CSV.
+    scores_csv = Path(getattr(settings.reaction_prediction, "output_csv", "") or "")
+    if scores_csv.exists():
+        _load_model_scores_for_envelopes(settings)
+
+        combined_cfg = analysis_cfg.get("combined") or {}
+        raw_envelopes_cfg = (combined_cfg.get("combined_base") or {}).get("envelopes")
+        distance_envelopes_cfg = (combined_cfg.get("distance_base") or {}).get("envelopes")
+        rms_envelopes_cfg = combined_cfg.get("envelopes")
+
+        if raw_envelopes_cfg:
+            _rerender_envelope_block_with_scores(
+                raw_envelopes_cfg, "Raw envelopes (combined_base)"
+            )
+        if distance_envelopes_cfg:
+            _rerender_envelope_block_with_scores(
+                distance_envelopes_cfg, "Distance envelopes (distance_base)"
+            )
+        if rms_envelopes_cfg:
+            _rerender_envelope_block_with_scores(
+                rms_envelopes_cfg, "RMS envelopes (combined)"
+            )
+        if env_vis_cfg:
+            vis_envelopes_cfg = env_vis_cfg.get("envelopes")
+            if vis_envelopes_cfg:
+                _rerender_envelope_block_with_scores(
+                    vis_envelopes_cfg, "envelope_visuals.envelopes"
+                )
+            payload = dict(ev_expected, version=STATE_VERSION)
+            _write_state(settings, "envelope_visuals", "analysis", payload)
 
     # -- dataset_means with cache skip --
     dm_expected = _dataset_means_expected(analysis_cfg)
@@ -1918,15 +2234,16 @@ def _batch_copy_to_smb(raw_cfg: Dict[str, Any]) -> None:
             if out_dir.exists() and smb_path:
                 copies_to_make.append((out_dir, smb_path))
 
-        combined_base_cfg = combined_cfg.get("combined_base", {})
-        base_envelopes = combined_base_cfg.get("envelopes", [])
-        if not isinstance(base_envelopes, list):
-            base_envelopes = [base_envelopes]
-        for env_cfg in base_envelopes:
-            out_dir = Path(env_cfg.get("out_dir", ""))
-            smb_path = env_cfg.get("out_dir_smb")
-            if out_dir.exists() and smb_path:
-                copies_to_make.append((out_dir, smb_path))
+        for base_key in ("combined_base", "distance_base"):
+            base_cfg = combined_cfg.get(base_key, {})
+            base_envelopes = base_cfg.get("envelopes", [])
+            if not isinstance(base_envelopes, list):
+                base_envelopes = [base_envelopes]
+            for env_cfg in base_envelopes:
+                out_dir = Path(env_cfg.get("out_dir", ""))
+                smb_path = env_cfg.get("out_dir_smb")
+                if out_dir.exists() and smb_path:
+                    copies_to_make.append((out_dir, smb_path))
 
     # Collect reaction prediction outputs (CSV + matrix figures)
     reaction_cfg = raw_cfg.get("reaction_prediction", {})

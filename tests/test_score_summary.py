@@ -39,11 +39,20 @@ def _make_score_rows() -> list[dict[str, object]]:
         [0, 1, 0, 1, 0],
     ]
 
+    # Trial labels must carry an odor suffix so _load_scores does not strip them
+    # as "no odor suffix" rows.  EB-Training schedule: 1=Hexanol, 2=Ethyl
+    # Butyrate, 3=Hexanol, 4=Ethyl Butyrate, 5=Ethyl Butyrate.
+    trial_labels = (
+        "testing_1_hexanol",
+        "testing_2_ethylbutyrate",
+        "testing_3_hexanol",
+        "testing_4_ethylbutyrate",
+        "testing_5_ethylbutyrate",
+    )
+
     for idx, scores in enumerate(train_patterns, start=1):
         fly = f"train_fly_{idx}"
-        for trial_label, score in zip(
-            ("testing_1", "testing_2", "testing_3", "testing_4", "testing_5"), scores
-        ):
+        for trial_label, score in zip(trial_labels, scores):
             rows.append(
                 {
                     "dataset": "EB-Training",
@@ -57,9 +66,7 @@ def _make_score_rows() -> list[dict[str, object]]:
 
     for idx, scores in enumerate(ctrl_patterns, start=1):
         fly = f"ctrl_fly_{idx}"
-        for trial_label, score in zip(
-            ("testing_1", "testing_2", "testing_3", "testing_4", "testing_5"), scores
-        ):
+        for trial_label, score in zip(trial_labels, scores):
             rows.append(
                 {
                     "dataset": "EB-Control",

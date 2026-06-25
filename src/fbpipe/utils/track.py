@@ -65,29 +65,57 @@ class Track:
         self.history.append(self.box_xyxy.copy())
 
 class _BaseTracker:
-    def __init__(self, iou_thres=0.25, max_age=15, ema_alpha=0.2):
+    def __init__(self, iou_thres=0.25, max_age=15, ema_alpha=0.2, match_mode="iou", max_match_dist=80.0):
         self.iou_thres = iou_thres
         self.max_age = max_age
         self.ema_alpha = ema_alpha
+        # "iou" (default) matches by box overlap; "center" matches by center-to-
+        # center distance, which is far more robust for small, fast objects whose
+        # boxes barely overlap (or not at all) between consecutive frames.
+        self.match_mode = match_mode
+        self.max_match_dist = float(max_match_dist)
         self.tracks: List[Track] = []
+
+    def _associate_center(self, det_xyxy: np.ndarray, det_scores: np.ndarray, preds, assigned_tr, assigned_det) -> None:
+        pred_centers = np.stack([xyxy_to_cxcywh(p)[:2] for p in preds])
+        det_centers = np.stack([xyxy_to_cxcywh(d)[:2] for d in det_xyxy])
+        D = np.linalg.norm(pred_centers[:, None, :] - det_centers[None, :, :], axis=2)
+        while True:
+            i, j = np.unravel_index(np.argmin(D), D.shape)
+            if not np.isfinite(D[i, j]) or D[i, j] > self.max_match_dist:
+                break
+            if i in assigned_tr or j in assigned_det:
+                D[i, j] = np.inf
+                continue
+            self.tracks[i].correct(xyxy_to_cxcywh(det_xyxy[j]), det_scores[j])
+            assigned_tr.add(i)
+            assigned_det.add(j)
+            D[i, :] = np.inf
+            D[:, j] = np.inf
+
+    def _associate_iou(self, det_xyxy: np.ndarray, det_scores: np.ndarray, preds, assigned_tr, assigned_det) -> None:
+        M = iou(np.stack(preds), det_xyxy)
+        while True:
+            i, j = np.unravel_index(np.argmax(M), M.shape)
+            if M[i, j] < self.iou_thres:
+                break
+            if i in assigned_tr or j in assigned_det:
+                M[i, j] = -1
+                continue
+            self.tracks[i].correct(xyxy_to_cxcywh(det_xyxy[j]), det_scores[j])
+            assigned_tr.add(i)
+            assigned_det.add(j)
+            M[i, :] = -1
+            M[:, j] = -1
 
     def _associate(self, det_xyxy: np.ndarray, det_scores: np.ndarray) -> Tuple[set, set]:
         preds = [t.predict() for t in self.tracks]
         assigned_tr, assigned_det = set(), set()
         if len(self.tracks) and len(det_xyxy):
-            M = iou(np.stack(preds), det_xyxy)
-            while True:
-                i, j = np.unravel_index(np.argmax(M), M.shape)
-                if M[i, j] < self.iou_thres:
-                    break
-                if i in assigned_tr or j in assigned_det:
-                    M[i, j] = -1
-                    continue
-                self.tracks[i].correct(xyxy_to_cxcywh(det_xyxy[j]), det_scores[j])
-                assigned_tr.add(i)
-                assigned_det.add(j)
-                M[i, :] = -1
-                M[:, j] = -1
+            if self.match_mode == "center":
+                self._associate_center(det_xyxy, det_scores, preds, assigned_tr, assigned_det)
+            else:
+                self._associate_iou(det_xyxy, det_scores, preds, assigned_tr, assigned_det)
         return assigned_tr, assigned_det
 
     def _spawn_tracks(self, det_xyxy: np.ndarray, det_scores: np.ndarray, assigned_det: set, max_tracks: Optional[int] = None) -> None:
@@ -116,8 +144,14 @@ class SingleClassTracker(_BaseTracker):
 class MultiObjectTracker(_BaseTracker):
     """Track multiple instances of a single class, returning the live tracks."""
 
-    def __init__(self, iou_thres=0.25, max_age=15, ema_alpha=0.2, max_tracks=4):
-        super().__init__(iou_thres=iou_thres, max_age=max_age, ema_alpha=ema_alpha)
+    def __init__(self, iou_thres=0.25, max_age=15, ema_alpha=0.2, max_tracks=4, match_mode="iou", max_match_dist=80.0):
+        super().__init__(
+            iou_thres=iou_thres,
+            max_age=max_age,
+            ema_alpha=ema_alpha,
+            match_mode=match_mode,
+            max_match_dist=max_match_dist,
+        )
         self.max_tracks = max_tracks
 
     def step(self, det_xyxy: np.ndarray, det_scores: np.ndarray) -> List[Track]:

@@ -38,6 +38,7 @@ from ..utils.distance_sanity import (
 )
 from ..utils.fly_files import iter_fly_distance_csvs
 from ..utils.gpu_batch_optimizer import BatchFileProcessor, estimate_optimal_batch_size
+from ..utils.tables import read_table, read_schema_columns, write_table
 
 
 def _is_already_normalized(
@@ -138,20 +139,37 @@ def main(cfg: Settings) -> None:
                 )
 
                 # Quick check for distance column + skip already-normalized files.
-                df_temp = pd.read_csv(csv_path, nrows=1)
-                if (
-                    not force_recompute
-                    and not needs_sanitization
-                    and _is_already_normalized(
-                        list(df_temp.columns),
-                        df_temp,
+                try:
+                    temp_cols = read_schema_columns(csv_path)
+                except Exception:
+                    temp_cols = []
+                if not force_recompute and not needs_sanitization and temp_cols:
+                    check_cols = [
+                        col
+                        for col in (
+                            PROBOSCIS_MIN_DISTANCE_COL,
+                            PROBOSCIS_MAX_DISTANCE_COL,
+                            f"effective_max_distance_{EYE_CLASS}_{PROBOSCIS_CLASS}",
+                        )
+                        if col in temp_cols
+                    ]
+                    try:
+                        snapshot = (
+                            read_table(csv_path, columns=check_cols).iloc[:1]
+                            if check_cols
+                            else pd.DataFrame()
+                        )
+                    except Exception:
+                        snapshot = pd.DataFrame()
+                    if _is_already_normalized(
+                        temp_cols,
+                        snapshot,
                         gmin=gmin,
                         gmax=gmax,
                         effective_max=effective_max,
-                    )
-                ):
-                    continue
-                dist_col = find_proboscis_distance_column(df_temp)
+                    ):
+                        continue
+                dist_col = find_proboscis_distance_column(pd.DataFrame(columns=temp_cols))
                 if dist_col is None:
                     continue
 
@@ -207,7 +225,7 @@ def _process_fly_batch(
 
         for idx, csv_path in enumerate(batch_paths):
             try:
-                df = pd.read_csv(csv_path)
+                df = read_table(csv_path)
                 df, sanitized_count = sanitize_three_fly_distance_dataframe(
                     df,
                     csv_path,
@@ -275,7 +293,7 @@ def _process_fly_batch(
                 df["max_distance_2_6"] = gmax
 
             # Save
-            df.to_csv(csv_path, index=False)
+            write_table(df, csv_path)
             processed_count += 1
 
     return processed_count

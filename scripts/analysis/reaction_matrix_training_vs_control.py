@@ -44,6 +44,7 @@ from scripts.analysis.envelope_visuals import (
     ODOR_ORDER,
     get_protocol,
     _canon_dataset,
+    apply_dataset_odor_remap,
     _display_label_ci,
     _display_odor,
     _drop_testing_11,
@@ -146,6 +147,15 @@ def _sig_stars(p: float) -> str:
     return "ns"
 
 
+def _format_p_value(p: float) -> str:
+    """Render a p-value for display on the bar plot."""
+    if pd.isna(p):
+        return ""
+    if p < 0.001:
+        return "p<0.001"
+    return f"p={p:.3f}"
+
+
 def _load_raw_binary_csv(out_dir: Path, dataset: str) -> pd.DataFrame:
     """Load raw trial-level binary CSV for a dataset (needed for Fisher's test)."""
     ds_dir = resolve_dataset_output_dir(out_dir, dataset)
@@ -214,7 +224,7 @@ def _draw_significance_brackets(
     merged: pd.DataFrame,
     p_values: dict[tuple[int, str], float],
 ) -> None:
-    """Draw bracket + stars between each train/control bar pair."""
+    """Draw bracket + stars + p-value between each train/control bar pair."""
     for i, (_, row) in enumerate(merged.iterrows()):
         if "trial_num" in row.index:
             key = (int(row["trial_num"]), str(row["odor"]))
@@ -222,7 +232,8 @@ def _draw_significance_brackets(
             key = (0, str(row["odor"]))
         p = p_values.get(key, np.nan)
         stars = _sig_stars(p)
-        if not stars:
+        p_str = _format_p_value(p)
+        if not stars and not p_str:
             continue
 
         # Height of bracket: well above the taller bar's annotation
@@ -243,11 +254,23 @@ def _draw_significance_brackets(
             [tip_y, bracket_y, bracket_y, tip_y],
             color="black", linewidth=0.9, clip_on=False,
         )
-        # Stars text
-        ax.text(
-            x_positions[i], bracket_y + 0.5, stars,
-            ha="center", va="bottom", fontsize=8, fontweight="bold",
-        )
+        # Stars (top) + p-value (below stars). When the comparison is not
+        # significant, just show the p-value (skips the now-redundant "ns").
+        if stars and stars != "ns":
+            ax.text(
+                x_positions[i], bracket_y + 0.5, stars,
+                ha="center", va="bottom", fontsize=8, fontweight="bold",
+            )
+            label_y = bracket_y + 0.5
+            ax.text(
+                x_positions[i], label_y + 4.0, p_str,
+                ha="center", va="bottom", fontsize=7,
+            )
+        else:
+            ax.text(
+                x_positions[i], bracket_y + 0.5, p_str,
+                ha="center", va="bottom", fontsize=7,
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -578,11 +601,30 @@ def generate_training_vs_control_matrices(cfg: SpreadsheetMatrixConfig) -> None:
             if drop_mask.any():
                 subset = subset.loc[~drop_mask].copy()
 
+            # Also drop trials whose label has no odor suffix (RandomPanel's
+            # training_15 / training_16 light-only — see reaction_matrix_from_spreadsheet.py).
+            no_odor_mask = subset["trial"].apply(
+                lambda t: _extract_odor_from_label(t) == str(t)
+            )
+            if no_odor_mask.any():
+                subset = subset.loc[~no_odor_mask].copy()
+
             if get_protocol() == "v2":
                 subset = subset.copy()
                 subset["_odor"] = subset["trial"].apply(_extract_odor_from_label)
-                subset["_odor_display"] = subset["_odor"].apply(
-                    lambda o: _display_label_ci(o) if o.lower() != "lightonly" else None
+                # Per-dataset odor remap (training side dictates substitute labels
+                # so train + control heatmap rows align). Falls through to no
+                # change when neither dataset registers an override.
+                subset["_odor_display"] = subset.apply(
+                    lambda r: (
+                        None
+                        if r["_odor"].lower() == "lightonly"
+                        else apply_dataset_odor_remap(
+                            r.get("dataset", train_ds),
+                            _display_label_ci(r["_odor"]),
+                        )
+                    ),
+                    axis=1,
                 )
                 subset = subset[subset["_odor_display"].notna()]
 
@@ -783,8 +825,29 @@ def main(argv: Sequence[str] | None = None) -> None:
                    help="Path to flagged-flies-truth CSV for excluding non-reactive flies.")
     p.add_argument("--protocol", type=str, default="v2", choices=["v2", "legacy"],
                    help="Protocol version for trial ordering (default: v2).")
+    p.add_argument("--config", type=str, default="",
+                   help="Pipeline config YAML; used to load dataset_overrides.odor_remap.")
     args = p.parse_args(argv)
     set_protocol(args.protocol)
+    try:
+        from fbpipe.figure_export import maybe_install_from_env
+        maybe_install_from_env()
+    except Exception:  # noqa: BLE001 — sidecar is optional
+        pass
+    if args.config:
+        try:
+            from fbpipe.config import load_settings
+            from scripts.analysis.envelope_visuals import set_dataset_odor_remap
+            settings = load_settings(args.config)
+            remap = {
+                str(ds): dict(ov.odor_remap)
+                for ds, ov in settings.dataset_overrides.items()
+                if getattr(ov, "odor_remap", None)
+            }
+            if remap:
+                set_dataset_odor_remap(remap)
+        except Exception as exc:  # noqa: BLE001 — defensive
+            print(f"[WARN] Failed to load odor_remap from {args.config}: {exc}")
 
     trial_orders = tuple(args.trial_order) if args.trial_order else ("observed", "trained-first")
 

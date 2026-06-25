@@ -13,6 +13,7 @@ import pandas as pd
 
 from ..config import Settings, load_flagged_fly_exclusions
 from ..utils.smb_copy import copy_to_smb
+from ..utils.tables import read_table  # data_csv input may be Parquet or CSV
 
 logger = logging.getLogger(__name__)
 
@@ -127,6 +128,10 @@ def _write_empty_predictions(output_csv: Path, columns: Sequence[str]) -> None:
     cols = list(columns)
     if "prediction" not in cols:
         cols.append("prediction")
+    # model_predictions.csv is an EXTERNAL/human-facing output consumed by literal
+    # `.csv` readers (run_workflows reaction-prediction gate + SMB sync, the
+    # reaction_matrix analysis, backup scripts) and written by the external
+    # flybehavior-response CLI. It must stay CSV.
     pd.DataFrame(columns=cols).to_csv(output_csv, index=False)
 
 
@@ -197,7 +202,7 @@ def _augment_prediction_csv(
     merged["_non_reactive"] = csv_mask
     merged["non_reactive_flag"] = csv_mask.astype(float)
 
-    merged.to_csv(output_csv, index=False)
+    merged.to_csv(output_csv, index=False)  # external CSV output (see _write_empty_predictions)
     print(f"[REACTION] Annotated predictions with span metadata ({len(merged)} rows)")
 
 
@@ -220,7 +225,7 @@ def main(cfg: Settings) -> None:
     if not model_path.exists():
         raise FileNotFoundError(f"Model file not found: {model_path}")
 
-    df = pd.read_csv(data_csv)
+    df = read_table(data_csv)
     df = _filter_trial_types(df, allowed=("testing",))
     if df.empty:
         print(

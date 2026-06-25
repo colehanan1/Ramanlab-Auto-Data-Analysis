@@ -29,6 +29,7 @@ import pandas as pd
 from ..config import Settings, get_main_directories
 from ..utils.columns import PROBOSCIS_X_COL, PROBOSCIS_Y_COL
 from ..utils.augmentation import augment_labeled_frames
+from ..utils.tables import read_table
 
 log = logging.getLogger("fbpipe.curate_yolo")
 
@@ -512,8 +513,17 @@ def main(cfg: Settings) -> None:
 
             log.info(f"[CURATION] Inspecting fly directory: {fly_dir.name}")
 
-            # Find YOLO output CSVs
-            distance_csvs = list(fly_dir.glob("*/*_fly*_distances.csv"))
+            # Find YOLO output distance tables (.parquet preferred, .csv legacy),
+            # de-duplicated by (parent, stem) so a trial present in both formats
+            # is only inspected once.
+            distance_csvs = []
+            _seen_stems: set[tuple] = set()
+            for _p in sorted(fly_dir.glob("*/*_fly*_distances.parquet")):
+                _seen_stems.add((_p.parent, _p.stem))
+                distance_csvs.append(_p)
+            for _p in sorted(fly_dir.glob("*/*_fly*_distances.csv")):
+                if (_p.parent, _p.stem) not in _seen_stems:
+                    distance_csvs.append(_p)
 
             if not distance_csvs:
                 log.info(f"[CURATION] No YOLO distance CSVs found in {fly_dir.name}")
@@ -525,7 +535,7 @@ def main(cfg: Settings) -> None:
             for csv_path in distance_csvs:
                 # Read tracking data
                 try:
-                    df = pd.read_csv(csv_path)
+                    df = read_table(csv_path)
                 except Exception as exc:
                     log.warning(f"Failed to read {csv_path.name}: {exc}")
                     continue
@@ -626,7 +636,7 @@ def main(cfg: Settings) -> None:
                 video_path = Path(flagged["video_path"])
                 csv_path = Path(flagged["csv_path"])
 
-                df = pd.read_csv(csv_path)
+                df = read_table(csv_path)
 
                 frames_per_video = target_frames_cfg.per_video
                 frames = extract_frames_stratified(

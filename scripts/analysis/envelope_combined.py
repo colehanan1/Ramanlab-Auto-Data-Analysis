@@ -43,7 +43,20 @@ for path in (str(REPO_ROOT), str(SRC_ROOT)):
     if path not in sys.path:
         sys.path.insert(0, path)
 
-from fbpipe.config import load_settings, resolve_config_path, load_raw_config
+from fbpipe.config import (
+    DatasetOverride,
+    Settings,
+    get_dataset_override,
+    load_raw_config,
+    load_settings,
+    resolve_config_path,
+)
+from fbpipe.utils.trial_metadata import (
+    TrialMetadata,
+    find_sidecar_by_label,
+    load_trial_metadata,
+)
+from fbpipe.utils.fly_type import fly_type_for_dir
 from fbpipe.odor_constants import (
     ODOR_CANON,
     DISPLAY_LABEL,
@@ -74,10 +87,94 @@ AUC_COLUMNS = (
     "Peak-Value",
 )
 
+# Pipeline-wide fallback windows (used only when a trial has no sidecar /
+# ActiveOFM data). Per-trial values come from ``TrialMetadata`` via
+# ``_resolve_trial_meta_for_csv`` below.
 BEFORE_FRAMES = 1260
 DURING_FRAMES = 1200
 AFTER_FRAMES = 1200
 DURING_START_FRAME = BEFORE_FRAMES
+
+
+# Module-level Settings holder. ``run_workflows`` calls ``set_runtime_settings``
+# once after loading the config so per-dataset overrides are visible without
+# having to thread cfg through every helper signature.
+_RUNTIME_SETTINGS: Settings | None = None
+
+
+def set_runtime_settings(cfg: Settings | None) -> None:
+    """Stash a loaded ``Settings`` for downstream metadata lookups.
+
+    Called once by the pipeline entry point so that per-dataset overrides
+    (``trial_type_override``, ``figure_output_subdir``) and ``odor_on_s`` /
+    ``odor_off_s`` / ``fps_default`` defaults are honoured everywhere.
+    """
+
+    global _RUNTIME_SETTINGS
+    _RUNTIME_SETTINGS = cfg
+
+
+# Parses ``<trial_type>_<N>...`` (and optional ``_<odor>``) from a filename so
+# we can locate the sidecar pair for callers that hold an *envelope* CSV path
+# (e.g. ``<batch>/angle_distance_rms_envelope/training_10_citral_fly1_…csv``)
+# instead of the per-trial folder.
+_TRIAL_LABEL_FROM_NAME = re.compile(
+    r"(?P<type>training|testing)_(?P<index>\d+)", re.IGNORECASE
+)
+
+
+def _resolve_trial_meta_for_csv(csv_path: Path | str, n_frames_hint: int | None = None) -> TrialMetadata:
+    """Return ``TrialMetadata`` for the trial that owns ``csv_path``.
+
+    Handles two CSV layouts seen in the pipeline:
+
+    1. Per-trial distance CSV — ``<batch>/<trial_dir>/<trial>_fly<N>_distances.csv``.
+       Sidecar sits one level up in the batch folder.
+    2. Per-fly envelope CSV — ``<batch>/angle_distance_rms_envelope/<label>_fly<N>_…envelope.csv``.
+       Sidecar sits in the batch folder (two levels up). The trial folder
+       is inferred from the label parsed out of the CSV name.
+
+    Falls back to config defaults when no sidecar / ActiveOFM data can be
+    found, so legacy datasets without sidecars continue to work.
+    """
+
+    path = Path(csv_path).resolve()
+    cfg = _RUNTIME_SETTINGS
+    parent = path.parent
+    # Decide which directory is the batch folder vs the trial folder.
+    if parent.name.lower() == "angle_distance_rms_envelope":
+        batch_dir = parent.parent
+        m = _TRIAL_LABEL_FROM_NAME.search(path.name)
+        if m:
+            trial_type = m.group("type").lower()
+            trial_index = int(m.group("index"))
+            sidecar_pair = find_sidecar_by_label(batch_dir, trial_type, trial_index)
+            # Pick a stable trial_dir for the cache key; prefer the matching
+            # per-trial folder if it exists on disk, else fall back to a
+            # synthetic path under the batch.
+            inferred_dir = batch_dir / f"{batch_dir.name}_{trial_type}_{trial_index}"
+            trial_dir = inferred_dir if inferred_dir.is_dir() else parent
+        else:
+            sidecar_pair = (None, None)
+            trial_dir = parent
+    else:
+        trial_dir = parent
+        sidecar_pair = None  # let load_trial_metadata discover via find_sidecar
+
+    override: DatasetOverride | None = (
+        get_dataset_override(cfg, trial_dir) if cfg is not None else None
+    )
+    return load_trial_metadata(
+        trial_dir,
+        fps_default=float(cfg.fps_default) if cfg is not None else 40.0,
+        odor_on_s_default=float(cfg.odor_on_s) if cfg is not None else 30.0,
+        odor_off_s_default=float(cfg.odor_off_s) if cfg is not None else 60.0,
+        n_frames_fallback=n_frames_hint,
+        dataset_override=override,
+        known_datasets=tuple(cfg.datasets) if cfg is not None else (),
+        use_cache=True,
+        sidecar_pair=sidecar_pair,
+    )
 DURING_END_FRAME = BEFORE_FRAMES + DURING_FRAMES
 
 from scripts.analysis import envelope_visuals
@@ -1035,6 +1132,18 @@ def _is_month_folder(path: Path) -> bool:
 
 
 def _infer_category(path: Path) -> str:
+    # Per-dataset override (e.g. RandomPanel: every trial folder is named
+    # ``..._training_N`` even though the trials are actually testing) wins
+    # over folder/cycle heuristics.
+    cfg = _RUNTIME_SETTINGS
+    if cfg is not None:
+        try:
+            override = get_dataset_override(cfg, path)
+        except Exception:
+            override = None
+        if override is not None and override.trial_type_override in ("training", "testing"):
+            return override.trial_type_override
+
     # Prioritize filename over parent folder names to handle cases like
     # "opto_EB(6-training)/.../_testing_1_..." where parent has "training"
     # but filename has "testing"
@@ -1654,7 +1763,10 @@ def _seconds_from_timestamp(df: pd.DataFrame, column: str) -> pd.Series:
     series = df[column]
     if column in ("UTC_ISO", "Timestamp"):
         dt = pd.to_datetime(series, errors="coerce", utc=(column == "UTC_ISO"))
-        secs = dt.astype("int64") / 1e9
+        # Resolution-independent: pandas>=2 may parse sub-second timestamps as
+        # datetime64[us]/[ms], so dt.astype("int64")/1e9 (which assumes ns)
+        # undershoots elapsed seconds by 1000x. total_seconds() is exact.
+        secs = (dt - dt.min()).dt.total_seconds()
     elif column == "Number":
         secs = pd.to_numeric(series, errors="coerce").astype(float)
     elif column == "MonoNs":
@@ -1707,10 +1819,26 @@ def _effective_fps(value: float, *, fallback: float, default: float) -> float:
     return 0.0
 
 
-def _segment_bounds(total_len: int) -> tuple[int, int, int, int]:
-    before_end = max(0, min(BEFORE_FRAMES, total_len))
+def _segment_bounds(
+    total_len: int,
+    *,
+    odor_on_frame: int | None = None,
+    odor_off_frame: int | None = None,
+) -> tuple[int, int, int, int]:
+    """Return ``(before_end, during_start, during_end, after_end)`` clipped to ``total_len``.
+
+    When ``odor_on_frame`` / ``odor_off_frame`` are provided (typically from
+    ``TrialMetadata`` for the trial), those are used as the segment boundaries.
+    Otherwise the legacy pipeline-wide ``BEFORE_FRAMES`` / ``DURING_FRAMES``
+    defaults are used so existing datasets without sidecars behave identically.
+    """
+
+    before_default = BEFORE_FRAMES
+    during_default = BEFORE_FRAMES + DURING_FRAMES
+    before_end = max(0, min(int(odor_on_frame if odor_on_frame is not None else before_default), total_len))
     during_start = before_end
-    during_end = max(during_start, min(during_start + DURING_FRAMES, total_len))
+    during_end_in = int(odor_off_frame) if odor_off_frame is not None else during_default
+    during_end = max(during_start, min(during_end_in, total_len))
     after_end = max(during_end, min(during_end + AFTER_FRAMES, total_len))
     return before_end, during_start, during_end, after_end
 
@@ -1748,10 +1876,16 @@ def _compute_trial_metrics(
     default_fps: float,
     fly_before_median: float,
     use_per_trial_baseline: bool = False,
+    odor_on_frame: int | None = None,
+    odor_off_frame: int | None = None,
 ) -> dict[str, float]:
     env = np.asarray(values, dtype=float)
     total_len = env.size
-    before_end, during_start, during_end, after_end = _segment_bounds(total_len)
+    before_end, during_start, during_end, after_end = _segment_bounds(
+        total_len,
+        odor_on_frame=odor_on_frame,
+        odor_off_frame=odor_off_frame,
+    )
 
     before = env[:before_end]
     during = env[during_start:during_end]
@@ -2374,7 +2508,10 @@ def build_wide_csv(
         dataset = root.name
         for fly_dir in sorted(p for p in root.iterdir() if p.is_dir()):
             fly = fly_dir.name
-            print(f"[DEBUG] build_wide_csv: scanning fly_dir={fly_dir}")
+            # Resolve canonical genotype from the batch's session_metadata.txt and
+            # ntfy-alert (once) on any uncatalogued "Fly Type:" so it can be added.
+            fly_type = fly_type_for_dir(fly_dir, alert_new=True, context=f"{dataset}/{fly}")
+            print(f"[DEBUG] build_wide_csv: scanning fly_dir={fly_dir} fly_type={fly_type}")
             for csv_path in _find_trial_csvs(fly_dir):
                 trial_type = _infer_category(csv_path).lower()
                 if trial_type_allow is not None and trial_type not in trial_type_allow:
@@ -2441,8 +2578,19 @@ def build_wide_csv(
         measure = str(item["measure_col"])
         if item.get("trial_type") not in baseline_types:
             continue
+        # Read up to the per-trial odor-on frame so the baseline sample for
+        # RandomPanel-style short trials does not bleed into the stim window.
         try:
-            df_before = pd.read_csv(csv_path, usecols=[measure], nrows=BEFORE_FRAMES)
+            _meta_pre = _resolve_trial_meta_for_csv(csv_path)
+            _before_nrows = (
+                int(_meta_pre.odor_on_frame)
+                if _meta_pre.odor_on_frame is not None
+                else BEFORE_FRAMES
+            )
+        except Exception:
+            _before_nrows = BEFORE_FRAMES
+        try:
+            df_before = pd.read_csv(csv_path, usecols=[measure], nrows=max(1, _before_nrows))
         except Exception as exc:
             print(f"[WARN] build_wide_csv: failed to read before segment from {csv_path.name}: {exc}")
             continue
@@ -2488,6 +2636,16 @@ def build_wide_csv(
         "tracking_pct_missing",
         "tracking_flagged",
         "trace_len",
+        # Per-trial window seconds, sourced from the Pi rig sidecar +
+        # ActiveOFM column. Consumed by envelope figure scripts so each
+        # trial's x-axis and odor-shading reflect actual rig timing.
+        "trial_odor_on_s",
+        "trial_odor_off_s",
+        "trial_duration_s",
+        # First optogenetic light-on time (s from recording start), parsed from
+        # the rig sensors_output_*.csv. Consumed by envelope figures to draw
+        # the green "Light pulsing starts" line at the measured time.
+        "trial_light_on_s",
     ]
     meta_suffix = ["trial_type", "trial_label", "fps"]
     metadata = meta_prefix + stat_columns + meta_suffix
@@ -2611,6 +2769,17 @@ def build_wide_csv(
                 f"fly_number={fly_number_label} fps={fps:.3f} frames={len(values)}"
             )
 
+            # Pull per-trial windows from the Pi rig sidecar / ActiveOFM CSV
+            # so trials with non-standard lengths or odor timing are scored
+            # correctly. Falls back to legacy 1260/2460 defaults when sidecars
+            # are missing.
+            try:
+                meta = _resolve_trial_meta_for_csv(csv_path, n_frames_hint=int(len(values)))
+            except Exception as exc:  # pragma: no cover - defensive
+                print(f"[WARN] trial-meta load failed for {csv_path.name}: {exc}")
+                meta = None
+            odor_on_in = meta.odor_on_frame if meta is not None else None
+            odor_off_in = meta.odor_off_frame if meta is not None else None
             metrics = _compute_trial_metrics(
                 values,
                 fps,
@@ -2618,6 +2787,8 @@ def build_wide_csv(
                 default_fps=fps_fallback,
                 fly_before_median=fly_before_medians.get(item["fly_key"], float("nan")),
                 use_per_trial_baseline=use_per_trial_baseline,
+                odor_on_frame=odor_on_in,
+                odor_off_frame=odor_off_in,
             )
 
             finite_mask = np.isfinite(values)
@@ -2636,7 +2807,11 @@ def build_wide_csv(
                     f"dataset={dataset} fly={fly} fly_number={fly_number_label}; local extrema set to NaN."
                 )
 
-            during_slice = values[DURING_START_FRAME:DURING_END_FRAME]
+            # Use per-trial windows from the sidecar; fall back to the legacy
+            # pipeline-wide constants when no sidecar is available.
+            _during_start = int(meta.odor_on_frame) if meta is not None and meta.odor_on_frame is not None else DURING_START_FRAME
+            _during_end = int(meta.odor_off_frame) if meta is not None and meta.odor_off_frame is not None else DURING_END_FRAME
+            during_slice = values[_during_start:_during_end]
             if during_slice.size:
                 during_mask = np.isfinite(during_slice)
                 during_in_range_values = during_slice[during_mask]
@@ -2650,7 +2825,8 @@ def build_wide_csv(
                 local_min_during = float("nan")
                 local_max_during = float("nan")
 
-            before_slice = values[:BEFORE_FRAMES]
+            _before_end = int(meta.odor_on_frame) if meta is not None and meta.odor_on_frame is not None else BEFORE_FRAMES
+            before_slice = values[:_before_end]
             if before_slice.size:
                 before_mask = np.isfinite(before_slice)
                 if before_mask.any():
@@ -2696,6 +2872,32 @@ def build_wide_csv(
                             max_missing_pct=tracking_cfg.max_missing_frames_pct_per_trial,
                         )
 
+            # Per-trial window seconds from the rig sidecar so downstream
+            # figures can shade odor-on/off and set the x-axis per trial.
+            _fps_for_seconds = float(fps) if math.isfinite(float(fps)) and float(fps) > 0 else float(fps_fallback)
+            if meta is not None:
+                _trial_odor_on_s = (
+                    (meta.odor_on_frame / max(meta.fps, 1e-6))
+                    if meta.odor_on_frame is not None
+                    else float("nan")
+                )
+                _trial_odor_off_s = (
+                    (meta.odor_off_frame / max(meta.fps, 1e-6))
+                    if meta.odor_off_frame is not None
+                    else float("nan")
+                )
+                _trial_duration_s = float(meta.n_frames) / max(meta.fps, 1e-6)
+                _trial_light_on_s = (
+                    float(meta.light_on_s)
+                    if meta.light_on_s is not None and math.isfinite(float(meta.light_on_s))
+                    else float("nan")
+                )
+            else:
+                _trial_odor_on_s = float("nan")
+                _trial_odor_off_s = float("nan")
+                _trial_duration_s = float(len(values)) / max(_fps_for_seconds, 1e-6)
+                _trial_light_on_s = float("nan")
+
             trial_results.append(
                 {
                     "trial_type": trial_type,
@@ -2714,6 +2916,10 @@ def build_wide_csv(
                     "tracking_pct_missing": tracking_quality.get("pct_missing", 0.0),
                     "tracking_flagged": tracking_quality.get("flagged", False),
                     "trace_len": int(len(values)),
+                    "trial_odor_on_s": float(_trial_odor_on_s),
+                    "trial_odor_off_s": float(_trial_odor_off_s),
+                    "trial_duration_s": float(_trial_duration_s),
+                    "trial_light_on_s": float(_trial_light_on_s),
                 }
             )
             # Collect samples from BOTH testing and training trials
@@ -2847,6 +3053,10 @@ def build_wide_csv(
                 result.get("tracking_pct_missing", 0.0),
                 result.get("tracking_flagged", False),
                 result.get("trace_len", len(values)),
+                result.get("trial_odor_on_s", float("nan")),
+                result.get("trial_odor_off_s", float("nan")),
+                result.get("trial_duration_s", float("nan")),
+                result.get("trial_light_on_s", float("nan")),
                 result["trial_type"],
                 result["label"],
                 float(result["fps"]),
@@ -2902,6 +3112,21 @@ def build_wide_csv(
     for trial_key, target in extra_paths.items():
         print(f"[OK] Wrote {trial_key} subset: {target}")
 
+    # Emit Parquet siblings so analysis consumers (fbpipe.analysis.read_wide_table)
+    # load these large wide tables columnar (~3-4x faster + selective columns).
+    # Read with default dtypes so the Parquet is byte-faithful to pd.read_csv (no
+    # dtype drift); the CSV is kept for any literal-".csv" reader.
+    try:
+        from fbpipe.utils.tables import write_table
+
+        for _tgt in [out_path, *extra_paths.values()]:
+            _tgt = Path(_tgt)
+            if _tgt.exists():
+                write_table(pd.read_csv(_tgt), _tgt, replace_legacy_csv=False)
+                print(f"[OK] Wrote Parquet sibling: {_tgt.with_suffix('.parquet').name}")
+    except Exception as exc:  # never fail the build over the optional sidecar
+        print(f"[WARN] build_wide_csv: Parquet sibling(s) skipped: {exc}")
+
 
 def wide_to_matrix(input_csv: str, output_dir: str) -> None:
     csv_path = Path(input_csv).expanduser().resolve()
@@ -2946,6 +3171,10 @@ def wide_to_matrix(input_csv: str, output_dir: str) -> None:
             "tracking_pct_missing",
             "tracking_flagged",
             "trace_len",
+            "trial_odor_on_s",
+            "trial_odor_off_s",
+            "trial_duration_s",
+            "trial_light_on_s",
         )
         if col in df.columns
     ]

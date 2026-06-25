@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from functools import partial
 from pathlib import Path
 import re
 
@@ -8,6 +9,8 @@ import pandas as pd
 from ..config import Settings, get_main_directories
 from ..utils.columns import find_proboscis_distance_column
 from ..utils.fly_files import iter_fly_distance_csvs
+from ..utils.parallel import parallel_map
+from ..utils.tables import read_table, resolve_existing
 
 
 def _consecutive_runs(values: list[int], min_len: int = 10) -> list[tuple[int, int]]:
@@ -30,80 +33,94 @@ def _consecutive_runs(values: list[int], min_len: int = 10) -> list[tuple[int, i
     return runs
 
 
-def main(cfg: Settings) -> None:
+def _process_fly_dir(fly_dir: Path, cfg: Settings) -> None:
+    """Process a single fly directory: detect and report dropped frames for all distance CSVs.
+
+    This is a module-level function so it is picklable by joblib's loky backend.
+    """
     force_recompute = bool(getattr(getattr(cfg, "force", None), "pipeline", False))
+    print(f"[DROP] Checking fly directory: {fly_dir.name}")
+    for csv_path, _, _ in iter_fly_distance_csvs(fly_dir, recursive=True):
+        out_path = Path(csv_path.with_suffix("").as_posix() + "_dropped_frames.txt")
+        actual_input = resolve_existing(csv_path) or csv_path
+        if (
+            not force_recompute
+            and out_path.exists()
+            and out_path.stat().st_mtime >= actual_input.stat().st_mtime
+        ):
+            print(f"[DROP] Skipping up-to-date report: {out_path.name}")
+            continue
+        print(f"[DROP] Evaluating frames in {csv_path.name}")
+        df = read_table(csv_path)
+        df.columns = df.columns.str.strip()
+        if "frame" not in df.columns:
+            print(
+                f"[DROP] CSV {csv_path.name} is missing a 'frame' column; "
+                "cannot compute dropped frames."
+            )
+            continue
+
+        present = (
+            pd.to_numeric(df["frame"], errors="coerce")
+            .dropna()
+            .astype(int)
+            .unique()
+        )
+        present = sorted(present.tolist())
+        if not present:
+            print(f"[DROP] CSV {csv_path.name} has no valid frame numbers; skipping.")
+            continue
+
+        min_frame, max_frame = present[0], present[-1]
+        expected = set(range(min_frame, max_frame + 1))
+        missing = sorted(expected - set(present))
+
+        dropped = []
+        dist_col = find_proboscis_distance_column(df)
+        if dist_col:
+            dropped = df[df[dist_col].isna()]["frame"].tolist()
+        else:
+            print(
+                f"[DROP] No proboscis distance column found in {csv_path.name}; "
+                "NaN distance-based drops cannot be identified."
+            )
+
+        all_dropped = sorted(set(missing) | set(dropped))
+        flagged_runs = _consecutive_runs(all_dropped, min_len=10)
+        trial_label = ""
+        trial_match = re.search(r"(testing|training)_\d+", csv_path.stem, re.IGNORECASE)
+        if trial_match:
+            trial_label = trial_match.group(0)
+
+        with open(out_path, "w", encoding="utf-8") as fp:
+            if not all_dropped:
+                fp.write("No dropped frames found.\n")
+            else:
+                fp.write("Dropped frames (missing or NaN distance):\n")
+                for frame in all_dropped:
+                    fp.write(f"{frame}\n")
+                fp.write(f"\nTotal dropped frames: {len(all_dropped)}\n")
+                if flagged_runs:
+                    fp.write("\nFlagged consecutive drops (>=10 in a row):\n")
+                    for start, end in flagged_runs:
+                        fp.write(f"{start}-{end}\n")
+        print(
+            f"[DROP] Wrote dropped frame report for {csv_path.name} → {out_path}"
+        )
+        for start, end in flagged_runs:
+            print(
+                f"[DROP][FLAG] {csv_path.name} ({trial_label or 'unknown trial'}) has >=10 consecutive dropped frames: {start}-{end}"
+            )
+
+
+def main(cfg: Settings) -> None:
     roots = get_main_directories(cfg)
     for root in roots:
         print(f"[DROP] Scanning {root} for dropped frames")
-        for fly_dir in [p for p in root.iterdir() if p.is_dir()]:
-            print(f"[DROP] Checking fly directory: {fly_dir.name}")
-            for csv_path, _, _ in iter_fly_distance_csvs(fly_dir, recursive=True):
-                out_path = Path(csv_path.with_suffix("").as_posix() + "_dropped_frames.txt")
-                if (
-                    not force_recompute
-                    and out_path.exists()
-                    and out_path.stat().st_mtime >= csv_path.stat().st_mtime
-                ):
-                    print(f"[DROP] Skipping up-to-date report: {out_path.name}")
-                    continue
-                print(f"[DROP] Evaluating frames in {csv_path.name}")
-                df = pd.read_csv(csv_path)
-                df.columns = df.columns.str.strip()
-                if "frame" not in df.columns:
-                    print(
-                        f"[DROP] CSV {csv_path.name} is missing a 'frame' column; "
-                        "cannot compute dropped frames."
-                    )
-                    continue
-
-                present = (
-                    pd.to_numeric(df["frame"], errors="coerce")
-                    .dropna()
-                    .astype(int)
-                    .unique()
-                )
-                present = sorted(present.tolist())
-                if not present:
-                    print(f"[DROP] CSV {csv_path.name} has no valid frame numbers; skipping.")
-                    continue
-
-                min_frame, max_frame = present[0], present[-1]
-                expected = set(range(min_frame, max_frame + 1))
-                missing = sorted(expected - set(present))
-
-                dropped = []
-                dist_col = find_proboscis_distance_column(df)
-                if dist_col:
-                    dropped = df[df[dist_col].isna()]["frame"].tolist()
-                else:
-                    print(
-                        f"[DROP] No proboscis distance column found in {csv_path.name}; "
-                        "NaN distance-based drops cannot be identified."
-                    )
-
-                all_dropped = sorted(set(missing) | set(dropped))
-                flagged_runs = _consecutive_runs(all_dropped, min_len=10)
-                trial_label = ""
-                trial_match = re.search(r"(testing|training)_\d+", csv_path.stem, re.IGNORECASE)
-                if trial_match:
-                    trial_label = trial_match.group(0)
-
-                with open(out_path, "w", encoding="utf-8") as fp:
-                    if not all_dropped:
-                        fp.write("No dropped frames found.\n")
-                    else:
-                        fp.write("Dropped frames (missing or NaN distance):\n")
-                        for frame in all_dropped:
-                            fp.write(f"{frame}\n")
-                        fp.write(f"\nTotal dropped frames: {len(all_dropped)}\n")
-                        if flagged_runs:
-                            fp.write("\nFlagged consecutive drops (>=10 in a row):\n")
-                            for start, end in flagged_runs:
-                                fp.write(f"{start}-{end}\n")
-                print(
-                    f"[DROP] Wrote dropped frame report for {csv_path.name} → {out_path}"
-                )
-                for start, end in flagged_runs:
-                    print(
-                        f"[DROP][FLAG] {csv_path.name} ({trial_label or 'unknown trial'}) has >=10 consecutive dropped frames: {start}-{end}"
-                    )
+        fly_dirs = [p for p in root.iterdir() if p.is_dir()]
+        parallel_map(
+            partial(_process_fly_dir, cfg=cfg),
+            fly_dirs,
+            enabled=cfg.parallel.enabled,
+            n_jobs=cfg.parallel.n_jobs,
+        )

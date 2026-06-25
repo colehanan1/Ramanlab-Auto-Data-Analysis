@@ -18,7 +18,7 @@ import logging
 import math
 import os
 import re
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
@@ -27,6 +27,13 @@ import numpy as np
 import pandas as pd
 
 from fbpipe.utils.columns import EYE_CLASS, PROBOSCIS_CLASS
+from fbpipe.utils.trial_metadata import TrialMetadata, load_trial_metadata
+from fbpipe.config import (
+    DatasetOverride,
+    Settings,
+    get_dataset_override,
+    load_settings,
+)
 
 LOGGER = logging.getLogger(__name__)
 
@@ -39,11 +46,10 @@ FLY_NUMBER_PATTERN = re.compile(r"fly[^0-9]*(\d+)", re.IGNORECASE)
 WIDE_COL_PATTERN = re.compile(r"(?P<prefix>eye_x|eye_y|prob_x|prob_y)_f(?P<frame>\d+)", re.IGNORECASE)
 
 
-BASELINE_END = 1260  # first ~30 seconds at 40 fps
-STIM_END = 2460  # subsequent ~30 seconds during odor presentation
-FPS = 40.0
+# Window boundaries / fps are now sourced from per-trial sidecars via
+# ``TrialMetadata`` (see fbpipe.utils.trial_metadata). Only the time-invariant
+# constants remain here.
 EARLY_WIN_SEC = 1.0
-EARLY_WIN = int(EARLY_WIN_SEC * FPS)
 HIGH_EXT_THRESH = 75.0
 
 
@@ -332,6 +338,12 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         "--no-cache",
         action="store_true",
         help="Disable fly statistics caching (forces full recomputation)."
+    )
+    parser.add_argument(
+        "--config",
+        default=None,
+        help="Path to pipeline config (yaml). Used for fps_default, odor_on_s, "
+             "odor_off_s and per-dataset overrides. Defaults to the repo config.",
     )
     return parser.parse_args(argv)
 
@@ -664,8 +676,14 @@ def _safe_stat(series: pd.Series, mask: np.ndarray, func) -> float:
 
 def _apply_behavioural_windows(
     df: pd.DataFrame,
+    meta: TrialMetadata,
 ) -> Tuple[pd.DataFrame, Dict[str, float], Dict[str, int]]:
-    """Append behavioural window masks and summary statistics to an enriched dataframe."""
+    """Append behavioural window masks and summary statistics to an enriched dataframe.
+
+    Window boundaries come from the per-trial ``TrialMetadata`` — never from
+    pipeline-wide constants — so trials with non-standard lengths and odor
+    timing are scored correctly.
+    """
 
     if "frame" not in df.columns:
         LOGGER.warning("Dataframe lacks frame column; behavioural windows will be empty.")
@@ -679,10 +697,14 @@ def _apply_behavioural_windows(
     is_valid = frame_values.notna().to_numpy()
     frames = frame_values.to_numpy()
 
-    before_mask = (frames < BASELINE_END) & is_valid
-    during_mask = (frames >= BASELINE_END) & (frames < STIM_END) & is_valid
-    after_mask = (frames >= STIM_END) & is_valid
-    early_mask = (frames >= BASELINE_END) & (frames < BASELINE_END + EARLY_WIN) & is_valid
+    odor_on = int(meta.odor_on_frame) if meta.odor_on_frame is not None else 0
+    odor_off = int(meta.odor_off_frame) if meta.odor_off_frame is not None else int(meta.n_frames)
+    early_win = max(1, int(round(EARLY_WIN_SEC * max(meta.fps, 1e-6))))
+
+    before_mask = (frames < odor_on) & is_valid
+    during_mask = (frames >= odor_on) & (frames < odor_off) & is_valid
+    after_mask = (frames >= odor_off) & is_valid
+    early_mask = (frames >= odor_on) & (frames < odor_on + early_win) & is_valid
 
     df = df.copy()
     before_mask = before_mask.astype(bool)
@@ -766,6 +788,7 @@ def enrich_trial(
     trial: TrialInfo,
     df: pd.DataFrame,
     stats: FlyStats,
+    meta: TrialMetadata,
 ) -> Tuple[pd.DataFrame, Dict[str, float | int]]:
     df = df.copy()
     df = df.astype({col: float for col in ["frame", "eye_x", "eye_y", "prob_x", "prob_y"]}, errors="ignore")
@@ -834,7 +857,13 @@ def enrich_trial(
         if not series.empty and (series.lt(0).any() or series.gt(100).any()):
             raise AssertionError(f"{column} not clipped to [0, 100] for {trial.csv_path_in}")
 
-    enriched, behaviour_summary, window_counts = _apply_behavioural_windows(enriched)
+    enriched, behaviour_summary, window_counts = _apply_behavioural_windows(enriched, meta)
+    enriched["n_frames"] = int(meta.n_frames)
+    enriched["fps"] = float(meta.fps)
+    enriched["odor_on_frame"] = int(meta.odor_on_frame) if meta.odor_on_frame is not None else -1
+    enriched["odor_off_frame"] = int(meta.odor_off_frame) if meta.odor_off_frame is not None else -1
+    if meta.odor:
+        enriched["trial_odor"] = meta.odor
 
     summary.update(behaviour_summary)
     LOGGER.debug(
@@ -912,6 +941,7 @@ class TestingAggregator:
         df: pd.DataFrame,
         summary: Dict[str, float | int],
         stats: FlyStats,
+        meta: TrialMetadata,
     ) -> None:
         if self.dry_run:
             LOGGER.info(
@@ -922,11 +952,12 @@ class TestingAggregator:
             )
             return
 
-        trimmed_df = self._trim_frames(df, trial)
+        trimmed_df = self._trim_frames(df, trial, meta)
         if trimmed_df.empty:
             LOGGER.warning(
-                "Skipping testing aggregate append for %s because no frames remain within 0-3600",
+                "Skipping testing aggregate append for %s because no frames remain within [0, %d]",
                 trial.csv_path_in,
+                int(meta.n_frames),
             )
             return
 
@@ -1014,31 +1045,71 @@ class TestingAggregator:
             json.dump(schema, handle, indent=2, sort_keys=True)
         LOGGER.info("Wrote testing aggregate schema: %s", self.schema_path)
 
-    def _trim_frames(self, df: pd.DataFrame, trial: TrialInfo) -> pd.DataFrame:
-        """Keep only frames with indices between 0 and 3600 inclusive."""
+    def _trim_frames(self, df: pd.DataFrame, trial: TrialInfo, meta: TrialMetadata) -> pd.DataFrame:
+        """Keep frames within ``[0, meta.n_frames]`` for this trial.
+
+        Trial length is sourced from the Pi rig sidecar (or the caller-supplied
+        fallback), so trials of any duration are preserved exactly without
+        truncation or padding.
+        """
+
+        limit = int(meta.n_frames)
+        head_n = limit + 1  # inclusive on the upper bound, matching legacy behaviour
 
         if "frame" not in df.columns:
             LOGGER.warning(
-                "Trial %s lacks a frame column; writing only the first 3601 rows to testing aggregate",
+                "Trial %s lacks a frame column; writing only the first %d rows to testing aggregate",
                 trial.csv_path_in,
+                head_n,
             )
-            return df.head(3601).copy()
+            return df.head(head_n).copy()
 
-        mask = df["frame"].between(0, 3600, inclusive="both")
+        mask = df["frame"].between(0, limit, inclusive="both")
         trimmed = df.loc[mask]
         if trimmed.empty:
-            # Fallback to first 3601 rows to avoid dropping the trial entirely if
-            # frame numbering is unexpected.
             LOGGER.warning(
-                "Trial %s has no frames in [0, 3600]; defaulting to first 3601 rows",
+                "Trial %s has no frames in [0, %d]; defaulting to first %d rows",
                 trial.csv_path_in,
+                limit,
+                head_n,
             )
-            return df.head(3601).copy()
+            return df.head(head_n).copy()
         return trimmed.copy()
+
+
+def _resolve_trial_meta(
+    trial: TrialInfo,
+    cfg: Optional[Settings],
+) -> TrialMetadata:
+    """Load ``TrialMetadata`` for ``trial`` using ``cfg`` for fallback defaults."""
+
+    fps_default = float(cfg.fps_default) if cfg is not None else 40.0
+    odor_on_default = float(cfg.odor_on_s) if cfg is not None else 30.0
+    odor_off_default = float(cfg.odor_off_s) if cfg is not None else 60.0
+    known_ds = tuple(cfg.datasets) if cfg is not None else ()
+    override: Optional[DatasetOverride] = (
+        get_dataset_override(cfg, trial.trial_dir) if cfg is not None else None
+    )
+    n_frames_fallback: Optional[int] = None
+    try:
+        n_frames_fallback = int(pd.read_csv(trial.csv_path_in, usecols=[0]).shape[0])
+    except Exception:
+        n_frames_fallback = None
+    return load_trial_metadata(
+        trial.trial_dir,
+        fps_default=fps_default,
+        odor_on_s_default=odor_on_default,
+        odor_off_s_default=odor_off_default,
+        n_frames_fallback=n_frames_fallback,
+        dataset_override=override,
+        known_datasets=known_ds,
+        use_cache=True,
+    )
 
 
 def process_single_trial(
     input_csv_path: str,
+    cfg: Optional[Settings] = None,
 ) -> Tuple[pd.DataFrame, Dict[str, float], Dict[str, int]]:
     """Load a CSV, append behavioural windows, and return the enriched dataframe."""
 
@@ -1047,7 +1118,25 @@ def process_single_trial(
         raise FileNotFoundError(f"Input CSV does not exist: {path}")
 
     df = pd.read_csv(path)
-    enriched, summary_updates, counts = _apply_behavioural_windows(df)
+    # Use the CSV's parent trial folder to fetch per-trial metadata (sidecar),
+    # falling back to config defaults if no sidecar is present.
+    trial_dir = path.parent
+    override = get_dataset_override(cfg, trial_dir) if cfg is not None else None
+    fps_default = float(cfg.fps_default) if cfg is not None else 40.0
+    odor_on_default = float(cfg.odor_on_s) if cfg is not None else 30.0
+    odor_off_default = float(cfg.odor_off_s) if cfg is not None else 60.0
+    known_ds = tuple(cfg.datasets) if cfg is not None else ()
+    meta = load_trial_metadata(
+        trial_dir,
+        fps_default=fps_default,
+        odor_on_s_default=odor_on_default,
+        odor_off_s_default=odor_off_default,
+        n_frames_fallback=int(len(df)),
+        dataset_override=override,
+        known_datasets=known_ds,
+        use_cache=True,
+    )
+    enriched, summary_updates, counts = _apply_behavioural_windows(df, meta)
     return enriched, summary_updates, counts
 
 
@@ -1057,6 +1146,7 @@ def process_trials(
     dry_run: bool,
     testing_aggregator: Optional[TestingAggregator],
     cache_dir: Optional[Path] = None,
+    cfg: Optional[Settings] = None,
 ) -> List[Dict[str, object]]:
     consolidated_rows: List[Dict[str, object]] = []
     trials_by_fly: Dict[Tuple[str, str], List[TrialInfo]] = {}
@@ -1066,6 +1156,26 @@ def process_trials(
     # Track cache statistics for logging
     cache_hits = 0
     cache_misses = 0
+
+    # Resolve per-trial metadata up front; this also applies the per-dataset
+    # trial_type_override so testing/training routing is honoured everywhere.
+    meta_by_trial: Dict[TrialInfo, TrialMetadata] = {}
+    rebuilt_trials: List[TrialInfo] = []
+    trial_index_old_to_new: Dict[TrialInfo, TrialInfo] = {}
+    for trial in trials:
+        meta = _resolve_trial_meta(trial, cfg)
+        if meta.trial_type and meta.trial_type != trial.trial_type:
+            new_trial = replace(trial, trial_type=meta.trial_type)
+        else:
+            new_trial = trial
+        meta_by_trial[new_trial] = meta
+        trial_index_old_to_new[trial] = new_trial
+        rebuilt_trials.append(new_trial)
+    # Re-bucket by (dataset, fly) using the rebuilt trials so the sort downstream
+    # uses the corrected trial_type.
+    trials_by_fly = {}
+    for trial in rebuilt_trials:
+        trials_by_fly.setdefault((trial.dataset, trial.fly_directory), []).append(trial)
 
     for (dataset, fly_directory), fly_trials in trials_by_fly.items():
         fly_trials = sorted(fly_trials, key=lambda t: (t.trial_type, t.trial_label, t.csv_path_in.name))
@@ -1113,7 +1223,8 @@ def process_trials(
                 trial_data[trial] = df
 
         for trial in fly_trials:
-            enriched_df, summary = enrich_trial(trial, trial_data[trial], stats)
+            meta = meta_by_trial[trial]
+            enriched_df, summary = enrich_trial(trial, trial_data[trial], stats, meta)
             output_path = determine_output_path(trial, outdir)
             csv_path_out = output_path
             consolidated_row: Dict[str, object] = {
@@ -1150,7 +1261,7 @@ def process_trials(
             LOGGER.info("Wrote behavioural trial CSV: %s", behaviour_path)
 
             if testing_aggregator is not None and trial.trial_type == "testing":
-                testing_aggregator.append(trial, enriched_df, summary, stats)
+                testing_aggregator.append(trial, enriched_df, summary, stats, meta)
 
     # Log cache statistics
     if cache_dir is not None:
@@ -1184,13 +1295,20 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     args = parse_args(argv)
     configure_logging(args.log_level)
 
+    cfg: Optional[Settings]
+    try:
+        cfg = load_settings(args.config) if args.config else load_settings("config/config.yaml")
+    except Exception as exc:
+        LOGGER.warning("Could not load settings (%s); using built-in defaults.", exc)
+        cfg = None
+
     if args.input:
         if args.limit_flies is not None or args.limit_trials is not None:
             LOGGER.warning("--limit-flies/--limit-trials are ignored when --input is provided.")
         if args.outdir:
             LOGGER.info("--outdir is ignored in --input mode; outputs are written beside the source CSV.")
 
-        enriched_df, behaviour_summary, counts = process_single_trial(args.input)
+        enriched_df, behaviour_summary, counts = process_single_trial(args.input, cfg=cfg)
         behaviour_path = Path(args.input).with_name(Path(args.input).stem + "_with_behavior.csv")
 
         if args.dry_run:
@@ -1249,7 +1367,9 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
 
     testing_aggregator = TestingAggregator(outdir, args.dry_run)
 
-    consolidated_rows = process_trials(trials, outdir, args.dry_run, testing_aggregator, cache_dir)
+    consolidated_rows = process_trials(
+        trials, outdir, args.dry_run, testing_aggregator, cache_dir, cfg=cfg
+    )
 
     if consolidated_rows:
         write_consolidated(consolidated_rows, outdir, args.dry_run)

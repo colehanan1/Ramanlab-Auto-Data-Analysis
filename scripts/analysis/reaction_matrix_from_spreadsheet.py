@@ -36,6 +36,7 @@ import re as _re
 from scripts.analysis.envelope_visuals import (
     DISPLAY_LABEL,
     ODOR_ORDER,
+    apply_dataset_odor_remap,
     compute_non_reactive_flags,
     non_reactive_mask,
     plot_reaction_rate_bars,
@@ -277,14 +278,46 @@ def generate_reaction_matrices_from_csv(cfg: SpreadsheetMatrixConfig) -> None:
             if drop_mask.any():
                 subset = subset.loc[~drop_mask].copy()
 
+            # Also drop trials whose label has no odor suffix (e.g. RandomPanel's
+            # training_15 / training_16 light-only trials — the rig cycle name
+            # contains underscores so the odor-map regex skips them). For
+            # entirely light-only datasets (no odor on any trial), this empties
+            # the subset and there's nothing to plot, so skip the odor.
+            no_odor_mask = subset["trial"].apply(
+                lambda t: _extract_odor_from_label(t) == str(t)
+            )
+            if no_odor_mask.any():
+                subset = subset.loc[~no_odor_mask].copy()
+            if subset.empty:
+                print(
+                    "[INFO] reaction_matrix_csv: skipping",
+                    odor,
+                    "because no trials had odor labels (likely a light-only dataset).",
+                )
+                continue
+
             if get_protocol() == "v2":
                 # V2: build matrix by ODOR NAME (consistent across flies with randomized trial order)
                 subset = subset.copy()
                 subset["_odor"] = subset["trial"].apply(_extract_odor_from_label)
+                # Apply per-dataset odor remap (e.g. Hex-Control-24-0.1 swaps
+                # Citral -> "Sour Dough Yeast (25%)") right after the display
+                # name is resolved.
                 subset["_odor_display"] = subset["_odor"].apply(
-                    lambda o: _display_label_ci(o) if o.lower() != "lightonly" else None
+                    lambda o: (
+                        None
+                        if o.lower() == "lightonly"
+                        else apply_dataset_odor_remap(odor, _display_label_ci(o))
+                    )
                 )
                 subset = subset[subset["_odor_display"].notna()]
+                if subset.empty:
+                    print(
+                        "[INFO] reaction_matrix_csv: skipping",
+                        odor,
+                        "because no rows remained after odor-display filtering.",
+                    )
+                    continue
 
                 trained_display = DISPLAY_LABEL.get(odor, odor)
                 unique_odors = sorted(set(subset["_odor_display"]), key=str.lower)
@@ -397,7 +430,7 @@ def generate_reaction_matrices_from_csv(cfg: SpreadsheetMatrixConfig) -> None:
                         reaction_col="during_hit",
                         separate_presentations=True,
                     )
-                except RuntimeError:
+                except (RuntimeError, ValueError):
                     ax_dc.text(
                         0.5,
                         0.5,
@@ -607,13 +640,52 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         choices=["v2", "legacy"],
         help="Protocol version for trial ordering (default: v2).",
     )
+    parser.add_argument(
+        "--config",
+        type=str,
+        default="",
+        help="Pipeline config YAML; used to load dataset_overrides.odor_remap.",
+    )
     parser.set_defaults(overwrite=True)
     return parser.parse_args(argv)
+
+
+def _apply_odor_remap_from_config(config_path: str) -> None:
+    """Load DatasetOverride.odor_remap entries and register them.
+
+    Subprocess scripts don't inherit the parent's module-level registry, so
+    each must re-populate from the config to apply per-dataset display
+    overrides (e.g. Hex-Control-24-0.1 swaps Citral -> Sour Dough Yeast).
+    """
+    if not config_path:
+        return
+    try:
+        from fbpipe.config import load_settings
+        from scripts.analysis.envelope_visuals import set_dataset_odor_remap
+    except Exception:
+        return
+    try:
+        settings = load_settings(config_path)
+    except Exception:
+        return
+    remap = {
+        str(ds): dict(ov.odor_remap)
+        for ds, ov in settings.dataset_overrides.items()
+        if getattr(ov, "odor_remap", None)
+    }
+    if remap:
+        set_dataset_odor_remap(remap)
 
 
 def main(argv: Sequence[str] | None = None) -> None:
     args = _parse_args(argv)
     set_protocol(args.protocol)
+    try:
+        from fbpipe.figure_export import maybe_install_from_env
+        maybe_install_from_env()
+    except Exception:  # noqa: BLE001 — sidecar is optional
+        pass
+    _apply_odor_remap_from_config(args.config)
     trial_orders: Sequence[str] = args.trial_order or ("observed", "trained-first")
     cfg = SpreadsheetMatrixConfig(
         csv_path=args.csv_path,

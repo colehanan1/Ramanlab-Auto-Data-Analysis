@@ -169,6 +169,13 @@ def _expand_datasets(data: dict) -> dict:
     if "roots" in cb_wide:
         cb_wide["roots"] = list(secured_roots)
 
+    # analysis.combined.distance_base.wide.roots (secured) — distance-only
+    # variant of combined_base, reads the same per-trial CSVs.
+    distance_base = combined.get("distance_base", {})
+    db_wide = distance_base.get("wide", {})
+    if "roots" in db_wide:
+        db_wide["roots"] = list(secured_roots)
+
     # analysis.combined.secure_cleanup.sources
     cleanup = combined.get("secure_cleanup", {})
     if "sources" in cleanup:
@@ -231,6 +238,35 @@ def get_main_directories(cfg: Settings) -> list[Path]:
         dirs.extend(discover_flagged_directories(cfg.flagged_root))
 
     return dirs
+
+
+def infer_dataset_for_path(cfg: "Settings", path: str | Path) -> str:
+    """Return the dataset name that ``path`` lives under.
+
+    Matches path components against ``cfg.datasets``. Empty string when nothing
+    matches (older configs without a top-level ``datasets:`` list).
+    """
+    parts = set(Path(path).resolve().parts)
+    for ds in cfg.datasets:
+        if ds in parts:
+            return ds
+    lower = {p.lower(): p for p in parts}
+    for ds in cfg.datasets:
+        if ds.lower() in lower:
+            return ds
+    return ""
+
+
+def get_dataset_override(cfg: "Settings", path: str | Path) -> "DatasetOverride":
+    """Return the ``DatasetOverride`` for the dataset containing ``path``.
+
+    Returns an empty ``DatasetOverride`` (all fields ``None``) if no override
+    is configured for that dataset, so callers can use it unconditionally.
+    """
+    ds = infer_dataset_for_path(cfg, path)
+    if ds and ds in cfg.dataset_overrides:
+        return cfg.dataset_overrides[ds]
+    return DatasetOverride()
 
 
 @dataclass
@@ -318,6 +354,31 @@ class YoloCurationSettings:
 
 
 @dataclass
+class ProboscisFilterSettings:
+    """Downstream rejection of physically-impossible proboscis detections.
+
+    Runs *after* tracking on the per-fly distance CSVs. It only blanks (NaNs)
+    suspect points — it never fabricates or moves a detection, so any gap it
+    leaves can be interpolated later if desired. Two independent gates:
+
+    * geometry: anisotropic — the proboscis can extend the full
+      ``max_eye_prob_distance_px`` left, right, and down of its eye, but only
+      ``max_eye_prob_distance_px / up_divisor`` upward. This is a flat-topped blob
+      around the frozen eye, applied for every fly count. (``up_divisor`` of 1.0
+      collapses it back to a plain circle.)
+    * velocity: drop any proboscis that jumps more than ``max_jump_px`` from the
+      previous accepted position between consecutive detections. Catches eye→
+      wrong-proboscis switches and model hallucinations that land inside the
+      radius.
+    """
+
+    enabled: bool = True
+    max_eye_prob_distance_px: float = 150.0
+    up_divisor: float = 4.0
+    max_jump_px: float = 80.0
+
+
+@dataclass
 class PseudolabelDiversityBins:
     enabled: bool = False
     x_bins: int = 8
@@ -376,6 +437,50 @@ class ForceSettings:
 
 
 @dataclass
+class ParallelSettings:
+    """Opt-in CPU parallelism for the per-fly/per-CSV pipeline stages.
+
+    Disabled by default so behaviour is identical to the historical serial
+    pipeline unless explicitly enabled. ``n_jobs <= 0`` resolves to
+    ``max(1, cpu_count - 2)`` at runtime.
+    """
+
+    enabled: bool = False
+    n_jobs: int = 0  # 0 -> auto (cpu_count - 2)
+
+
+@dataclass
+class DatasetOverride:
+    """Per-dataset overrides resolved at trial-loading time.
+
+    ``trial_type_override`` forces every trial in the dataset into the chosen
+    pipeline branch (``"training"`` or ``"testing"``) regardless of what the
+    folder or sidecar cycle name says. ``odor_on_s`` / ``odor_off_s`` are used
+    only as a last-resort fallback when the rig did not write an
+    ``ActiveOFM`` sensor CSV. ``figure_output_subdir`` (if set) is appended to
+    every figure output path so the dataset lands in its own folder.
+    """
+
+    trial_type_override: Optional[str] = None
+    figure_output_subdir: Optional[str] = None
+    odor_on_s: Optional[float] = None
+    odor_off_s: Optional[float] = None
+    # Light-only datasets (no odor delivery): when ``light_only`` is True,
+    # plotting code should suppress the odor span and draw a light annotation
+    # at ``[light_start_s, light_start_s + light_duration_s]`` instead.
+    light_only: bool = False
+    light_start_s: Optional[float] = None
+    light_duration_s: Optional[float] = None
+    # Per-dataset display-label remap. Keys are the display odor names
+    # produced by the v2 trial-label resolver (e.g. ``"Citral"``) and values
+    # are the substitute labels to render in figures (e.g.
+    # ``"Sour Dough Yeast (25%)"``). Used when a dataset's rig configuration
+    # delivered a different odor than the trial-label suffix claims, so the
+    # figures need a per-dataset override.
+    odor_remap: Dict[str, str] = field(default_factory=dict)
+
+
+@dataclass
 class Settings:
     model_path: str
     main_directories: str | list[str]  # Can be single path or list of paths
@@ -405,6 +510,7 @@ class Settings:
     flow_skip_edge: int = 10
     max_flies: int = 4
     max_proboscis_tracks: int = 4  # Backward-compatible config field; YOLO now mirrors the initial eye count.
+    proboscis_match_max_dist_px: float = 80.0  # Center-distance gate for proboscis track association (small/fast object).
     pair_rebind_ratio: float = 0.20
     zero_iou_epsilon: float = 1e-8
 
@@ -417,17 +523,31 @@ class Settings:
     reaction_prediction: ReactionPredictionSettings = field(default_factory=ReactionPredictionSettings)
     force: ForceSettings = field(default_factory=ForceSettings)
 
+    # opt-in CPU parallelism for per-fly/per-CSV stages
+    parallel: ParallelSettings = field(default_factory=ParallelSettings)
+
     # tracking quality
     tracking: TrackingConfig = field(default_factory=TrackingConfig)
 
     # YOLO dataset curation
     yolo_curation: YoloCurationSettings = field(default_factory=YoloCurationSettings)
 
+    # Downstream proboscis rejection (geometry + velocity gates)
+    proboscis_filter: ProboscisFilterSettings = field(default_factory=ProboscisFilterSettings)
+
     # Pseudolabel mining + export
     pseudolabel: PseudolabelSettings = field(default_factory=PseudolabelSettings)
 
     # Protocol version: "legacy" (old flys/) or "v2" (new flys_New/)
     protocol: str = "legacy"
+
+    # Datasets declared under the top-level `datasets:` block (used by helpers
+    # to infer the dataset name for an arbitrary trial path).
+    datasets: Tuple[str, ...] = field(default_factory=tuple)
+
+    # Per-dataset overrides keyed by the literal dataset name. Empty by default
+    # so existing configs are untouched.
+    dataset_overrides: Dict[str, DatasetOverride] = field(default_factory=dict)
 
 def _get(d: Dict[str, Any], key: str, default: Any):
     return d.get(key, default)
@@ -664,6 +784,31 @@ def load_settings(config_path: str | Path) -> Settings:
         video_source_dirs=tuple(video_source_dirs),
     )
 
+    # proboscis filter config (downstream geometry + velocity rejection)
+    prob_filter_cfg = data.get("proboscis_filter", {})
+    if not isinstance(prob_filter_cfg, dict):
+        prob_filter_cfg = {}
+    proboscis_filter = ProboscisFilterSettings(
+        enabled=_as_bool(
+            os.getenv("PROBOSCIS_FILTER_ENABLED", prob_filter_cfg.get("enabled", True)), True
+        ),
+        max_eye_prob_distance_px=float(
+            os.getenv(
+                "PROBOSCIS_MAX_EYE_DIST_PX",
+                prob_filter_cfg.get("max_eye_prob_distance_px", 150.0),
+            )
+        ),
+        up_divisor=float(
+            os.getenv(
+                "PROBOSCIS_UP_DIVISOR",
+                prob_filter_cfg.get("up_divisor", 4.0),
+            )
+        ),
+        max_jump_px=float(
+            os.getenv("PROBOSCIS_MAX_JUMP_PX", prob_filter_cfg.get("max_jump_px", 80.0))
+        ),
+    )
+
     # pseudolabel config
     pseudolabel_cfg = data.get("pseudolabel", {})
     if not isinstance(pseudolabel_cfg, dict):
@@ -719,6 +864,56 @@ def load_settings(config_path: str | Path) -> Settings:
         export_coco_json=_as_bool(pseudolabel_cfg.get("export_coco_json", False), False),
     )
 
+    # Datasets declared at the top level (post-_expand_datasets the original
+    # literal list is preserved on `data["datasets"]`).
+    datasets_cfg = data.get("datasets") or []
+    if not isinstance(datasets_cfg, list):
+        datasets_cfg = []
+    datasets_tuple = tuple(str(d) for d in datasets_cfg if d)
+
+    # Per-dataset overrides
+    raw_overrides = data.get("dataset_overrides") or {}
+    if not isinstance(raw_overrides, dict):
+        raw_overrides = {}
+    dataset_overrides: Dict[str, DatasetOverride] = {}
+    for ds_name, block in raw_overrides.items():
+        if not isinstance(block, dict):
+            continue
+        dataset_overrides[str(ds_name)] = DatasetOverride(
+            trial_type_override=(
+                str(block["trial_type_override"]).strip().lower()
+                if block.get("trial_type_override") is not None
+                else None
+            ),
+            figure_output_subdir=(
+                str(block["figure_output_subdir"]).strip()
+                if block.get("figure_output_subdir")
+                else None
+            ),
+            odor_on_s=(
+                float(block["odor_on_s"]) if block.get("odor_on_s") is not None else None
+            ),
+            odor_off_s=(
+                float(block["odor_off_s"]) if block.get("odor_off_s") is not None else None
+            ),
+            light_only=bool(block.get("light_only", False)),
+            light_start_s=(
+                float(block["light_start_s"])
+                if block.get("light_start_s") is not None
+                else None
+            ),
+            light_duration_s=(
+                float(block["light_duration_s"])
+                if block.get("light_duration_s") is not None
+                else None
+            ),
+            odor_remap={
+                str(k): str(v)
+                for k, v in (block.get("odor_remap") or {}).items()
+                if k is not None and v is not None
+            },
+        )
+
     flagged_root = str(
         os.getenv("FLAGGED_ROOT", _get(data, "flagged_root", ""))
     )
@@ -728,6 +923,12 @@ def load_settings(config_path: str | Path) -> Settings:
     auto_discover_flagged = _as_bool(
         os.getenv("AUTO_DISCOVER_FLAGGED", _get(data, "auto_discover_flagged", True)),
         True
+    )
+
+    parallel_cfg_raw = data.get("parallel") if isinstance(data.get("parallel"), dict) else {}
+    parallel = ParallelSettings(
+        enabled=_as_bool(os.getenv("PARALLEL_ENABLED", parallel_cfg_raw.get("enabled")), False),
+        n_jobs=int(os.getenv("PARALLEL_N_JOBS", parallel_cfg_raw.get("n_jobs", 0))),
     )
 
     return Settings(
@@ -758,6 +959,9 @@ def load_settings(config_path: str | Path) -> Settings:
         flow_skip_edge=int(os.getenv("FLOW_SKIP_EDGE", yolo.get("flow_skip_edge", 10))),
         max_flies=int(os.getenv("MAX_FLIES", yolo.get("max_flies", 4))),
         max_proboscis_tracks=int(os.getenv("MAX_PROBOSCIS_TRACKS", yolo.get("max_proboscis_tracks", 4))),
+        proboscis_match_max_dist_px=float(
+            os.getenv("PROBOSCIS_MATCH_MAX_DIST_PX", yolo.get("proboscis_match_max_dist_px", 80.0))
+        ),
         pair_rebind_ratio=float(os.getenv("PAIR_REBIND_RATIO", yolo.get("pair_rebind_ratio", 0.20))),
         zero_iou_epsilon=float(os.getenv("ZERO_IOU_EPSILON", yolo.get("zero_iou_epsilon", 1e-8))),
 
@@ -771,8 +975,12 @@ def load_settings(config_path: str | Path) -> Settings:
         ),
         reaction_prediction=reaction_prediction,
         force=force,
+        parallel=parallel,
         tracking=tracking,
         yolo_curation=yolo_curation,
+        proboscis_filter=proboscis_filter,
         pseudolabel=pseudolabel,
         protocol=str(_get(data, "protocol", "legacy")),
+        datasets=datasets_tuple,
+        dataset_overrides=dataset_overrides,
     )

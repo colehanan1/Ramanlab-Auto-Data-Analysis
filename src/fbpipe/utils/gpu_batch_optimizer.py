@@ -20,7 +20,6 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
-import pandas as pd
 import torch
 
 from .columns import (
@@ -56,72 +55,6 @@ class BatchFileProcessor:
         self.batch_size = batch_size
         self.device = device
         self.use_pinned_memory = use_pinned_memory and device == 'cuda'
-
-    def normalize_distances_batch_files(
-        self,
-        csv_paths: List[Path],
-        stats: List[Tuple[float, float, float]],  # [(gmin, gmax, effective_max), ...]
-        dist_col: str = PROBOSCIS_DISTANCE_COL
-    ) -> int:
-        """
-        Process multiple CSV files in optimized batches.
-
-        Args:
-            csv_paths: List of CSV file paths
-            stats: List of (gmin, gmax, effective_max) tuples for each file
-            dist_col: Name of distance column
-
-        Returns:
-            Number of files successfully processed
-        """
-        processed_count = 0
-
-        # Process in batches
-        for i in range(0, len(csv_paths), self.batch_size):
-            batch_paths = csv_paths[i:i + self.batch_size]
-            batch_stats = stats[i:i + self.batch_size]
-
-            # Load batch into memory
-            batch_data = []
-            batch_dfs = []
-
-            for csv_path in batch_paths:
-                try:
-                    df = pd.read_csv(csv_path)
-                    if dist_col not in df.columns:
-                        print(f"[BATCH] Skipping {csv_path.name}: missing {dist_col}")
-                        continue
-
-                    distances = pd.to_numeric(df[dist_col], errors="coerce").to_numpy()
-                    batch_data.append(distances)
-                    batch_dfs.append((csv_path, df))
-                except Exception as e:
-                    print(f"[BATCH] Error reading {csv_path.name}: {e}")
-                    continue
-
-            if not batch_data:
-                continue
-
-            # Process entire batch on GPU at once
-            batch_results = self._process_batch_gpu(batch_data, batch_stats[:len(batch_data)])
-
-            # Save results
-            for idx, (csv_path, df) in enumerate(batch_dfs):
-                if idx < len(batch_results):
-                    percentages = batch_results[idx]
-                    gmin, gmax, effective_max = batch_stats[idx]
-
-                    # Update dataframe
-                    df[PROBOSCIS_DISTANCE_PCT_COL] = percentages
-                    df[PROBOSCIS_MIN_DISTANCE_COL] = gmin
-                    df[PROBOSCIS_MAX_DISTANCE_COL] = gmax
-                    df[f"effective_max_distance_{EYE_CLASS}_{PROBOSCIS_CLASS}"] = effective_max
-
-                    # Save
-                    df.to_csv(csv_path, index=False)
-                    processed_count += 1
-
-        return processed_count
 
     def _process_batch_gpu(
         self,
