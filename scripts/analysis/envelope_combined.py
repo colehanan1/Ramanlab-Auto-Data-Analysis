@@ -1763,7 +1763,10 @@ def _seconds_from_timestamp(df: pd.DataFrame, column: str) -> pd.Series:
     series = df[column]
     if column in ("UTC_ISO", "Timestamp"):
         dt = pd.to_datetime(series, errors="coerce", utc=(column == "UTC_ISO"))
-        secs = dt.astype("int64") / 1e9
+        # Resolution-independent: pandas>=2 may parse sub-second timestamps as
+        # datetime64[us]/[ms], so dt.astype("int64")/1e9 (which assumes ns)
+        # undershoots elapsed seconds by 1000x. total_seconds() is exact.
+        secs = (dt - dt.min()).dt.total_seconds()
     elif column == "Number":
         secs = pd.to_numeric(series, errors="coerce").astype(float)
     elif column == "MonoNs":
