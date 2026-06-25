@@ -410,6 +410,41 @@ def _is_cuda_failure(exc: Exception) -> bool:
     return any(tok in msg for tok in ("cuda", "cudnn", "cublas", "expandable_segments", "device-side assert", "hip"))
 
 
+def _make_batched_predict_fn(model, get_device, set_device, allow_cpu, *, cuda_empty_cache=None):
+    """Build a batched YOLO predict fn with CUDA OOM sub-batch backoff and optional CPU fallback.
+
+    get_device() -> current device string ('cuda'/'cpu'); set_device(target) switches it.
+    On a CUDA failure: free VRAM, halve the sub-batch and retry the SAME frames; at batch=1,
+    fall back to CPU if allow_cpu, else re-raise. Returns one Results per input image.
+    """
+    def batched_predict_fn(images, conf_thres):
+        bs = len(images)
+        while True:
+            try:
+                out = []
+                for i in range(0, len(images), bs):
+                    out.extend(model.predict(images[i:i+bs], conf=conf_thres,
+                                             verbose=False, device=get_device(), half=True))
+                return out
+            except RuntimeError as exc:
+                if get_device() == "cuda" and _is_cuda_failure(exc):
+                    if cuda_empty_cache is not None:
+                        cuda_empty_cache()
+                    elif torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+                    if bs > 1:
+                        bs = max(1, bs // 2)
+                        log.warning("CUDA OOM/failure at batch; retrying at sub-batch %d", bs)
+                        continue
+                    if allow_cpu:
+                        log.warning("CUDA failed at batch=1 (%s); switching to CPU.", exc)
+                        set_device("cpu")
+                        return model.predict(images, conf=conf_thres, verbose=False,
+                                             device=get_device(), half=False)
+                raise
+    return batched_predict_fn
+
+
 def main(cfg: Settings):
     cuda_available = torch.cuda.is_available()
     use_cuda = cuda_available and not cfg.allow_cpu
@@ -467,16 +502,15 @@ def main(cfg: Settings):
     if device_in_use is None:
         raise RuntimeError("Failed to initialise YOLO device")
 
-    def predict_fn(image, conf_thres):
-        nonlocal device_in_use
-        try:
-            return model.predict(image, conf=conf_thres, verbose=False, device=device_in_use, half=True)
-        except RuntimeError as exc:
-            if device_in_use == "cuda" and cfg.allow_cpu and _is_cuda_failure(exc):
-                log.warning("CUDA inference failed (%s); switching to CPU for the rest of the run.", exc)
-                _set_device("cpu")
-                return model.predict(image, conf=conf_thres, verbose=False, device=device_in_use, half=True)
-            raise
+    batched_predict_fn = _make_batched_predict_fn(
+        model,
+        get_device=lambda: device_in_use,
+        set_device=_set_device,
+        allow_cpu=cfg.allow_cpu,
+    )
+
+    def predict_fn(image, conf_thres):   # single-frame adapter for the warm-up scan
+        return batched_predict_fn([image], conf_thres)
 
     AX, AY = cfg.anchor_x, cfg.anchor_y
 
