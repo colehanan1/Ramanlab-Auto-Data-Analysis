@@ -391,13 +391,14 @@ def test_build_wide_csv_adds_auc_columns(tmp_path):
     # local_max_during is somewhere in the linspace [1.0, 5.0] but not exactly
     # 5.0 because the window ends before the last frame of the stimulus.
     assert math.isclose(df.loc[0, "local_min_during"], 1.0)
-    assert np.isfinite(df.loc[0, "local_max_during"])
-    assert df.loc[0, "local_max_during"] > 1.0
+    # During window ends before the stimulus' last frame, so the peak lands just
+    # below the linspace max of 5.0 (Hilbert smoothing) — pin a tight band so a
+    # real regression (e.g. a halved during-peak) is still caught.
+    assert 4.0 < df.loc[0, "local_max_during"] <= 5.0
     # local_max_over_global_min uses trimmed_min_effective as the denominator;
     # with values starting at 1.0 the 1st-percentile baseline is also 1.0.
     assert math.isclose(df.loc[0, "local_max_over_global_min"], 5.0)
-    assert np.isfinite(df.loc[0, "local_max_during_over_global_min"])
-    assert df.loc[0, "local_max_during_over_global_min"] > 1.0
+    assert 4.0 < df.loc[0, "local_max_during_over_global_min"] <= 5.0
     assert df.loc[0, "non_reactive_flag"] == 1.0
 
     flagged_file = out_csv.with_name(out_csv.stem + "_flagged_flies.txt")
@@ -441,10 +442,10 @@ def test_local_extrema_respect_distance_limits(tmp_path):
     assert math.isclose(df.loc[0, "global_max"], 300.0)
     assert math.isclose(df.loc[0, "local_min"], 5.0)
     assert math.isclose(df.loc[0, "local_max"], 300.0)
-    # local_max_over_global_min = local_max / trimmed_min_effective
-    # trimmed_min_effective comes from the 1st-percentile fallback of the
+    # local_max_over_global_min = local_max(300) / trimmed_min_effective, where
+    # trimmed_min_effective is the 1st-percentile fallback (~5.21) of the
     # all-trial combined samples when no raw distance stats are present.
-    assert np.isfinite(df.loc[0, "local_max_over_global_min"])
+    assert math.isclose(df.loc[0, "local_max_over_global_min"], 57.58, abs_tol=0.5)
     assert np.isnan(df.loc[0, "local_min_during"])
     assert np.isnan(df.loc[0, "local_max_during"])
     assert np.isnan(df.loc[0, "local_max_during_over_global_min"])
