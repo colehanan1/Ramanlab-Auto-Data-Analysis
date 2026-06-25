@@ -3112,6 +3112,21 @@ def build_wide_csv(
     for trial_key, target in extra_paths.items():
         print(f"[OK] Wrote {trial_key} subset: {target}")
 
+    # Emit Parquet siblings so analysis consumers (fbpipe.analysis.read_wide_table)
+    # load these large wide tables columnar (~3-4x faster + selective columns).
+    # Read with default dtypes so the Parquet is byte-faithful to pd.read_csv (no
+    # dtype drift); the CSV is kept for any literal-".csv" reader.
+    try:
+        from fbpipe.utils.tables import write_table
+
+        for _tgt in [out_path, *extra_paths.values()]:
+            _tgt = Path(_tgt)
+            if _tgt.exists():
+                write_table(pd.read_csv(_tgt), _tgt, replace_legacy_csv=False)
+                print(f"[OK] Wrote Parquet sibling: {_tgt.with_suffix('.parquet').name}")
+    except Exception as exc:  # never fail the build over the optional sidecar
+        print(f"[WARN] build_wide_csv: Parquet sibling(s) skipped: {exc}")
+
 
 def wide_to_matrix(input_csv: str, output_dir: str) -> None:
     csv_path = Path(input_csv).expanduser().resolve()

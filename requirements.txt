@@ -3,7 +3,10 @@
 # Reaction prediction artifacts were trained on NumPy 1.x; keep the runtime below 2.0
 # so the bundled models load without re-exporting them.
 numpy>=1.24,<2
-pandas>=2.0
+# Pin to the pandas 2.2 line: the codebase (and pandas-stubs==2.2.3 below) targets
+# it, and pandas 3.0 makes Copy-on-Write the default, silently changing in-place
+# DataFrame mutation semantics that this mutation-heavy code relies on.
+pandas>=2.2,<3
 matplotlib>=3.7
 scipy>=1.11
 scikit-image>=0.22
