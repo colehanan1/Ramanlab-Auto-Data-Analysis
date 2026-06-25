@@ -2428,6 +2428,10 @@ def combine_distance_angle(cfg: CombineConfig) -> None:
 # ---------------------------------------------------------------------------
 
 
+# Local video formats pruned during cleanup once their secured copy is confirmed.
+PRUNABLE_VIDEO_SUFFIXES = (".mp4", ".h264")
+
+
 def secure_copy_and_cleanup(
     sources: Sequence[str], destination: str, perform_cleanup: bool = False
 ) -> None:
@@ -2471,12 +2475,14 @@ def secure_copy_and_cleanup(
             if not any(lower.startswith(month) for month in MONTHS):
                 print(f"Preserving non-month folder: {fly_folder}")
                 continue
-            # Only prune .mp4 files whose copy already exists in secured storage.
+            # Only prune video files (.mp4 / .h264) whose copy already exists in
+            # secured storage. .h264 raw captures are deleted from local once the
+            # secured copy is confirmed present, same as .mp4.
             deleted_count = 0
             for item in fly_folder.rglob("*"):
                 if not item.is_file():
                     continue
-                if item.suffix.lower() != ".mp4":
+                if item.suffix.lower() not in PRUNABLE_VIDEO_SUFFIXES:
                     continue
                 relative = item.relative_to(source)
                 secured_copy = dest_mirror / relative
