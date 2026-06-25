@@ -1,7 +1,7 @@
 """Tests for _make_batched_predict_fn: OOM backoff, CPU fallback, re-raise."""
 import pytest; pytest.importorskip("ultralytics")
 
-from src.fbpipe.steps.yolo_infer import _make_batched_predict_fn
+from fbpipe.steps.yolo_infer import _make_batched_predict_fn
 
 
 # ---------------------------------------------------------------------------
@@ -117,6 +117,28 @@ def test_oom_reraises_at_batch1_without_cpu():
 # stubbed detections and INDEPENDENTLY-seeded collaborators, then asserts the
 # emitted rows are bit-identical at every batch size. This is the correctness
 # proof for the whole frame-batching feature.
+#
+# The fixture is deliberately built to exercise BOTH order-sensitive invariants
+# the batching could break:
+#
+#   1. EVOLVING tracker state / frame order. Stubbed eye and proboscis boxes
+#      drift per frame index, so every tracking-derived field (eye/cls8 centers,
+#      distances, EMA-smoothed positions, ids) changes frame-to-frame. A reorder
+#      or dropped/duplicated frame therefore changes the rows.
+#
+#   2. prev_gray THREADING across chunk boundaries. ``use_optical_flow=True`` and
+#      the frames carry a *moving, richly-textured* pattern (a fixed random
+#      texture translated by ``frame_idx * SHIFT`` via ``np.roll``) so Farneback
+#      flow is nonzero and DETERMINISTIC. On exactly one non-first frame
+#      (``MISSING_PROB_FRAME``) the proboscis detection is omitted, so its
+#      tracker coasts (``time_since_update > 0``) and ``_process_frame`` calls
+#      ``_flow_nudge(prev_gray, gray, ...)`` -- the ONLY consumer of prev_gray.
+#      MISSING_PROB_FRAME=3 is the start of chunk 2 when B=3, so a regression
+#      that dropped prev_gray at a chunk boundary would feed ``None`` into the
+#      nudge and the row at frame 3 would diverge from the sequential reference.
+#
+# Uniform ``np.full((...), i)`` frames were rejected on purpose: they produce
+# ZERO optical flow, leaving prev_gray computed-but-never-consumed.
 # ===========================================================================
 
 import numpy as np
@@ -134,11 +156,31 @@ from fbpipe.utils.track import SingleClassTracker
 from fbpipe.utils import track as track_module
 
 # Full-size frame so detection coords (hundreds of px) and the frame-size-scaled
-# pairer rebind radius are compatible. Pixel VALUE is the frame index i, kept
-# small (N <= 8) so i fits in a uint8 -- that is the only size constraint.
+# pairer rebind radius are compatible.
 H = W = 1080
 N_FRAMES = 8
 AX, AY = 540.0, 540.0
+
+# Proboscis (PROBOSCIS_CLASS == 1) drifts each frame and stays between/near the
+# eyes so the eye->proboscis distance gate keeps the match alive. The box is made
+# large (90x90) on purpose: ``_flow_nudge`` crops the (coasted) track box and
+# skips ``flow_skip_edge`` px on each side, so a tiny box would leave nothing to
+# run Farneback on.
+PROB_X0, PROB_Y0, PROB_X1, PROB_Y1 = 210.0, 60.0, 300.0, 150.0
+
+# Per-frame motion for optical flow. A FIXED random texture (rich gradients at
+# all scales -> no Farneback aperture problem) translated horizontally by
+# ``i * SHIFT`` via np.roll gives an exact, deterministic median flow of SHIFT px
+# in x. (Periodic stripes / solid blobs / linear ramps all measured ZERO flow
+# here; random texture is what makes prev_gray observably affect the rows.)
+SHIFT = 6
+_TEXTURE = np.random.default_rng(0).integers(0, 256, size=(H, W), dtype=np.uint8)
+
+# One non-first frame with the proboscis detection MISSING, so the proboscis
+# tracker coasts and _flow_nudge(prev_gray, ...) is invoked. Index 3 is the start
+# of chunk 2 when batch_size == 3 -> lands on a chunk boundary, exercising
+# prev_gray threading ACROSS that boundary.
+MISSING_PROB_FRAME = 3
 
 
 class _CannedResult:
@@ -154,13 +196,31 @@ class _CannedResult:
 CANNED = [_CannedResult(i) for i in range(N_FRAMES)]
 
 
+def _make_frame(i: int) -> np.ndarray:
+    """Frame i: the fixed texture rolled by ``i * SHIFT`` px in x (deterministic
+    horizontal motion for Farneback), with the frame index stamped into the
+    top-left corner pixel so the stub can key its canned result off it.
+
+    The 4x4 corner is zeroed first so the rolled texture never clobbers the
+    index marker, and the marker sits OUTSIDE every proboscis box, so it never
+    perturbs the optical-flow crop.
+    """
+    rolled = np.roll(_TEXTURE, i * SHIFT, axis=1)
+    frame = np.ascontiguousarray(np.repeat(rolled[:, :, None], 3, axis=2).astype(np.uint8))
+    frame[0:4, 0:4, :] = 0
+    frame[0, 0, 0] = i
+    return frame
+
+
 def _detections_for_frame(i: int):
     """Deterministic per-frame detections so tracking evolves reproducibly.
 
-    Eyes drift a little each frame; the proboscis sits between the two eyes.
-    Same mapping is used by reference and chunked runs (keyed by frame index),
-    so any divergence in output rows is purely an ordering/state bug in the
-    helper -- which is exactly what this test must catch.
+    Eyes drift a little each frame; the proboscis sits between the two eyes and
+    drifts with them. On ``MISSING_PROB_FRAME`` the proboscis detection is empty
+    so its tracker coasts and the prev_gray-consuming flow nudge fires. The same
+    mapping is used by reference and chunked runs (keyed by frame index), so any
+    divergence in output rows is purely an ordering/state bug in the helper --
+    which is exactly what this test must catch.
     """
     drift = float(i)
     eye_boxes = np.array(
@@ -171,8 +231,14 @@ def _detections_for_frame(i: int):
         dtype=np.float32,
     )
     eye_scores = np.array([0.95, 0.90], dtype=np.float32)
-    prob_box = np.array([[250.0, 100.0, 260.0, 110.0]], dtype=np.float32)
-    prob_scores = np.array([0.98], dtype=np.float32)
+    if i == MISSING_PROB_FRAME:
+        prob_box = np.zeros((0, 4), dtype=np.float32)
+        prob_scores = np.zeros((0,), dtype=np.float32)
+    else:
+        prob_box = np.array(
+            [[PROB_X0 + drift, PROB_Y0, PROB_X1 + drift, PROB_Y1]], dtype=np.float32
+        )
+        prob_scores = np.array([0.98], dtype=np.float32)
     return {
         0: {"boxes": eye_boxes, "scores": eye_scores},
         1: {"boxes": prob_box, "scores": prob_scores},
@@ -194,7 +260,9 @@ def _make_settings() -> Settings:
         main_directories="/tmp/videos",
         max_flies=2,
         conf_thres=0.40,
-        use_optical_flow=False,  # keep deterministic; prev_gray still threaded
+        # Optical flow ON so prev_gray is actually CONSUMED (via _flow_nudge on
+        # the coasting proboscis track at MISSING_PROB_FRAME), not just threaded.
+        use_optical_flow=True,
     )
 
 
@@ -219,7 +287,7 @@ def _make_collaborators(cfg: Settings, active_max_flies: int):
 
 
 class _FakeVideoCapture:
-    """Yields N frames where frame i = np.full((H, W, 3), i, uint8)."""
+    """Yields N textured, moving frames (frame i == ``_make_frame(i)``)."""
 
     def __init__(self, n_frames: int):
         self._n = n_frames
@@ -231,7 +299,7 @@ class _FakeVideoCapture:
     def read(self):
         if self._i >= self._n:
             return False, None
-        frame = np.full((H, W, 3), self._i, dtype=np.uint8)
+        frame = _make_frame(self._i)
         self._i += 1
         return True, frame
 
@@ -253,7 +321,7 @@ class _CollectingWriter:
 
 
 def _batched_predict_stub(frames, conf):
-    """One canned result per frame, keyed off the frame's pixel value."""
+    """One canned result per frame, keyed off the frame's index marker pixel."""
     return [CANNED[int(f[0, 0, 0])] for f in frames]
 
 
@@ -284,7 +352,7 @@ def _build_reference_rows(cfg: Settings, active_max_flies: int):
     prev_gray = None
     fps = 30.0
     for i in range(N_FRAMES):
-        frame = np.full((H, W, 3), i, dtype=np.uint8)
+        frame = _make_frame(i)
         ts = i / fps
         frame, row, prev_gray = _process_frame(
             frame,
@@ -304,11 +372,16 @@ def _build_reference_rows(cfg: Settings, active_max_flies: int):
     return rows
 
 
-@pytest.mark.parametrize("batch_size", [1, 3, 8, N_FRAMES])
+@pytest.mark.parametrize("batch_size", [1, 3, 4, 8])
 def test_chunked_inference_matches_sequential_reference(monkeypatch, batch_size):
     """_run_chunked_inference must produce rows bit-identical to the sequential
-    reference at every batch size: 1 (serial), 3 (partial last batch),
-    8 (exact multiple == N), N (single chunk)."""
+    reference at every batch size:
+      1 -> serial (one frame per chunk),
+      3 -> partial last batch (3 | 3 | 2); frame 3 is a chunk boundary,
+      4 -> exact multiple, multiple full batches (4 | 4),
+      8 -> single chunk (== N_FRAMES).
+    A single sequential reference is built once; every param compares to it.
+    """
     _install_collect_detections(monkeypatch)
     cfg = _make_settings()
     active_max_flies = 2
@@ -352,6 +425,24 @@ def test_chunked_inference_matches_sequential_reference(monkeypatch, batch_size)
         f"batch_size={batch_size}: writer received {len(writer.frames)} frames, "
         f"expected {N_FRAMES}"
     )
+
+    # Guard against a vacuous comparison: the coasting-proboscis frame MUST have
+    # been nudged by prev_gray-driven optical flow. With prev_gray threaded
+    # correctly the nudge shifts the proboscis x by ~SHIFT px relative to its
+    # un-nudged Kalman prediction; if prev_gray were dropped the nudge is a no-op
+    # and this value would be different. We assert the nudged value is present so
+    # a future fixture change can't silently make the flow path inert.
+    nudged_x = reference_rows[MISSING_PROB_FRAME]["cls8_0_x"]
+    prev_x = reference_rows[MISSING_PROB_FRAME - 1]["cls8_0_x"]
+    assert not np.isnan(nudged_x), (
+        "fixture regression: proboscis match lost at the coast frame; the "
+        "prev_gray flow path is no longer exercised"
+    )
+    assert abs(nudged_x - prev_x) > SHIFT / 2.0, (
+        "fixture regression: coast-frame proboscis x barely moved; optical flow "
+        f"nudge appears inert (nudged={nudged_x}, prev={prev_x})"
+    )
+
     for i, (ref, got) in enumerate(zip(reference_rows, chunked_rows)):
         assert _rows_equal(ref, got), (
             f"batch_size={batch_size}: row {i} diverged from sequential reference\n"
