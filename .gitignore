@@ -23,9 +23,8 @@ config/*
 !config/example.yaml
 !config/environment.yml
 
-# Data, outputs, logs
+# Data, outputs
 cache/
-logs/
 data/
 datasets/
 dataset/
@@ -85,11 +84,21 @@ htmlcov/
 # OS / editor
 .DS_Store
 Thumbs.db
-.vscode/
 .idea/
 
 # Claude AI generated documentation
 docs/claude-output/
+
+# Claude Code IDE and project files
+CLAUDE.md
+.codex
+.cron_make_run.lock
+.vscode
+.remember
+.hypothesis
+
+# Claude Code runtime (scratch)
+.superpowers/
 
 # Pi experiment code (lives on Pi, tracked separately)
 PiCode/
@@ -101,6 +110,3 @@ combinedv2_pi2.py
 combinedv3_pi1.py
 combinedv3_pi2.py
 esphomeflynursery2.yaml
-
-# Superpowers SDD progress ledger (scratch)
-.superpowers/
