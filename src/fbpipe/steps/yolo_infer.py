@@ -340,6 +340,37 @@ def _process_frame(
     return frame, row, gray
 
 
+def _run_chunked_inference(cap, max_frame, target_wh, writer, timestamps, fps, anchor,
+                           settings, batched_predict_fn, single_trackers, prev_gray,
+                           eye_mgr, cls8_tracker, pairer, active_max_flies, batch_size):
+    AX, AY = anchor
+    target_w, target_h = target_wh
+    rows, frame_idx, B = [], 0, max(1, batch_size)   # caller already clamped B per engine guard
+    while cap.isOpened():
+        batch_frames, batch_meta = [], []
+        while len(batch_frames) < B and frame_idx <= max_frame:   # per-FRAME max_frame guard
+            ok, frame = cap.read()
+            if not ok or frame is None or frame.size == 0:        # EOF / corrupt-frame guard
+                break
+            h, w = frame.shape[:2]
+            frame = (cv2.resize(frame, (target_w, target_h), interpolation=cv2.INTER_LINEAR)
+                     if (w, h) != (target_w, target_h) else frame.copy())  # break cv2 buffer aliasing
+            batch_meta.append((frame_idx, timestamps.get(frame_idx, frame_idx / fps)))
+            batch_frames.append(frame)
+            frame_idx += 1
+        if not batch_frames:                                      # never predict([])
+            break
+        results = batched_predict_fn(batch_frames, settings.conf_thres)
+        assert len(results) == len(batch_frames)                  # fail loud on engine truncation
+        for frame, (fidx, ts), result in zip(batch_frames, batch_meta, results):
+            frame, row, prev_gray = _process_frame(
+                frame, fidx, ts, single_trackers, prev_gray, (AX, AY),
+                settings, result, eye_mgr, cls8_tracker, pairer, active_max_flies)
+            writer.write(frame)
+            rows.append(row)
+    return rows
+
+
 def _export_per_fly_csvs(
     df: pd.DataFrame,
     out_dir: Path,
@@ -636,33 +667,15 @@ def main(cfg: Settings):
                 target_w, target_h = (1080, 1080) if (w, h) != (1080, 1080) else (w, h)
                 pairer.rebind_max_dist_px = cfg.pair_rebind_ratio * math.hypot(target_w, target_h)
 
-                rows = []
-                prev_gray = None
-                frame_idx = 0
                 t0 = time.time()
-                while cap.isOpened() and frame_idx <= max_frame:
-                    ok, frame = cap.read()
-                    if not ok: break
-                    if (w, h) != (1080, 1080):
-                        frame = cv2.resize(frame, (1080,1080), interpolation=cv2.INTER_LINEAR)
-                    ts = timestamps.get(frame_idx, frame_idx / fps)
-                    frame, row, prev_gray = _process_frame(
-                        frame,
-                        frame_idx,
-                        ts,
-                        single_trackers,
-                        prev_gray,
-                        (AX, AY),
-                        cfg,
-                        predict_fn,
-                        eye_mgr,
-                        cls8_tracker,
-                        pairer,
-                        active_max_flies,
-                    )
-                    writer.write(frame)
-                    rows.append(row)
-                    frame_idx += 1
+                B = max(1, cfg.inference_batch_size) if (not is_engine or cfg.engine_supports_batch) else 1
+                log.info("YOLO inference: %s path, effective batch size %d%s",
+                         "engine" if is_engine else "pt", B,
+                         " (engine batch-capable)" if is_engine and cfg.engine_supports_batch else "")
+                rows = _run_chunked_inference(
+                    cap, max_frame, (target_w, target_h), writer, timestamps, fps, (AX, AY),
+                    cfg, batched_predict_fn, single_trackers, None,
+                    eye_mgr, cls8_tracker, pairer, active_max_flies, B)
                 cap.release(); writer.release()
 
                 if out_mp4.exists():
