@@ -31,7 +31,7 @@ import re
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Mapping, Sequence, Tuple
+from typing import Iterable, Mapping, Sequence, Tuple
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -285,7 +285,7 @@ DISCRIMINATE_ODOR_COLOR = "#4d4d4d"
 DISCRIMINATE_ODOR_ALPHA = 0.28
 DISCRIMINATE_ODOR_LINGER_ALPHA = 0.18
 DISCRIMINATE_ODOR_LABEL = "Discriminate odor"
-ODOR_PLUS_LIGHT_LABEL = "Odor + light"
+ODOR_PLUS_LIGHT_LABEL = "Odor"
 
 
 # ---------------------------------------------------------------------------
@@ -850,6 +850,22 @@ def non_reactive_mask(df: pd.DataFrame) -> pd.Series:
     return mask.fillna(False)
 
 
+def _baseline_theta(window: np.ndarray, std_mult: float) -> float:
+    """Threshold = resting median + k * one-sided (upper) robust spread.
+
+    Only deviations *above* the baseline median feed the dispersion, so downward
+    dips below the resting position (the opposite of a proboscis extension) do not
+    raise the threshold. ``sigma`` is 0 when there are no upward samples, leaving
+    theta at the resting median.
+    """
+    baseline = float(np.nanmedian(window))
+    dev = window - baseline
+    up = dev[np.isfinite(dev) & (dev > 0.0)]
+    mad_up = float(np.nanmedian(up)) if up.size else 0.0
+    sigma = 1.4826 * mad_up
+    return float(baseline + std_mult * sigma)
+
+
 def _compute_theta(
     env: np.ndarray, fps: float, baseline_until_s: float, std_mult: float
 ) -> float:
@@ -862,11 +878,7 @@ def _compute_theta(
     if before_end <= 0:
         return math.nan
 
-    window = env[:before_end]
-    baseline = float(np.nanmedian(window))
-    mad = float(np.nanmedian(np.abs(window - baseline)))
-    sigma = 1.4826 * mad
-    return float(baseline + std_mult * sigma)
+    return _baseline_theta(env[:before_end], std_mult)
 
 
 def filter_and_validate_trial_type(
@@ -1053,10 +1065,7 @@ def _score_trial(env: np.ndarray, fps: float, cfg: MatrixPlotConfig) -> tuple[in
     if before.size == 0:
         return (0, 0)
 
-    baseline = float(np.nanmedian(before))
-    mad = float(np.nanmedian(np.abs(before - baseline)))
-    sigma = 1.4826 * mad
-    theta = float(baseline + cfg.threshold_std_mult * sigma)
+    theta = _baseline_theta(before, cfg.threshold_std_mult)
     during_hit = int(np.sum(during > theta) >= cfg.min_samples_over) if during.size else 0
     after_hit = int(np.sum(after > theta) >= cfg.min_samples_over) if after.size else 0
     return during_hit, after_hit
@@ -1886,6 +1895,55 @@ def _bounded_scale(value: float | int | None, *, default: float = 1.0) -> float:
     return scale
 
 
+def _should_show_light_legend(
+    light_annotation_mode: str,
+    light_start_values: Iterable[float | None],
+    x_max_limit: float,
+) -> bool:
+    """Whether the green "Light pulsing starts" legend entry should appear.
+
+    The green line is sourced from each trial's sensors log (the measured
+    first light-on time). It is only drawn in ``"line"`` mode and only for
+    trials whose light-on time is finite and within the visible x-axis. Control
+    datasets have no optogenetic light, so every ``light_start_s`` is ``None``
+    and no line is drawn — in that case the legend must not advertise it.
+    """
+
+    if str(light_annotation_mode).strip().lower() != "line":
+        return False
+    return any(
+        ls is not None and math.isfinite(float(ls)) and float(ls) <= x_max_limit
+        for ls in light_start_values
+    )
+
+
+def _is_control_dataset(dataset_canon: str) -> bool:
+    """True for control datasets, which carry no optogenetic light.
+
+    The light-on annotation is decided per *dataset* (by name), not per trial:
+    a control dataset never shows a "Light pulsing starts" line even if an
+    individual trial's sensors log happens to contain a stray light event.
+    """
+
+    return "control" in str(dataset_canon).strip().casefold()
+
+
+def _should_show_discriminate_legend(
+    trial_type: str, is_discriminate_flags: Iterable[object]
+) -> bool:
+    """Whether the "Discriminate odor" legend entry should appear.
+
+    Only training figures can carry a discriminate-odor trial, and only when at
+    least one trial actually uses the discriminate condition. v2-protocol Hex
+    datasets use the same odor for all six training trials, so none are
+    discriminate and the entry must be suppressed.
+    """
+
+    if str(trial_type).strip().lower() != "training":
+        return False
+    return any(bool(flag) for flag in is_discriminate_flags)
+
+
 def _trial_selection_rank(trial_label: str) -> tuple[int, int]:
     """Prefer canonical distance-labelled trial rows when duplicate aliases exist."""
 
@@ -2160,6 +2218,10 @@ def generate_envelope_plots(cfg: EnvelopePlotConfig) -> None:
             _per_light = float(trial_light_on_lookup.get(idx, float("nan")))
             if math.isfinite(_per_light) and _per_light > 0:
                 light_start_s = _per_light
+            # Control datasets have no optogenetic light: suppress the light-on
+            # line/legend by dataset name, regardless of any per-trial value.
+            if _is_control_dataset(dataset_canon):
+                light_start_s = None
             is_discriminate_odor = _is_discriminate_odor_trial(
                 trial_label=trial_label,
                 trial_type=trial_type,
@@ -2273,19 +2335,13 @@ def generate_envelope_plots(cfg: EnvelopePlotConfig) -> None:
                     ax.axvline(light_start_eff, linestyle="--", linewidth=odor_marker_lw, color="tab:green")
                     ax.axvline(light_end_eff, linestyle="--", linewidth=odor_marker_lw, color="tab:green")
             else:
-                ax.axvline(trial_on_effective, linestyle="--", linewidth=odor_marker_lw, color="black")
-                ax.axvline(trial_off_effective, linestyle="--", linewidth=odor_marker_lw, color="black")
-
+                # The black dashed "odor at fly" on/off markers were removed at
+                # the user's request; the gray "Odor + light" span below carries
+                # the odor window and ends at the true odor-off time.
                 transit_on_end = min(trial_on_effective, per_trial_x_max)
                 steady_off_end = min(trial_off_effective, per_trial_x_max)
-                linger_off_end = min(trial_off_effective + linger, per_trial_x_max)
                 odor_bar_color = DISCRIMINATE_ODOR_COLOR if is_discriminate_odor else ODOR_PLUS_LIGHT_COLOR
                 odor_bar_alpha = DISCRIMINATE_ODOR_ALPHA if is_discriminate_odor else ODOR_PLUS_LIGHT_ALPHA
-                odor_linger_alpha = (
-                    DISCRIMINATE_ODOR_LINGER_ALPHA
-                    if is_discriminate_odor
-                    else ODOR_PLUS_LIGHT_LINGER_ALPHA
-                )
 
                 if light_annotation_mode == "paired-span" and light_start_s is not None:
                     light_start_eff = min(max(light_start_s, transit_on_end), steady_off_end)
@@ -2303,17 +2359,10 @@ def generate_envelope_plots(cfg: EnvelopePlotConfig) -> None:
                             alpha=0.22,
                             color="#f4a261",
                         )
-                    if linger_off_end > steady_off_end:
-                        ax.axvspan(
-                            steady_off_end,
-                            linger_off_end,
-                            alpha=odor_linger_alpha,
-                            color=odor_bar_color,
-                        )
-                elif linger_off_end > transit_on_end:
+                elif steady_off_end > transit_on_end:
                     ax.axvspan(
                         transit_on_end,
-                        linger_off_end,
+                        steady_off_end,
                         alpha=odor_bar_alpha,
                         color=odor_bar_color,
                     )
@@ -2432,8 +2481,9 @@ def generate_envelope_plots(cfg: EnvelopePlotConfig) -> None:
 
         axes[-1].set_xlabel("Time (s)", fontsize=xlabel_font)
 
+        # The black dashed "Odor at fly" markers were removed from the plots, so
+        # the legend no longer carries that entry.
         legend_handles = [
-            plt.Line2D([0], [0], linestyle="--", linewidth=odor_marker_lw, color="black", label="Odor at fly"),
             plt.Rectangle(
                 (0, 0),
                 1,
@@ -2443,7 +2493,11 @@ def generate_envelope_plots(cfg: EnvelopePlotConfig) -> None:
                 label=ODOR_PLUS_LIGHT_LABEL,
             ),
         ]
-        if trial_type == "training":
+        # Only show the discriminate-odor entry when a trial actually uses the
+        # discriminate condition (v2 Hex datasets have none).
+        if _should_show_discriminate_legend(
+            trial_type, [curve[8] for curve in trial_curves]
+        ):
             legend_handles.append(
                 plt.Rectangle(
                     (0, 0),
@@ -2451,10 +2505,19 @@ def generate_envelope_plots(cfg: EnvelopePlotConfig) -> None:
                     1,
                     alpha=DISCRIMINATE_ODOR_ALPHA,
                     color=DISCRIMINATE_ODOR_COLOR,
-                label=DISCRIMINATE_ODOR_LABEL,
+                    label=DISCRIMINATE_ODOR_LABEL,
                 )
             )
-        if light_annotation_mode == "line":
+        # Only advertise the green light marker when a line was actually drawn
+        # for at least one trial. Control datasets have no optogenetic light, so
+        # every trial's light_start_s is None and no line appears — suppressing
+        # the legend entry keeps it honest.
+        show_light_legend = _should_show_light_legend(
+            light_annotation_mode,
+            [curve[7] for curve in trial_curves],
+            x_max_limit,
+        )
+        if show_light_legend:
             legend_handles.append(
                 plt.Line2D(
                     [0],

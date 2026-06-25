@@ -24,6 +24,7 @@ import matplotlib.pyplot as plt
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 import numpy as np
 import pandas as pd
+from fbpipe.utils.tables import read_table
 
 # ---------------------------------------------------------------------------
 # Paths
@@ -68,7 +69,7 @@ MAX_FRAMES = 3600  # Only show up to frame 3600 (~90 s at 40 fps)
 def load_data() -> pd.DataFrame:
     """Load envelope CSV and filter to testing trials only."""
     print("Loading envelope data …")
-    df = pd.read_csv(INPUT_CSV)
+    df = read_table(INPUT_CSV)
     df = df[df["trial_type"].str.strip().str.lower() == "testing"].copy()
     print(f"  Testing rows: {len(df)}")
     return df

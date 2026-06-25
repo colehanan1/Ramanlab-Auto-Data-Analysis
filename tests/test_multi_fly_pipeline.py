@@ -333,6 +333,44 @@ def test_combine_distance_angle_includes_fly_number_column(tmp_path):
     assert any("_fly2_" in name for name in plot_names)
 
 
+def test_combine_distance_angle_reads_parquet_inputs(tmp_path):
+    """combine_distance_angle must ingest per-trial parquet distance inputs."""
+    root = tmp_path / "experiment_pq"
+    fly_dir = root / "june_01_session"
+    month_dir = fly_dir / "june"
+    n = 4
+
+    for idx, distance in enumerate(([10.0, 20.0, 30.0, 40.0], [15.0, 25.0, 35.0, 45.0]), start=1):
+        df = pd.DataFrame(
+            {
+                "frame": list(range(n)),
+                "timestamp": [i / 40.0 for i in range(n)],
+                f"x_class{EYE_CLASS}": [100.0] * n,
+                f"y_class{EYE_CLASS}": [100.0] * n,
+                f"x_class{PROBOSCIS_CLASS}": [200.0] * n,
+                f"y_class{PROBOSCIS_CLASS}": [200.0] * n,
+                "proboscis_distance": distance,
+                "distance_percentage": distance,
+                "angle_centered_pct": [0.0, 5.0 * idx, 10.0 * idx, 15.0 * idx],
+            }
+        )
+        out = month_dir / "RMS_calculations" / f"june_01_fly_1_testing_1_fly{idx}_distances.parquet"
+        out.parent.mkdir(parents=True, exist_ok=True)
+        df.to_parquet(out, index=False)
+
+    combine_distance_angle(CombineConfig(root=root, fps_default=40.0, window_sec=0.25))
+
+    out_dir = fly_dir / "angle_distance_rms_envelope"
+    outputs = sorted(out_dir.glob("*angle_distance_rms_envelope.csv"))
+    assert len(outputs) == 2  # both parquet trials were combined
+    observed = set()
+    for path in outputs:
+        df = pd.read_csv(path)
+        assert "fly_number" in df.columns
+        observed.update(df["fly_number"].astype(str))
+    assert observed == {"1", "2"}
+
+
 def test_build_wide_csv_adds_auc_columns(tmp_path):
     dataset_root = tmp_path / "secured_dataset"
     fly_dir = dataset_root / "session_a"

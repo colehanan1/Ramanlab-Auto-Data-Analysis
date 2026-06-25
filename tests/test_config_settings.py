@@ -5,9 +5,11 @@ from pathlib import Path
 from fbpipe.config import _expand_datasets, load_settings
 
 
-def test_expand_datasets_rewrites_distance_base_roots(tmp_path: Path) -> None:
-    """distance_base.wide.roots auto-expands to the secured roots, like
-    combined_base.wide.roots, for datasets that exist on disk."""
+def test_expand_datasets_combined_base_reads_local_roots(tmp_path: Path) -> None:
+    """combined_base + distance_base wide builds must read LOCAL (data) roots —
+    the same place ``combine`` writes its angle_distance_rms_envelope output — so
+    each run's freshly processed data lands in the combined_base CSV/figures.
+    Reading secured would only ever see prior runs' data (one-run lag)."""
     data_base = tmp_path / "data"
     secured_base = tmp_path / "secured"
     (data_base / "Hex-Training").mkdir(parents=True)
@@ -26,10 +28,9 @@ def test_expand_datasets_rewrites_distance_base_roots(tmp_path: Path) -> None:
 
     expanded = _expand_datasets(data)
     combined = expanded["analysis"]["combined"]
-    expected = [f"{secured_base}/Hex-Training/"]
-    assert combined["distance_base"]["wide"]["roots"] == expected
-    # combined_base behaviour must be unchanged.
-    assert combined["combined_base"]["wide"]["roots"] == expected
+    expected_local = [f"{data_base}/Hex-Training/"]
+    assert combined["combined_base"]["wide"]["roots"] == expected_local
+    assert combined["distance_base"]["wide"]["roots"] == expected_local
 
 
 def test_load_settings_reads_non_reactive_span(tmp_path: Path) -> None:

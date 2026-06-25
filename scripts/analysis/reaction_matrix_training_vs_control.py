@@ -31,6 +31,7 @@ from typing import Sequence
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+from fbpipe.utils.tables import read_table
 from matplotlib import gridspec
 from matplotlib.colors import BoundaryNorm, ListedColormap
 from scipy.stats import fisher_exact
@@ -169,7 +170,7 @@ def _load_raw_binary_csv(out_dir: Path, dataset: str) -> pd.DataFrame:
             break
     if csv_path is None:
         csv_path = candidates[0]
-    df = pd.read_csv(csv_path)
+    df = read_table(csv_path)
     if "odor_sent" not in df.columns or "during_hit" not in df.columns:
         return pd.DataFrame()
     if "trial_num" not in df.columns:
@@ -302,7 +303,7 @@ def _load_rates_from_binary_csv(
         csv_path = candidates[0]
 
     print(f"[INFO] Reading rates from {csv_path}")
-    df = pd.read_csv(csv_path)
+    df = read_table(csv_path)
 
     if df.empty or "odor_sent" not in df.columns or "during_hit" not in df.columns:
         print(f"[WARN] Binary CSV for {dataset} is empty or missing columns")
@@ -498,7 +499,7 @@ def plot_training_vs_control_bars(
 
 def generate_training_vs_control_matrices(cfg: SpreadsheetMatrixConfig) -> None:
     # Load and prepare predictions (same as reaction_matrix_from_spreadsheet)
-    df = pd.read_csv(cfg.csv_path)
+    df = read_table(cfg.csv_path)
     required = {"dataset", "fly", "fly_number", "trial_label", "prediction"}
     missing = required.difference(df.columns)
     if missing:

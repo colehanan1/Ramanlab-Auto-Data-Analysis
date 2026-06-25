@@ -349,6 +349,49 @@ def test_build_wide_csv_exports_training_subset(tmp_path):
     assert "trial_light_on_s" in training_df.columns
 
 
+def test_iter_slot_distance_csvs_prefers_parquet(tmp_path):
+    """RMS_calculations distance files are discovered as parquet OR csv, parquet wins."""
+
+    fly_dir = tmp_path / "june_01_batch_1"
+    rms = fly_dir / "RMS_calculations"
+    rms.mkdir(parents=True, exist_ok=True)
+    stem = "june_01_batch_1_testing_1_fly1_distances"
+    # Same logical trial present as BOTH parquet and csv.
+    pd.DataFrame({"x_class2": [1.0]}).to_parquet(rms / f"{stem}.parquet", index=False)
+    pd.DataFrame({"x_class2": [1.0]}).to_csv(rms / f"{stem}.csv", index=False)
+
+    found = list(ec._iter_slot_distance_csvs(fly_dir, "fly1"))
+    assert len(found) == 1  # deduped by stem
+    assert found[0].suffix == ".parquet"  # parquet preferred
+
+
+def test_build_wide_csv_reads_parquet_angle_distance_inputs(tmp_path):
+    """build_wide_csv must ingest parquet angle_distance_rms_envelope inputs."""
+
+    dataset_root = tmp_path / "hex_training_parquet"
+    fly_dir = dataset_root / "june_01_batch_1"
+    out_dir = fly_dir / "angle_distance_rms_envelope"
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    values = np.array([0.0, 25.0, 50.0, 100.0], dtype=float)
+    stem = "june_01_batch_1_testing_1_angle_distance_rms_envelope"
+    pd.DataFrame({"envelope_of_rms": values}).to_parquet(out_dir / f"{stem}.parquet", index=False)
+
+    output_csv = tmp_path / "wide.csv"
+    ec.build_wide_csv(
+        [str(dataset_root)],
+        str(output_csv),
+        measure_cols=["envelope_of_rms"],
+    )
+
+    wide_df = pd.read_csv(output_csv)
+    assert len(wide_df) == 1
+    np.testing.assert_allclose(
+        wide_df.loc[0, ["dir_val_0", "dir_val_1", "dir_val_2", "dir_val_3"]].to_numpy(dtype=float),
+        values,
+    )
+
+
 def test_build_wide_csv_accepts_renamed_combined_pct_column(tmp_path):
     """Legacy combined_base requests should still resolve renamed combined_pct data."""
 

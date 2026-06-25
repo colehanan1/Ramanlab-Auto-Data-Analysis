@@ -24,6 +24,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+from fbpipe.utils.tables import read_table
 
 # ── Paths ─────────────────────────────────────────────────────────────────
 OLD_DATA = Path("/home/ramanlab/Documents/cole/Data/flys")
@@ -289,7 +290,7 @@ def main() -> None:
 
             # Read data
             try:
-                df = pd.read_csv(fpath)
+                df = read_table(fpath)
             except Exception as exc:
                 print(f"  SKIP {fpath}: {exc}")
                 continue

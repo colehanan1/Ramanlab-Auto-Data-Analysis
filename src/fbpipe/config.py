@@ -163,18 +163,21 @@ def _expand_datasets(data: dict) -> dict:
     if "roots" in wide:
         wide["roots"] = list(data_roots)
 
-    # analysis.combined.combined_base.wide.roots (secured)
+    # analysis.combined.combined_base.wide.roots — read LOCAL (data) roots, the
+    # same place ``combine`` writes angle_distance_rms_envelope, so each run's
+    # freshly processed data is included. (Previously read secured, which only
+    # held prior runs' data → a one-run lag that dropped new datasets.)
     combined_base = combined.get("combined_base", {})
     cb_wide = combined_base.get("wide", {})
     if "roots" in cb_wide:
-        cb_wide["roots"] = list(secured_roots)
+        cb_wide["roots"] = list(data_roots)
 
-    # analysis.combined.distance_base.wide.roots (secured) — distance-only
-    # variant of combined_base, reads the same per-trial CSVs.
+    # analysis.combined.distance_base.wide.roots — distance-only variant of
+    # combined_base; reads the same per-trial files, so also LOCAL.
     distance_base = combined.get("distance_base", {})
     db_wide = distance_base.get("wide", {})
     if "roots" in db_wide:
-        db_wide["roots"] = list(secured_roots)
+        db_wide["roots"] = list(data_roots)
 
     # analysis.combined.secure_cleanup.sources
     cleanup = combined.get("secure_cleanup", {})

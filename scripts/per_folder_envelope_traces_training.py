@@ -30,6 +30,7 @@ for _p in (str(_REPO / "src"), str(_REPO)):
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+from fbpipe.utils.tables import read_table
 from matplotlib.ticker import MultipleLocator
 
 # Time-axis tick spacing (seconds) for PER-over-time trace panels.
@@ -527,7 +528,7 @@ def _load_exclusion_set(flagged_path: Path) -> set[tuple[str, str, int]]:
 
 def main():
     print(f"Reading {CSV_PATH} ...")
-    df = pd.read_csv(CSV_PATH)
+    df = read_table(CSV_PATH)
 
     # Keep only training rows
     df = df[df["trial_type"] == "training"].copy()

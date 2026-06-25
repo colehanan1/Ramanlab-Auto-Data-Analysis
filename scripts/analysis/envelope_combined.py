@@ -57,6 +57,12 @@ from fbpipe.utils.trial_metadata import (
     load_trial_metadata,
 )
 from fbpipe.utils.fly_type import fly_type_for_dir
+from fbpipe.utils.tables import (
+    read_table,
+    write_table,
+    resolve_existing,
+    read_schema_columns,
+)
 from fbpipe.odor_constants import (
     ODOR_CANON,
     DISPLAY_LABEL,
@@ -383,17 +389,76 @@ def _load_distance_stats(fly_dir: Path, slot_label: str | None) -> tuple[float, 
     return None
 
 
+def _iter_table_files(directory: Path, stem_glob: str) -> Iterator[Path]:
+    """Yield one file per logical stem under ``directory`` matching ``stem_glob``.
+
+    Both ``.parquet`` and ``.csv`` are considered; when a stem exists in both
+    formats the ``.parquet`` is yielded and the ``.csv`` is skipped (parquet is
+    the canonical pipeline output). ``stem_glob`` must NOT include an extension.
+    """
+    seen: set[str] = set()
+    for suffix in (".parquet", ".csv"):
+        for path in sorted(directory.glob(stem_glob + suffix)):
+            if not path.is_file():
+                continue
+            if path.stem in seen:
+                continue
+            seen.add(path.stem)
+            yield path
+
+
+def _read_trial_table(
+    path: Path,
+    *,
+    columns: Sequence[str] | None = None,
+    nrows: int | None = None,
+    dtype: Mapping[str, object] | None = None,
+) -> pd.DataFrame:
+    """Read a per-trial table (parquet or csv) with optional column/row limits.
+
+    Translates the column-subset (``usecols`` vs ``columns``), row-limit and
+    ``dtype`` arguments across the two backends so call sites stay format-blind.
+    """
+    p = resolve_existing(path) or Path(path)
+    if p.suffix.lower() == ".parquet":
+        df = pd.read_parquet(
+            p, engine="pyarrow", columns=list(columns) if columns is not None else None
+        )
+        if nrows is not None:
+            df = df.iloc[: max(0, int(nrows))]
+        if dtype:
+            df = df.astype({k: v for k, v in dtype.items() if k in df.columns})
+        return df
+    read_kwargs: dict[str, object] = {}
+    if columns is not None:
+        read_kwargs["usecols"] = list(columns)
+    if nrows is not None:
+        read_kwargs["nrows"] = int(nrows)
+    if dtype:
+        read_kwargs["dtype"] = dict(dtype)
+    return pd.read_csv(p, **read_kwargs)
+
+
+def _table_num_rows(path: Path) -> int:
+    """Row count for a parquet (footer) or csv (line count) table; 0 on error."""
+    p = resolve_existing(path) or Path(path)
+    if p.suffix.lower() == ".parquet":
+        import pyarrow.parquet as _pq
+
+        return int(_pq.read_metadata(p).num_rows)
+    with open(p, "rb") as fh:
+        return max(0, sum(1 for _ in fh) - 1)  # subtract header
+
+
 def _iter_slot_distance_csvs(fly_dir: Path, slot_label: str | None) -> Iterator[Path]:
-    """Yield testing/training eye-proboscis distance CSVs for the provided slot."""
+    """Yield testing/training eye-proboscis distance tables (parquet or csv)."""
 
     rms_dir = fly_dir / "RMS_calculations"
     if not rms_dir.is_dir():
         return
     slot_token = (slot_label or "").strip().lower()
-    pattern = f"*{slot_token}_distances.csv" if slot_token else "*_distances.csv"
-    for path in sorted(rms_dir.glob(pattern)):
-        if not path.is_file():
-            continue
+    stem_glob = f"*{slot_token}_distances" if slot_token else "*_distances"
+    for path in _iter_table_files(rms_dir, stem_glob):
         if TRIAL_REGEX.search(path.stem.lower()) is None:
             continue
         yield path
@@ -465,7 +530,7 @@ def _class2_distances(csv_path: Path) -> np.ndarray:
     """Compute pixel distances between eye and proboscis detections."""
 
     try:
-        df = pd.read_csv(csv_path)
+        df = read_table(csv_path)
     except Exception as exc:
         print(f"[WARN] Could not read raw distance columns from {csv_path.name}: {exc}")
         return np.empty(0, dtype=float)
@@ -1269,6 +1334,7 @@ def _locate_trials(
         print(f"[DEBUG] {fly_dir.name}: no month-named directories detected; using full recursive scan.")
 
     candidates: dict[Path, tuple[str, Path]] = {}
+    seen_stems: set[str] = set()
     skip_counts: Counter[str] = Counter()
     total_matches = 0
 
@@ -1289,7 +1355,14 @@ def _locate_trials(
                 skip_counts[reason] += 1
                 continue
 
+            # Same logical trial in both formats: parquet patterns run first, so
+            # a csv whose stem was already taken by a parquet is skipped.
+            if real not in candidates and real.stem in seen_stems:
+                skip_counts["dup-format"] += 1
+                continue
+
             origin = "month" if any(_within(real, month_dir) for month_dir in month_dirs) else "recursive"
+            seen_stems.add(real.stem)
             existing = candidates.get(real)
             if existing:
                 prev_origin, _ = existing
@@ -1327,7 +1400,7 @@ def _locate_trials(
             f"[DEBUG] {fly_dir.name}: evaluating {csv_path} (origin={origin}, label={label}, category~{category_guess})"
         )
         try:
-            header = pd.read_csv(csv_path, nrows=5)
+            header = _read_trial_table(csv_path, nrows=5)
         except Exception as exc:
             print(f"[WARN] {fly_dir.name}: failed to read header from {csv_path} → {exc}")
             continue
@@ -1448,6 +1521,7 @@ def _trial_csv_candidates(fly_dir: Path, suffix_globs: Iterable[str] | str) -> l
     patterns = [suffix_globs] if isinstance(suffix_globs, str) else list(suffix_globs)
     candidates: list[Path] = []
     seen: set[Path] = set()
+    seen_stems: set[str] = set()
     for pattern in patterns:
         for path in fly_dir.rglob(pattern):
             if not path.is_file():
@@ -1457,7 +1531,10 @@ def _trial_csv_candidates(fly_dir: Path, suffix_globs: Iterable[str] | str) -> l
             real = path.resolve()
             if real in seen:
                 continue
+            if real.stem in seen_stems:
+                continue  # same logical trial already taken (parquet wins)
             seen.add(real)
+            seen_stems.add(real.stem)
             candidates.append(path)
     return sorted(candidates)
 
@@ -1466,7 +1543,7 @@ def _find_reference_angle(csv_paths: Sequence[Path]) -> float:
     best: tuple[int, float, float] | None = None
     for path in csv_paths:
         try:
-            df = pd.read_csv(path)
+            df = read_table(path)
             angles = _compute_angle_deg(df).to_numpy(dtype=float)
         except Exception:
             continue
@@ -1510,7 +1587,7 @@ def _fly_max_centered(csv_paths: Sequence[Path], reference_angle: float) -> floa
     max_abs = 0.0
     for path in csv_paths:
         try:
-            df = pd.read_csv(path)
+            df = read_table(path)
             angles = _compute_angle_deg(df).to_numpy(dtype=float)
         except Exception:
             continue
@@ -1564,7 +1641,7 @@ def _ensure_angle_percentages(fly_dir: Path, suffix_globs: Iterable[str] | str) 
     updates = 0
     for path in csv_paths:
         try:
-            df = pd.read_csv(path)
+            df = read_table(path)
             angles = _compute_angle_deg(df)
         except Exception:
             continue
@@ -1600,7 +1677,12 @@ def _ensure_angle_percentages(fly_dir: Path, suffix_globs: Iterable[str] | str) 
 
         if needs_write:
             try:
-                df.to_csv(path, index=False)
+                # Persist back in the SAME format as the source (parquet stays
+                # parquet, legacy csv stays csv) to avoid surprising other readers.
+                if path.suffix.lower() == ".parquet":
+                    write_table(df, path, replace_legacy_csv=False)
+                else:
+                    df.to_csv(path, index=False)
                 updates += 1
                 print(f"[angle] {fly_dir.name}: augmented {path.name} with centered angle columns.")
             except Exception as exc:
@@ -1708,15 +1790,25 @@ def _find_trial_csvs(fly_dir: Path) -> Iterator[Path]:
         return
 
     seen: set[Path] = set()
+    seen_stems: set[str] = set()
     all_paths: list[Path] = []
-    for pattern in ("**/*testing*.csv", "**/*training*.csv"):
+    # Prefer parquet over csv so a trial present in both formats is read once.
+    for pattern in (
+        "**/*testing*.parquet",
+        "**/*training*.parquet",
+        "**/*testing*.csv",
+        "**/*training*.csv",
+    ):
         for csv in base.glob(pattern):
             if not csv.is_file():
                 continue
             real = csv.resolve()
             if real in seen:
                 continue
+            if real.stem in seen_stems:
+                continue  # same logical trial already taken (parquet wins)
             seen.add(real)
+            seen_stems.add(real.stem)
             all_paths.append(real)
 
     groups: dict[tuple[str, str], list[Path]] = {}
@@ -1961,13 +2053,23 @@ class CombineConfig:
     odor_off_s: float = 60.0
     odor_latency_s: float = 0.0
     save_trial_plots: bool = False
+    # Parquet patterns first so a trial present in both formats prefers parquet
+    # during stem-level de-duplication downstream.
     angle_suffixes: tuple[str, ...] = (
+        "*fly*_distances.parquet",
+        "*merged.parquet",
+        "*class_2_8.parquet",
+        "*class_2_6.parquet",
         "*fly*_distances.csv",
         "*merged.csv",
         "*class_2_8.csv",
         "*class_2_6.csv",
     )
     distance_suffixes: tuple[str, ...] = (
+        "*fly*_distances.parquet",
+        "*merged.parquet",
+        "*class_2_8.parquet",
+        "*class_2_6.parquet",
         "*fly*_distances.csv",
         "*merged.csv",
         "*class_2_8.csv",
@@ -2069,7 +2171,7 @@ def combine_distance_angle(cfg: CombineConfig) -> None:
                 )
 
                 try:
-                    dist_df = pd.read_csv(dist_path)
+                    dist_df = read_table(dist_path)
 
                     # Read raw pixel distance for combining
                     raw_dist_col = find_proboscis_distance_column(dist_df)
@@ -2105,7 +2207,7 @@ def combine_distance_angle(cfg: CombineConfig) -> None:
 
                     time_dist = _time_axis(dist_df, cfg.fps_default)
 
-                    angle_df = pd.read_csv(angle_path)
+                    angle_df = read_table(angle_path)
                     angle_col = _pick_column(angle_df, ANGLE_COLS)
                     if not angle_col:
                         raise ValueError("missing angle column")
@@ -2517,7 +2619,7 @@ def build_wide_csv(
                 if trial_type_allow is not None and trial_type not in trial_type_allow:
                     continue
                 try:
-                    header = pd.read_csv(csv_path, nrows=0)
+                    header = pd.DataFrame(columns=read_schema_columns(csv_path))
                 except Exception as exc:
                     print(f"[WARN] Skip {csv_path.name}: header read error: {exc}")
                     continue
@@ -2562,11 +2664,11 @@ def build_wide_csv(
     if not items:
         raise RuntimeError("No eligible testing/training CSVs found in provided roots.")
 
-    # Compute max_len via fast line count (avoids a full pd.read_csv per file).
+    # Compute max_len via a cheap row count (parquet footer or csv line count;
+    # avoids a full read per file).
     for item in items:
         try:
-            with open(item["csv_path"], "rb") as _fh:
-                n_rows = sum(1 for _ in _fh) - 1  # subtract header
+            n_rows = _table_num_rows(Path(item["csv_path"]))
         except Exception:
             n_rows = 0
         max_len = max(max_len, n_rows)
@@ -2590,7 +2692,9 @@ def build_wide_csv(
         except Exception:
             _before_nrows = BEFORE_FRAMES
         try:
-            df_before = pd.read_csv(csv_path, usecols=[measure], nrows=max(1, _before_nrows))
+            df_before = _read_trial_table(
+                csv_path, columns=[measure], nrows=max(1, _before_nrows)
+            )
         except Exception as exc:
             print(f"[WARN] build_wide_csv: failed to read before segment from {csv_path.name}: {exc}")
             continue
@@ -2743,7 +2847,7 @@ def build_wide_csv(
             if ts_col and ts_col not in read_cols:
                 read_cols.append(ts_col)
             try:
-                chunk = pd.read_csv(csv_path, usecols=read_cols)
+                chunk = _read_trial_table(csv_path, columns=read_cols)
             except Exception as exc:
                 print(f"[WARN] Read failed {csv_path}: {exc}")
                 continue
@@ -3133,7 +3237,10 @@ def wide_to_matrix(input_csv: str, output_dir: str) -> None:
     out_dir = Path(output_dir).expanduser().resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    df = pd.read_csv(csv_path, dtype={"fly_number": str})
+    # Accept either the .csv or a .parquet sibling (parquet preferred).
+    df = read_table(csv_path)
+    if "fly_number" in df.columns:
+        df["fly_number"] = df["fly_number"].astype(str)
     meta_preference = [
         "dataset",
         "fly",

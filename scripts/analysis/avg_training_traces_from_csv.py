@@ -21,6 +21,7 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+from fbpipe.utils.tables import read_table
 from matplotlib.ticker import MultipleLocator
 
 # Time-axis tick spacing (seconds) for PER-over-time trace panels.
@@ -164,7 +165,7 @@ def load_group(csv_path: Path, datasets: set[str],
     after_day: (month_num, day) exclusive lower bound
     """
     print(f"  Loading from {csv_path.name}...")
-    df = pd.read_csv(csv_path, low_memory=False)
+    df = read_table(csv_path)
     df = df[df["dataset"].isin(datasets)]
     print(f"  Rows matching datasets: {len(df)}")
 

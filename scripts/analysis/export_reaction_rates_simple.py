@@ -12,6 +12,7 @@ import sys
 from pathlib import Path
 import numpy as np
 import pandas as pd
+from fbpipe.utils.tables import read_table
 
 # Add project root to path
 project_root = Path(__file__).resolve().parents[2]
@@ -128,7 +129,7 @@ def export_reaction_rates_from_wide_csv(
     Generate reaction rates summary CSV from wide CSV file.
     """
     print(f"[INFO] Loading wide CSV from {wide_csv}")
-    df = pd.read_csv(wide_csv)
+    df = read_table(wide_csv)
 
     print(f"[INFO] Loaded {len(df)} rows")
 

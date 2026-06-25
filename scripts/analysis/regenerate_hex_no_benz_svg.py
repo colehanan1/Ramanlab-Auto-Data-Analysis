@@ -34,6 +34,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 import numpy as np  # noqa: E402
 import pandas as pd  # noqa: E402
+from fbpipe.utils.tables import read_table
 import yaml  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -133,7 +134,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         LOGGER.error("Wide CSV not found: %s", wide_csv)
         sys.exit(1)
     LOGGER.info("Wide CSV: %s", wide_csv)
-    wide_df = pd.read_csv(wide_csv)
+    wide_df = read_table(wide_csv)
 
     fps = args.fps
     odor_on_s = args.odor_on_s

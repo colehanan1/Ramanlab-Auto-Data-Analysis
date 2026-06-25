@@ -23,6 +23,7 @@ from typing import Iterable, Sequence
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+from fbpipe.utils.tables import read_table
 from matplotlib import gridspec
 from matplotlib.colors import BoundaryNorm, ListedColormap
 from matplotlib.patches import Patch
@@ -132,7 +133,7 @@ def _filter_trial_types(
 def _load_predictions(
     csv_path: Path, *, threshold: float, flagged_flies_csv: str = ""
 ) -> pd.DataFrame:
-    df = pd.read_csv(csv_path)
+    df = read_table(csv_path)
     required = {"dataset", "fly", "fly_number", "trial_label", "prediction"}
     missing = required.difference(df.columns)
     if missing:

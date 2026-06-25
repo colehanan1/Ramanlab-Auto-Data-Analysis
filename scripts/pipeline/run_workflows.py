@@ -15,7 +15,7 @@ import time
 import urllib.request
 from dataclasses import replace as dc_replace
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
 import pandas as pd
 import yaml
@@ -852,9 +852,10 @@ def _run_combined(
     *,
     folder_filter: str | None = None,
     defer_envelopes: bool = False,
-) -> None:
+    defer_secure_cleanup: bool = False,
+) -> Callable[[], None] | None:
     if not cfg:
-        return
+        return None
 
     combine_roots: dict[str, Path] = {}
     wide_root_paths: list[Path] = []
@@ -1400,6 +1401,42 @@ def _run_combined(
                 non_reactive_threshold=settings.non_reactive_span_px if settings is not None else None,
             )
 
+    # The local→secured copy (and optional local deletion) is deferred to the
+    # very end of the run when requested, so it happens AFTER all figures have
+    # been rendered from the local data — mirroring the file-server sync step.
+    # When deferred, return a thunk the caller runs once all figures are done.
+    if defer_secure_cleanup:
+        return lambda: _run_secure_cleanup(
+            cfg, settings, folder_filter=folder_filter, flagged_dirs=flagged_dirs
+        )
+    _run_secure_cleanup(
+        cfg, settings, folder_filter=folder_filter, flagged_dirs=flagged_dirs
+    )
+    return None
+
+
+def _run_secure_cleanup(
+    cfg: Mapping[str, Any] | None,
+    settings: Settings | None,
+    *,
+    folder_filter: str | None = None,
+    flagged_dirs: Sequence[Path] | None = None,
+) -> None:
+    """Copy local experiment data to secured storage (and optionally delete the
+    local source). Split out of ``_run_combined`` so it can run AFTER all figures
+    are rendered from the local data, mirroring the file-server sync step.
+
+    ``flagged_dirs`` is re-discovered from ``settings`` when not supplied (cheap),
+    so this can be called standalone from ``main`` after the deferred figures.
+    """
+    if not cfg:
+        return
+
+    if flagged_dirs is None:
+        flagged_dirs = []
+        if settings is not None and settings.flagged_root:
+            flagged_dirs = discover_flagged_directories(settings.flagged_root)
+
     secure_cfg = cfg.get("secure_cleanup")
     if secure_cfg:
         sources = secure_cfg.get("sources") or []
@@ -1435,7 +1472,7 @@ def _run_combined(
     # Secure-copy flagged experiments to their own secured storage folder.
     if flagged_dirs:
         # In single-folder mode, only sync the target flagged dir.
-        sync_flagged = flagged_dirs
+        sync_flagged = list(flagged_dirs)
         if folder_filter:
             target = folder_filter.strip().lower()
             sync_flagged = [fd for fd in flagged_dirs if fd.name.lower() == target]
@@ -1927,6 +1964,8 @@ def main(argv: Sequence[str] | None = None) -> None:
             f"(predictions CSV: {rx_cfg.output_csv})."
         )
 
+    # Deferred local→secured copy (runs after ALL figures; see _run_combined).
+    deferred_secure_cleanup: Callable[[], None] | None = None
     combined_cfg_input = analysis_cfg.get("combined")
     if combined_cfg_input:
         combined_expected = {
@@ -1980,11 +2019,12 @@ def main(argv: Sequence[str] | None = None) -> None:
                     "[analysis] combined analysis cached → skipping. Set force.combined=true to recompute."
                 )
         if not skip_combined:
-            _run_combined(
+            deferred_secure_cleanup = _run_combined(
                 combined_cfg_input,
                 settings,
                 folder_filter=folder_filter,
                 defer_envelopes=defer_envelopes,
+                defer_secure_cleanup=True,
             )
             # Only write combined cache when running ALL folders; a single-folder
             # run is partial so the next full run must recompute.
@@ -2102,6 +2142,13 @@ def main(argv: Sequence[str] | None = None) -> None:
         _run_dataset_means_training(config_path, no_overwrite=True)
         payload = dict(dm_expected, version=STATE_VERSION)
         _write_state(settings, "dataset_means", "analysis", payload)
+
+    # All figures are now rendered (combined, envelope_visuals, deferred
+    # model-annotated re-renders, dataset_means). NOW copy local experiment data
+    # to secured storage (and optionally delete local) — deferred to here so the
+    # figure pipeline always reads from the still-present local data first.
+    if deferred_secure_cleanup is not None:
+        deferred_secure_cleanup()
 
     # Copy all analysis outputs to SMB at the end
     LOGGER.info("\n" + "=" * 70)

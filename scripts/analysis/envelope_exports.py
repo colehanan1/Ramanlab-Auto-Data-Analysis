@@ -28,6 +28,7 @@ from typing import Iterable, Iterator, List, Optional, Sequence
 
 import numpy as np
 import pandas as pd
+from fbpipe.utils.tables import read_table
 from scipy.signal import hilbert
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -716,7 +717,7 @@ def convert_wide_csv(cfg: ConvertConfig) -> None:
     print(
         f"[DEBUG] convert_wide_csv → input={cfg.input_csv}, output_dir={cfg.out_dir}"
     )
-    df = pd.read_csv(cfg.input_csv)
+    df = read_table(cfg.input_csv)
     print(
         f"[DEBUG] Loaded wide CSV with shape={df.shape} columns={list(df.columns)}"
     )

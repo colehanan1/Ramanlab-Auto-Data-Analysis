@@ -75,7 +75,11 @@ class EyeAnchorManager:
 
         if len(self.anchors_xyxy) >= self.max_eyes:
             centers = [xyxy_to_cxcywh(b)[:2] for b in self.anchors_xyxy]
-            order = np.argsort([c[0] for c in centers])
+            # Flies are stacked vertically: number slots top-to-bottom (by y),
+            # with x as a deterministic tie-break when two eyes share a row.
+            xs = [c[0] for c in centers]
+            ys = [c[1] for c in centers]
+            order = np.lexsort((xs, ys))
             self.anchors_xyxy = [self.anchors_xyxy[i] for i in order]
             self.anchor_ids = [self.anchor_ids[i] for i in order]
             self.confirmed = True
