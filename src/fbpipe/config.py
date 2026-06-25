@@ -516,6 +516,8 @@ class Settings:
     proboscis_match_max_dist_px: float = 80.0  # Center-distance gate for proboscis track association (small/fast object).
     pair_rebind_ratio: float = 0.20
     zero_iou_epsilon: float = 1e-8
+    inference_batch_size: int = 32  # YOLO predict() chunk size; clamped to 1 for non-batch-capable .engine models
+    engine_supports_batch: bool = False  # set True only for a dynamic-batch .engine (see scripts/convert/export_tensorrt.py --dynamic)
 
     # distance limits
     class2_min: float = 70.0
@@ -967,6 +969,8 @@ def load_settings(config_path: str | Path) -> Settings:
         ),
         pair_rebind_ratio=float(os.getenv("PAIR_REBIND_RATIO", yolo.get("pair_rebind_ratio", 0.20))),
         zero_iou_epsilon=float(os.getenv("ZERO_IOU_EPSILON", yolo.get("zero_iou_epsilon", 1e-8))),
+        inference_batch_size=int(os.getenv("INFERENCE_BATCH_SIZE", yolo.get("inference_batch_size", 32))),
+        engine_supports_batch=(os.getenv("ENGINE_SUPPORTS_BATCH", str(yolo.get("engine_supports_batch", False))).lower()=="true"),
 
         class2_min=float(os.getenv("CLASS2_MIN", dist_limits.get("class2_min", 70.0))),
         class2_max=float(os.getenv("CLASS2_MAX", dist_limits.get("class2_max", 250.0))),
