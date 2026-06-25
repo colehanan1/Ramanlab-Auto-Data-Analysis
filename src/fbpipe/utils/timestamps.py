@@ -36,9 +36,11 @@ def to_seconds_series(df: pd.DataFrame, ts_col: str) -> pd.Series:
     s = df[ts_col]
     if ts_col in ("UTC_ISO", "Timestamp"):
         dt = pd.to_datetime(s, errors="coerce", utc=(ts_col == "UTC_ISO"))
-        secs = dt.astype("int64") / 1e9
-        t0 = np.nanmin(secs.values)
-        return (secs - t0).astype(float)
+        # Resolution-independent elapsed seconds. pandas >= 2 may parse sub-second
+        # ISO strings as datetime64[us] (or [ms]/[s]), NOT always [ns]; the old
+        # ``dt.astype("int64") / 1e9`` assumed nanoseconds and undershot by 1000x
+        # on microsecond data (e.g. fps computed as 40020 instead of 40).
+        return (dt - dt.min()).dt.total_seconds().astype(float)
     if ts_col == "Number":
         vals = pd.to_numeric(s, errors="coerce").astype(float)
         t0 = np.nanmin(vals.values)
