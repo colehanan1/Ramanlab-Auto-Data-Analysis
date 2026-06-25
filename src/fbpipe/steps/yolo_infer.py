@@ -180,16 +180,14 @@ def _process_frame(
     prev_gray,
     anchor,
     settings: Settings,
-    predict_fn,
+    result,
     eye_mgr: EyeAnchorManager,
     cls8_tracker: MultiObjectTracker,
     pairer: StablePairing,
     active_max_flies: int,
 ):
-    conf_thres = settings.conf_thres
     flow_params = dict(pyr_scale=0.5, levels=3, winsize=15, iterations=3, poly_n=5, poly_sigma=1.2, flags=0)
 
-    result = predict_fn(frame, conf_thres)[0]
     dets = collect_detections(result, ALL_TRACKED_CLASSES)
 
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
