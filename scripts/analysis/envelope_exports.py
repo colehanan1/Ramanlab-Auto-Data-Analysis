@@ -495,14 +495,18 @@ def collect_envelopes(cfg: CollectConfig) -> None:
                 print(f"[DEBUG]     Selected measure column: {measure_col}")
 
                 slot_token = _fly_slot_from_name(csv_path.name)
-                fly_number = _fly_number_from_name(csv_path.name)
                 if slot_token:
                     slot_label = slot_token.replace("_distances", "")
                     fly_id = f"{fly}_{slot_label}"
+                    # Prefer fly number derived from the slot token (e.g. "fly3"
+                    # in "fly3_distances") over the one found anywhere in the
+                    # full filename (which may match an unrelated "fly_1" prefix).
+                    fly_number = _fly_number_from_name(slot_label)
                     if fly_number is None:
-                        fly_number = _fly_number_from_name(slot_label)
+                        fly_number = _fly_number_from_name(csv_path.name)
                 else:
                     fly_id = fly
+                    fly_number = _fly_number_from_name(csv_path.name)
                     if fly_number is None:
                         fly_number = _fly_number_from_name(fly)
 

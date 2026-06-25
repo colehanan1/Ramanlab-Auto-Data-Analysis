@@ -60,8 +60,8 @@ class TestQualityMetrics:
     def test_compute_quality_metrics_good_tracking(self):
         """Test metrics for video with good tracking."""
         df = pd.DataFrame({
-            "proboscis_x": np.arange(100, 200, 1),
-            "proboscis_y": np.ones(100) * 200,
+            "x_class1": np.arange(100, 200, 1),
+            "y_class1": np.ones(100) * 200,
         })
 
         with tempfile.NamedTemporaryFile(suffix=".mp4") as tmp:
@@ -84,8 +84,8 @@ class TestQualityMetrics:
         y_vals = np.concatenate([y_vals, [np.nan] * 50])
 
         df = pd.DataFrame({
-            "proboscis_x": x_vals,
-            "proboscis_y": y_vals,
+            "x_class1": x_vals,
+            "y_class1": y_vals,
         })
 
         with tempfile.NamedTemporaryFile(suffix=".mp4") as tmp:

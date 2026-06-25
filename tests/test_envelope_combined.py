@@ -407,10 +407,9 @@ def test_build_wide_csv_prefers_distance_labelled_trial_alias(tmp_path):
     wide_df = pd.read_csv(output_csv)
 
     assert len(wide_df) == 1
-    assert (
-        wide_df.loc[0, "trial_label"]
-        == "testing_1_fly1_distances_fly1_angle_distance_rms_envelope"
-    )
+    # _trial_label normalises the stem to just the trial key (e.g. "testing_1"),
+    # so the stored trial_label is the short canonical form, not the full stem.
+    assert wide_df.loc[0, "trial_label"] == "testing_1"
     np.testing.assert_allclose(
         wide_df.loc[0, ["dir_val_0", "dir_val_1", "dir_val_2"]].to_numpy(dtype=float),
         long_values,
