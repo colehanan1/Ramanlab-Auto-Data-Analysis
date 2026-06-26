@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import math
+import os
 import time
 
 import cv2
@@ -545,15 +546,40 @@ def main(cfg: Settings):
 
     AX, AY = cfg.anchor_x, cfg.anchor_y
 
+    # Optional video-level parallelism: N worker processes each handle a disjoint
+    # slice of the deterministically-ordered video list via global_index % N.
+    # Defaults (1/0) preserve the original single-process behaviour exactly.
+    num_workers = max(1, int(os.getenv("NUM_WORKERS", "1")))
+    worker_index = int(os.getenv("WORKER_INDEX", "0")) % num_workers
+    if num_workers > 1:
+        # Cap OpenCV/torch CPU threads so N workers don't oversubscribe the cores
+        # (BLAS/OpenMP pools are capped via env in the driver, before import).
+        _t = max(1, (os.cpu_count() or num_workers) // num_workers)
+        try:
+            cv2.setNumThreads(_t)
+        except Exception:
+            pass
+        try:
+            torch.set_num_threads(_t)
+        except Exception:
+            pass
+        print(f"[YOLO] worker {worker_index+1}/{num_workers}: every {num_workers}th video, {_t} CPU threads")
+
     roots = get_main_directories(cfg)
-    for root in roots:
+    _job_idx = -1
+    for root in sorted(roots, key=str):
         if not root.is_dir():
             print(f"[YOLO] main_directories entry does not exist: {root}")
             continue
 
-        for fly in [p for p in root.iterdir() if p.is_dir()]:
-            video_files = [f for f in fly.iterdir() if f.suffix.lower() in (".mp4",".avi")]
+        for fly in sorted((p for p in root.iterdir() if p.is_dir()), key=str):
+            video_files = sorted(
+                (f for f in fly.iterdir() if f.suffix.lower() in (".mp4", ".avi")), key=str
+            )
             for video_path in video_files:
+                _job_idx += 1
+                if _job_idx % num_workers != worker_index:
+                    continue
                 base = video_path.stem
                 csv_file_path = fly / f"{base.replace('_preprocessed','')}.csv"
                 parts = base.split("_")
@@ -600,8 +626,16 @@ def main(cfg: Settings):
                 timestamps = {}
                 calculated_fps = cap.get(cv2.CAP_PROP_FPS) or cfg.fps_default
 
+                df_timestamps = None
                 if csv_file_path.exists():
-                    df_timestamps = read_table(csv_file_path)
+                    try:
+                        df_timestamps = read_table(csv_file_path)
+                    except (pd.errors.EmptyDataError, pd.errors.ParserError) as exc:
+                        log.warning(
+                            "Timestamp CSV %s is empty/unparseable (%s); using frame-index timestamps.",
+                            csv_file_path.name, exc,
+                        )
+                if df_timestamps is not None:
                     frame_col = pick_frame_column(df_timestamps)
                     if frame_col is not None:
                         ts_col = pick_timestamp_column(df_timestamps)
@@ -669,9 +703,10 @@ def main(cfg: Settings):
 
                 t0 = time.time()
                 B = max(1, cfg.inference_batch_size) if (not is_engine or cfg.engine_supports_batch) else 1
-                log.info("YOLO inference: %s path, effective batch size %d%s",
-                         "engine" if is_engine else "pt", B,
-                         " (engine batch-capable)" if is_engine and cfg.engine_supports_batch else "")
+                _path_tag = "engine" if is_engine else "pt"
+                _batch_tag = " (engine batch-capable)" if is_engine and cfg.engine_supports_batch else ""
+                log.info("YOLO inference: %s path, effective batch size %d%s", _path_tag, B, _batch_tag)
+                print(f"[YOLO] {video_path.name}: {_path_tag} path, effective batch size {B}{_batch_tag}")
                 rows = _run_chunked_inference(
                     cap, max_frame, (target_w, target_h), writer, timestamps, fps, (AX, AY),
                     cfg, batched_predict_fn, single_trackers, None,
