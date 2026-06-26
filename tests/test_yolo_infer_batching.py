@@ -1,0 +1,589 @@
+"""Tests for _make_batched_predict_fn: OOM backoff, CPU fallback, re-raise."""
+import pytest; pytest.importorskip("ultralytics")
+
+from fbpipe.steps.yolo_infer import _make_batched_predict_fn
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+class _FakeResult:
+    """Minimal stand-in for ultralytics Results."""
+
+
+def _make_results(n):
+    return [_FakeResult() for _ in range(n)]
+
+
+# ---------------------------------------------------------------------------
+# Test 1: OOM halves sub-batch size, eventually succeeds
+# ---------------------------------------------------------------------------
+
+def test_oom_backoff_halves_then_succeeds():
+    """Fake model raises on len(images) > 2; succeeds at ≤2. Full batch=4 → two sub-batches of 2."""
+    call_log = []
+
+    class FakeModel:
+        def predict(self, images, conf, verbose, device, half, **kw):
+            call_log.append(len(images))
+            if len(images) > 2:
+                raise RuntimeError("CUDA out of memory. Tried to allocate 100 MiB")
+            return _make_results(len(images))
+
+    fn = _make_batched_predict_fn(
+        FakeModel(),
+        get_device=lambda: "cuda",
+        set_device=lambda t: None,
+        allow_cpu=False,
+        cuda_empty_cache=lambda: None,
+    )
+
+    images = [object() for _ in range(4)]
+    results = fn(images, conf_thres=0.5)
+
+    assert len(results) == 4, f"Expected 4 results, got {len(results)}"
+    # First call was the full batch of 4
+    assert call_log[0] == 4, f"First call should be full batch (4), got {call_log[0]}"
+    # All subsequent calls (after backoff) were ≤ 2
+    assert all(n <= 2 for n in call_log[1:]), (
+        f"All retried sub-batch calls should be ≤ 2, got {call_log[1:]}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Test 2: OOM at batch=1 falls back to CPU when allow_cpu=True
+# ---------------------------------------------------------------------------
+
+def test_oom_at_batch1_falls_back_to_cpu_when_allowed():
+    """Fake model raises on CUDA (any size); succeeds on CPU. Verify device switch and half=False."""
+    cpu_call_kwargs = {}
+    dev = {"cur": "cuda"}
+
+    class FakeModel:
+        def predict(self, images, conf, verbose, device, half, **kw):
+            if device == "cuda":
+                raise RuntimeError("CUDA out of memory")
+            # CPU path: record kwargs
+            cpu_call_kwargs["device"] = device
+            cpu_call_kwargs["half"] = half
+            return _make_results(len(images))
+
+    fn = _make_batched_predict_fn(
+        FakeModel(),
+        get_device=lambda: dev["cur"],
+        set_device=lambda t: dev.__setitem__("cur", t),
+        allow_cpu=True,
+        cuda_empty_cache=lambda: None,
+    )
+
+    images = [object() for _ in range(2)]
+    results = fn(images, conf_thres=0.3)
+
+    assert dev["cur"] == "cpu", f"Device should have switched to 'cpu', got {dev['cur']}"
+    assert len(results) == 2, f"Expected 2 results, got {len(results)}"
+    assert cpu_call_kwargs.get("half") is False, (
+        f"CPU fallback predict must use half=False, got half={cpu_call_kwargs.get('half')}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Test 3: OOM at batch=1 re-raises when allow_cpu=False
+# ---------------------------------------------------------------------------
+
+def test_oom_reraises_at_batch1_without_cpu():
+    """Fake model always raises on cuda; allow_cpu=False → RuntimeError propagates."""
+
+    class FakeModel:
+        def predict(self, images, conf, verbose, device, half, **kw):
+            raise RuntimeError("CUDA out of memory")
+
+    fn = _make_batched_predict_fn(
+        FakeModel(),
+        get_device=lambda: "cuda",
+        set_device=lambda t: None,
+        allow_cpu=False,
+        cuda_empty_cache=lambda: None,
+    )
+
+    with pytest.raises(RuntimeError):
+        fn([object()], conf_thres=0.5)
+
+
+# ===========================================================================
+# Task 5 Step 1: Parity test — chunked inference == sequential reference.
+#
+# Drives a sequential reference and ``_run_chunked_inference`` with the SAME
+# stubbed detections and INDEPENDENTLY-seeded collaborators, then asserts the
+# emitted rows are bit-identical at every batch size. This is the correctness
+# proof for the whole frame-batching feature.
+#
+# The fixture is deliberately built to exercise BOTH order-sensitive invariants
+# the batching could break:
+#
+#   1. EVOLVING tracker state / frame order. Stubbed eye and proboscis boxes
+#      drift per frame index, so every tracking-derived field (eye/cls8 centers,
+#      distances, EMA-smoothed positions, ids) changes frame-to-frame. A reorder
+#      or dropped/duplicated frame therefore changes the rows.
+#
+#   2. prev_gray THREADING across chunk boundaries. ``use_optical_flow=True`` and
+#      the frames carry a *moving, richly-textured* pattern (a fixed random
+#      texture translated by ``frame_idx * SHIFT`` via ``np.roll``) so Farneback
+#      flow is nonzero and DETERMINISTIC. On exactly one non-first frame
+#      (``MISSING_PROB_FRAME``) the proboscis detection is omitted, so its
+#      tracker coasts (``time_since_update > 0``) and ``_process_frame`` calls
+#      ``_flow_nudge(prev_gray, gray, ...)`` -- the ONLY consumer of prev_gray.
+#      MISSING_PROB_FRAME=3 is the start of chunk 2 when B=3, so a regression
+#      that dropped prev_gray at a chunk boundary would feed ``None`` into the
+#      nudge and the row at frame 3 would diverge from the sequential reference.
+#
+# Uniform ``np.full((...), i)`` frames were rejected on purpose: they produce
+# ZERO optical flow, leaving prev_gray computed-but-never-consumed.
+# ===========================================================================
+
+import numpy as np
+
+from fbpipe.config import Settings
+from fbpipe.steps import yolo_infer
+from fbpipe.steps.yolo_infer import (
+    SINGLE_TRACK_CLASSES,
+    _build_proboscis_tracker,
+    _process_frame,
+    _run_chunked_inference,
+)
+from fbpipe.utils.multi_fly import EyeAnchorManager, StablePairing
+from fbpipe.utils.track import SingleClassTracker
+from fbpipe.utils import track as track_module
+
+# Full-size frame so detection coords (hundreds of px) and the frame-size-scaled
+# pairer rebind radius are compatible.
+H = W = 1080
+N_FRAMES = 8
+AX, AY = 540.0, 540.0
+
+# Proboscis (PROBOSCIS_CLASS == 1) drifts each frame and stays between/near the
+# eyes so the eye->proboscis distance gate keeps the match alive. The box is made
+# large (90x90) on purpose: ``_flow_nudge`` crops the (coasted) track box and
+# skips ``flow_skip_edge`` px on each side, so a tiny box would leave nothing to
+# run Farneback on.
+PROB_X0, PROB_Y0, PROB_X1, PROB_Y1 = 210.0, 60.0, 300.0, 150.0
+
+# Per-frame motion for optical flow. A FIXED random texture (rich gradients at
+# all scales -> no Farneback aperture problem) translated horizontally by
+# ``i * SHIFT`` via np.roll gives an exact, deterministic median flow of SHIFT px
+# in x. (Periodic stripes / solid blobs / linear ramps all measured ZERO flow
+# here; random texture is what makes prev_gray observably affect the rows.)
+SHIFT = 6
+_TEXTURE = np.random.default_rng(0).integers(0, 256, size=(H, W), dtype=np.uint8)
+
+# One non-first frame with the proboscis detection MISSING, so the proboscis
+# tracker coasts and _flow_nudge(prev_gray, ...) is invoked. Index 3 is the start
+# of chunk 2 when batch_size == 3 -> lands on a chunk boundary, exercising
+# prev_gray threading ACROSS that boundary.
+MISSING_PROB_FRAME = 3
+
+
+class _CannedResult:
+    """Opaque per-frame stand-in for an Ultralytics Results object."""
+
+    def __init__(self, frame_index: int):
+        self.frame_index = frame_index
+
+
+# One canned result per frame index. The chunked stub and the sequential
+# reference both look these up by frame index, so they consume the EXACT
+# same result objects.
+CANNED = [_CannedResult(i) for i in range(N_FRAMES)]
+
+
+def _make_frame(i: int) -> np.ndarray:
+    """Frame i: the fixed texture rolled by ``i * SHIFT`` px in x (deterministic
+    horizontal motion for Farneback), with the frame index stamped into the
+    top-left corner pixel so the stub can key its canned result off it.
+
+    The 4x4 corner is zeroed first so the rolled texture never clobbers the
+    index marker, and the marker sits OUTSIDE every proboscis box, so it never
+    perturbs the optical-flow crop.
+    """
+    rolled = np.roll(_TEXTURE, i * SHIFT, axis=1)
+    frame = np.ascontiguousarray(np.repeat(rolled[:, :, None], 3, axis=2).astype(np.uint8))
+    frame[0:4, 0:4, :] = 0
+    frame[0, 0, 0] = i
+    return frame
+
+
+def _detections_for_frame(i: int):
+    """Deterministic per-frame detections so tracking evolves reproducibly.
+
+    Eyes drift a little each frame; the proboscis sits between the two eyes and
+    drifts with them. On ``MISSING_PROB_FRAME`` the proboscis detection is empty
+    so its tracker coasts and the prev_gray-consuming flow nudge fires. The same
+    mapping is used by reference and chunked runs (keyed by frame index), so any
+    divergence in output rows is purely an ordering/state bug in the helper --
+    which is exactly what this test must catch.
+    """
+    drift = float(i)
+    eye_boxes = np.array(
+        [
+            [100.0 + drift, 100.0, 110.0 + drift, 110.0],
+            [400.0 - drift, 100.0, 410.0 - drift, 110.0],
+        ],
+        dtype=np.float32,
+    )
+    eye_scores = np.array([0.95, 0.90], dtype=np.float32)
+    if i == MISSING_PROB_FRAME:
+        prob_box = np.zeros((0, 4), dtype=np.float32)
+        prob_scores = np.zeros((0,), dtype=np.float32)
+    else:
+        prob_box = np.array(
+            [[PROB_X0 + drift, PROB_Y0, PROB_X1 + drift, PROB_Y1]], dtype=np.float32
+        )
+        prob_scores = np.array([0.98], dtype=np.float32)
+    return {
+        0: {"boxes": eye_boxes, "scores": eye_scores},
+        1: {"boxes": prob_box, "scores": prob_scores},
+    }
+
+
+def _install_collect_detections(monkeypatch):
+    """Map a canned result -> deterministic detections keyed by frame index."""
+
+    def fake_collect(result, classes):
+        return _detections_for_frame(result.frame_index)
+
+    monkeypatch.setattr(yolo_infer, "collect_detections", fake_collect)
+
+
+def _make_settings() -> Settings:
+    return Settings(
+        model_path="model.pt",
+        main_directories="/tmp/videos",
+        max_flies=2,
+        conf_thres=0.40,
+        # Optical flow ON so prev_gray is actually CONSUMED (via _flow_nudge on
+        # the coasting proboscis track at MISSING_PROB_FRAME), not just threaded.
+        use_optical_flow=True,
+    )
+
+
+def _make_collaborators(cfg: Settings, active_max_flies: int):
+    """Build a fresh, independently-seeded collaborator set exactly as main() does.
+
+    Caller MUST reset ``track_module.Track._next_id = 1`` immediately before
+    calling this, otherwise the process-global track id counter leaks across
+    sets and ``cls8_*_track_id`` diverges between reference and chunked runs.
+    """
+    single_trackers = {
+        cls: SingleClassTracker(
+            iou_thres=cfg.iou_match_thres, max_age=cfg.max_age, ema_alpha=cfg.ema_alpha
+        )
+        for cls in SINGLE_TRACK_CLASSES
+    }
+    eye_mgr = EyeAnchorManager(max_eyes=active_max_flies, zero_iou_eps=cfg.zero_iou_epsilon)
+    cls8_tracker = _build_proboscis_tracker(cfg, active_max_flies)
+    pairer = StablePairing(max_pairs=active_max_flies)
+    pairer.rebind_max_dist_px = cfg.pair_rebind_ratio * np.hypot(W, H)
+    return single_trackers, eye_mgr, cls8_tracker, pairer
+
+
+class _FakeVideoCapture:
+    """Yields N textured, moving frames (frame i == ``_make_frame(i)``)."""
+
+    def __init__(self, n_frames: int):
+        self._n = n_frames
+        self._i = 0
+
+    def isOpened(self):
+        return self._i < self._n
+
+    def read(self):
+        if self._i >= self._n:
+            return False, None
+        frame = _make_frame(self._i)
+        self._i += 1
+        return True, frame
+
+    def release(self):
+        pass
+
+
+class _CollectingWriter:
+    """Captures written frames so we can ignore them; rows are what we compare."""
+
+    def __init__(self):
+        self.frames = []
+
+    def write(self, frame):
+        self.frames.append(frame)
+
+    def release(self):
+        pass
+
+
+def _batched_predict_stub(frames, conf):
+    """One canned result per frame, keyed off the frame's index marker pixel."""
+    return [CANNED[int(f[0, 0, 0])] for f in frames]
+
+
+def _rows_equal(a: dict, b: dict) -> bool:
+    """NaN-aware per-key equality: equal iff same keys and each value matches
+    (both NaN counts as equal)."""
+    if a.keys() != b.keys():
+        return False
+    for k in a:
+        va, vb = a[k], b[k]
+        a_nan = isinstance(va, float) and np.isnan(va)
+        b_nan = isinstance(vb, float) and np.isnan(vb)
+        if a_nan and b_nan:
+            continue
+        if a_nan != b_nan:
+            return False
+        if va != vb:
+            return False
+    return True
+
+
+def _build_reference_rows(cfg: Settings, active_max_flies: int):
+    """Sequential reference: loop _process_frame over the same frames in order,
+    threading prev_gray, consuming the SAME canned results."""
+    track_module.Track._next_id = 1
+    single_trackers, eye_mgr, cls8_tracker, pairer = _make_collaborators(cfg, active_max_flies)
+    rows = []
+    prev_gray = None
+    fps = 30.0
+    for i in range(N_FRAMES):
+        frame = _make_frame(i)
+        ts = i / fps
+        frame, row, prev_gray = _process_frame(
+            frame,
+            i,
+            ts,
+            single_trackers,
+            prev_gray,
+            (AX, AY),
+            cfg,
+            CANNED[i],
+            eye_mgr,
+            cls8_tracker,
+            pairer,
+            active_max_flies,
+        )
+        rows.append(row)
+    return rows
+
+
+@pytest.mark.parametrize("batch_size", [1, 3, 4, 8])
+def test_chunked_inference_matches_sequential_reference(monkeypatch, batch_size):
+    """_run_chunked_inference must produce rows bit-identical to the sequential
+    reference at every batch size:
+      1 -> serial (one frame per chunk),
+      3 -> partial last batch (3 | 3 | 2); frame 3 is a chunk boundary,
+      4 -> exact multiple, multiple full batches (4 | 4),
+      8 -> single chunk (== N_FRAMES).
+    A single sequential reference is built once; every param compares to it.
+    """
+    _install_collect_detections(monkeypatch)
+    cfg = _make_settings()
+    active_max_flies = 2
+    fps = 30.0
+    timestamps = {}  # falls back to frame_idx / fps inside the helper
+
+    # Build the single sequential reference (its own seeded collaborators).
+    reference_rows = _build_reference_rows(cfg, active_max_flies)
+    assert len(reference_rows) == N_FRAMES
+
+    # Build a fresh chunked run: fresh cap, fresh writer, fresh collaborators,
+    # and crucially reset the process-global track id counter first.
+    track_module.Track._next_id = 1
+    single_trackers, eye_mgr, cls8_tracker, pairer = _make_collaborators(cfg, active_max_flies)
+    cap = _FakeVideoCapture(N_FRAMES)
+    writer = _CollectingWriter()
+
+    chunked_rows = _run_chunked_inference(
+        cap,
+        N_FRAMES - 1,           # max_frame: per-frame cap (last decodable index)
+        (W, H),                 # target_wh == frame size -> exercises .copy() path
+        writer,
+        timestamps,
+        fps,
+        (AX, AY),
+        cfg,
+        _batched_predict_stub,
+        single_trackers,
+        None,                   # prev_gray starts None
+        eye_mgr,
+        cls8_tracker,
+        pairer,
+        active_max_flies,
+        batch_size,
+    )
+
+    assert len(chunked_rows) == N_FRAMES, (
+        f"batch_size={batch_size}: expected {N_FRAMES} rows, got {len(chunked_rows)}"
+    )
+    assert len(writer.frames) == N_FRAMES, (
+        f"batch_size={batch_size}: writer received {len(writer.frames)} frames, "
+        f"expected {N_FRAMES}"
+    )
+
+    # Guard against a vacuous comparison: the coasting-proboscis frame MUST have
+    # been nudged by prev_gray-driven optical flow. With prev_gray threaded
+    # correctly the nudge shifts the proboscis x by ~SHIFT px relative to its
+    # un-nudged Kalman prediction; if prev_gray were dropped the nudge is a no-op
+    # and this value would be different. We assert the nudged value is present so
+    # a future fixture change can't silently make the flow path inert.
+    nudged_x = reference_rows[MISSING_PROB_FRAME]["cls8_0_x"]
+    prev_x = reference_rows[MISSING_PROB_FRAME - 1]["cls8_0_x"]
+    assert not np.isnan(nudged_x), (
+        "fixture regression: proboscis match lost at the coast frame; the "
+        "prev_gray flow path is no longer exercised"
+    )
+    assert abs(nudged_x - prev_x) > SHIFT / 2.0, (
+        "fixture regression: coast-frame proboscis x barely moved; optical flow "
+        f"nudge appears inert (nudged={nudged_x}, prev={prev_x})"
+    )
+
+    for i, (ref, got) in enumerate(zip(reference_rows, chunked_rows)):
+        assert _rows_equal(ref, got), (
+            f"batch_size={batch_size}: row {i} diverged from sequential reference\n"
+            f"  reference={ref}\n  chunked  ={got}"
+        )
+
+
+# ===========================================================================
+# Task 5 Step 2: Edge / mitigation tests for _run_chunked_inference
+# ===========================================================================
+
+class _CountingWriter:
+    """Minimal writer that counts write() calls (no frame storage needed)."""
+
+    def __init__(self):
+        self.call_count = 0
+
+    def write(self, frame):
+        self.call_count += 1
+
+    def release(self):
+        pass
+
+
+def _trivial_predict(frames, conf):
+    """Stub batched_predict_fn returning one _CannedResult per frame.
+    Keys off the index marker pixel (frame[0,0,0]), same as _batched_predict_stub.
+    Extended CANNED list is not needed here because we only use frame indices 0..9;
+    we build a local result on the fly."""
+    return [_CannedResult(int(f[0, 0, 0])) for f in frames]
+
+
+def _run_edge(
+    monkeypatch,
+    n_frames: int,
+    batch_size: int,
+    max_frame: int = None,
+    predict_fn=None,
+):
+    """Drive _run_chunked_inference with a fresh cap/writer/collaborators and
+    return (rows, writer) so callers can assert row counts and write counts."""
+    _install_collect_detections(monkeypatch)
+    cfg = _make_settings()
+    active_max_flies = 2
+    fps = 30.0
+    timestamps = {}
+    if max_frame is None:
+        max_frame = n_frames - 1
+    if predict_fn is None:
+        predict_fn = _trivial_predict
+
+    track_module.Track._next_id = 1
+    single_trackers, eye_mgr, cls8_tracker, pairer = _make_collaborators(cfg, active_max_flies)
+    cap = _FakeVideoCapture(n_frames)
+    writer = _CountingWriter()
+
+    rows = _run_chunked_inference(
+        cap,
+        max_frame,
+        (W, H),
+        writer,
+        timestamps,
+        fps,
+        (AX, AY),
+        cfg,
+        predict_fn,
+        single_trackers,
+        None,
+        eye_mgr,
+        cls8_tracker,
+        pairer,
+        active_max_flies,
+        batch_size,
+    )
+    return rows, writer
+
+
+# ---------------------------------------------------------------------------
+# Test: partial last batch (N=10, B=3 → chunks 3,3,3,1 → 10 rows)
+# ---------------------------------------------------------------------------
+
+def test_partial_last_batch(monkeypatch):
+    """N=10, batch_size=3 → 4 chunks (3,3,3,1); all 10 frames processed."""
+    rows, writer = _run_edge(monkeypatch, n_frames=10, batch_size=3)
+    assert len(rows) == 10, f"Expected 10 rows, got {len(rows)}"
+    assert writer.call_count == 10, (
+        f"writer.write expected 10 calls, got {writer.call_count}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Test: EOF on a chunk boundary (N=9, B=3 → exactly 3 full chunks, no 4th call)
+# ---------------------------------------------------------------------------
+
+def test_eof_on_chunk_boundary(monkeypatch):
+    """N=9, batch_size=3 → exactly 3 calls to predict (3,3,3); the loop fills
+    a 4th batch and gets empty → ``if not batch_frames: break`` fires without
+    ever calling predict([]).  The stub asserts it is never called with [].
+    """
+    call_count = {"n": 0}
+
+    def strict_predict(frames, conf):
+        assert len(frames) > 0, "predict must never be called with an empty list"
+        call_count["n"] += 1
+        return [_CannedResult(int(f[0, 0, 0])) for f in frames]
+
+    rows, writer = _run_edge(monkeypatch, n_frames=9, batch_size=3, predict_fn=strict_predict)
+    assert len(rows) == 9, f"Expected 9 rows, got {len(rows)}"
+    assert call_count["n"] == 3, (
+        f"Expected predict called exactly 3 times, got {call_count['n']}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Test: max_frame cap (N=10 decodable, max_frame=5 → frames 0..5 → 6 rows)
+# ---------------------------------------------------------------------------
+
+def test_max_frame_cap(monkeypatch):
+    """max_frame=5 stops processing after frame index 5; the cap could yield 10
+    frames but the per-frame guard ``frame_idx <= max_frame`` prevents reading
+    past index 5.  Exactly 6 frames (indices 0–5 inclusive) must be processed."""
+    rows, writer = _run_edge(monkeypatch, n_frames=10, batch_size=3, max_frame=5)
+    assert len(rows) == 6, f"Expected 6 rows (frames 0..5), got {len(rows)}"
+    assert writer.call_count == 6, (
+        f"writer.write expected 6 calls, got {writer.call_count}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Test: truncated results → AssertionError (fail-loud guard)
+# ---------------------------------------------------------------------------
+
+def test_truncated_results_raises(monkeypatch):
+    """If batched_predict_fn returns fewer results than frames in the batch the
+    helper must raise AssertionError (from ``assert len(results) == len(batch_frames)``).
+    """
+
+    def short_predict(frames, conf):
+        results = [_CannedResult(int(f[0, 0, 0])) for f in frames]
+        # Drop the last result to simulate a truncated engine response.
+        return results[:-1] if len(results) > 1 else results
+
+    with pytest.raises(AssertionError):
+        _run_edge(monkeypatch, n_frames=4, batch_size=4, predict_fn=short_predict)

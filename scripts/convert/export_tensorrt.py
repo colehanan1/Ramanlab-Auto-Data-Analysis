@@ -33,6 +33,10 @@ def main():
         help="Path to pipeline configuration YAML.",
     )
     parser.add_argument("--model-path", default=None, help="Override the YOLO model path.")
+    parser.add_argument("--batch", type=int, default=32,
+                        help="Max batch size for the engine's dynamic profile (default 32).")
+    parser.add_argument("--dynamic", action=argparse.BooleanOptionalAction, default=True,
+                        help="Build a dynamic-batch engine (accepts 1..--batch frames). Use --no-dynamic for a static batch-1 engine.")
     args = parser.parse_args()
 
     model_path_value = args.model_path or load_settings(args.config).model_path
@@ -59,10 +63,15 @@ def main():
     log.info("Exporting to TensorRT engine (this may take 5-15 minutes)...")
     log.info("Using FP16 precision for RTX 3090 Tensor Cores")
 
-    model.export(format="engine", half=True, device="cuda:0")
+    model.export(format="engine", half=True, device="cuda:0",
+                 dynamic=args.dynamic, batch=args.batch)
 
     log.info(f"✓ TensorRT engine created: {engine_path}")
     log.info("YOLO inference will now use this optimized engine automatically")
+    if args.dynamic:
+        log.info(
+            "Dynamic engine built (max batch %d). To enable batching set yolo.engine_supports_batch: true "
+            "(or ENGINE_SUPPORTS_BATCH=true) and INFERENCE_BATCH_SIZE<=%d.", args.batch, args.batch)
 
 if __name__ == "__main__":
     main()

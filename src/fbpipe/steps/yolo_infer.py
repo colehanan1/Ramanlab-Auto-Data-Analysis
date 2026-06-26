@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import math
+import os
 import time
 
 import cv2
@@ -180,16 +181,14 @@ def _process_frame(
     prev_gray,
     anchor,
     settings: Settings,
-    predict_fn,
+    result,
     eye_mgr: EyeAnchorManager,
     cls8_tracker: MultiObjectTracker,
     pairer: StablePairing,
     active_max_flies: int,
 ):
-    conf_thres = settings.conf_thres
     flow_params = dict(pyr_scale=0.5, levels=3, winsize=15, iterations=3, poly_n=5, poly_sigma=1.2, flags=0)
 
-    result = predict_fn(frame, conf_thres)[0]
     dets = collect_detections(result, ALL_TRACKED_CLASSES)
 
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
@@ -342,6 +341,37 @@ def _process_frame(
     return frame, row, gray
 
 
+def _run_chunked_inference(cap, max_frame, target_wh, writer, timestamps, fps, anchor,
+                           settings, batched_predict_fn, single_trackers, prev_gray,
+                           eye_mgr, cls8_tracker, pairer, active_max_flies, batch_size):
+    AX, AY = anchor
+    target_w, target_h = target_wh
+    rows, frame_idx, B = [], 0, max(1, batch_size)   # caller already clamped B per engine guard
+    while cap.isOpened():
+        batch_frames, batch_meta = [], []
+        while len(batch_frames) < B and frame_idx <= max_frame:   # per-FRAME max_frame guard
+            ok, frame = cap.read()
+            if not ok or frame is None or frame.size == 0:        # EOF / corrupt-frame guard
+                break
+            h, w = frame.shape[:2]
+            frame = (cv2.resize(frame, (target_w, target_h), interpolation=cv2.INTER_LINEAR)
+                     if (w, h) != (target_w, target_h) else frame.copy())  # break cv2 buffer aliasing
+            batch_meta.append((frame_idx, timestamps.get(frame_idx, frame_idx / fps)))
+            batch_frames.append(frame)
+            frame_idx += 1
+        if not batch_frames:                                      # never predict([])
+            break
+        results = batched_predict_fn(batch_frames, settings.conf_thres)
+        assert len(results) == len(batch_frames)                  # fail loud on engine truncation
+        for frame, (fidx, ts), result in zip(batch_frames, batch_meta, results):
+            frame, row, prev_gray = _process_frame(
+                frame, fidx, ts, single_trackers, prev_gray, (AX, AY),
+                settings, result, eye_mgr, cls8_tracker, pairer, active_max_flies)
+            writer.write(frame)
+            rows.append(row)
+    return rows
+
+
 def _export_per_fly_csvs(
     df: pd.DataFrame,
     out_dir: Path,
@@ -412,6 +442,41 @@ def _is_cuda_failure(exc: Exception) -> bool:
     return any(tok in msg for tok in ("cuda", "cudnn", "cublas", "expandable_segments", "device-side assert", "hip"))
 
 
+def _make_batched_predict_fn(model, get_device, set_device, allow_cpu, *, cuda_empty_cache=None):
+    """Build a batched YOLO predict fn with CUDA OOM sub-batch backoff and optional CPU fallback.
+
+    get_device() -> current device string ('cuda'/'cpu'); set_device(target) switches it.
+    On a CUDA failure: free VRAM, halve the sub-batch and retry the SAME frames; at batch=1,
+    fall back to CPU if allow_cpu, else re-raise. Returns one Results per input image.
+    """
+    def batched_predict_fn(images, conf_thres):
+        bs = len(images)
+        while True:
+            try:
+                out = []
+                for i in range(0, len(images), bs):
+                    out.extend(model.predict(images[i:i+bs], conf=conf_thres,
+                                             verbose=False, device=get_device(), half=True))
+                return out
+            except RuntimeError as exc:
+                if get_device() == "cuda" and _is_cuda_failure(exc):
+                    if cuda_empty_cache is not None:
+                        cuda_empty_cache()
+                    elif torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+                    if bs > 1:
+                        bs = max(1, bs // 2)
+                        log.warning("CUDA OOM/failure at batch; retrying at sub-batch %d", bs)
+                        continue
+                    if allow_cpu:
+                        log.warning("CUDA failed at batch=1 (%s); switching to CPU.", exc)
+                        set_device("cpu")
+                        return model.predict(images, conf=conf_thres, verbose=False,
+                                             device=get_device(), half=False)
+                raise
+    return batched_predict_fn
+
+
 def main(cfg: Settings):
     cuda_available = torch.cuda.is_available()
     use_cuda = cuda_available and not cfg.allow_cpu
@@ -469,28 +534,52 @@ def main(cfg: Settings):
     if device_in_use is None:
         raise RuntimeError("Failed to initialise YOLO device")
 
-    def predict_fn(image, conf_thres):
-        nonlocal device_in_use
-        try:
-            return model.predict(image, conf=conf_thres, verbose=False, device=device_in_use, half=True)
-        except RuntimeError as exc:
-            if device_in_use == "cuda" and cfg.allow_cpu and _is_cuda_failure(exc):
-                log.warning("CUDA inference failed (%s); switching to CPU for the rest of the run.", exc)
-                _set_device("cpu")
-                return model.predict(image, conf=conf_thres, verbose=False, device=device_in_use, half=True)
-            raise
+    batched_predict_fn = _make_batched_predict_fn(
+        model,
+        get_device=lambda: device_in_use,
+        set_device=_set_device,
+        allow_cpu=cfg.allow_cpu,
+    )
+
+    def predict_fn(image, conf_thres):   # single-frame adapter for the warm-up scan
+        return batched_predict_fn([image], conf_thres)
 
     AX, AY = cfg.anchor_x, cfg.anchor_y
 
+    # Optional video-level parallelism: N worker processes each handle a disjoint
+    # slice of the deterministically-ordered video list via global_index % N.
+    # Defaults (1/0) preserve the original single-process behaviour exactly.
+    num_workers = max(1, int(os.getenv("NUM_WORKERS", "1")))
+    worker_index = int(os.getenv("WORKER_INDEX", "0")) % num_workers
+    if num_workers > 1:
+        # Cap OpenCV/torch CPU threads so N workers don't oversubscribe the cores
+        # (BLAS/OpenMP pools are capped via env in the driver, before import).
+        _t = max(1, (os.cpu_count() or num_workers) // num_workers)
+        try:
+            cv2.setNumThreads(_t)
+        except Exception:
+            pass
+        try:
+            torch.set_num_threads(_t)
+        except Exception:
+            pass
+        print(f"[YOLO] worker {worker_index+1}/{num_workers}: every {num_workers}th video, {_t} CPU threads")
+
     roots = get_main_directories(cfg)
-    for root in roots:
+    _job_idx = -1
+    for root in sorted(roots, key=str):
         if not root.is_dir():
             print(f"[YOLO] main_directories entry does not exist: {root}")
             continue
 
-        for fly in [p for p in root.iterdir() if p.is_dir()]:
-            video_files = [f for f in fly.iterdir() if f.suffix.lower() in (".mp4",".avi")]
+        for fly in sorted((p for p in root.iterdir() if p.is_dir()), key=str):
+            video_files = sorted(
+                (f for f in fly.iterdir() if f.suffix.lower() in (".mp4", ".avi")), key=str
+            )
             for video_path in video_files:
+                _job_idx += 1
+                if _job_idx % num_workers != worker_index:
+                    continue
                 base = video_path.stem
                 csv_file_path = fly / f"{base.replace('_preprocessed','')}.csv"
                 parts = base.split("_")
@@ -537,8 +626,16 @@ def main(cfg: Settings):
                 timestamps = {}
                 calculated_fps = cap.get(cv2.CAP_PROP_FPS) or cfg.fps_default
 
+                df_timestamps = None
                 if csv_file_path.exists():
-                    df_timestamps = read_table(csv_file_path)
+                    try:
+                        df_timestamps = read_table(csv_file_path)
+                    except (pd.errors.EmptyDataError, pd.errors.ParserError) as exc:
+                        log.warning(
+                            "Timestamp CSV %s is empty/unparseable (%s); using frame-index timestamps.",
+                            csv_file_path.name, exc,
+                        )
+                if df_timestamps is not None:
                     frame_col = pick_frame_column(df_timestamps)
                     if frame_col is not None:
                         ts_col = pick_timestamp_column(df_timestamps)
@@ -604,33 +701,16 @@ def main(cfg: Settings):
                 target_w, target_h = (1080, 1080) if (w, h) != (1080, 1080) else (w, h)
                 pairer.rebind_max_dist_px = cfg.pair_rebind_ratio * math.hypot(target_w, target_h)
 
-                rows = []
-                prev_gray = None
-                frame_idx = 0
                 t0 = time.time()
-                while cap.isOpened() and frame_idx <= max_frame:
-                    ok, frame = cap.read()
-                    if not ok: break
-                    if (w, h) != (1080, 1080):
-                        frame = cv2.resize(frame, (1080,1080), interpolation=cv2.INTER_LINEAR)
-                    ts = timestamps.get(frame_idx, frame_idx / fps)
-                    frame, row, prev_gray = _process_frame(
-                        frame,
-                        frame_idx,
-                        ts,
-                        single_trackers,
-                        prev_gray,
-                        (AX, AY),
-                        cfg,
-                        predict_fn,
-                        eye_mgr,
-                        cls8_tracker,
-                        pairer,
-                        active_max_flies,
-                    )
-                    writer.write(frame)
-                    rows.append(row)
-                    frame_idx += 1
+                B = max(1, cfg.inference_batch_size) if (not is_engine or cfg.engine_supports_batch) else 1
+                _path_tag = "engine" if is_engine else "pt"
+                _batch_tag = " (engine batch-capable)" if is_engine and cfg.engine_supports_batch else ""
+                log.info("YOLO inference: %s path, effective batch size %d%s", _path_tag, B, _batch_tag)
+                print(f"[YOLO] {video_path.name}: {_path_tag} path, effective batch size {B}{_batch_tag}")
+                rows = _run_chunked_inference(
+                    cap, max_frame, (target_w, target_h), writer, timestamps, fps, (AX, AY),
+                    cfg, batched_predict_fn, single_trackers, None,
+                    eye_mgr, cls8_tracker, pairer, active_max_flies, B)
                 cap.release(); writer.release()
 
                 if out_mp4.exists():
