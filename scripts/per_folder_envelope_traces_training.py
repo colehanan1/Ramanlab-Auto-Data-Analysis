@@ -172,8 +172,8 @@ TRAINING_ODOR_SCHEDULE_AIR = {
     5: HEXANOL_LABEL, 6: "AIR", 7: HEXANOL_LABEL, 8: "AIR",
 }
 TRAINING_ODOR_SCHEDULE_3OCT = {
-    1: "3-Octonol", 2: "3-Octonol", 3: "3-Octonol", 4: "3-Octonol",
-    5: HEXANOL_LABEL, 6: "3-Octonol", 7: HEXANOL_LABEL, 8: "3-Octonol",
+    1: "3-Octanol", 2: "3-Octanol", 3: "3-Octanol", 4: "3-Octanol",
+    5: HEXANOL_LABEL, 6: "3-Octanol", 7: HEXANOL_LABEL, 8: "3-Octanol",
 }
 
 

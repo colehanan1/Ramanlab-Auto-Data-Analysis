@@ -93,7 +93,7 @@ PRIMARY_ODOR_LABEL = {
     "Hex-Control-24-2": HEXANOL_LABEL,
     "Hex-Control-24-002": HEXANOL_LABEL,
     "Benz-Control-24-2": "Benzaldehyde",
-    "3OCT-Control-24-2": "3-Octonol",
+    "3OCT-Control-24-2": "3-Octanol",
 }
 
 
@@ -129,7 +129,7 @@ def _resolve_odor_name(dataset: str, trial_label: str) -> str:
         if number in (2, 4, 5):
             return "AIR"
         m = {6: "Apple Cider Vinegar", 7: "Ethyl Butyrate",
-             8: "Benzaldehyde", 9: "Citral", 10: "3-Octonol"}
+             8: "Benzaldehyde", 9: "Citral", 10: "3-Octanol"}
         return m.get(number, trial_label)
 
     # 3OCT-Training testing
@@ -137,7 +137,7 @@ def _resolve_odor_name(dataset: str, trial_label: str) -> str:
         if number in (1, 3):
             return HEXANOL_LABEL
         if number in (2, 4, 5):
-            return "3-Octonol"
+            return "3-Octanol"
         m = {6: "Apple Cider Vinegar", 7: "Ethyl Butyrate",
              8: "Benzaldehyde", 9: "Citral", 10: "Linalool"}
         return m.get(number, trial_label)
@@ -157,15 +157,15 @@ def _resolve_odor_name(dataset: str, trial_label: str) -> str:
 
     # Novel odor mappings for trials 6-10+
     novel = {
-        "Benz-Control": {6: "Apple Cider Vinegar", 7: "3-Octonol",
+        "Benz-Control": {6: "Apple Cider Vinegar", 7: "3-Octanol",
                          8: "Ethyl Butyrate", 9: "Citral", 10: "Linalool"},
-        "Benz-Training": {6: "Apple Cider Vinegar", 7: "3-Octonol",
+        "Benz-Training": {6: "Apple Cider Vinegar", 7: "3-Octanol",
                           8: "Ethyl Butyrate", 9: "Citral", 10: "Linalool"},
-        "EB-Control": {6: "Apple Cider Vinegar", 7: "3-Octonol",
+        "EB-Control": {6: "Apple Cider Vinegar", 7: "3-Octanol",
                        8: "Benzaldehyde", 9: "Citral", 10: "Linalool"},
-        "Hex-Control": {6: "Benzaldehyde", 7: "3-Octonol",
+        "Hex-Control": {6: "Benzaldehyde", 7: "3-Octanol",
                         8: "Ethyl Butyrate", 9: "Citral", 10: "Linalool"},
-        "ACV-Training": {6: "3-Octonol", 7: "Ethyl Butyrate",
+        "ACV-Training": {6: "3-Octanol", 7: "Ethyl Butyrate",
                          8: "Benzaldehyde", 9: "Citral", 10: "Linalool"},
     }
     if ds_alias in novel:

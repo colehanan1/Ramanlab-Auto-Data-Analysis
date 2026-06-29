@@ -1638,6 +1638,9 @@ def _run_reactions(settings: Settings, config_path: Path | None = None) -> None:
             cmd.append("--overwrite")
         if config_path is not None:
             cmd.extend(["--config", str(config_path)])
+        # Run the reaction figures in the config's experiment protocol so legacy
+        # datasets (labels without odor suffixes) don't hit the v2-only code path.
+        cmd.extend(["--protocol", str(settings.protocol)])
 
         print("[analysis] reactions.matrix →", " ".join(cmd))
         subprocess.run(cmd, check=True, env=env)
@@ -1673,6 +1676,7 @@ def _run_reactions(settings: Settings, config_path: Path | None = None) -> None:
                 tvc_cmd.append("--overwrite")
             if config_path is not None:
                 tvc_cmd.extend(["--config", str(config_path)])
+            tvc_cmd.extend(["--protocol", str(settings.protocol)])
             print("[analysis] reactions.train_vs_ctrl →", " ".join(tvc_cmd))
             subprocess.run(tvc_cmd, check=True, env=env)
         else:
@@ -1699,6 +1703,7 @@ def _run_reactions(settings: Settings, config_path: Path | None = None) -> None:
                 score_cmd.extend(["--flagged-flies-csv", flagged_csv])
             if config_path is not None:
                 score_cmd.extend(["--config", str(config_path)])
+            score_cmd.extend(["--protocol", str(settings.protocol)])
             print("[analysis] score_summary →", " ".join(score_cmd))
             subprocess.run(score_cmd, check=True, env=env)
         else:
@@ -1710,6 +1715,7 @@ def _run_pipeline(
     *,
     main_directory: str | None = None,
     steps: Sequence[str] | None = None,
+    num_workers: int = 1,
 ) -> None:
     cmd = [sys.executable, "-m", "fbpipe.pipeline", "--config", str(config_path)]
     if steps:
@@ -1717,7 +1723,6 @@ def _run_pipeline(
     else:
         cmd.append("all")
     suffix = f" (MAIN_DIRECTORY={main_directory})" if main_directory else ""
-    print(f"[analysis] pipeline{suffix} → {' '.join(cmd)}")
     env = os.environ.copy()
     if main_directory:
         env["MAIN_DIRECTORY"] = main_directory
@@ -1726,13 +1731,38 @@ def _run_pipeline(
     if pythonpath:
         extra_paths.append(pythonpath)
     env["PYTHONPATH"] = os.pathsep.join(extra_paths)
-    try:
-        subprocess.run(cmd, check=True, env=env)
-    except subprocess.CalledProcessError as e:
-        print(f"[ERROR] Pipeline failed with exit code {e.returncode}")
-        if e.stderr:
-            print(e.stderr.decode() if hasattr(e.stderr, "decode") else e.stderr)
-        raise
+
+    n = max(1, int(num_workers))
+    if n <= 1:
+        print(f"[analysis] pipeline{suffix} → {' '.join(cmd)}")
+        try:
+            subprocess.run(cmd, check=True, env=env)
+        except subprocess.CalledProcessError as e:
+            print(f"[ERROR] Pipeline failed with exit code {e.returncode}")
+            if e.stderr:
+                print(e.stderr.decode() if hasattr(e.stderr, "decode") else e.stderr)
+            raise
+        return
+
+    # Parallel YOLO: launch N worker processes, each handling a disjoint 1/N
+    # slice of the deterministically-ordered video list (yolo_infer.main reads
+    # NUM_WORKERS / WORKER_INDEX). Same mechanism as scripts/pipeline/
+    # parallel_yolo.py, inlined so a single run_workflows run fans out the step.
+    # Only valid for the YOLO step — other steps are not worker-sliced, so the
+    # caller must pass num_workers>1 only for steps=("yolo",).
+    print(f"[analysis] pipeline{suffix} → {n} parallel workers: {' '.join(cmd)}")
+    procs = []
+    for i in range(n):
+        worker_env = dict(env)
+        worker_env["NUM_WORKERS"] = str(n)
+        worker_env["WORKER_INDEX"] = str(i)
+        procs.append(subprocess.Popen(cmd, env=worker_env))
+    return_codes = [p.wait() for p in procs]
+    failed = [(i, rc) for i, rc in enumerate(return_codes) if rc != 0]
+    if failed:
+        idx, rc = failed[0]
+        print(f"[ERROR] {len(failed)} of {n} YOLO worker(s) failed; first: worker {idx} exit {rc}")
+        raise subprocess.CalledProcessError(rc, cmd)
 
 
 def main(argv: Sequence[str] | None = None) -> None:
@@ -1931,7 +1961,12 @@ def main(argv: Sequence[str] | None = None) -> None:
 
             if yolo_targets:
                 for resolved in yolo_targets:
-                    _run_pipeline(config_path, main_directory=resolved, steps=("yolo",))
+                    _run_pipeline(
+                        config_path,
+                        main_directory=resolved,
+                        steps=("yolo",),
+                        num_workers=settings.yolo_num_workers,
+                    )
 
             if pipeline_targets:
                 for resolved, expected in pipeline_targets:
@@ -1973,6 +2008,11 @@ def main(argv: Sequence[str] | None = None) -> None:
             "class2_min": settings.class2_min,
             "class2_max": settings.class2_max,
             "dataset_roots": sorted(dataset_roots) if dataset_roots else [],
+            # Switching legacy<->v2 changes the wide CSV / matrix rules, so the
+            # protocol must be part of the cache key; otherwise a legacy run
+            # after a v2 run (or vice versa) would hash-skip and reuse the wrong
+            # figures.
+            "protocol": settings.protocol,
         }
         pair_cfg_input = combined_cfg_input.get("pair_groups")
         pair_expected: list[dict[str, Any]] = []

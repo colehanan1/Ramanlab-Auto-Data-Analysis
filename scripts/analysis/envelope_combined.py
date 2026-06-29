@@ -56,7 +56,7 @@ from fbpipe.utils.trial_metadata import (
     find_sidecar_by_label,
     load_trial_metadata,
 )
-from fbpipe.utils.fly_type import fly_type_for_dir
+from fbpipe.utils.fly_type import UNKNOWN_FLY_TYPE, fly_type_for_dir
 from fbpipe.utils.tables import (
     read_table,
     write_table,
@@ -191,10 +191,37 @@ from scripts.analysis.envelope_visuals import (
     compute_non_reactive_flags,
     generate_envelope_plots,
     generate_reaction_matrices,
+    get_protocol,
     is_non_reactive_span,
     resolve_dataset_output_dir,
     should_write,
 )
+
+
+def _protocol_for_path(path: Path | str | None = None) -> str:
+    """Return the active experiment protocol ('legacy' | 'v2').
+
+    The global protocol (set from ``Settings.protocol`` via ``set_protocol`` at
+    pipeline start — the single source of truth shared with ``envelope_visuals``)
+    is primary. When ``path`` is supplied and its dataset declares a
+    ``DatasetOverride.protocol``, that wins — a clean per-dataset extension point
+    (no override currently sets it, so this reduces to the global protocol).
+    """
+
+    if path is not None and _RUNTIME_SETTINGS is not None:
+        try:
+            override = get_dataset_override(_RUNTIME_SETTINGS, path)
+        except Exception:
+            override = None
+        if override is not None and getattr(override, "protocol", None) in ("legacy", "v2"):
+            return override.protocol
+    return get_protocol()
+
+
+def _is_legacy(path: Path | str | None = None) -> bool:
+    """True when the v1 ("legacy") figure rules should be reproduced."""
+
+    return _protocol_for_path(path) == "legacy"
 
 
 MONTHS = (
@@ -260,6 +287,19 @@ TRIAL_REGEX = re.compile(
     r"(testing|training)_(\d+)(?:_((?!fly\d|distances)[A-Za-z0-9._-]+?))?(?:_fly\d|_distances|$)",
     re.IGNORECASE,
 )
+# v1 ("legacy") regex: group 3 greedily captures the entire suffix after the
+# trial index, so a stem like ``testing_3_Benzaldehyde_fly1_distances_...`` keeps
+# the full ``Benzaldehyde_fly1_distances_...`` as the trial label — matching v1's
+# label strings (and therefore its code_maps / matrix metadata) exactly.
+TRIAL_REGEX_LEGACY = re.compile(r"(testing|training)_(\d+)(?:_(.+))?", re.IGNORECASE)
+
+
+def _trial_regex(path: Path | str | None = None) -> "re.Pattern[str]":
+    """Trial-name regex for the active protocol (legacy = greedy v1 suffix)."""
+
+    return TRIAL_REGEX_LEGACY if _is_legacy(path) else TRIAL_REGEX
+
+
 TESTING_REGEX = re.compile(r"testing_(\d+)(?:_(.+))?", re.IGNORECASE)
 TRAINING_REGEX = re.compile(r"training_(\d+)(?:_(.+))?", re.IGNORECASE)
 FLY_SLOT_REGEX = re.compile(r"(fly\d+)_distances", re.IGNORECASE)
@@ -608,7 +648,7 @@ PRIMARY_ODOR_LABEL = {
     "Benz-Control": "Benzaldehyde",
     "Benz-Control-24-2": "Benzaldehyde",
     "Benz-Control-24-02": "Benzaldehyde",
-    "3OCT-Control-24-2": "3-Octonol",
+    "3OCT-Control-24-2": "3-Octanol",
 }
 
 TRAINING_ODOR_SCHEDULE_DEFAULT = {
@@ -794,34 +834,34 @@ TRAINING_ODOR_SCHEDULE_OVERRIDES = {
         8: "AIR",
     },
     "3OCT-Training": {
-        1: "3-Octonol",
-        2: "3-Octonol",
-        3: "3-Octonol",
-        4: "3-Octonol",
+        1: "3-Octanol",
+        2: "3-Octanol",
+        3: "3-Octanol",
+        4: "3-Octanol",
         5: HEXANOL,
-        6: "3-Octonol",
+        6: "3-Octanol",
         7: HEXANOL,
-        8: "3-Octonol",
+        8: "3-Octanol",
     },
     "3OCT-Training-24-2": {
-        1: "3-Octonol",
-        2: "3-Octonol",
-        3: "3-Octonol",
-        4: "3-Octonol",
+        1: "3-Octanol",
+        2: "3-Octanol",
+        3: "3-Octanol",
+        4: "3-Octanol",
         5: HEXANOL,
-        6: "3-Octonol",
+        6: "3-Octanol",
         7: HEXANOL,
-        8: "3-Octonol",
+        8: "3-Octanol",
     },
     "3OCT-Control-24-2": {
-        1: "3-Octonol",
-        2: "3-Octonol",
-        3: "3-Octonol",
-        4: "3-Octonol",
+        1: "3-Octanol",
+        2: "3-Octanol",
+        3: "3-Octanol",
+        4: "3-Octanol",
         5: HEXANOL,
-        6: "3-Octonol",
+        6: "3-Octanol",
         7: HEXANOL,
-        8: "3-Octonol",
+        8: "3-Octanol",
     },
     "ACV": {
         1: "Apple Cider Vinegar",
@@ -845,8 +885,8 @@ TRAINING_ODOR_SCHEDULE_OVERRIDES = {
     },
     # ── Manual / sucrose-trained fly datasets ──
     "manual_3-octonol": {
-        1: "3-Octonol", 2: "3-Octonol", 3: "3-Octonol",
-        4: "3-Octonol", 5: "3-Octonol", 6: "3-Octonol",
+        1: "3-Octanol", 2: "3-Octanol", 3: "3-Octanol",
+        4: "3-Octanol", 5: "3-Octanol", 6: "3-Octanol",
     },
     "manual_10s_Odor_Benz": {
         1: "Benzaldehyde", 2: "Benzaldehyde", 3: "Benzaldehyde",
@@ -941,7 +981,7 @@ def _display_odor(dataset_canon: str, trial_label: str) -> str:
 
     mapping = {
         "ACV": {
-            6: "3-Octonol",
+            6: "3-Octanol",
             7: "Ethyl Butyrate",
             8: "Benzaldehyde",
             9: "Citral",
@@ -949,16 +989,16 @@ def _display_odor(dataset_canon: str, trial_label: str) -> str:
         },
         "3-octonol": {6: "Benzaldehyde", 7: "Citral", 8: "Linalool"},
         "Benz": {6: "Citral", 7: "Linalool"},
-        "Benz-Control": {6: "Apple Cider Vinegar", 7: "3-Octonol", 8: "Ethyl Butyrate", 9: "Citral", 10: "Linalool"},
-        "EB": {6: "Apple Cider Vinegar", 7: "3-Octonol", 8: "Benzaldehyde", 9: "Citral", 10: "Linalool"},
+        "Benz-Control": {6: "Apple Cider Vinegar", 7: "3-Octanol", 8: "Ethyl Butyrate", 9: "Citral", 10: "Linalool"},
+        "EB": {6: "Apple Cider Vinegar", 7: "3-Octanol", 8: "Benzaldehyde", 9: "Citral", 10: "Linalool"},
         "EB-Control": {
             6: "Apple Cider Vinegar",
-            7: "3-Octonol",
+            7: "3-Octanol",
             8: "Benzaldehyde",
             9: "Citral",
             10: "Linalool",
         },
-        "Hex-Control": {6: "Benzaldehyde", 7: "3-Octonol", 8: "Ethyl Butyrate", 9: "Citral", 10: "Linalool"},
+        "Hex-Control": {6: "Benzaldehyde", 7: "3-Octanol", 8: "Ethyl Butyrate", 9: "Citral", 10: "Linalool"},
         "10s_Odor_Benz": {6: "Benzaldehyde", 7: "Benzaldehyde"},
         "AIR-Training": {
             1: "Hexanol",
@@ -970,10 +1010,10 @@ def _display_odor(dataset_canon: str, trial_label: str) -> str:
             7: "Ethyl Butyrate",
             8: "Benzaldehyde",
             9: "Citral",
-            10: "3-Octonol",
+            10: "3-Octanol",
         },
         "ACV-Training": {
-            6: "3-Octonol",
+            6: "3-Octanol",
             7: "Ethyl Butyrate",
             8: "Benzaldehyde",
             9: "Citral",
@@ -995,8 +1035,8 @@ def _display_odor(dataset_canon: str, trial_label: str) -> str:
         },
         # ── Manual / sucrose-trained fly datasets ──
         "manual_3-octonol": {
-            1: "Hexanol", 2: "3-Octonol", 3: "Hexanol", 4: "3-Octonol",
-            5: "3-Octonol", 6: "Benzaldehyde", 7: "Citral", 8: "Linalool",
+            1: "Hexanol", 2: "3-Octanol", 3: "Hexanol", 4: "3-Octanol",
+            5: "3-Octanol", 6: "Benzaldehyde", 7: "Citral", 8: "Linalool",
         },
         "manual_10s_Odor_Benz": {
             1: "Hexanol", 2: "Benzaldehyde", 3: "Hexanol", 4: "Benzaldehyde",
@@ -1005,7 +1045,7 @@ def _display_odor(dataset_canon: str, trial_label: str) -> str:
         "manual_ACV": {
             1: "Hexanol", 2: "Apple Cider Vinegar", 3: "Hexanol",
             4: "Apple Cider Vinegar", 5: "Apple Cider Vinegar",
-            6: "3-Octonol", 7: "Ethyl Butyrate", 8: "Benzaldehyde", 9: "Citral",
+            6: "3-Octanol", 7: "Ethyl Butyrate", 8: "Benzaldehyde", 9: "Citral",
         },
         "manual_Benz": {
             1: "Hexanol", 2: "Benzaldehyde", 3: "Hexanol",
@@ -1014,13 +1054,13 @@ def _display_odor(dataset_canon: str, trial_label: str) -> str:
         "manual_EB": {
             1: "Hexanol", 2: "Ethyl Butyrate", 3: "Hexanol",
             4: "Ethyl Butyrate", 5: "Ethyl Butyrate",
-            6: "Apple Cider Vinegar", 7: "3-Octonol", 8: "Benzaldehyde",
+            6: "Apple Cider Vinegar", 7: "3-Octanol", 8: "Benzaldehyde",
             9: "Citral", 10: "Linalool",
         },
         "manual_ret_EB": {
             1: "Hexanol", 2: "Ethyl Butyrate", 3: "Hexanol",
             4: "Ethyl Butyrate", 5: "Ethyl Butyrate",
-            6: "Apple Cider Vinegar", 7: "3-Octonol", 8: "Benzaldehyde",
+            6: "Apple Cider Vinegar", 7: "3-Octanol", 8: "Benzaldehyde",
             9: "Citral", 10: "Linalool",
         },
     }
@@ -1199,15 +1239,17 @@ def _is_month_folder(path: Path) -> bool:
 def _infer_category(path: Path) -> str:
     # Per-dataset override (e.g. RandomPanel: every trial folder is named
     # ``..._training_N`` even though the trials are actually testing) wins
-    # over folder/cycle heuristics.
-    cfg = _RUNTIME_SETTINGS
-    if cfg is not None:
-        try:
-            override = get_dataset_override(cfg, path)
-        except Exception:
-            override = None
-        if override is not None and override.trial_type_override in ("training", "testing"):
-            return override.trial_type_override
+    # over folder/cycle heuristics. This is a v2 mechanism; the legacy protocol
+    # reproduces v1, which used filename/path heuristics only.
+    if not _is_legacy(path):
+        cfg = _RUNTIME_SETTINGS
+        if cfg is not None:
+            try:
+                override = get_dataset_override(cfg, path)
+            except Exception:
+                override = None
+            if override is not None and override.trial_type_override in ("training", "testing"):
+                return override.trial_type_override
 
     # Prioritize filename over parent folder names to handle cases like
     # "opto_EB(6-training)/.../_testing_1_..." where parent has "training"
@@ -1295,16 +1337,18 @@ def _get_odor_map(fly_dir: Path) -> dict[str, str]:
 
 
 def _trial_label(path: Path, odor_map: dict[str, str] | None = None) -> str:
-    match = TRIAL_REGEX.search(path.stem)
+    regex = _trial_regex(path)
+    match = regex.search(path.stem)
     if not match:
         chain = f"{path.stem}/" + "/".join(parent.name for parent in path.parents)
-        match = TRIAL_REGEX.search(chain)
+        match = regex.search(chain)
     if match:
         label = f"{match.group(1).lower()}_{match.group(2)}"
         if match.group(3):
             label += f"_{match.group(3)}"
-        elif odor_map:
-            # No odor suffix in filename — look up from recording CSV names
+        elif odor_map and not _is_legacy(path):
+            # No odor suffix in filename — look up from recording CSV names.
+            # v1 ("legacy") has no odor-map concept, so this is v2-only.
             odor = odor_map.get(label)
             if odor:
                 label += f"_{odor}"
@@ -1387,8 +1431,10 @@ def _locate_trials(
         print(f"[WARN] {fly_dir.name}: no trial CSVs matched patterns {patterns}")
         return []
 
-    # Build odor map from original recording CSVs in this fly directory
-    odor_map = _get_odor_map(fly_dir)
+    # Build odor map from original recording CSVs in this fly directory (v2
+    # only). Legacy reproduces v1, which has no odor-map concept, so skip the
+    # scan entirely (also avoids the flys_New / secured alt-path filesystem walk).
+    odor_map = {} if _is_legacy(fly_dir) else _get_odor_map(fly_dir)
     if odor_map:
         print(f"[DEBUG] {fly_dir.name}: odor map from recordings: {odor_map}")
 
@@ -2090,9 +2136,15 @@ def combine_distance_angle(cfg: CombineConfig) -> None:
     odor_on_cmd = cfg.odor_on_s
     odor_off_cmd = cfg.odor_off_s
     # PER-trace visualization uses commanded odor window (30-60 s). Latency
-    # offset is applied only to the model's reaction detection window.
-    odor_on_effective = odor_on_cmd
-    odor_off_effective = odor_off_cmd
+    # offset is applied only to the model's reaction detection window. v1
+    # ("legacy") drew the trial-plot odor markers at the latency-shifted time,
+    # so reproduce that under the legacy protocol (figure markers only).
+    if _is_legacy(cfg.root):
+        odor_on_effective = odor_on_cmd + odor_latency
+        odor_off_effective = odor_off_cmd + odor_latency
+    else:
+        odor_on_effective = odor_on_cmd
+        odor_off_effective = odor_off_cmd
     dataset_canon = _canon_dataset(cfg.root.name)
 
     for fly_dir in sorted(p for p in cfg.root.iterdir() if p.is_dir()):
@@ -2618,8 +2670,18 @@ def build_wide_csv(
             fly = fly_dir.name
             # Resolve canonical genotype from the batch's session_metadata.txt and
             # ntfy-alert (once) on any uncatalogued "Fly Type:" so it can be added.
-            fly_type = fly_type_for_dir(fly_dir, alert_new=True, context=f"{dataset}/{fly}")
-            print(f"[DEBUG] build_wide_csv: scanning fly_dir={fly_dir} fly_type={fly_type}")
+            # v1 ("legacy") has no genotype concept and no session_metadata.txt, so
+            # skip the lookup there (fly_type is not written into the wide CSV).
+            if _is_legacy(fly_dir):
+                # Legacy (v1) has no genotype concept and no session_metadata.txt;
+                # keep a neutral placeholder so the per-trial items dict stays
+                # uniform. The fly_type column itself is dropped from the legacy
+                # schema below (see meta_prefix), preserving v1 byte-for-byte.
+                fly_type = UNKNOWN_FLY_TYPE
+                print(f"[DEBUG] build_wide_csv: scanning fly_dir={fly_dir}")
+            else:
+                fly_type = fly_type_for_dir(fly_dir, alert_new=True, context=f"{dataset}/{fly}")
+                print(f"[DEBUG] build_wide_csv: scanning fly_dir={fly_dir} fly_type={fly_type}")
             for csv_path in _find_trial_csvs(fly_dir):
                 trial_type = _infer_category(csv_path).lower()
                 if trial_type_allow is not None and trial_type not in trial_type_allow:
@@ -2658,6 +2720,7 @@ def build_wide_csv(
                         "fly": fly,
                         "fly_key": f"{dataset}::{fly}",
                         "fly_number": fly_number_label,
+                        "fly_type": fly_type,
                         "fly_dir": str(fly_dir),
                         "csv_path": csv_path,
                         "measure_col": measure,
@@ -2688,15 +2751,19 @@ def build_wide_csv(
             continue
         # Read up to the per-trial odor-on frame so the baseline sample for
         # RandomPanel-style short trials does not bleed into the stim window.
-        try:
-            _meta_pre = _resolve_trial_meta_for_csv(csv_path)
-            _before_nrows = (
-                int(_meta_pre.odor_on_frame)
-                if _meta_pre.odor_on_frame is not None
-                else BEFORE_FRAMES
-            )
-        except Exception:
+        # Legacy protocol always uses the hardcoded 1260-frame before window.
+        if _is_legacy(csv_path):
             _before_nrows = BEFORE_FRAMES
+        else:
+            try:
+                _meta_pre = _resolve_trial_meta_for_csv(csv_path)
+                _before_nrows = (
+                    int(_meta_pre.odor_on_frame)
+                    if _meta_pre.odor_on_frame is not None
+                    else BEFORE_FRAMES
+                )
+            except Exception:
+                _before_nrows = BEFORE_FRAMES
         try:
             df_before = _read_trial_table(
                 csv_path, columns=[measure], nrows=max(1, _before_nrows)
@@ -2726,6 +2793,12 @@ def build_wide_csv(
             fly_before_medians[key] = float(np.nanmedian(merged))
 
     meta_prefix = ["dataset", "fly", "fly_number"]
+    # v2 records a per-batch genotype ("fly_type") so result figures can be
+    # split by genotype. Placed right after fly_number to keep the positional
+    # code_maps contract (column_order[2] == "fly_number"). Legacy omits it to
+    # reproduce the v1 wide schema byte-for-byte.
+    if not _is_legacy():
+        meta_prefix = meta_prefix + ["fly_type"]
     stat_columns = [
         "global_min",
         "global_max",
@@ -2746,17 +2819,21 @@ def build_wide_csv(
         "tracking_pct_missing",
         "tracking_flagged",
         "trace_len",
-        # Per-trial window seconds, sourced from the Pi rig sidecar +
-        # ActiveOFM column. Consumed by envelope figure scripts so each
-        # trial's x-axis and odor-shading reflect actual rig timing.
-        "trial_odor_on_s",
-        "trial_odor_off_s",
-        "trial_duration_s",
-        # First optogenetic light-on time (s from recording start), parsed from
-        # the rig sensors_output_*.csv. Consumed by envelope figures to draw
-        # the green "Light pulsing starts" line at the measured time.
-        "trial_light_on_s",
     ]
+    # Per-trial window seconds, sourced from the Pi rig sidecar + ActiveOFM
+    # column (v2 only). Consumed by envelope figure scripts so each trial's
+    # x-axis and odor-shading reflect actual rig timing. The legacy protocol
+    # reproduces v1's wide schema, which has no per-trial seconds columns, so
+    # they are omitted there (schema is uniform per file -> global protocol).
+    if not _is_legacy():
+        stat_columns += [
+            "trial_odor_on_s",
+            "trial_odor_off_s",
+            "trial_duration_s",
+            # First optogenetic light-on time (s from recording start), parsed
+            # from the rig sensors_output_*.csv; draws the green light line.
+            "trial_light_on_s",
+        ]
     meta_suffix = ["trial_type", "trial_label", "fps"]
     metadata = meta_prefix + stat_columns + meta_suffix
     value_cols = [f"dir_val_{idx}" for idx in range(max_len)]
@@ -2799,6 +2876,10 @@ def build_wide_csv(
         ),
     ):
         group_items = list(grouped)
+        # All trials in a (dataset, fly) group share one batch dir => one
+        # genotype, so read it off the first item. UNKNOWN for legacy / sidecar-
+        # less batches; only emitted to the row when not _is_legacy() (below).
+        fly_type = str(group_items[0].get("fly_type", UNKNOWN_FLY_TYPE))
         fly_dir_path = Path(group_items[0]["fly_dir"]).expanduser().resolve()
         slot_choices = sorted(
             {
@@ -2882,12 +2963,17 @@ def build_wide_csv(
             # Pull per-trial windows from the Pi rig sidecar / ActiveOFM CSV
             # so trials with non-standard lengths or odor timing are scored
             # correctly. Falls back to legacy 1260/2460 defaults when sidecars
-            # are missing.
-            try:
-                meta = _resolve_trial_meta_for_csv(csv_path, n_frames_hint=int(len(values)))
-            except Exception as exc:  # pragma: no cover - defensive
-                print(f"[WARN] trial-meta load failed for {csv_path.name}: {exc}")
+            # are missing. Under the legacy protocol we skip sidecar metadata
+            # entirely (meta=None) so every odor window uses the hardcoded
+            # 1260/2460 constants — byte-for-byte v1 behavior.
+            if _is_legacy(csv_path):
                 meta = None
+            else:
+                try:
+                    meta = _resolve_trial_meta_for_csv(csv_path, n_frames_hint=int(len(values)))
+                except Exception as exc:  # pragma: no cover - defensive
+                    print(f"[WARN] trial-meta load failed for {csv_path.name}: {exc}")
+                    meta = None
             odor_on_in = meta.odor_on_frame if meta is not None else None
             odor_off_in = meta.odor_off_frame if meta is not None else None
             metrics = _compute_trial_metrics(
@@ -3140,10 +3226,26 @@ def build_wide_csv(
             ):
                 local_max_during_over_global_min = float(local_max_during_val) / float(baseline_min)
 
+            # v2 emits four per-trial seconds cells; legacy omits them so the
+            # row width matches the legacy stat_columns schema above.
+            _trial_seconds_cells = (
+                []
+                if _is_legacy()
+                else [
+                    result.get("trial_odor_on_s", float("nan")),
+                    result.get("trial_odor_off_s", float("nan")),
+                    result.get("trial_duration_s", float("nan")),
+                    result.get("trial_light_on_s", float("nan")),
+                ]
+            )
+            # v2 emits the genotype cell right after fly_number; legacy omits it
+            # so the row width matches the legacy meta_prefix schema above.
+            _fly_type_cells = [] if _is_legacy() else [fly_type]
             row = [
                 dataset,
                 fly,
                 fly_number_label,
+                *_fly_type_cells,
                 gmin,
                 gmax,
                 trimmed_min_effective,
@@ -3163,10 +3265,7 @@ def build_wide_csv(
                 result.get("tracking_pct_missing", 0.0),
                 result.get("tracking_flagged", False),
                 result.get("trace_len", len(values)),
-                result.get("trial_odor_on_s", float("nan")),
-                result.get("trial_odor_off_s", float("nan")),
-                result.get("trial_duration_s", float("nan")),
-                result.get("trial_light_on_s", float("nan")),
+                *_trial_seconds_cells,
                 result["trial_type"],
                 result["label"],
                 float(result["fps"]),
@@ -3251,6 +3350,10 @@ def wide_to_matrix(input_csv: str, output_dir: str) -> None:
         "dataset",
         "fly",
         "fly_number",
+        # v2-only genotype column; absent from legacy wide CSVs (filtered out
+        # by the `if column in df.columns` guard below) so legacy code_maps are
+        # unchanged. Kept after fly_number to preserve column_order positions.
+        "fly_type",
         "trial_type",
         "trial_label",
         "fps",
@@ -3435,9 +3538,15 @@ def overlay_sources(
     odor_on_cmd = odor_on_s
     odor_off_cmd = odor_off_s
     # PER-trace visualization uses commanded odor window (30-60 s). Latency
-    # offset is reflected only in the linger tail + after-show range.
-    odor_on_effective = odor_on_cmd
-    odor_off_effective = odor_off_cmd
+    # offset is reflected only in the linger tail + after-show range. v1
+    # ("legacy") shifted the overlay odor markers by the latency, so reproduce
+    # that under the legacy protocol (figure markers only, no CSV impact).
+    if _is_legacy():
+        odor_on_effective = odor_on_cmd + odor_latency
+        odor_off_effective = odor_off_cmd + odor_latency
+    else:
+        odor_on_effective = odor_on_cmd
+        odor_off_effective = odor_off_cmd
     linger = max(latency_sec, 0.0)
     x_max = odor_off_effective + linger + after_show_sec
 

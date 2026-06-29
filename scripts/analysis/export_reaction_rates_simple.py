@@ -87,7 +87,7 @@ def compute_reaction_rates(
         elif "benz" in trial_label or "benzaldehyde" in trial_label:
             return "Benzaldehyde"
         elif "oct" in trial_label:
-            return "3-Octonol"
+            return "3-Octanol"
         elif "eb" in trial_label or "ethyl" in trial_label or "butyrate" in trial_label:
             return "Ethyl Butyrate"
         elif "lin" in trial_label or "linalool" in trial_label:

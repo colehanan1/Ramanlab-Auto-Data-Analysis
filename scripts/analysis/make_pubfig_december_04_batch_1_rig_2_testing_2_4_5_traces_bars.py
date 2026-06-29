@@ -3,7 +3,7 @@
 
 Uses combined-base envelope matrix (Distance x Angle %) and renders:
 1) Traces for testing_2, testing_4, testing_5 with shared axes + odor span.
-2) PER% bar plot by odor during testing (ordered: 3-Octonol, ACV, Linalool).
+2) PER% bar plot by odor during testing (ordered: 3-Octanol, ACV, Linalool).
 """
 
 from __future__ import annotations

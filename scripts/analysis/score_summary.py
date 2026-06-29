@@ -38,6 +38,7 @@ from scripts.analysis.envelope_visuals import (
     _is_light_only_label,
     _is_testing_11_label,
     _normalise_fly_columns,
+    _safe_dirname,
     _trained_label,
     _trial_num,
     apply_dataset_odor_remap,
@@ -739,25 +740,29 @@ def _plot_heatmap(
 # ---------------------------------------------------------------------------
 
 
-def generate_score_summary(
-    csv_path: Path,
-    out_dir: Path,
-    *,
-    overwrite: bool = True,
-    non_reactive_threshold: float | None = None,
-    flagged_flies_csv: str = "",
-) -> None:
+def _genotype_score_groups(
+    df: pd.DataFrame, out_dir: Path
+) -> list[tuple[pd.DataFrame, Path]]:
+    """Split scores into per-genotype (df, out_dir) groups.
+
+    When the data spans more than one genotype (``fly_type``), each genotype's
+    flies get their own ``<out_dir>/<genotype>/`` subfolder so genotypes are
+    never pooled in one summary. Single-genotype data — and legacy predictions
+    with no ``fly_type`` column — return one group at ``out_dir`` (unchanged).
+    """
+    if "fly_type" not in df.columns:
+        return [(df, out_dir)]
+    genos = sorted({str(g).strip() for g in df["fly_type"] if str(g).strip()})
+    if len(genos) <= 1:
+        return [(df, out_dir)]
+    return [
+        (df[df["fly_type"].astype(str).str.strip() == g].copy(), out_dir / _safe_dirname(g))
+        for g in genos
+    ]
+
+
+def _summarise_and_plot(df: pd.DataFrame, out_dir: Path, *, overwrite: bool) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
-
-    df = _load_scores(
-        csv_path,
-        threshold=non_reactive_threshold,
-        flagged_flies_csv=flagged_flies_csv,
-    )
-    if df.empty:
-        print("[score_summary] No data after filtering; nothing to plot.")
-        return
-
     summary = _compute_summary(df)
 
     # Export CSV
@@ -777,6 +782,33 @@ def generate_score_summary(
     _plot_heatmap(summary, out_dir, overwrite=overwrite)
     _plot_training_vs_control_bars(train_ctrl_summary, out_dir, overwrite=overwrite)
     print(f"[score_summary] Plots saved to {out_dir}")
+
+
+def generate_score_summary(
+    csv_path: Path,
+    out_dir: Path,
+    *,
+    overwrite: bool = True,
+    non_reactive_threshold: float | None = None,
+    flagged_flies_csv: str = "",
+) -> None:
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    df = _load_scores(
+        csv_path,
+        threshold=non_reactive_threshold,
+        flagged_flies_csv=flagged_flies_csv,
+    )
+    if df.empty:
+        print("[score_summary] No data after filtering; nothing to plot.")
+        return
+
+    # Sort flies by genotype: one full score-summary set per genotype when the
+    # data holds more than one (else a single pooled set, as before).
+    for sub_df, sub_out in _genotype_score_groups(df, out_dir):
+        if sub_df.empty:
+            continue
+        _summarise_and_plot(sub_df, sub_out, overwrite=overwrite)
 
 
 def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:

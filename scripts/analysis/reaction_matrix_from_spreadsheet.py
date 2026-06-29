@@ -46,6 +46,7 @@ from scripts.analysis.envelope_visuals import (
     set_protocol,
     should_write,
     _canon_dataset,
+    _safe_dirname,
     _display_label_ci,
     _display_odor,
     _extract_odor_from_label,
@@ -80,6 +81,21 @@ def _normalise_trial_label(label: str) -> str:
         _re.IGNORECASE,
     )
     return m.group(1) if m else str(label)
+
+
+def _drop_label_only_no_odor_trials(subset):
+    """V2 only: drop trials whose LABEL carries no odor suffix (e.g. RandomPanel
+    light-only trials whose cycle name has no odor token).
+
+    Under the legacy protocol the odor is derived from the hardcoded schedule by
+    trial NUMBER (see ``_display_odor``), so plain ``testing_N`` labels are valid
+    and must be kept — applying the v2 filter there drops every trial and yields
+    an empty "No odors available" matrix.
+    """
+    if get_protocol() != "v2":
+        return subset
+    mask = subset["trial"].apply(lambda t: _extract_odor_from_label(t) == str(t))
+    return subset.loc[~mask].copy() if mask.any() else subset
 
 
 _RC_CONTEXT = {
@@ -230,13 +246,40 @@ def generate_reaction_matrices_from_csv(cfg: SpreadsheetMatrixConfig) -> None:
     ordered_present = [odor for odor in ODOR_ORDER if odor in present]
     extras = sorted(odor for odor in present if odor not in ODOR_ORDER)
 
+    # Per-dataset genotype split: when a dataset (odor) holds more than one
+    # genotype (fly_type), emit one reaction matrix per genotype into a
+    # per-genotype subfolder so different genotypes are never pooled into one
+    # matrix. Single-genotype datasets — and legacy predictions, which carry no
+    # fly_type column — produce one pooled matrix as before. Each unit is an
+    # (odor, genotype-or-None) pair flattened into the existing odor loop so the
+    # render body below is reused verbatim once per genotype.
+    def _genotype_units(odor: str) -> list[tuple[str, str | None]]:
+        if "fly_type" not in df.columns:
+            return [(odor, None)]
+        genos = sorted(
+            {
+                str(g).strip()
+                for g in df.loc[df["dataset_canon"] == odor, "fly_type"]
+                if str(g).strip()
+            }
+        )
+        if len(genos) <= 1:
+            return [(odor, None)]
+        return [(odor, g) for g in genos]
+
+    odor_units: list[tuple[str, str | None]] = []
+    for odor in ordered_present + extras:
+        odor_units.extend(_genotype_units(odor))
+
     # Collect reaction rate statistics for CSV export
     all_rate_stats = []
 
     for order in cfg.trial_orders:
         order_suffix = _order_suffix(order)
-        for odor in ordered_present + extras:
+        for odor, genotype in odor_units:
             subset = df[df["dataset_canon"] == odor]
+            if genotype is not None:
+                subset = subset[subset["fly_type"].astype(str).str.strip() == genotype]
             if subset.empty:
                 continue
 
@@ -284,11 +327,7 @@ def generate_reaction_matrices_from_csv(cfg: SpreadsheetMatrixConfig) -> None:
             # contains underscores so the odor-map regex skips them). For
             # entirely light-only datasets (no odor on any trial), this empties
             # the subset and there's nothing to plot, so skip the odor.
-            no_odor_mask = subset["trial"].apply(
-                lambda t: _extract_odor_from_label(t) == str(t)
-            )
-            if no_odor_mask.any():
-                subset = subset.loc[~no_odor_mask].copy()
+            subset = _drop_label_only_no_odor_trials(subset)
             if subset.empty:
                 print(
                     "[INFO] reaction_matrix_csv: skipping",
@@ -451,7 +490,9 @@ def generate_reaction_matrices_from_csv(cfg: SpreadsheetMatrixConfig) -> None:
                     # Collect rate stats for CSV export
                     for _, row in rate_stats.iterrows():
                         all_rate_stats.append({
-                            "dataset": odor,
+                            # Keep genotype-split datasets distinct in the
+                            # summary pivot so per-genotype rates don't collide.
+                            "dataset": odor if genotype is None else f"{odor} [{genotype}]",
                             "trial_order": order,
                             "trial_num": int(row["trial_num"]) if "trial_num" in row else np.nan,
                             "odor_sent": str(row["odor"]),
@@ -467,6 +508,8 @@ def generate_reaction_matrices_from_csv(cfg: SpreadsheetMatrixConfig) -> None:
                     axis.set_position([pos.x0, new_y0, pos.width, pos.height])
 
                 odor_dir = resolve_dataset_output_dir(cfg.out_dir, odor)
+                if genotype is not None:
+                    odor_dir = odor_dir / _safe_dirname(genotype)
 
                 png_name = (
                     f"reaction_matrix_{odor.replace(' ', '_')}_{int(cfg.after_window_sec)}"

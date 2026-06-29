@@ -138,7 +138,7 @@ def test_24_2_datasets_stay_distinct_but_share_existing_trial_schedules(tmp_path
 
     assert ec._display_odor("Hex-Control-24-2", "training_1") == "Hexanol"
     assert ec._display_odor("Hex-Training-24-2", "testing_6") == "Benzaldehyde"
-    assert ec._display_odor("Benz-Control-24-2", "testing_7") == "3-Octonol"
+    assert ec._display_odor("Benz-Control-24-2", "testing_7") == "3-Octanol"
     assert ec._display_odor("Benz-Training-24-2", "testing_8") == "Ethyl Butyrate"
 
 
@@ -148,21 +148,21 @@ def test_testing_aliases_follow_control_ordering():
     schedules = {
         "EB-Control": {
             6: "Apple Cider Vinegar",
-            7: "3-Octonol",
+            7: "3-Octanol",
             8: "Benzaldehyde",
             9: "Citral",
             10: "Linalool",
         },
         "Hex-Control": {
             6: "Benzaldehyde",
-            7: "3-Octonol",
+            7: "3-Octanol",
             8: "Ethyl Butyrate",
             9: "Citral",
             10: "Linalool",
         },
         "Benz-Control": {
             6: "Apple Cider Vinegar",
-            7: "3-Octonol",
+            7: "3-Octanol",
             8: "Ethyl Butyrate",
             9: "Citral",
             10: "Linalool",
@@ -313,6 +313,9 @@ def test_training_schedule_matches_spec():
 def test_build_wide_csv_exports_training_subset(tmp_path):
     """The wide CSV builder should emit the training-only subset when requested."""
 
+    # This test pins v2 behavior: the per-trial seconds columns
+    # (trial_light_on_s, ...) exist only under the v2 protocol.
+    ev.set_protocol("v2")
     dataset_root = tmp_path / "hex_control"
     fly_dir = dataset_root / "october_01_fly1"
     out_dir = fly_dir / "angle_distance_rms_envelope"
@@ -423,6 +426,9 @@ def test_build_wide_csv_accepts_renamed_combined_pct_column(tmp_path):
 def test_build_wide_csv_prefers_distance_labelled_trial_alias(tmp_path):
     """Duplicate trial aliases should keep only the distances-labelled combined CSV."""
 
+    # Pins v2 behavior: the stricter v2 regex normalises the stem to the short
+    # trial key ("testing_1"); the legacy greedy regex keeps the full suffix.
+    ev.set_protocol("v2")
     dataset_root = tmp_path / "acv_training"
     fly_dir = dataset_root / "march_05_batch_1"
     out_dir = fly_dir / "angle_distance_rms_envelope"

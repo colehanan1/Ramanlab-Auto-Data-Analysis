@@ -149,13 +149,13 @@ def test_compute_dataset_means_baseline_corrects_each_odor_and_skips_unmapped_te
         subtract_baseline=True,
     )
 
-    assert set(results) == {"3-Octonol"}
-    np.testing.assert_allclose(results["3-Octonol"]["mean"], [0.0, 0.0, 3.5, 5.5])
+    assert set(results) == {"3-Octanol"}
+    np.testing.assert_allclose(results["3-Octanol"]["mean"], [0.0, 0.0, 3.5, 5.5])
     np.testing.assert_allclose(
-        results["3-Octonol"]["sem"],
+        results["3-Octanol"]["sem"],
         [0.0, 0.0, 0.35355339, 0.35355339],
     )
-    assert results["3-Octonol"]["n_flies"] == 2
+    assert results["3-Octanol"]["n_flies"] == 2
     assert "testing_11" not in results
 
 
@@ -318,7 +318,7 @@ def test_compute_dataset_means_can_leave_raw_values_when_baseline_disabled():
         subtract_baseline=False,
     )
 
-    np.testing.assert_allclose(results["3-Octonol"]["mean"], [15.0, 15.0, 18.5, 20.5])
+    np.testing.assert_allclose(results["3-Octanol"]["mean"], [15.0, 15.0, 18.5, 20.5])
 
 
 def test_resolve_wide_csv_path_uses_fallback_default(monkeypatch, tmp_path):

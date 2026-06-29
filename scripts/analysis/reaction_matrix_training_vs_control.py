@@ -65,6 +65,7 @@ from scripts.analysis.envelope_visuals import (
     resolve_dataset_output_dir,
     set_protocol,
     should_write,
+    _safe_dirname,
 )
 from scripts.analysis.reaction_matrix_from_spreadsheet import (
     SpreadsheetMatrixConfig,
@@ -157,9 +158,16 @@ def _format_p_value(p: float) -> str:
     return f"p={p:.3f}"
 
 
-def _load_raw_binary_csv(out_dir: Path, dataset: str) -> pd.DataFrame:
-    """Load raw trial-level binary CSV for a dataset (needed for Fisher's test)."""
+def _load_raw_binary_csv(out_dir: Path, dataset: str, subdir: str | None = None) -> pd.DataFrame:
+    """Load raw trial-level binary CSV for a dataset (needed for Fisher's test).
+
+    ``subdir`` (a genotype label) reads the per-genotype binary CSV that the
+    reaction-matrix step writes under ``<dataset>/<genotype>/`` for datasets that
+    hold more than one genotype; ``None`` reads the pooled CSV at the dataset root.
+    """
     ds_dir = resolve_dataset_output_dir(out_dir, dataset)
+    if subdir:
+        ds_dir = ds_dir / _safe_dirname(subdir)
     candidates = list(ds_dir.glob(f"binary_reactions_{dataset}*.csv"))
     if not candidates:
         return pd.DataFrame()
@@ -284,11 +292,18 @@ def _load_rates_from_binary_csv(
     dataset_canon: str,
     *,
     include_hexanol: bool,
+    subdir: str | None = None,
 ) -> pd.DataFrame:
     """Build a stats DataFrame (odor, rate, num_trials, num_reactions, is_trained)
-    from an existing ``binary_reactions_*_unordered.csv``."""
+    from an existing ``binary_reactions_*_unordered.csv``.
+
+    ``subdir`` (a genotype label) reads the per-genotype binary CSV under
+    ``<dataset>/<genotype>/``; ``None`` reads the pooled CSV at the dataset root.
+    """
 
     ds_dir = resolve_dataset_output_dir(out_dir, dataset)
+    if subdir:
+        ds_dir = ds_dir / _safe_dirname(subdir)
     candidates = list(ds_dir.glob(f"binary_reactions_{dataset}*.csv"))
     if not candidates:
         print(f"[WARN] No binary CSV found for {dataset} in {ds_dir}")
@@ -558,10 +573,42 @@ def generate_training_vs_control_matrices(cfg: SpreadsheetMatrixConfig) -> None:
     active_pairs = _auto_training_control_pairs(present)
     saved_unordered_pngs: list[Path] = []
 
+    # Per-dataset genotype split (mirrors reaction_matrix_from_spreadsheet): when
+    # the TRAINING dataset holds more than one genotype, emit one train-vs-control
+    # comparison per genotype into <Training>/<genotype>/. The control side reads
+    # its matching per-genotype binary CSV when it too was split, else the pooled
+    # root CSV. Single-genotype datasets — and legacy predictions, which carry no
+    # fly_type column — behave exactly as before (genotype is None).
+    def _dataset_genotypes(dataset_canon: str) -> list[str]:
+        if "fly_type" not in df.columns:
+            return []
+        return sorted(
+            {
+                str(g).strip()
+                for g in df.loc[df["dataset_canon"] == dataset_canon, "fly_type"]
+                if str(g).strip()
+            }
+        )
+
+    def _binary_subdir(dataset_canon: str, genotype: str | None) -> str | None:
+        # The reaction-matrix step writes a per-genotype subfolder only when a
+        # dataset has >1 genotype; otherwise the binary CSV is at the root.
+        if genotype is None:
+            return None
+        return genotype if len(_dataset_genotypes(dataset_canon)) > 1 else None
+
+    pair_units: list[tuple[str, str, str | None]] = []
+    for train_ds, ctrl_ds in active_pairs.items():
+        train_genos = _dataset_genotypes(train_ds)
+        if len(train_genos) > 1:
+            pair_units.extend((train_ds, ctrl_ds, g) for g in train_genos)
+        else:
+            pair_units.append((train_ds, ctrl_ds, None))
+
     for order in cfg.trial_orders:
         order_suffix = _order_suffix(order)
 
-        for train_ds, ctrl_ds in active_pairs.items():
+        for train_ds, ctrl_ds, genotype in pair_units:
             # Skip training datasets with no control data
             if train_ds in ("ACV-Training", "3OCT-Training"):
                 print(f"[INFO] {train_ds} has no control data, skipping train vs control plots.")
@@ -572,6 +619,10 @@ def generate_training_vs_control_matrices(cfg: SpreadsheetMatrixConfig) -> None:
 
             # --- Build the MATRIX from the training dataset ---
             subset = df[df["dataset_canon"] == train_ds].copy()
+            if genotype is not None:
+                subset = subset[subset["fly_type"].astype(str).str.strip() == genotype].copy()
+                if subset.empty:
+                    continue
             subset = _normalise_fly_columns(subset)
             drop_mask = subset["trial"].apply(_is_testing_11_label)
             if drop_mask.any():
@@ -604,11 +655,20 @@ def generate_training_vs_control_matrices(cfg: SpreadsheetMatrixConfig) -> None:
 
             # Also drop trials whose label has no odor suffix (RandomPanel's
             # training_15 / training_16 light-only — see reaction_matrix_from_spreadsheet.py).
-            no_odor_mask = subset["trial"].apply(
-                lambda t: _extract_odor_from_label(t) == str(t)
-            )
-            if no_odor_mask.any():
-                subset = subset.loc[~no_odor_mask].copy()
+            # V2 only: legacy labels are plain ``testing_N`` (odor from the schedule),
+            # so this filter would drop every trial and empty the matrix.
+            if get_protocol() == "v2":
+                no_odor_mask = subset["trial"].apply(
+                    lambda t: _extract_odor_from_label(t) == str(t)
+                )
+                if no_odor_mask.any():
+                    subset = subset.loc[~no_odor_mask].copy()
+
+            # All trials filtered out (e.g. a legacy dataset whose labels carry no
+            # odor suffix, so the no-odor drop empties it). Skip this pair —
+            # an empty DataFrame.apply(axis=1) would raise below.
+            if subset.empty:
+                continue
 
             if get_protocol() == "v2":
                 subset = subset.copy()
@@ -686,19 +746,23 @@ def generate_training_vs_control_matrices(cfg: SpreadsheetMatrixConfig) -> None:
                     during_matrix[fly_map[(row["fly"], row["fly_number"])], trial_map[row["trial"]]] = int(row["during_hit"])
 
             # --- Load PRE-COMPUTED reaction rates from existing binary CSVs ---
+            train_subdir = _binary_subdir(train_ds, genotype)
+            ctrl_subdir = _binary_subdir(ctrl_ds, genotype)
             train_rate = _load_rates_from_binary_csv(
                 cfg.out_dir, train_ds, train_ds,
                 include_hexanol=cfg.include_hexanol,
+                subdir=train_subdir,
             )
             ctrl_rate = _load_rates_from_binary_csv(
                 cfg.out_dir, ctrl_ds, ctrl_ds,
                 include_hexanol=cfg.include_hexanol,
+                subdir=ctrl_subdir,
             )
 
             # --- Fisher's exact test per odor ---
             p_values: dict[tuple[int, str], float] = {}
-            train_raw = _load_raw_binary_csv(cfg.out_dir, train_ds)
-            ctrl_raw = _load_raw_binary_csv(cfg.out_dir, ctrl_ds)
+            train_raw = _load_raw_binary_csv(cfg.out_dir, train_ds, train_subdir)
+            ctrl_raw = _load_raw_binary_csv(cfg.out_dir, ctrl_ds, ctrl_subdir)
             if not train_raw.empty and not ctrl_raw.empty:
                 if get_protocol() == "v2":
                     # V2: use odor label as key (no trial_num)
@@ -773,6 +837,8 @@ def generate_training_vs_control_matrices(cfg: SpreadsheetMatrixConfig) -> None:
 
                 # Save
                 odor_dir = resolve_dataset_output_dir(cfg.out_dir, train_ds)
+                if genotype is not None:
+                    odor_dir = odor_dir / _safe_dirname(genotype)
                 png_name = (
                     f"reaction_matrix_train_vs_ctrl_{train_ds.replace(' ', '_')}"
                     f"_{int(cfg.after_window_sec)}_latency_{cfg.latency_sec:.3f}s"

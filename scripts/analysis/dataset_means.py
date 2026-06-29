@@ -80,7 +80,7 @@ ODOR_COLOURS = {
     "Ethyl Butyrate": "#1f77b4",
     "Ethyl Butyrate (6-Training)": "#1f77b4",
     "Linalool": "#9467bd",
-    "3-Octonol": "#8c564b",
+    "3-Octanol": "#8c564b",
     "AIR": "#7f7f7f",
 }
 FALLBACK_ODOR_COLOURS = (
