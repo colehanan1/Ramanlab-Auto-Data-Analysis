@@ -522,13 +522,13 @@ def _plot_training_vs_control_for_odor(
 ODOR_PAIRS_TVC: tuple[tuple[str, str], ...] = (
     ("Hexanol", "Ethyl Butyrate"),
     ("Citral", "Apple Cider Vinegar"),
-    ("Linalool", "3-Octonol"),
+    ("Linalool", "3-Octanol"),
 )
 
 # Additional composite control-only overlays (N odors on one axes). Rendered
 # from the control flies only, with mean + SEM band per odor.
 ODOR_GROUPS_CONTROL: tuple[tuple[str, ...], ...] = (
-    ("Hexanol", "Linalool", "3-Octonol"),
+    ("Hexanol", "Linalool", "3-Octanol"),
     ("Ethyl Butyrate",),
 )
 
@@ -1066,7 +1066,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
 
         # ---- Odor-pair plots, one per condition --------------------------------
         # Three odor pairs (Hexanol+Ethyl Butyrate, Citral+Apple Cider Vinegar,
-        # Linalool+3-Octonol) each rendered as TWO figures: one for trained
+        # Linalool+3-Octanol) each rendered as TWO figures: one for trained
         # flies (both odors overlaid with SEM bands) and one for control flies
         # (same layout). Trained / control are kept on separate axes so each
         # plot stays uncluttered.
@@ -1120,7 +1120,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
                 )
 
         # ---- Control-only composite overlays (N odors on one axes) -----------
-        # E.g. Hexanol + Linalool + 3-Octonol, mean + SEM, control flies only.
+        # E.g. Hexanol + Linalool + 3-Octanol, mean + SEM, control flies only.
         group_meta: list[dict] = []
         ctrl_per_odor = ctrl_prep["per_odor_per_fly"]
         for group in ODOR_GROUPS_CONTROL:

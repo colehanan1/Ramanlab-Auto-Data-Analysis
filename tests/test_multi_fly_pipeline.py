@@ -19,6 +19,10 @@ from envelope_combined import (
     combine_distance_angle,
 )
 from envelope_exports import CollectConfig, ConvertConfig, collect_envelopes, convert_wide_csv
+# envelope_combined reads the protocol from scripts.analysis.envelope_visuals, so
+# pin v2 through that exact module (not a short-name import) where a test relies
+# on v2 trial-label normalisation.
+from scripts.analysis import envelope_visuals as ev
 from fbpipe.config import Settings
 from fbpipe.steps import detect_dropped_frames, distance_normalize, distance_stats
 from fbpipe.utils.columns import EYE_CLASS, PROBOSCIS_CLASS
@@ -490,6 +494,9 @@ def test_local_extrema_respect_distance_limits(tmp_path):
 
 
 def test_global_extrema_aggregate_across_trials(tmp_path):
+    # Pins v2 behavior: this test filters on the normalised trial label
+    # ("testing_1"); the legacy greedy regex would keep the full "..._fly2_distances".
+    ev.set_protocol("v2")
     dataset_root = tmp_path / "secured_dataset"
     fly_dir = dataset_root / "session_b"
     csv_dir = fly_dir / "angle_distance_rms_envelope"

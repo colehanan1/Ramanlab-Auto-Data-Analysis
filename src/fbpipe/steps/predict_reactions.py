@@ -172,6 +172,9 @@ def _augment_prediction_csv(
         column
         for column in (
             "trial_type",
+            # Canonical genotype (v2 only) so reaction-matrix plots can split by
+            # fly type. Absent under legacy, where the guard below drops it.
+            "fly_type",
             "global_min",
             "global_max",
             "trimmed_global_min",

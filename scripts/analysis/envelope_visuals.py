@@ -157,7 +157,7 @@ def apply_dataset_odor_remap(dataset_canon: object, odor_name: object) -> str:
 # fbpipe.odor_constants (single source of truth).
 
 REACTION_RATE_ODOR_ORDER = [
-    "3-Octonol",
+    "3-Octanol",
     "Apple Cider Vinegar",
     "Benzaldehyde",
     "Citral",
@@ -191,8 +191,8 @@ PRIMARY_ODOR_LABEL = {
     "Cit-Control": "Citral",
     "Lin-Control": "Linalool",
     "ACV-Control": "Apple Cider Vinegar",
-    "3OCT-Control": "3-Octonol",
-    "3OCT-Control-24-2": "3-Octonol",
+    "3OCT-Control": "3-Octanol",
+    "3OCT-Control-24-2": "3-Octanol",
 }
 
 TRAINING_ODOR_SCHEDULE_ACV = {
@@ -260,14 +260,14 @@ TRAINING_ODOR_SCHEDULE_HEX = {
 }
 
 TRAINING_ODOR_SCHEDULE_3OCT = {
-    1: "3-Octonol",
-    2: "3-Octonol",
-    3: "3-Octonol",
-    4: "3-Octonol",
+    1: "3-Octanol",
+    2: "3-Octanol",
+    3: "3-Octanol",
+    4: "3-Octanol",
     5: HEXANOL_LABEL,
-    6: "3-Octonol",
+    6: "3-Octanol",
     7: HEXANOL_LABEL,
-    8: "3-Octonol",
+    8: "3-Octanol",
 }
 
 NON_REACTIVE_SPAN_PX = 7.5
@@ -430,7 +430,7 @@ _DISPLAY_LABEL_LOWER.update({
     "benzaldehyde": "Benzaldehyde",
     "ethylbutyrate": "Ethyl Butyrate",
     "acv": "Apple Cider Vinegar",
-    "3-octonol": "3-Octonol",
+    "3-octonol": "3-Octanol",
     "citral": "Citral",
     "linalool": "Linalool",
     "lightonly": "Optogenetic Light Control",
@@ -545,14 +545,14 @@ def _display_odor(dataset_canon: str, trial_label: str) -> str:
         if number == 9:
             return "Citral"
         if number == 10:
-            return "3-Octonol"
+            return "3-Octanol"
 
     # Handle 3OCT-Training testing trials
     if dataset_key in ("3OCT-Training", "3OCT-Training-24-2", "3OCT-Control-24-2"):
         if number in (1, 3):
             return HEXANOL_LABEL
         if number in (2, 4, 5):
-            return "3-Octonol"
+            return "3-Octanol"
         if number == 6:
             return "Apple Cider Vinegar"
         if number == 7:
@@ -581,7 +581,7 @@ def _display_odor(dataset_canon: str, trial_label: str) -> str:
 
     mapping = {
         "ACV": {
-            6: "3-Octonol",
+            6: "3-Octanol",
             7: "Ethyl Butyrate",
             8: "Benzaldehyde",
             9: "Citral",
@@ -591,21 +591,21 @@ def _display_odor(dataset_canon: str, trial_label: str) -> str:
         "Benz": {6: "Citral", 7: "Linalool"},
         "Benz-Control": {
             6: "Apple Cider Vinegar",
-            7: "3-Octonol",
+            7: "3-Octanol",
             8: "Ethyl Butyrate",
             9: "Citral",
             10: "Linalool",
         },
         "EB": {
             6: "Apple Cider Vinegar",
-            7: "3-Octonol",
+            7: "3-Octanol",
             8: "Benzaldehyde",
             9: "Citral",
             10: "Linalool",
         },
         "EB-Control": {
             6: "Apple Cider Vinegar",
-            7: "3-Octonol",
+            7: "3-Octanol",
             8: "Benzaldehyde",
             9: "Citral",
             10: "Linalool",
@@ -613,20 +613,20 @@ def _display_odor(dataset_canon: str, trial_label: str) -> str:
         "EB-Training(No-Operant)": {
             # Testing trials (6-10): same as EB-Training
             6: "Apple Cider Vinegar",
-            7: "3-Octonol",
+            7: "3-Octanol",
             8: "Benzaldehyde",
             9: "Citral",
             10: "Linalool",
         },
         "Hex-Control": {
             6: "Benzaldehyde",
-            7: "3-Octonol",
+            7: "3-Octanol",
             8: "Ethyl Butyrate",
             9: "Citral",
             10: "Linalool",
         },
         "ACV-Training": {
-            6: "3-Octonol",
+            6: "3-Octanol",
             7: "Ethyl Butyrate",
             8: "Benzaldehyde",
             9: "Citral",
@@ -967,7 +967,7 @@ def _load_matrix(matrix_path: Path, codes_json: Path) -> tuple[pd.DataFrame, lis
     env_cols_meta = list(meta.get("env_columns", []) or [])
     df = pd.DataFrame(matrix, columns=ordered_cols)
 
-    decode_candidates = ["dataset", "fly", "fly_number", "trial_type", "trial_label"]
+    decode_candidates = ["dataset", "fly", "fly_number", "fly_type", "trial_type", "trial_label"]
     rev_maps = {
         col: {int(code): label for label, code in mapping.items()}
         for col, mapping in code_maps.items()
@@ -1003,6 +1003,7 @@ def _load_matrix(matrix_path: Path, codes_json: Path) -> tuple[pd.DataFrame, lis
                 "dataset",
                 "fly",
                 "fly_number",
+                "fly_type",
                 "trial_type",
                 "trial_label",
             }
@@ -2103,6 +2104,19 @@ def generate_envelope_plots(cfg: EnvelopePlotConfig) -> None:
     matrix_label = str(cfg.matrix_npy).lower()
     share_ylabel = "combined_base" in matrix_label or "angle_distance" in matrix_label
 
+    # Per-dataset genotype split: when a dataset holds more than one genotype
+    # (fly_type), route each fly's figure into a per-genotype subfolder so the
+    # different genotypes are never pooled in one folder. Single-genotype
+    # datasets — and legacy matrices, which carry no fly_type column — keep the
+    # flat <dataset>/ layout unchanged.
+    genotypes_per_dataset: dict[str, set[str]] = {}
+    if "fly_type" in df.columns:
+        for _ds, _ft in zip(
+            df["dataset_canon"].to_numpy(str), df["fly_type"].to_numpy(str)
+        ):
+            if _ft:
+                genotypes_per_dataset.setdefault(_ds, set()).add(_ft)
+
     flies_rendered = 0
     for (fly, fly_number), fly_df in df.groupby(["fly", "fly_number"], sort=False):
         if max_flies is not None and flies_rendered >= max_flies:
@@ -2117,6 +2131,13 @@ def generate_envelope_plots(cfg: EnvelopePlotConfig) -> None:
 
         dataset_candidates = [dataset_lookup[idx] for idx in indices if dataset_lookup[idx]]
         folder_dir = resolve_dataset_output_dir(cfg.out_dir, dataset_candidates or ("UNKNOWN",))
+        # Drop this fly's figure into a per-genotype subfolder iff its dataset
+        # mixes more than one genotype (one batch => one genotype, so iloc[0]).
+        if "fly_type" in fly_df.columns and dataset_candidates:
+            fly_genotype = str(fly_df["fly_type"].iloc[0]).strip()
+            ds_canon = dataset_candidates[0]
+            if fly_genotype and len(genotypes_per_dataset.get(ds_canon, ())) > 1:
+                folder_dir = folder_dir / _safe_dirname(fly_genotype)
         fly_number_label = str(fly_number)
         suffix = "" if fly_number_label.upper() == "UNKNOWN" else f"_fly{fly_number_label}"
         out_path = folder_dir / (
