@@ -641,7 +641,13 @@ def _latency_records_from_csv(
             ds_norm = df["dataset"].map(_canon_dataset).map(_norm_key_text)
             fly_norm = df["fly"].map(_norm_key_text)
             mask = [(ds, fly) not in blocked for ds, fly in zip(ds_norm, fly_norm)]
-        df = df[mask].copy()
+        # ``mask`` is a list of bools. When ``df`` is empty (e.g. a testing-only
+        # dataset filtered to trial_type == "training") it is ``[]``, and
+        # ``df[[]]`` would be read as *column* selection — dropping every column
+        # and masking the real "no training rows" condition as a confusing
+        # ``KeyError: 'trial_label'`` below. Coerce to a boolean ndarray so it is
+        # always interpreted as row selection.
+        df = df[np.asarray(mask, dtype=bool)].copy()
 
     df["trial_num"] = df["trial_label"].map(_trial_num)
     df = df[df["trial_num"].isin(set(int(t) for t in trials_of_interest))].copy()

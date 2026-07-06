@@ -55,6 +55,7 @@ from fbpipe.utils.smb_copy import copy_to_smb
 from scripts.analysis.envelope_visuals import (
     EnvelopePlotConfig,
     MatrixPlotConfig,
+    NoTargetTrialsError,
     generate_envelope_plots,
     generate_reaction_matrices,
     set_dataset_light_windows,
@@ -244,17 +245,28 @@ def _should_track_file(file_path: Path, dataset_root: Path) -> bool:
     if file_path.name.startswith(('sensors_', '.', '~')):
         return False
 
-    # Must live at fly_dir/trial_dir/file depth (>= 3 path parts relative to the
-    # dataset root). Shallower files (e.g. a stats sidecar directly in fly_dir)
-    # are not per-trial pipeline outputs and must not be tracked.
+    # Two things are tracked:
+    #  1. Per-trial pipeline tables at fly_dir/trial_dir/file depth (>= 3 path
+    #     parts relative to the dataset root). Shallower files (e.g. a stats
+    #     sidecar directly in fly_dir) are not per-trial outputs.
+    #  2. Raw recording inputs at batch depth (``<batch>/output_*.csv``, exactly
+    #     2 parts). Without these, adding a freshly-recorded batch of raw videos
+    #     does NOT change the manifest (raw outputs live shallower than the
+    #     processed tables), so the dataset cache stays "valid" and the new batch
+    #     is silently skipped. Raw output_* CSVs survive processing, so tracking
+    #     them is stable and does not cause spurious post-processing invalidation.
     try:
         relative = file_path.relative_to(dataset_root)
-        if len(relative.parts) < 3:
-            return False
-        return True
     except ValueError:
         # File not in dataset_root
         return False
+
+    depth = len(relative.parts)
+    if depth >= 3:
+        return True
+    if depth == 2 and file_path.name.startswith("output_"):
+        return True
+    return False
 
 
 def _file_content_hash(path: Path, *, chunk_size: int = 1 << 20) -> str:
@@ -680,7 +692,17 @@ def _rerender_envelope_block_with_scores(
             f"[analysis] envelope_visuals: re-rendering {label} → {config.out_dir} "
             "(scores annotated)."
         )
-        generate_envelope_plots(config)
+        try:
+            generate_envelope_plots(config)
+        except NoTargetTrialsError:
+            # Testing-only dataset (e.g. RandomPanel): this block targets a
+            # trial_type with no trials. Skip it rather than abort the run;
+            # other entries (e.g. the testing blocks) still render.
+            print(
+                f"[analysis] envelope_visuals: re-rendering {label} → SKIPPED "
+                f"(no '{config.trial_type}' trials in matrix; dataset is "
+                f"{config.trial_type}-free)."
+            )
 
 
 def _run_envelope_visuals(
@@ -707,6 +729,28 @@ def _run_envelope_visuals(
         config, smb_path = _envelope_plot_config(envelopes_cfg)
         print(f"[analysis] envelope_visuals.envelopes → {config.out_dir}")
         generate_envelope_plots(config)
+
+
+def _csv_has_training_rows(csv_path: Path) -> bool:
+    """Return True if ``csv_path`` contains at least one training trial.
+
+    Used to skip training-only analyses (e.g. latency) for datasets that are
+    testing-only by design — e.g. RandomPanel, whose trials carry a
+    ``trial_type_override: testing`` so every row is typed ``testing`` even
+    though the trial labels read ``training_N``. Returns True when the file has
+    no ``trial_type`` column, since the analyses then treat every row as a
+    candidate and we should not skip.
+    """
+    try:
+        col = pd.read_csv(csv_path, usecols=["trial_type"])
+    except ValueError:
+        # No ``trial_type`` column — let the downstream analysis decide.
+        return True
+    if col.empty:
+        return False
+    return (
+        col["trial_type"].astype(str).str.strip().str.lower().eq("training").any()
+    )
 
 
 def _run_training(cfg: Mapping[str, Any] | None) -> None:
@@ -748,6 +792,13 @@ def _run_training(cfg: Mapping[str, Any] | None) -> None:
         if fly_state_csv is not None and not fly_state_csv.exists():
             print(f"[WARN] training.latency fly_state_csv missing: {fly_state_csv}")
             fly_state_csv = None
+
+        if csv_path is not None and not _csv_has_training_rows(csv_path):
+            print(
+                f"[analysis] training.latency → SKIPPED: {csv_path.name} has no "
+                "training trials (dataset is testing-only)."
+            )
+            return
 
         print(f"[analysis] training.latency → {out_dir}")
         latency_reports(

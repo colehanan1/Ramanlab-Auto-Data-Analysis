@@ -1236,7 +1236,7 @@ def plot_reaction_rate_bars(
 
     bars = ax.bar(
         x,
-        stats_df["rate"].to_numpy(float),
+        stats_df["rate"].to_numpy(float) * 100.0,
         color=colors,
         edgecolor="black",
         linewidth=0.75,
@@ -1255,7 +1255,7 @@ def plot_reaction_rate_bars(
         if bool(is_trained):
             tick.set_color("tab:blue")
             tick.set_weight("bold")
-    ax.set_ylim(0.0, 1.10)
+    ax.set_ylim(0.0, 110.0)
     ax.set_ylabel("PER %")
     ax.set_xlabel("Presented Odor")
     ax.set_title(title, fontsize=12, weight="bold")
@@ -1265,7 +1265,7 @@ def plot_reaction_rate_bars(
     for bar, (_, row) in zip(bars, stats_df.iterrows()):
         rate = float(row["rate"])
         trials = int(row["num_trials"])
-        text_y = min(rate + 0.05, 1.02)
+        text_y = min(rate * 100.0 + 5.0, 102.0)
         annotation = f"{rate:.0%}\n(n={trials})"
         ax.text(
             bar.get_x() + bar.get_width() / 2,
@@ -1976,6 +1976,17 @@ def _select_trial_rows(fly_df: pd.DataFrame) -> pd.DataFrame:
     return fly_df.loc[selected].copy()
 
 
+class NoTargetTrialsError(RuntimeError):
+    """Raised when the matrix contains no trials of the requested ``trial_type``.
+
+    Subclasses ``RuntimeError`` for backward compatibility with existing
+    ``except RuntimeError`` handlers. The pipeline catches this specifically to
+    skip training-targeted envelope blocks for testing-only datasets (e.g.
+    RandomPanel, where every trial is overridden to ``testing``) instead of
+    aborting the whole run.
+    """
+
+
 def generate_envelope_plots(cfg: EnvelopePlotConfig) -> None:
     df, env_cols = _load_matrix(cfg.matrix_npy, cfg.codes_json)
     trial_type = cfg.trial_type.strip().lower()
@@ -2002,7 +2013,7 @@ def generate_envelope_plots(cfg: EnvelopePlotConfig) -> None:
             f"Cannot build {trial_type} envelope plots: {reason}. "
             f"Available trial types: {available_types}"
         )
-        raise RuntimeError(
+        raise NoTargetTrialsError(
             f"No {trial_type} trials found in matrix; cannot build envelope plots. "
             f"Reason: {reason}. "
             f"Available trial types: {available_types}"
