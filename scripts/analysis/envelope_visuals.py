@@ -1976,6 +1976,17 @@ def _select_trial_rows(fly_df: pd.DataFrame) -> pd.DataFrame:
     return fly_df.loc[selected].copy()
 
 
+class NoTargetTrialsError(RuntimeError):
+    """Raised when the matrix contains no trials of the requested ``trial_type``.
+
+    Subclasses ``RuntimeError`` for backward compatibility with existing
+    ``except RuntimeError`` handlers. The pipeline catches this specifically to
+    skip training-targeted envelope blocks for testing-only datasets (e.g.
+    RandomPanel, where every trial is overridden to ``testing``) instead of
+    aborting the whole run.
+    """
+
+
 def generate_envelope_plots(cfg: EnvelopePlotConfig) -> None:
     df, env_cols = _load_matrix(cfg.matrix_npy, cfg.codes_json)
     trial_type = cfg.trial_type.strip().lower()
@@ -2002,7 +2013,7 @@ def generate_envelope_plots(cfg: EnvelopePlotConfig) -> None:
             f"Cannot build {trial_type} envelope plots: {reason}. "
             f"Available trial types: {available_types}"
         )
-        raise RuntimeError(
+        raise NoTargetTrialsError(
             f"No {trial_type} trials found in matrix; cannot build envelope plots. "
             f"Reason: {reason}. "
             f"Available trial types: {available_types}"

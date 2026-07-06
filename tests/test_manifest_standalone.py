@@ -46,10 +46,23 @@ def test_file_tracking():
         sensors_csv = dataset_root / "fly1" / "trial1" / "sensors_temp.csv"
         sensors_csv.write_text("data")
 
+        # Should track: raw recording input at batch depth (depth 2). New
+        # batches of raw recordings must invalidate the dataset cache so they
+        # get processed; these survive processing so tracking is stable.
+        raw_recording = dataset_root / "june_30_batch_2" / "output_b2_training_1_ACV_x.csv"
+        raw_recording.parent.mkdir(parents=True)
+        raw_recording.write_text("frames")
+
+        # Should NOT track: a non-recording CSV directly in a batch folder.
+        batch_meta = dataset_root / "june_30_batch_2" / "summary.csv"
+        batch_meta.write_text("data")
+
         # Test
         assert _should_track_file(tracked_csv, dataset_root) is True, "Should track nested CSV"
         assert _should_track_file(root_csv, dataset_root) is False, "Should NOT track root CSV"
         assert _should_track_file(sensors_csv, dataset_root) is False, "Should NOT track sensors CSV"
+        assert _should_track_file(raw_recording, dataset_root) is True, "Should track raw output_* recording at batch depth"
+        assert _should_track_file(batch_meta, dataset_root) is False, "Should NOT track non-output CSV at batch depth"
 
     print("✅ File tracking filters work correctly")
 
