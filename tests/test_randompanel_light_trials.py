@@ -131,6 +131,106 @@ def test_no_staircase_when_absent():
     print("PASS: test_no_staircase_when_absent")
 
 
+# ── Pi-1 light-intensity ramp ─────────────────────────────────────────
+# On Pi 1 (LDD-L dimming) the ramp REPLACES the freq/duty trailers; on Pi 2 the
+# trailers run unchanged and the ramp is omitted entirely.
+
+_DEFAULT_TRAILERS = [
+    {"label": "Light_Solid_1Hz_100pct", "hertz": 1.0, "duty": 100.0},
+    {"label": "Light_Pulse_5Hz_50pct", "hertz": 5.0, "duty": 50.0},
+]
+
+
+def _ramp_cfg(extra=None, trailers=True):
+    exp = {}
+    if trailers:
+        exp["light_trials"] = _DEFAULT_TRAILERS
+    ramp = {
+        "enabled": True,
+        "intensities": [10, 20, 30, 40, 50],
+        "on_duration": 10,
+        "gap": 30,
+        "pre": 15,
+        "post": 15,
+        "gap_before": 245,
+    }
+    if extra:
+        ramp.update(extra)
+    exp["light_intensity_ramp"] = ramp
+    return _panel_cfg(exp)
+
+
+def _ramp_light_step(result):
+    return [
+        s for s in result["cycles"][0]["steps"]
+        if "light_schedule" in s and s.get("odor_label") == "Light_Intensity_Ramp"
+    ]
+
+
+def test_intensity_ramp_pi1_single_video():
+    """pi1=True + ramp block → one Start/Stop pair, one light step, 5 solid
+    segments at brightness 10..50, correct offsets, total 200 s."""
+    result = expand_config(_ramp_cfg(), pi1=True)
+    steps = result["cycles"][0]["steps"]
+    starts = [
+        s for s in steps
+        if s["name"] == "Start Recording" and s.get("odor_label") == "Light_Intensity_Ramp"
+    ]
+    ramp = _ramp_light_step(result)
+    assert len(starts) == 1, "ramp must be a single video"
+    assert len(ramp) == 1, "ramp must be a single light step"
+    light = ramp[0]
+    segs = light["light_schedule"]
+    assert len(segs) == 5
+    assert [s["brightness"] for s in segs] == [10, 20, 30, 40, 50]
+    assert light["light_duty"] == 100.0                 # solid
+    assert [s["start"] for s in segs] == [15, 55, 95, 135, 175]
+    assert all(s["end"] - s["start"] == 10 for s in segs)
+    assert light["duration"] == 200
+    print("PASS: test_intensity_ramp_pi1_single_video")
+
+
+def test_intensity_ramp_pi1_replaces_trailers():
+    """pi1=True + ramp block → the freq/duty trailers are NOT emitted."""
+    result = expand_config(_ramp_cfg(), pi1=True)
+    labels = [
+        str(s.get("odor_label", "")) for s in result["cycles"][0]["steps"]
+        if "light_schedule" in s
+    ]
+    assert labels == ["Light_Intensity_Ramp"], f"expected ramp only, got {labels}"
+    print("PASS: test_intensity_ramp_pi1_replaces_trailers")
+
+
+def test_intensity_ramp_absent_on_pi2():
+    """pi1=False + ramp block → no ramp; trailers run unchanged."""
+    result = expand_config(_ramp_cfg(), pi1=False)
+    steps = result["cycles"][0]["steps"]
+    assert not any(s.get("odor_label") == "Light_Intensity_Ramp" for s in steps)
+    light_labels = [s.get("odor_label") for s in steps if "light_schedule" in s]
+    assert "Light_Solid_1Hz_100pct" in light_labels
+    assert "Light_Pulse_5Hz_50pct" in light_labels
+    print("PASS: test_intensity_ramp_absent_on_pi2")
+
+
+def test_no_ramp_block_keeps_trailers_both_pis():
+    """No light_intensity_ramp key → trailers on both Pis, no ramp anywhere."""
+    for pi in (True, False):
+        result = expand_config(_panel_cfg(), pi1=pi)
+        steps = result["cycles"][0]["steps"]
+        assert not any(s.get("odor_label") == "Light_Intensity_Ramp" for s in steps)
+        assert any(s.get("odor_label") == "Light_Solid_1Hz_100pct" for s in steps)
+    print("PASS: test_no_ramp_block_keeps_trailers_both_pis")
+
+
+def test_intensity_ramp_disabled_falls_back_to_trailers():
+    """enabled: false → treated as absent; Pi 1 runs trailers, no ramp."""
+    result = expand_config(_ramp_cfg({"enabled": False}), pi1=True)
+    steps = result["cycles"][0]["steps"]
+    assert not any(s.get("odor_label") == "Light_Intensity_Ramp" for s in steps)
+    assert any(s.get("odor_label") == "Light_Solid_1Hz_100pct" for s in steps)
+    print("PASS: test_intensity_ramp_disabled_falls_back_to_trailers")
+
+
 if __name__ == "__main__":
     test_default_light_trials()
     test_custom_light_trials_order_and_values()
@@ -138,4 +238,9 @@ if __name__ == "__main__":
     test_staircase_single_video()
     test_staircase_segments_and_timing()
     test_no_staircase_when_absent()
+    test_intensity_ramp_pi1_single_video()
+    test_intensity_ramp_pi1_replaces_trailers()
+    test_intensity_ramp_absent_on_pi2()
+    test_no_ramp_block_keeps_trailers_both_pis()
+    test_intensity_ramp_disabled_falls_back_to_trailers()
     print("\n=== ALL TESTS PASSED ===")
