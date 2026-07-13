@@ -473,6 +473,16 @@ def _plot_bar_charts(
                 edgecolor="white",
                 linewidth=0.5,
             )
+            # Print the mean value above each bar (clear of its SEM whisker).
+            for xi, mean_v, sem_v in zip(
+                x, sub["mean_score"].values, sub["sem_score"].values
+            ):
+                ax.text(
+                    xi,
+                    mean_v + (sem_v if np.isfinite(sem_v) else 0.0) + 0.12,
+                    f"{mean_v:.2f}",
+                    ha="center", va="bottom", fontsize=8,
+                )
             ax.set_xticks(x)
             if get_protocol() == "v2" and "odor_col" in sub.columns:
                 ax.set_xticklabels(
@@ -622,6 +632,18 @@ def _plot_training_vs_control_bars(
                 linewidth=0.75,
                 label="Control",
             )
+
+            # Print the mean value above each bar (clear of its SEM whisker).
+            for xi, mean_v, sem_v in zip(x - bar_w / 2, train_vals, train_err):
+                ax.text(
+                    xi, mean_v + sem_v + 0.12, f"{mean_v:.2f}",
+                    ha="center", va="bottom", fontsize=7, rotation=90,
+                )
+            for xi, mean_v, sem_v in zip(x + bar_w / 2, ctrl_vals, ctrl_err):
+                ax.text(
+                    xi, mean_v + sem_v + 0.12, f"{mean_v:.2f}",
+                    ha="center", va="bottom", fontsize=7, rotation=90,
+                )
 
             n_train = sub["n_flies_train"].fillna(0).astype(int)
             n_ctrl = sub["n_flies_ctrl"].fillna(0).astype(int)

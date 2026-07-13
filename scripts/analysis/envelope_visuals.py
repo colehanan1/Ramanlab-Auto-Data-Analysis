@@ -1373,6 +1373,10 @@ def _matrix_title(dataset_canon: str) -> str:
 
     dataset_key = _odor_dataset_key(dataset_canon)
     base = DISPLAY_LABEL.get(dataset_key, dataset_key)
+    # RandomPanel datasets aren't a Training/Control pairing, so the qualifier
+    # is misleading; label them with a plain "Results" suffix.
+    if "randompanel" in dataset_key.lower():
+        return f"{base} Results"
     is_conditioning = "Training" in dataset_key or dataset_key in TESTING_DATASET_ALIAS
     suffix = "Conditioning Results" if is_conditioning else "Control Results"
     return f"{base} {suffix}"

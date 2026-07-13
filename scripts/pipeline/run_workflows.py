@@ -610,6 +610,47 @@ def _copy_output_to_smb(local_path: Path | str, smb_path: str | None) -> None:
         LOGGER.error(f"Error copying to SMB: {e}")
 
 
+def _run_light_only_traces(cfg: Mapping[str, Any] | None) -> None:
+    """Render per-fly light-only PER trace figures, sorted by dataset.
+
+    Driven by the ``analysis.light_only_traces`` config block:
+      input_csv:   wide envelope CSV (``all_envelope_rows_wide_combined_base.csv``).
+      out_dir:     output root; one subfolder per dataset is created beneath it.
+      datasets:    optional allow-list; auto-detected from light trials if omitted.
+      out_dir_smb: optional SMB mirror path.
+      enabled:     set false to skip the stage.
+
+    These are figures, so the stage always re-renders when configured (it reads
+    the existing wide CSV and so runs under ``--figures-only`` too).
+    """
+    if not cfg or not cfg.get("enabled", True):
+        return
+    input_csv = cfg.get("input_csv")
+    out_dir = cfg.get("out_dir")
+    if not input_csv or not out_dir:
+        LOGGER.warning(
+            "[analysis] light_only_traces: input_csv and out_dir are required; skipping."
+        )
+        return
+    csv_path = Path(input_csv)
+    if not csv_path.exists():
+        LOGGER.warning(
+            "[analysis] light_only_traces: CSV not found (%s); skipping.", csv_path
+        )
+        return
+
+    from scripts.analysis.light_trial_traces import generate as _generate_light_only
+
+    datasets = cfg.get("datasets") or None
+    print(f"[analysis] light_only_traces → {out_dir}")
+    result = _generate_light_only(csv_path, Path(out_dir), datasets=datasets)
+    LOGGER.info(
+        "[analysis] light_only_traces: %d figures across %d dataset(s) → %s",
+        result["n_figures"], len(result["per_dataset"]), out_dir,
+    )
+    _copy_output_to_smb(out_dir, cfg.get("out_dir_smb"))
+
+
 def _load_model_scores_for_envelopes(settings: Settings) -> None:
     """Populate envelope_visuals._MODEL_SCORES from reaction_prediction.output_csv.
 
@@ -2178,6 +2219,9 @@ def main(argv: Sequence[str] | None = None) -> None:
             _write_state(settings, "training", "analysis", payload)
     else:
         _run_training(None)
+
+    # -- light-only PER traces (per-fly figures, sorted by dataset) --
+    _run_light_only_traces(analysis_cfg.get("light_only_traces"))
 
     _run_reactions(settings, config_path=config_path)
 
