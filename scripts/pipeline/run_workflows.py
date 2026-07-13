@@ -580,6 +580,10 @@ def _envelope_plot_config(data: Mapping[str, Any]) -> tuple[EnvelopePlotConfig, 
     opts = dict(data)
     for key in ("matrix_npy", "codes_json", "out_dir"):
         opts[key] = _ensure_path(opts.get(key), key)
+    # Optional: read the per-fly traces from a wide table (Parquet/CSV) instead
+    # of the float16 .npy matrix. ``matrix_npy`` stays required as a label hint.
+    if opts.get("wide_input"):
+        opts["wide_input"] = _ensure_path(opts.get("wide_input"), "wide_input")
     trial_type = str(opts.get("trial_type", "testing")).strip().lower()
     # Ensure training envelope renders include light-line annotations by default.
     if trial_type == "training" and not str(opts.get("light_annotation_mode", "")).strip():
@@ -1199,6 +1203,13 @@ def _run_combined(
             base_fps_fallback = float(
                 base_wide_cfg.get("fps_fallback", wide_fps_fallback)
             )
+            # Read the base block's own baseline flag, falling back to the outer
+            # ``combined.wide`` value. Without this, deleting ``combined.wide``
+            # would silently flip combined_base to ``use_per_trial_baseline=False``
+            # and change the numbers in all_envelope_rows_wide_combined_base.csv.
+            base_use_per_trial_baseline = bool(
+                base_wide_cfg.get("use_per_trial_baseline", use_per_trial_baseline)
+            )
             if "exclude_roots" in base_wide_cfg:
                 base_exclude_cfg = [
                     str(_ensure_path(path, "combined_base.wide.exclude_roots"))
@@ -1253,7 +1264,7 @@ def _run_combined(
                 trial_type_filter=trial_type_filter,
                 extra_trial_exports=extra_exports or None,
                 non_reactive_threshold=non_reactive_threshold,
-                use_per_trial_baseline=use_per_trial_baseline,
+                use_per_trial_baseline=base_use_per_trial_baseline,
             )
 
             for trial_key, matrix_dir in extra_matrix_dirs.items():
@@ -1665,6 +1676,20 @@ def _run_reactions(settings: Settings, config_path: Path | None = None) -> None:
     out_dir = Path(matrix_cfg.out_dir).expanduser()
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    # Only emit the "_unordered" plot variant (produced by the ``trained-first``
+    # order) and drop the redundant ``observed`` ordering: for v2 odor-column
+    # matrices the two are identical, and only the "_unordered" files are the
+    # ones symlinked into the Figures dir. Fall back to the configured orders if
+    # ``trained-first`` isn't among them (e.g. an observed-only legacy config).
+    plot_orders = [o for o in matrix_cfg.trial_orders if o == "trained-first"]
+    if not plot_orders:
+        plot_orders = list(matrix_cfg.trial_orders)
+    elif list(plot_orders) != list(matrix_cfg.trial_orders):
+        print(
+            "[analysis] reactions: emitting only the '_unordered' (trained-first) "
+            f"plot variant; skipping {sorted(set(matrix_cfg.trial_orders) - {'trained-first'})}."
+        )
+
     matrix_expected = {
         "non_reactive_span_px": settings.non_reactive_span_px,
         "flagged_flies_csv": str(getattr(settings, "flagged_flies_csv", "") or ""),
@@ -1674,7 +1699,7 @@ def _run_reactions(settings: Settings, config_path: Path | None = None) -> None:
         "row_gap": matrix_cfg.row_gap,
         "height_per_gap_in": matrix_cfg.height_per_gap_in,
         "bottom_shift_in": matrix_cfg.bottom_shift_in,
-        "trial_orders": list(matrix_cfg.trial_orders),
+        "trial_orders": list(plot_orders),
         "include_hexanol": matrix_cfg.include_hexanol,
     }
 
@@ -1721,7 +1746,7 @@ def _run_reactions(settings: Settings, config_path: Path | None = None) -> None:
         if flagged_csv:
             cmd.extend(["--flagged-flies-csv", flagged_csv])
 
-        for trial_order in matrix_cfg.trial_orders:
+        for trial_order in plot_orders:
             cmd.extend(["--trial-order", trial_order])
 
         if not matrix_cfg.include_hexanol:
@@ -1758,7 +1783,7 @@ def _run_reactions(settings: Settings, config_path: Path | None = None) -> None:
                 "--bottom-shift-in",
                 str(matrix_cfg.bottom_shift_in),
             ]
-            for trial_order in matrix_cfg.trial_orders:
+            for trial_order in plot_orders:
                 tvc_cmd.extend(["--trial-order", trial_order])
             if flagged_csv:
                 tvc_cmd.extend(["--flagged-flies-csv", flagged_csv])
@@ -1798,6 +1823,28 @@ def _run_reactions(settings: Settings, config_path: Path | None = None) -> None:
             score_cmd.extend(["--protocol", str(settings.protocol)])
             print("[analysis] score_summary →", " ".join(score_cmd))
             subprocess.run(score_cmd, check=True, env=env)
+
+            # --- RandomPanel per-odorant concentration comparison (Fisher) ---
+            # Skips itself cleanly when the CSV isn't a RandomPanel run holding
+            # all three concentrations (10 / 1 / 0.1).
+            conc_script = REPO_ROOT / "scripts" / "analysis" / "randompanel_conc_comparison.py"
+            if conc_script.exists():
+                conc_cmd = [
+                    str(Path(python_exec).expanduser()),
+                    str(conc_script),
+                    "--csv-path",
+                    str(csv_path.resolve()),
+                    "--out-dir",
+                    str(score_out_dir.resolve()),
+                    "--genotype-subdir",
+                    "--overwrite",
+                ]
+                if config_path is not None:
+                    conc_cmd.extend(["--config", str(config_path)])
+                print("[analysis] randompanel_conc_comparison →", " ".join(conc_cmd))
+                subprocess.run(conc_cmd, check=True, env=env)
+            else:
+                print("[analysis] randompanel_conc_comparison script not found, skipping.")
         else:
             print("[analysis] score_summary script not found, skipping.")
 

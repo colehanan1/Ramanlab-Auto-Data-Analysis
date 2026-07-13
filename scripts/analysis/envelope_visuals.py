@@ -55,6 +55,7 @@ from fbpipe.odor_constants import (
     resolve_testing_alias,
 )
 from fbpipe.plot_style import apply_lab_style
+from fbpipe.utils.tables import read_table
 
 apply_lab_style()
 
@@ -1015,6 +1016,30 @@ def _load_matrix(matrix_path: Path, codes_json: Path) -> tuple[pd.DataFrame, lis
     return df, env_cols
 
 
+def _load_wide_table(wide_path: Path) -> tuple[pd.DataFrame, list[str]]:
+    """Load a wide envelope table (Parquet/CSV) into the same ``(df, env_cols)``
+    shape :func:`_load_matrix` returns.
+
+    Lets :func:`generate_envelope_plots` read the wide ``combined_base`` table
+    directly (``all_envelope_rows_wide_combined_base.parquet``) instead of the
+    float16 ``.npy`` matrix. The wide table already carries native string id
+    columns and numeric ``fps`` (no code-map decode needed) and the raw
+    ``dir_val_*`` values (no float16 clip), so the figures are identical to — and
+    marginally more precise than — the matrix-backed render. ``read_table``
+    prefers a ``.parquet`` sibling and falls back to ``.csv``.
+    """
+    df = read_table(Path(wide_path))
+    env_cols = sorted(
+        (str(col) for col in df.columns if str(col).startswith("dir_val_")),
+        key=lambda col: int(col.split("_")[-1]),
+    )
+    if "fps" in df.columns:
+        df["fps"] = pd.to_numeric(df["fps"], errors="coerce")
+    else:
+        df["fps"] = np.nan
+    return df, env_cols
+
+
 # ---------------------------------------------------------------------------
 # Reaction matrix generation
 
@@ -1837,6 +1862,11 @@ class EnvelopePlotConfig:
     codes_json: Path
     out_dir: Path
     latency_sec: float
+    # When set, the per-fly traces are read from this wide table
+    # (``all_envelope_rows_wide_combined_base.parquet``) instead of the float16
+    # ``.npy`` matrix. ``matrix_npy`` is then used only as a label hint
+    # (y-axis / shared-ylabel heuristics), never opened.
+    wide_input: Path | str | None = None
     fps_default: float = 40.0
     odor_on_s: float = 30.0
     odor_off_s: float = 60.0
@@ -1992,7 +2022,10 @@ class NoTargetTrialsError(RuntimeError):
 
 
 def generate_envelope_plots(cfg: EnvelopePlotConfig) -> None:
-    df, env_cols = _load_matrix(cfg.matrix_npy, cfg.codes_json)
+    if cfg.wide_input:
+        df, env_cols = _load_wide_table(cfg.wide_input)
+    else:
+        df, env_cols = _load_matrix(cfg.matrix_npy, cfg.codes_json)
     trial_type = cfg.trial_type.strip().lower()
     if trial_type not in {"testing", "training"}:
         raise ValueError(f"Unsupported trial type: {cfg.trial_type!r}")

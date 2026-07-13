@@ -230,9 +230,7 @@ def _load_panel(
         df = df[df["fly_type"].astype(str).str.strip() == fly_type].copy()
     df = df[df["dataset_canon"].isin(CONC_BY_DATASET)].copy()
     if df.empty:
-        raise RuntimeError(
-            "No RandomPanel testing rows found for the requested genotype."
-        )
+        return df  # caller skips cleanly (not every dataset is a RandomPanel run)
     df["conc"] = df["dataset_canon"].map(CONC_BY_DATASET)
     df["odor"] = df["odor_display"]
 
@@ -344,6 +342,7 @@ def _plot_grouped(
     png_path: Path,
     as_pct: bool = False,
     reaction_line: bool = False,
+    footnote: bool = True,
 ) -> None:
     odors = sorted(summary["odor"].unique())
     x = np.arange(len(odors))
@@ -455,14 +454,15 @@ def _plot_grouped(
         leg._legend_box.align = "left"
 
         # Footnote: how to read the brackets.
-        ax.text(
-            0.0, -0.22,
-            "Unit = fly (both exposures averaged per fly, n=20/concentration). "
-            "Brackets: pairwise Fisher's exact test between concentrations "
-            "(2x2 for % reaction; Fisher-Freeman-Halton on the score distribution). "
-            "p-value shown for every pair; *** p<0.001, ** p<0.01, * p<0.05.",
-            transform=ax.transAxes, fontsize=7, color="#444444",
-        )
+        if footnote:
+            ax.text(
+                0.0, -0.22,
+                "Unit = fly (both exposures averaged per fly, n=20/concentration). "
+                "Brackets: pairwise Fisher's exact test between concentrations "
+                "(2x2 for % reaction; Fisher-Freeman-Halton on the score distribution). "
+                "p-value shown for every pair; *** p<0.001, ** p<0.01, * p<0.05.",
+                transform=ax.transAxes, fontsize=7, color="#444444",
+            )
 
         plt.tight_layout()
         fig.savefig(png_path, dpi=300, bbox_inches="tight")
@@ -475,6 +475,25 @@ def _plot_grouped(
 # ---------------------------------------------------------------------------
 
 
+def _resolve_out_dir(
+    out_dir: Path, csv_path: Path, fly_type: str, *, genotype_subdir: bool
+) -> Path:
+    """Mirror score_summary foldering: a per-genotype subfolder is used only
+    when the predictions CSV holds more than one genotype."""
+    if not (genotype_subdir and fly_type):
+        return out_dir
+    try:
+        genos = pd.read_csv(csv_path, usecols=["fly_type"])["fly_type"]
+        n_geno = len({str(g).strip() for g in genos if str(g).strip()})
+    except Exception:  # noqa: BLE001 — fly_type column may be absent
+        n_geno = 1
+    if n_geno <= 1:
+        return out_dir
+    from scripts.analysis.envelope_visuals import _safe_dirname
+
+    return out_dir / _safe_dirname(fly_type)
+
+
 def generate_conc_comparison(
     csv_path: Path,
     out_dir: Path,
@@ -484,10 +503,28 @@ def generate_conc_comparison(
     n_iter: int = 50_000,
     seed: int = 0,
     overwrite: bool = True,
+    genotype_subdir: bool = False,
 ) -> None:
-    out_dir.mkdir(parents=True, exist_ok=True)
-
     df = _load_panel(csv_path, fly_type=fly_type, config=config)
+    if df.empty:
+        print(
+            f"[conc_compare] No RandomPanel concentrations for fly_type={fly_type!r}"
+            f" in {csv_path.name}; skipping."
+        )
+        return
+    # Require all three concentrations before drawing the comparison.
+    present = set(df["conc"].unique())
+    if not set(CONC_ORDER).issubset(present):
+        print(
+            f"[conc_compare] Only concentrations {sorted(present)} present for "
+            f"fly_type={fly_type!r}; need {CONC_ORDER}. Skipping."
+        )
+        return
+
+    out_dir = _resolve_out_dir(
+        out_dir, csv_path, fly_type, genotype_subdir=genotype_subdir
+    )
+    out_dir.mkdir(parents=True, exist_ok=True)
     summary = _grouped_summary(df)
     stats = _compute_stats(df, n_iter=n_iter, seed=seed)
 
@@ -515,6 +552,7 @@ def generate_conc_comparison(
             title=f"RandomPanel: Mean Score by Odorant x Concentration{geno}",
             png_path=score_png,
             reaction_line=True,
+            footnote=False,
         )
 
     react_png = out_dir / "randompanel_conc_reaction_comparison.png"
@@ -539,6 +577,12 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--n-iter", type=int, default=50_000)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--overwrite", action="store_true", default=True)
+    parser.add_argument(
+        "--genotype-subdir", action="store_true", default=False,
+        help="Write into <out-dir>/<fly_type>/ when the CSV holds >1 genotype "
+             "(matches score_summary foldering). Pass the score_summary parent "
+             "as --out-dir with this flag.",
+    )
     return parser.parse_args(argv)
 
 
@@ -552,6 +596,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         n_iter=args.n_iter,
         seed=args.seed,
         overwrite=args.overwrite,
+        genotype_subdir=args.genotype_subdir,
     )
 
 
