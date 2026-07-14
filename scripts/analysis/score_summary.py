@@ -21,6 +21,7 @@ from typing import Sequence
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+from matplotlib import gridspec
 from matplotlib.colors import BoundaryNorm, ListedColormap, TwoSlopeNorm
 from scipy.stats import mannwhitneyu
 
@@ -497,16 +498,75 @@ def _compute_training_vs_control_summary(df: pd.DataFrame) -> pd.DataFrame:
 # ---------------------------------------------------------------------------
 
 
+def _draw_score_matrix(
+    fig, ax_m, cax, matrix: np.ndarray, n_col: int, x: np.ndarray,
+    columns: Sequence[str], is_trained: pd.Series,
+) -> None:
+    """Draw the per-fly score band + its discrete key."""
+    cmap, norm = _score_cmap()
+    n_fly = matrix.shape[0]
+    ax_m.imshow(
+        np.ma.masked_invalid(matrix), cmap=cmap, norm=norm, aspect="auto",
+        interpolation="nearest",
+        extent=(-0.5, n_col - 0.5, n_fly - 0.5, -0.5),
+    )
+    # 2px surface gap between fills.
+    for j in range(n_col + 1):
+        ax_m.axvline(j - 0.5, color="white", lw=1.6)
+    for i in range(n_fly + 1):
+        ax_m.axhline(i - 0.5, color="white", lw=1.6)
+
+    # Rows are anonymous, as in reaction_matrix: the row count is the message.
+    ax_m.set_yticks([])
+    ax_m.set_ylabel(f"{n_fly} Flies", fontsize=10)
+    ax_m.tick_params(axis="x", labelbottom=False, length=0)
+    for sp in ax_m.spines.values():
+        sp.set_visible(True)
+        sp.set_linewidth(0.6)
+        sp.set_color("0.6")
+
+    # Odor labels BELOW the matrix on a secondary axis: sharex shares the tick
+    # formatter, so labelling ax_m directly would also relabel the bars.
+    ax_lab = ax_m.secondary_xaxis("bottom")
+    ax_lab.set_xticks(x)
+    ax_lab.set_xticklabels(
+        [str(o).upper() if t else str(o) for o, t in zip(columns, is_trained)],
+        rotation=35, ha="right", fontsize=8,
+    )
+    for tick, t in zip(ax_lab.get_xticklabels(), is_trained):
+        if t:
+            tick.set_color("#1a3a6b")
+            tick.set_weight("bold")
+    ax_lab.tick_params(axis="x", length=0, pad=2)
+    for sp in ax_lab.spines.values():
+        sp.set_visible(False)
+
+    cb = fig.colorbar(
+        plt.cm.ScalarMappable(norm=norm, cmap=cmap), cax=cax, ticks=SCORES)
+    cb.set_label("Odor Response Score", fontsize=9, labelpad=4)
+    cb.ax.tick_params(labelsize=8, pad=2)
+    cb.ax.axhline(REACTION_BOUNDARY_Y, color="black", lw=2.2)
+    cb.ax.annotate(
+        "Reaction\nBoundary", xy=(0, REACTION_BOUNDARY_Y),
+        xycoords=cb.ax.get_yaxis_transform(),
+        xytext=(-8, 0), textcoords="offset points",
+        fontsize=9.5, fontweight="bold", va="center", ha="right",
+        linespacing=1.0,
+    )
+
+
 def _plot_bar_charts(
     df: pd.DataFrame, summary: pd.DataFrame, out_dir: Path, *, overwrite: bool
 ) -> None:
-    """One bar-chart per dataset/odor: mean score per testing number."""
+    """One figure per dataset: mean score per odor, with a per-fly score
+    matrix band above it under the v2 protocol."""
     present = df["dataset_canon"].unique().tolist()
     ordered = [o for o in ODOR_ORDER if o in present]
     extras = sorted(o for o in present if o not in ODOR_ORDER)
 
     for odor in ordered + extras:
-        sort_col = "odor_col" if "odor_col" in summary.columns and get_protocol() == "v2" else "trial_num"
+        is_v2 = get_protocol() == "v2" and "odor_col" in summary.columns
+        sort_col = "odor_col" if is_v2 else "trial_num"
         sub = summary[summary["dataset_canon"] == odor].sort_values(
             sort_col, key=lambda s: s.str.casefold() if s.dtype == object else s
         )
@@ -518,26 +578,56 @@ def _plot_bar_charts(
         if not should_write(png_path, overwrite):
             continue
 
+        x = np.arange(len(sub))
+        trained = _trained_label(odor)
+        if is_v2:
+            is_trained = sub["odor_col"].str.casefold().str.startswith(
+                trained.casefold())
+        else:
+            is_trained = pd.Series([False] * len(sub), index=sub.index)
+        bar_colors = ["#1a3a6b" if t else "#b0b0b0" for t in is_trained]
+
+        matrix, fly_keys = (
+            _per_fly_score_matrix(df, odor, sub["odor_col"].tolist())
+            if is_v2 else (np.zeros((0, 0)), [])
+        )
+        show_matrix = is_v2 and matrix.size > 0
+
         with plt.rc_context(_RC_CONTEXT):
-            fig, ax = plt.subplots(figsize=(max(6, len(sub) * 0.7 + 2), 5))
-            x = np.arange(len(sub))
-            # Color trained odor blue, non-trained gray
-            trained = _trained_label(odor)
-            if get_protocol() == "v2" and "odor_col" in sub.columns:
-                is_trained = sub["odor_col"].str.casefold().str.startswith(trained.casefold())
+            if show_matrix:
+                n_fly = len(fly_keys)
+                fig = plt.figure(
+                    figsize=(max(8, len(sub) * 1.15 + 2.5), n_fly * 0.16 + 5.0))
+                # Three columns: plots | gutter | colorbar. ax_m and ax_b BOTH
+                # live in column 0 so the matrix cells line up with the bars by
+                # construction. Anchoring the colorbar to ax_m alone
+                # (fig.colorbar(ax=ax_m)) shrinks only the matrix and silently
+                # breaks that alignment.
+                gs = gridspec.GridSpec(
+                    2, 3,
+                    width_ratios=[1.0, 0.125, 0.030],
+                    # Floor keeps a 1-fly band readable; cap stops a large
+                    # cohort dwarfing the bars.
+                    height_ratios=[min(1.4, max(0.35, n_fly * 0.17)), 1.0],
+                    hspace=0.50, wspace=0.0,
+                )
+                ax_m = fig.add_subplot(gs[0, 0])
+                ax = fig.add_subplot(gs[1, 0], sharex=ax_m)
+                cax = fig.add_subplot(gs[0, 2])
+                _draw_score_matrix(
+                    fig, ax_m, cax, matrix, len(sub), x,
+                    sub["odor_col"].tolist(), is_trained,
+                )
+                ax_m.set_title(f"Mean Ordinal Score - {label}", fontsize=13,
+                               weight="bold", pad=10)
             else:
-                is_trained = pd.Series([False] * len(sub), index=sub.index)
-            bar_colors = [
-                "#1a3a6b" if t else "#b0b0b0" for t in is_trained
-            ]
-            bars = ax.bar(
-                x,
-                sub["mean_score"].values,
-                yerr=sub["sem_score"].values,
-                capsize=4,
-                color=bar_colors,
-                edgecolor="white",
-                linewidth=0.5,
+                fig, ax = plt.subplots(figsize=(max(6, len(sub) * 0.7 + 2), 5))
+                ax.set_title(f"Mean Ordinal Score - {label}", fontsize=13,
+                             weight="bold")
+
+            ax.bar(
+                x, sub["mean_score"].values, yerr=sub["sem_score"].values,
+                capsize=4, color=bar_colors, edgecolor="white", linewidth=0.5,
             )
             # Print the mean value above each bar (clear of its SEM whisker).
             for xi, mean_v, sem_v in zip(
@@ -550,28 +640,34 @@ def _plot_bar_charts(
                     ha="center", va="bottom", fontsize=8,
                 )
             ax.set_xticks(x)
-            if get_protocol() == "v2" and "odor_col" in sub.columns:
+            if is_v2:
                 ax.set_xticklabels(
-                    [f"{o}\n(n={int(n)})" for o, n in zip(sub["odor_col"], sub["n_flies"])],
+                    [f"{o}\n(n={int(n)})" for o, n in zip(sub["odor_col"],
+                                                          sub["n_flies"])],
                     fontsize=8, rotation=35, ha="right",
                 )
             else:
                 ax.set_xticklabels(
-                    [f"T{int(t)}\n(n={int(n)})" for t, n in zip(sub["trial_num"], sub["n_flies"])],
+                    [f"T{int(t)}\n(n={int(n)})" for t, n in zip(sub["trial_num"],
+                                                                sub["n_flies"])],
                     fontsize=9,
                 )
-            ax.set_ylim(-1.5, 5.5)
+            if show_matrix:
+                # Same scale the matrix is coloured on.
+                ax.set_ylim(SCORE_MIN, SCORE_MAX)
+                ax.set_yticks(SCORES)
+            else:
+                ax.set_ylim(-1.5, 5.5)
             ax.set_ylabel("Mean Score")
-            ax.set_xlabel("Presented Odor" if get_protocol() == "v2" else "Testing Trial")
-            ax.set_title(f"Mean Ordinal Score - {label}", fontsize=13, weight="bold")
+            ax.set_xlabel("Presented Odor" if is_v2 else "Testing Trial")
             ax.axhline(y=0, color="gray", linewidth=0.5, linestyle="--")
-            # Mark the reaction boundary
             ax.axhline(
-                y=1.5, color="red", linewidth=0.8, linestyle=":", alpha=0.6,
-                label="Reaction Boundary",
+                y=REACTION_BOUNDARY_Y, color="red", linewidth=0.8, linestyle=":",
+                alpha=0.6, label="Reaction Boundary",
             )
             ax.legend(fontsize=8, loc="upper right")
-            plt.tight_layout()
+            if not show_matrix:
+                plt.tight_layout()
             fig.savefig(png_path, dpi=300, bbox_inches="tight")
             plt.close(fig)
 

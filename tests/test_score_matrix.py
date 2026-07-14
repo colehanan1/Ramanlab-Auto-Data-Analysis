@@ -185,3 +185,195 @@ def test_per_fly_matrix_ignores_other_datasets(tmp_path):
 
     assert "ctrl_fly|9" not in flies
     assert len(flies) == 2
+
+
+# ---------------------------------------------------------------------------
+# Task 3: render the matrix band in `_plot_bar_charts`
+# ---------------------------------------------------------------------------
+
+
+def _v2_panel_rows() -> list[dict[str, object]]:
+    """3 flies x 2 odors, EB-Training (trained odor = Ethyl Butyrate)."""
+    rows = []
+    scores = {"f1": (0, 5), "f2": (-1, 3), "f3": (0, 2)}
+    for idx, (fly, (hex_s, eb_s)) in enumerate(scores.items(), start=1):
+        for label, s in (("testing_1_hexanol", hex_s),
+                         ("testing_2_ethylbutyrate", eb_s)):
+            rows.append({
+                "dataset": "EB-Training", "fly": fly, "fly_number": str(idx),
+                "trial_label": label, "score": s, "trial_type": "testing",
+            })
+    return rows
+
+
+def _render_v2(tmp_path, rows=None):
+    """Render the v2 figure and hand back its live axes.
+
+    ``rows`` defaults to the standard 3-fly/2-odor panel; callers that need a
+    different score distribution (e.g. the rank-invariance guard) can pass
+    their own.
+    """
+    import matplotlib.pyplot as plt
+    from scripts.analysis.envelope_visuals import set_protocol
+    set_protocol("v2")
+    csv_path = tmp_path / "s.csv"
+    out_dir = tmp_path / "out"
+    pd.DataFrame(rows if rows is not None else _v2_panel_rows()).to_csv(
+        csv_path, index=False)
+
+    # Start from a clean figure registry. The `plt.close` monkeypatch below
+    # is a no-op (it must be, so the figure this test wants to inspect stays
+    # retrievable via get_fignums() after generate_score_summary() "closes"
+    # it) -- so any figure another test left open would otherwise linger and
+    # be mistaken below for the one this call renders.
+    plt.close("all")
+    closed = []
+    real_close = plt.close
+    plt.close = lambda *a, **k: closed.append(a[0] if a else None)
+    try:
+        module.generate_score_summary(csv_path=csv_path, out_dir=out_dir,
+                                      overwrite=True)
+    finally:
+        plt.close = real_close
+    fig = next(f for f in map(plt.figure, plt.get_fignums())
+               if any(a.get_ylabel() == "Mean Score" for a in f.axes))
+    return fig, out_dir
+
+
+def test_v2_figure_is_written(tmp_path):
+    from scripts.analysis.envelope_visuals import set_protocol
+    set_protocol("v2")
+    csv_path = tmp_path / "s.csv"
+    out_dir = tmp_path / "out"
+    pd.DataFrame(_v2_panel_rows()).to_csv(csv_path, index=False)
+    module.generate_score_summary(csv_path=csv_path, out_dir=out_dir,
+                                  overwrite=True)
+    assert (out_dir / "mean_score_EB-Training.png").exists()
+
+
+def test_v2_figure_has_matrix_and_bar_axes(tmp_path):
+    fig, _ = _render_v2(tmp_path)
+    ylabels = {a.get_ylabel() for a in fig.axes}
+    assert "Mean Score" in ylabels
+    assert any(lbl.endswith("Flies") for lbl in ylabels), "no matrix panel"
+
+
+def test_matrix_and_bars_share_an_identical_x_span(tmp_path):
+    """TRAP 1: fig.colorbar(ax=ax_m) shrinks only the matrix and breaks this."""
+    fig, _ = _render_v2(tmp_path)
+    ax_m = next(a for a in fig.axes if a.get_ylabel().endswith("Flies"))
+    ax_b = next(a for a in fig.axes if a.get_ylabel() == "Mean Score")
+    pm, pb = ax_m.get_position(), ax_b.get_position()
+    assert pm.x0 == pytest.approx(pb.x0, abs=1e-9), "matrix/bars misaligned"
+    assert pm.x1 == pytest.approx(pb.x1, abs=1e-9), "matrix/bars misaligned"
+    assert ax_m.get_xlim() == ax_b.get_xlim()
+
+
+def test_bar_labels_survive_matrix_labelling(tmp_path):
+    """TRAP 2: sharex makes ax_m and the bar axis share ONE major-formatter
+    instance (verified: `ax_m.xaxis.get_major_formatter() is
+    ax_b.xaxis.get_major_formatter()`), so whichever axis last calls
+    set_xticklabels() wins for BOTH. _draw_score_matrix runs before the bar
+    labelling code, so labelling ax_m directly (instead of on its own
+    secondary axis) would let the bars' later call silently overwrite the
+    matrix's odor labels with its own "(n=...)" text -- checking only the
+    bar axis would miss that, since the bar's text is untouched either way.
+    """
+    fig, _ = _render_v2(tmp_path)
+    ax_m = next(a for a in fig.axes if a.get_ylabel().endswith("Flies"))
+    ax_b = next(a for a in fig.axes if a.get_ylabel() == "Mean Score")
+    bar_texts = [t.get_text() for t in ax_b.get_xticklabels()]
+    matrix_texts = [t.get_text() for t in ax_m.get_xticklabels()]
+    assert any("(n=" in t for t in bar_texts), f"bar labels clobbered: {bar_texts}"
+    assert not any("(n=" in t for t in matrix_texts), (
+        f"ax_m picked up the bar's own labels via the shared formatter -- "
+        f"odor labels must live on ax_m's secondary axis: {matrix_texts}"
+    )
+
+
+def test_bar_y_axis_spans_the_full_score_range(tmp_path):
+    fig, _ = _render_v2(tmp_path)
+    ax_b = next(a for a in fig.axes if a.get_ylabel() == "Mean Score")
+    assert ax_b.get_ylim() == (module.SCORE_MIN, module.SCORE_MAX)
+    assert [int(t) for t in ax_b.get_yticks()] == module.SCORES
+
+
+def test_matrix_has_no_y_tick_labels(tmp_path):
+    fig, _ = _render_v2(tmp_path)
+    ax_m = next(a for a in fig.axes if a.get_ylabel().endswith("Flies"))
+    assert len(ax_m.get_yticks()) == 0
+
+
+def test_score_colour_does_not_depend_on_which_scores_are_present(tmp_path):
+    """THE rank-invariance guard: a 3 is the same green whether or not the
+    dataset contains a 1.
+
+    Task 1's unit test cannot prove this — _score_cmap() takes no data, so
+    nothing can be "a frame missing score 1". Here data actually flows: this
+    renders the real matrix panel for two datasets with different score sets
+    and reads back the cmap/norm the render call site (_draw_score_matrix)
+    actually handed to imshow -- via the live AxesImage artist -- rather
+    than calling _score_cmap() a second time in isolation. A second, direct
+    _score_cmap() call can never disagree with itself regardless of what
+    data was loaded in between, so it would silently pass even if the
+    renderer built a quantile/rank-based norm from the matrix's own
+    min/max; reading the artist's actual norm closes that gap and this test
+    would catch it.
+    """
+    from matplotlib.colors import to_rgba
+
+    def _rendered_colour_of_3(rows):
+        fig, _ = _render_v2(tmp_path, rows)
+        ax_m = next(a for a in fig.axes if a.get_ylabel().endswith("Flies"))
+        img = ax_m.images[0]
+        return img.cmap(img.norm(3))
+
+    dense = _v2_panel_rows()                       # scores {-1, 0, 2, 3, 5}
+    sparse = [r for r in _v2_panel_rows()          # drop everything but 0 and 3
+              if r["score"] in (0, 3)]
+    assert _rendered_colour_of_3(dense) == _rendered_colour_of_3(sparse)
+    assert _rendered_colour_of_3(dense) == to_rgba(module.SCORE_COLORS[
+        module.SCORES.index(3)])
+
+
+def test_legacy_figure_has_no_matrix_panel(tmp_path):
+    """Regression guard: legacy mean_score_*.png must render as before."""
+    import matplotlib.pyplot as plt
+    from scripts.analysis.envelope_visuals import set_protocol
+    set_protocol("legacy")
+    csv_path = tmp_path / "s.csv"
+    out_dir = tmp_path / "out"
+    pd.DataFrame(_v2_panel_rows()).to_csv(csv_path, index=False)
+
+    # See _render_v2: without a clean registry, an earlier test's un-closed
+    # (deliberately, via its own plt.close monkeypatch) v2 figure could be
+    # mistaken below for the one this call renders.
+    plt.close("all")
+    real_close = plt.close
+    plt.close = lambda *a, **k: None
+    try:
+        module.generate_score_summary(csv_path=csv_path, out_dir=out_dir,
+                                      overwrite=True)
+    finally:
+        plt.close = real_close
+
+    assert (out_dir / "mean_score_EB-Training.png").exists()
+    fig = next(f for f in map(plt.figure, plt.get_fignums())
+               if any(a.get_ylabel() == "Mean Score" for a in f.axes))
+    assert not any(a.get_ylabel().endswith("Flies") for a in fig.axes), \
+        "legacy figure grew a matrix panel"
+
+
+def test_matrix_column_absent_from_data_is_all_nan(tmp_path):
+    """Task 3 passes an independently-derived column list, so a column with no
+    matching rows must yield an all-NaN column, not an error or a shift."""
+    from scripts.analysis.envelope_visuals import set_protocol
+    set_protocol("v2")
+    csv_path = tmp_path / "s.csv"
+    pd.DataFrame(_v2_panel_rows()).to_csv(csv_path, index=False)
+    df = module._load_scores(csv_path)
+    columns = ["Hexanol", "Ethyl Butyrate", "Nonexistent Odor"]
+    mat, flies = module._per_fly_score_matrix(df, "EB-Training", columns)
+    assert mat.shape == (len(flies), 3)
+    assert np.isnan(mat[:, 2]).all(), "absent column should be entirely NaN"
+    assert not np.isnan(mat[:, 0]).all(), "present column must still be filled"
