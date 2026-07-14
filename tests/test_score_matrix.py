@@ -42,16 +42,20 @@ def test_score_cmap_maps_each_score_to_its_own_colour():
     assert len(set(seen)) == len(module.SCORES), "scores collapsed to same colour"
 
 
-def test_score_cmap_is_a_fixed_map_not_rank_based():
-    """A 3 is the same green whether or not a 1 is present in the data.
+def test_each_score_maps_to_its_own_designated_hex():
+    """Fixed map: score S wears SCORE_COLORS[S - SCORE_MIN], always.
 
-    Guards the rank-based regression: score 1 never occurs in EB-Training-24-1.
+    Falsifiable — breaks on wrong bounds math, reordered colours, or a bad hex.
+    (The deeper "not rank-based" guarantee is structural: _score_cmap() takes no
+    data, so it cannot depend on which scores a dataset happens to contain. The
+    end-to-end guard for that lives in the render tests, where data does flow.)
     """
+    from matplotlib.colors import to_rgba
     cmap, norm = module._score_cmap()
-    colour_of_3 = cmap(norm(3))
-    # Re-deriving the cmap from a frame lacking score 1 must not shift anything.
-    cmap2, norm2 = module._score_cmap()
-    assert cmap2(norm2(3)) == colour_of_3
+    for score, expected_hex in zip(module.SCORES, module.SCORE_COLORS):
+        assert cmap(norm(score)) == to_rgba(expected_hex), (
+            f"score {score} should be {expected_hex}"
+        )
 
 
 def test_score_cmap_missing_is_grey_and_distinct_from_every_score_colour():
