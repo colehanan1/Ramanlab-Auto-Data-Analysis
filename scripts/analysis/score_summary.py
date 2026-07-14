@@ -502,7 +502,7 @@ def _plot_bar_charts(
             # Mark the reaction boundary
             ax.axhline(
                 y=1.5, color="red", linewidth=0.8, linestyle=":", alpha=0.6,
-                label="Reaction boundary (1/2)",
+                label="Reaction Boundary",
             )
             ax.legend(fontsize=8, loc="upper right")
             plt.tight_layout()
@@ -674,7 +674,7 @@ def _plot_training_vs_control_bars(
                 linewidth=0.8,
                 linestyle=":",
                 alpha=0.6,
-                label="Reaction boundary (score >= 2)",
+                label="Reaction Boundary",
             )
             ax.set_ylim(-1.5, max(6.1, y_top + 1.0))
             ax.grid(axis="y", linestyle="--", linewidth=0.6, alpha=0.35)

@@ -443,7 +443,7 @@ def _plot_grouped(
         if reaction_line:
             ax.axhline(
                 y=REACTION_BOUNDARY, color="red", linewidth=0.8, linestyle=":",
-                alpha=0.6, label=f"Reaction boundary (score >= {REACTION_BOUNDARY})",
+                alpha=0.6, label="Reaction Boundary",
             )
         ax.grid(axis="y", linestyle="--", linewidth=0.6, alpha=0.35)
 
