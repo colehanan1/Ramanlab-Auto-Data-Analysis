@@ -854,7 +854,6 @@ def generate_training_vs_control_matrices(cfg: SpreadsheetMatrixConfig) -> None:
             # --- Figure layout ---
             odor_label = DISPLAY_LABEL.get(train_ds, train_ds)
             trained_display = DISPLAY_LABEL.get(train_ds, train_ds)
-            n_flies = len(fly_pairs)
             n_trials = len(odor_columns)
 
             base_w = max(10.0, 0.70 * n_trials + 6.0)
@@ -919,13 +918,19 @@ def generate_training_vs_control_matrices(cfg: SpreadsheetMatrixConfig) -> None:
                      fly_pairs, flagged_pairs),
                 ):
                     if mat.size:
-                        # Same cell height in both panels: fix the y-extent to the
-                        # LARGER fly count so one row is one cell everywhere. The
-                        # shorter panel simply ends early.
+                        # Same cell height in both panels: each panel's imshow
+                        # extent uses its OWN true row count (mat.shape[0]), so
+                        # imshow never stretches its cells to fill a taller
+                        # range than it actually has data for. set_ylim is the
+                        # SHARED max(n_ctrl, n_train), so both panels occupy the
+                        # same physical axes height -- one data-row is then one
+                        # cell of identical physical size in both panels, and
+                        # the shorter panel's cells simply stop partway down
+                        # (its rows end early) instead of being stretched.
                         ax.imshow(mat, cmap=cmap, norm=norm, aspect="auto",
                                   interpolation="nearest",
                                   extent=(-0.5, len(odor_columns) - 0.5,
-                                          max(n_ctrl, n_train) - 0.5, -0.5))
+                                          mat.shape[0] - 0.5, -0.5))
                         ax.set_ylim(max(n_ctrl, n_train) - 0.5, -0.5)
                     _style_trained_xticks(ax, list(odor_columns), trained_display, xtick_fs)
                     ax.set_yticks([])

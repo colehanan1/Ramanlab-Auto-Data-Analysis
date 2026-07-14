@@ -15,8 +15,12 @@ Covers:
     and an odor absent from that dataset's own data becomes an all-NaN
     (grey) column rather than shifting the layout.
   - A real end-to-end run of ``generate_training_vs_control_matrices``
-    produces both files, and the pair figure's two matrix panels share a
-    y-axis data range (cell height) and column labels.
+    produces both files, and the pair figure's two matrix panels have the
+    same RENDERED cell height in inches -- measured from each panel's own
+    image extent and axes geometry, not just an equal-by-construction
+    y-limit -- and identical column labels.
+  - ``_build_during_matrix`` filters by ``genotype`` (the ``fly_type``
+    column) when one is given, excluding flies of other genotypes.
 """
 
 from __future__ import annotations
@@ -245,6 +249,32 @@ def test_non_reactive_flies_are_excluded_and_reported_as_flagged():
     assert flagged == {("f2", "2")}, f"flagged pair not reported back: {flagged}"
 
 
+def test_genotype_filter_excludes_flies_of_other_genotypes():
+    """``genotype`` (matched against the ``fly_type`` column) must restrict
+    the matrix to flies of that genotype only. This is a verbatim 3-line
+    substitution per the Task 2 brief (see reaction_matrix_training_vs_control.py
+    around line 555-556), so risk is low, but it was previously untested --
+    a fixture with two genotypes must show the other genotype's fly and its
+    data excluded, not merely ignored positionally."""
+    set_protocol("v2")
+    df = _v2_rows(
+        "Zz-Training",
+        [
+            ("f1", "1", [("testing_1_Hexanol", 1)]),
+            ("f2", "2", [("testing_1_Hexanol", 0)]),
+        ],
+    )
+    df["fly_type"] = ["GenoA", "GenoB"]
+    mat, fly_pairs, cols, _ = module._build_during_matrix(
+        df, "Zz-Training", "GenoA", remap_from="Zz-Training"
+    )
+    assert fly_pairs == [("f1", "1")], (
+        f"genotype filter let a fly of another genotype through: {fly_pairs}"
+    )
+    assert cols == ["Hexanol"]
+    assert list(mat[:, 0]) == [1.0], "wrong fly's data landed in the filtered matrix"
+
+
 def test_fly_pairs_sorted_by_fly_sort_key_not_encounter_order():
     """fly_pairs must be name-then-numeric sorted (2 before 10), not row
     encounter order and not a plain string sort (which would put '10' before
@@ -418,17 +448,46 @@ def _write_predictions_csv(path: Path) -> None:
     pd.DataFrame(rows).to_csv(path, index=False)
 
 
+def _measured_cell_height_in(ax, fig):
+    """Rendered height, in inches, of ONE matrix cell on ``ax``.
+
+    ``imshow`` stretches its image to fill ``extent`` in DATA coordinates;
+    ``set_ylim`` then maps a DATA span onto the axes' fixed PHYSICAL height.
+    A cell's rendered height is therefore the axes' physical height scaled
+    by the fraction of the ylim span that one image row occupies. Reading
+    only ``get_ylim()`` cannot detect a mismatched image ``extent`` -- it is
+    equal by construction whenever ``set_ylim`` is shared, bug or no bug.
+    """
+    im = ax.images[0]
+    x0, x1, y_bottom, y_top = im.get_extent()   # y_bottom > y_top (inverted)
+    rows = im.get_array().shape[0]
+    ylo, yhi = ax.get_ylim()                    # ylo > yhi (inverted)
+    data_span = abs(ylo - yhi)
+    ax_h_in = ax.get_position().height * fig.get_figheight()
+    img_span = abs(y_bottom - y_top)
+    return (ax_h_in * (img_span / data_span)) / rows
+
+
 def test_pair_figure_end_to_end_shares_cell_height_and_columns(tmp_path, monkeypatch):
     """Real end-to-end check driven through the actual rendering code, not a
     hand-rolled parallel implementation.
 
-    The brief's version of this test builds its own throwaway figure using
-    matplotlib calls that merely MIRROR Step 5's approach; it never calls
-    into the module, so it cannot fail no matter what
-    generate_training_vs_control_matrices actually renders. It is kept above
-    (see test_pair_panels_share_cell_height_and_columns) for parity with the
-    brief, but this is the test that would actually catch a regression in
-    the shared-cell-height / shared-columns guarantee.
+    The brief's Step 6 test (``test_pair_panels_share_cell_height_and_columns``)
+    built its own throwaway figure using matplotlib calls that merely MIRROR
+    Step 5's approach; it never called into the module, so it could not fail
+    no matter what ``generate_training_vs_control_matrices`` actually
+    renders -- it has been deleted as dead weight.
+
+    This test's own ``get_ylim()`` equality checks below are ALSO
+    insufficient on their own: ``set_ylim`` is fixed to
+    ``max(n_ctrl, n_train)`` in both panels regardless of whether each
+    panel's ``imshow`` ``extent`` uses its OWN row count (correct) or the
+    shared max (buggy, stretches the shorter panel's cells), so those ylim
+    values are equal BY CONSTRUCTION either way and can never expose that
+    bug. The assertion below instead measures each panel's ACTUAL rendered
+    cell height in inches (``_measured_cell_height_in``), which does differ
+    between the two versions -- confirmed by reverting the extent fix and
+    observing this assertion fail with a ~1.5x ratio (see the report).
     """
     import matplotlib.pyplot as plt
 
@@ -457,6 +516,7 @@ def test_pair_figure_end_to_end_shares_cell_height_and_columns(tmp_path, monkeyp
     assert pair_figs, "no rendered figure has two matrix (imshow) axes"
     fig = pair_figs[-1]
     ax_c, ax_t = fig.axes
+    fig.canvas.draw()
 
     n_ctrl, n_train = 2, 3
     n_max = max(n_ctrl, n_train)
@@ -468,6 +528,16 @@ def test_pair_figure_end_to_end_shares_cell_height_and_columns(tmp_path, monkeyp
     assert ax_c.get_ylim() == ax_t.get_ylim(), (
         "both panels sit in one GridSpec row (equal physical height); an "
         "equal data range is what makes their cell height equal"
+    )
+
+    # The load-bearing check: the ylim equality above is necessary but NOT
+    # sufficient -- it holds by construction even when imshow's extent is
+    # wrong. Measure each panel's ACTUAL rendered cell height instead.
+    ctrl_cell = _measured_cell_height_in(ax_c, fig)
+    train_cell = _measured_cell_height_in(ax_t, fig)
+    assert ctrl_cell == pytest.approx(train_cell, rel=1e-6), (
+        f"cell heights differ: control {ctrl_cell:.4f}in vs training {train_cell:.4f}in "
+        f"-- the eye would read a size difference that is not in the data"
     )
 
     labels_c = [t.get_text() for t in ax_c.get_xticklabels()]
@@ -482,44 +552,3 @@ def test_pair_figure_end_to_end_shares_cell_height_and_columns(tmp_path, monkeyp
         if len(f.axes) == 1 and not f.axes[0].images
     ]
     assert bar_figs, "no bars-only (matrix-free) figure was rendered"
-
-
-def test_pair_panels_share_cell_height_and_columns():
-    """Control and training cells must be the same size, or the eye reads a
-    difference that isn't in the data. Both panels also carry identical
-    columns.
-
-    NOTE (test-quality flag): as written in the brief, this test builds a
-    throwaway figure whose imshow/set_ylim calls merely MIRROR Step 5's
-    approach -- it never imports or calls anything from
-    reaction_matrix_training_vs_control.py. With tick_params/xticklabels
-    untouched here it does not even hit that trap, but the deeper issue is
-    that it is fully self-contained: it demonstrates matplotlib's own
-    geometry APIs are internally consistent, not that THIS module's Step 5
-    code uses them correctly. Mutating Step 5 (e.g. using each panel's own
-    fly count instead of max(n_ctrl, n_train) in extent/ylim) cannot make
-    this test fail. It is kept, unmodified from the brief, for parity with
-    the spec; test_pair_figure_end_to_end_shares_cell_height_and_columns
-    above is the real regression guard and is written to fail under that
-    exact mutation (see the report's mutation-testing table).
-    """
-    import matplotlib.gridspec as _gs
-    import matplotlib.pyplot as plt
-
-    plt.close("all")
-    ctrl = np.array([[0.0, 1.0], [1.0, 0.0]])  # 2 flies
-    train = np.array([[1.0, 1.0], [0.0, 1.0], [1.0, 0.0]])  # 3 flies
-    fig = plt.figure(figsize=(8, 4))
-    gs = _gs.GridSpec(1, 2)
-    ax_c, ax_t = fig.add_subplot(gs[0, 0]), fig.add_subplot(gs[0, 1])
-    n_max = max(ctrl.shape[0], train.shape[0])
-    for ax, mat in ((ax_c, ctrl), (ax_t, train)):
-        ax.imshow(mat, aspect="auto", extent=(-0.5, 1.5, n_max - 0.5, -0.5))
-        ax.set_ylim(n_max - 0.5, -0.5)
-    fig.canvas.draw()
-    hc = ax_c.get_position().height / (ax_c.get_ylim()[0] - ax_c.get_ylim()[1])
-    ht = ax_t.get_position().height / (ax_t.get_ylim()[0] - ax_t.get_ylim()[1])
-    assert hc == pytest.approx(ht, rel=1e-9), (
-        f"cell heights differ: control {hc} vs training {ht}"
-    )
-    plt.close(fig)
