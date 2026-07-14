@@ -305,7 +305,7 @@ def test_matrix_carries_its_own_odor_labels_below(tmp_path):
     assert ax_m.child_axes, "matrix has no secondary axis -> odor labels missing"
     ax_lab = ax_m.child_axes[0]
     texts = [t.get_text() for t in ax_lab.get_xticklabels()]
-    assert any("HEXANOL" == t or "Hexanol" == t for t in texts), texts
+    assert "Hexanol" in texts, f"non-trained odor should not be uppercased: {texts}"
     trained = [t for t in ax_lab.get_xticklabels()
                if t.get_text() == "ETHYL BUTYRATE"]
     assert trained, f"trained odor not uppercased on the matrix: {texts}"
@@ -324,6 +324,16 @@ def test_matrix_has_no_y_tick_labels(tmp_path):
     fig, _ = _render_v2(tmp_path)
     ax_m = next(a for a in fig.axes if a.get_ylabel().endswith("Flies"))
     assert len(ax_m.get_yticks()) == 0
+
+
+def test_colorbar_key_is_present_and_labelled(tmp_path):
+    """Deleting the whole colorbar block otherwise survives every test."""
+    fig, _ = _render_v2(tmp_path)
+    cax = next((a for a in fig.axes
+                if a.get_ylabel() == "Odor Response Score"), None)
+    assert cax is not None, (
+        f"colorbar key missing; ylabels={[a.get_ylabel() for a in fig.axes]}"
+    )
 
 
 def test_score_colour_does_not_depend_on_which_scores_are_present(tmp_path):
@@ -356,6 +366,58 @@ def test_score_colour_does_not_depend_on_which_scores_are_present(tmp_path):
     assert _rendered_colour_of_3(dense) == _rendered_colour_of_3(sparse)
     assert _rendered_colour_of_3(dense) == to_rgba(module.SCORE_COLORS[
         module.SCORES.index(3)])
+
+
+def test_missing_cell_renders_as_missing_colour(tmp_path):
+    """A data gap must render as MISSING_COLOR grey on the real artist.
+
+    Guards a silent scientific misread: without set_bad(), a gap renders
+    transparent (white), which against score 1's near-white #f2ebf5 would look
+    like "no reaction" rather than "no data".
+    """
+    import numpy as np
+    from matplotlib.colors import to_rgba
+    from scripts.analysis.envelope_visuals import set_protocol
+    set_protocol("v2")
+    # Drop one (fly, odor) pair so the matrix has a real gap.
+    rows = [r for r in _v2_panel_rows()
+            if not (r["fly"] == "f2" and r["trial_label"] == "testing_1_hexanol")]
+    csv_path = tmp_path / "gap.csv"
+    out_dir = tmp_path / "out"
+    pd.DataFrame(rows).to_csv(csv_path, index=False)
+
+    import matplotlib.pyplot as plt
+    plt.close("all")
+    real_close = plt.close
+    plt.close = lambda *a, **k: None
+    try:
+        module.generate_score_summary(csv_path=csv_path, out_dir=out_dir,
+                                      overwrite=True)
+    finally:
+        plt.close = real_close
+    fig = next(f for f in map(plt.figure, plt.get_fignums())
+               if any(a.get_ylabel() == "Mean Score" for a in f.axes))
+    ax_m = next(a for a in fig.axes if a.get_ylabel().endswith("Flies"))
+    img = ax_m.images[0]
+    arr = img.get_array()
+    rgba = img.to_rgba(arr)
+    gap = np.argwhere(np.ma.getmaskarray(arr))
+    assert len(gap), "fixture produced no gap - test would be vacuous"
+    i, j = gap[0]
+    assert tuple(rgba[i, j]) == to_rgba(module.MISSING_COLOR), (
+        f"gap rendered {tuple(rgba[i, j])}, expected MISSING_COLOR "
+        f"{to_rgba(module.MISSING_COLOR)}"
+    )
+    # The assertion above only proves MISSING_COLOR *propagates* to the
+    # render -- it reads its expected value from module.MISSING_COLOR itself,
+    # so it can never disagree with a wrong-but-still-propagated constant
+    # (e.g. MISSING_COLOR accidentally set to a saturated colour instead of a
+    # neutral grey: both sides of the comparison above would shift together
+    # and it would still pass). Pin the literal semantics independently.
+    r, g, b, _a = to_rgba(module.MISSING_COLOR)
+    assert r == g == b, (
+        f"MISSING_COLOR must be a neutral grey, got rgb=({r}, {g}, {b})"
+    )
 
 
 def test_legacy_figure_has_no_matrix_panel(tmp_path):
