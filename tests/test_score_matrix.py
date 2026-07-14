@@ -514,3 +514,246 @@ def test_trained_odor_remap_does_not_merge_presentations(tmp_path):
         f"n_flies inflated by pseudoreplication: {eb['n_flies'].tolist()} "
         f"(3 flies measured twice must stay n=3, never 6)"
     )
+
+
+# ---------------------------------------------------------------------------
+# Task 3: control|training score matrix PAIR figure (_plot_score_pair)
+# ---------------------------------------------------------------------------
+
+
+def test_score_pair_figure_written_with_shared_key(tmp_path):
+    """Control|training score matrices in ONE figure with ONE shared key."""
+    import matplotlib.pyplot as plt
+    from scripts.analysis.envelope_visuals import set_protocol
+    set_protocol("v2")
+    plt.close("all")
+    rows = []
+    for ds, base in (("EB-Training", 4), ("EB-Control", 0)):
+        for idx, fly in enumerate(("a", "b", "c"), start=1):
+            for label in ("testing_1_hexanol", "testing_2_ethylbutyrate"):
+                rows.append({
+                    "dataset": ds, "fly": f"{ds}_{fly}", "fly_number": str(idx),
+                    "trial_label": label, "score": base, "trial_type": "testing",
+                })
+    csv_path = tmp_path / "s.csv"
+    out_dir = tmp_path / "out"
+    pd.DataFrame(rows).to_csv(csv_path, index=False)
+    module.generate_score_summary(csv_path=csv_path, out_dir=out_dir, overwrite=True)
+    assert (out_dir / "mean_score_pair_EB-Training.png").exists()
+
+
+def _pair_rows(train_flies: dict, ctrl_flies: dict) -> list[dict]:
+    """Minimal v2 rows for an EB-Training/EB-Control pair.
+
+    ``train_flies``/``ctrl_flies`` map a short fly name to a (hexanol_score,
+    ethylbutyrate_score) tuple; dict LENGTH sets that panel's fly count, so
+    callers can deliberately make the two panels unequal -- equal fly counts
+    can never expose a stretched-image `extent` bug (see the cell-height
+    test below).
+    """
+    rows = []
+    for ds, flies in (("EB-Training", train_flies), ("EB-Control", ctrl_flies)):
+        for idx, (fly, (hex_s, eb_s)) in enumerate(flies.items(), start=1):
+            for label, score in (("testing_1_hexanol", hex_s),
+                                  ("testing_2_ethylbutyrate", eb_s)):
+                rows.append({
+                    "dataset": ds, "fly": f"{ds}_{fly}", "fly_number": str(idx),
+                    "trial_label": label, "score": score, "trial_type": "testing",
+                })
+    return rows
+
+
+def _render_pair(tmp_path, rows):
+    """Render generate_score_summary() with plt.close disabled and hand back
+    the live PAIR figure.
+
+    The pair figure is identified by its `fig.suptitle` text ("Per-Fly Odor
+    Response - ...") -- unlike every other figure this module renders
+    (_plot_bar_charts's band/bar figure sets an AXES title via
+    `ax.set_title`, never a figure suptitle), so this lookup cannot
+    accidentally grab the wrong figure the way a bare "does any image
+    match" scan can (see test_score_pair_reuses_the_validated_palette).
+    """
+    import matplotlib.pyplot as plt
+    from scripts.analysis.envelope_visuals import set_protocol
+    set_protocol("v2")
+    csv_path = tmp_path / "s.csv"
+    out_dir = tmp_path / "out"
+    pd.DataFrame(rows).to_csv(csv_path, index=False)
+    plt.close("all")
+    real_close = plt.close
+    plt.close = lambda *a, **k: None
+    try:
+        module.generate_score_summary(csv_path=csv_path, out_dir=out_dir,
+                                      overwrite=True)
+    finally:
+        plt.close = real_close
+    fig = next(f for f in map(plt.figure, plt.get_fignums())
+               if f.get_suptitle().startswith("Per-Fly Odor Response"))
+    return fig, out_dir
+
+
+def _pair_panels(fig):
+    """Pick out the control/training imshow axes by their own titles (set in
+    _plot_score_pair as "Control (...)"/"Training (...)"), so callers never
+    have to guess GridSpec ordering."""
+    ax_c = next(a for a in fig.axes if a.get_title().startswith("Control"))
+    ax_t = next(a for a in fig.axes if a.get_title().startswith("Training"))
+    return ax_c, ax_t
+
+
+def _measured_cell_height_in(ax, fig):
+    """Rendered height, in inches, of ONE matrix cell on ``ax``.
+
+    Same approach as tests/test_train_vs_ctrl_split.py::_measured_cell_height_in
+    (duplicated locally rather than imported across test modules, matching
+    this file's existing convention of self-contained helpers): `imshow`
+    stretches its image to fill `extent` in DATA coordinates; `set_ylim`
+    then maps a DATA span onto the axes' fixed PHYSICAL height. A cell's
+    rendered height is therefore the axes' physical height scaled by the
+    fraction of the ylim span that one image row occupies. Reading only
+    `get_ylim()` cannot detect a mismatched image `extent` -- it is equal by
+    construction whenever `set_ylim` is shared, bug or no bug.
+    """
+    im = ax.images[0]
+    x0, x1, y_bottom, y_top = im.get_extent()   # y_bottom > y_top (inverted)
+    rows = im.get_array().shape[0]
+    ylo, yhi = ax.get_ylim()                    # ylo > yhi (inverted)
+    data_span = abs(ylo - yhi)
+    ax_h_in = ax.get_position().height * fig.get_figheight()
+    img_span = abs(y_bottom - y_top)
+    return (ax_h_in * (img_span / data_span)) / rows
+
+
+def test_score_pair_reuses_the_validated_palette(tmp_path):
+    """The pair figure must not introduce a second ramp: its cells must use
+    the same CVD-validated SCORE_COLORS as the band.
+
+    STRENGTHENED beyond the brief's verbatim version. The brief's version
+    scanned every image on every OPEN figure (`for f in map(plt.figure,
+    plt.get_fignums()) for a in f.axes for im in a.images`) without
+    restricting to the pair figure. But generate_score_summary() ALSO
+    renders the pre-existing per-dataset band/bar figures
+    (_plot_bar_charts -> _draw_score_matrix) for the very same
+    EB-Training/EB-Control datasets in the same call, and those already use
+    the correct SCORE_COLORS via _score_cmap() -- untouched by anything
+    _plot_score_pair does. Confirmed empirically two ways: (1) the brief's
+    unscoped assertion already PASSED at RED, before _plot_score_pair
+    existed at all -- the textbook vacuous case, a test that is green when
+    the feature under test is absent; (2) mutation testing -- replacing
+    _plot_score_pair's `cmap, norm = _score_cmap()` with a plain
+    Normalize-based ramp left the unscoped assertion passing (see the task
+    report for both outputs). Restricting to the pair figure's own artists
+    (via the suptitle-based _render_pair lookup) closes both gaps: it fails
+    at real RED and fails again under the cmap mutant.
+    """
+    from matplotlib.colors import to_rgba
+    rows = _pair_rows(
+        train_flies={"a": (4, 4), "b": (4, 4), "c": (4, 4)},
+        ctrl_flies={"a": (0, 0), "b": (0, 0), "c": (0, 0)},
+    )
+    fig, _ = _render_pair(tmp_path, rows)
+    imgs = [im for ax in fig.axes for im in ax.images]
+    assert imgs, "no matrix artist rendered on the pair figure"
+    # A score of 4 must wear SCORE_COLORS[4 - SCORE_MIN] on the pair figure too.
+    hit = [im for im in imgs
+           if tuple(im.cmap(im.norm(4))) ==
+           to_rgba(module.SCORE_COLORS[4 - module.SCORE_MIN])]
+    assert hit, "pair figure does not use the validated SCORE_COLORS ramp"
+
+
+def test_pair_panels_share_measured_cell_height_with_unequal_fly_counts(tmp_path):
+    """THE cell-height trap (Task 2 shipped this exact bug and it was caught
+    in review: control cells measured 1.54in vs training 1.03in). `imshow`
+    STRETCHES its image to fill `extent`, so giving a 2-row matrix a 3-row
+    extent renders its cells 1.5x too tall.
+
+    Equal fly counts can NEVER expose this: both panels would end at the
+    same row whether `extent` used its own true row count or the shared
+    max, so this fixture deliberately uses 3 training flies vs 2 control
+    flies. Checking only `get_ylim()` equality is also NOT enough -- it is
+    equal BY CONSTRUCTION (`ax.set_ylim(n_max - 0.5, -0.5)` is shared by
+    both panels) whether or not the `extent` bug is present; only the
+    ACTUAL rendered cell height, measured from each panel's own image
+    extent and axes geometry, can tell the two implementations apart.
+    """
+    rows = _pair_rows(
+        train_flies={"t1": (0, 5), "t2": (-1, 3), "t3": (0, 2)},
+        ctrl_flies={"c1": (0, 0), "c2": (1, -1)},
+    )
+    fig, _ = _render_pair(tmp_path, rows)
+    ax_c, ax_t = _pair_panels(fig)
+    fig.canvas.draw()
+
+    assert ax_c.get_ylim() == ax_t.get_ylim(), (
+        "panels must share one y-range for a fair visual comparison"
+    )
+    ctrl_cell = _measured_cell_height_in(ax_c, fig)
+    train_cell = _measured_cell_height_in(ax_t, fig)
+    assert ctrl_cell == pytest.approx(train_cell, rel=1e-6), (
+        f"cell heights differ: control {ctrl_cell:.4f}in vs training "
+        f"{train_cell:.4f}in -- the eye would read a size difference that "
+        f"is not in the data"
+    )
+
+
+def test_pair_panels_have_equal_width_and_one_shared_colorbar(tmp_path):
+    """THE cax trap: `fig.colorbar(mappable, ax=ax_t)` steals space from
+    ax_t to make room for an auto-inserted colorbar axes, shrinking ax_t
+    relative to ax_c and breaking the pair's visual symmetry. A plain
+    get_ylim() or x-span check cannot see this -- ax_t's DATA limits stay
+    exactly [-0.5, n_col - 0.5] either way; only its PHYSICAL width on the
+    page changes when the colorbar steals space from it instead of owning
+    its own dedicated gridspec column. Comparing rendered axes-position
+    widths catches it directly.
+
+    This also operationalises the "ONE shared key" half of
+    test_score_pair_figure_written_with_shared_key's docstring, which that
+    test cannot itself verify: it never patches plt.close, so by the time
+    its assertion runs every figure this call rendered has already been
+    closed and there is nothing left to inspect.
+    """
+    rows = _pair_rows(
+        train_flies={"t1": (0, 5), "t2": (-1, 3)},
+        ctrl_flies={"c1": (0, 0), "c2": (1, -1)},
+    )
+    fig, _ = _render_pair(tmp_path, rows)
+    ax_c, ax_t = _pair_panels(fig)
+
+    pc, pt = ax_c.get_position(), ax_t.get_position()
+    assert pc.width == pytest.approx(pt.width, rel=1e-6), (
+        f"control panel width {pc.width:.4f} != training panel width "
+        f"{pt.width:.4f} -- the colorbar must own its own gridspec column "
+        f"(cax=...), not shrink one panel via fig.colorbar(ax=...)"
+    )
+    colorbar_axes = [a for a in fig.axes
+                     if a.get_ylabel() == "Odor Response Score"]
+    assert len(colorbar_axes) == 1, (
+        f"expected exactly ONE shared key, found {len(colorbar_axes)}: "
+        f"{[a.get_ylabel() for a in fig.axes]}"
+    )
+
+
+def test_legacy_protocol_writes_no_score_pair_figure(tmp_path):
+    """Regression guard: the pair figure is v2-only
+    (`if get_protocol() != "v2" ...: return`). Legacy output must stay
+    byte-for-byte identical, i.e. no mean_score_pair_*.png must appear at
+    all under the legacy protocol -- mirrors the existing
+    test_legacy_figure_has_no_matrix_panel guard for the band figure.
+    """
+    from scripts.analysis.envelope_visuals import set_protocol
+    set_protocol("legacy")
+    rows = []
+    for idx, fly in enumerate(("f1", "f2"), start=1):
+        for label, score in (("testing_1", 0), ("testing_2", 5)):
+            rows.append({
+                "dataset": "EB-Training", "fly": fly, "fly_number": str(idx),
+                "trial_label": label, "score": score, "trial_type": "testing",
+            })
+    csv_path = tmp_path / "s.csv"
+    out_dir = tmp_path / "out"
+    pd.DataFrame(rows).to_csv(csv_path, index=False)
+    module.generate_score_summary(csv_path=csv_path, out_dir=out_dir, overwrite=True)
+    assert not list(out_dir.glob("mean_score_pair_*.png")), (
+        "legacy protocol must not emit the v2-only score-pair figure"
+    )

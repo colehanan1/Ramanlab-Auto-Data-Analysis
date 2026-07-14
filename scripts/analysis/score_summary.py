@@ -925,6 +925,84 @@ def _plot_heatmap(
         plt.close(fig)
 
 
+def _plot_score_pair(df: pd.DataFrame, out_dir: Path, *, overwrite: bool) -> None:
+    """One figure per training dataset: control score matrix LEFT, training
+    RIGHT, sharing columns, cell height, and a single key."""
+    if get_protocol() != "v2" or "odor_col" not in df.columns:
+        return
+    present = sorted(set(df["dataset_canon"]))
+    for train_ds, ctrl_ds in _auto_pairs(present).items():
+        if train_ds not in present or ctrl_ds not in present:
+            continue
+        png_path = out_dir / f"mean_score_pair_{train_ds.replace(' ', '_')}.png"
+        if not should_write(png_path, overwrite):
+            continue
+        pair_df = df[df["dataset_canon"].isin((train_ds, ctrl_ds))]
+        columns = sorted(pair_df["odor_col"].unique(), key=str.casefold)
+        train_m, train_flies = _per_fly_score_matrix(df, train_ds, columns)
+        ctrl_m, ctrl_flies = _per_fly_score_matrix(df, ctrl_ds, columns)
+        if not len(train_flies) or not len(ctrl_flies):
+            continue
+        n_max = max(len(train_flies), len(ctrl_flies))
+        cmap, norm = _score_cmap()
+        trained = _trained_label(train_ds)
+        is_trained = [str(c).casefold().startswith(trained.casefold()) for c in columns]
+
+        with plt.rc_context(_RC_CONTEXT):
+            fig = plt.figure(figsize=(max(9, len(columns) * 1.5 + 3),
+                                      n_max * 0.26 + 4.0))
+            # Colorbar owns its own column: fig.colorbar(ax=...) would shrink one
+            # panel and break the shared-cell-height guarantee.
+            gs = gridspec.GridSpec(1, 4, width_ratios=[1.0, 1.0, 0.10, 0.035],
+                                   wspace=0.10)
+            ax_c = fig.add_subplot(gs[0, 0])
+            ax_t = fig.add_subplot(gs[0, 1])
+            cax = fig.add_subplot(gs[0, 3])
+            for ax, mat, flies, title in (
+                (ax_c, ctrl_m, ctrl_flies, f"Control ({len(ctrl_flies)} Flies)"),
+                (ax_t, train_m, train_flies, f"Training ({len(train_flies)} Flies)"),
+            ):
+                # CELL HEIGHT PARITY -- get this exactly right.
+                # extent's y-span must match THIS matrix's own row count
+                # (mat.shape[0]), NOT n_max: imshow STRETCHES the image to fill
+                # the extent, so giving a 2-row matrix a 3-row extent renders its
+                # cells 1.5x too tall. Equal cell height comes from set_ylim
+                # sharing n_max across both panels while each image keeps its own
+                # true extent -- the shorter panel then genuinely ends early.
+                # (This exact mistake shipped in Task 2 and was caught in review:
+                # control cells measured 1.54in vs training 1.03in.)
+                ax.imshow(np.ma.masked_invalid(mat), cmap=cmap, norm=norm,
+                          aspect="auto", interpolation="nearest",
+                          extent=(-0.5, len(columns) - 0.5,
+                                  mat.shape[0] - 0.5, -0.5))
+                ax.set_ylim(n_max - 0.5, -0.5)
+                for j in range(len(columns) + 1):
+                    ax.axvline(j - 0.5, color="white", lw=1.6)
+                for i in range(n_max + 1):
+                    ax.axhline(i - 0.5, color="white", lw=1.6)
+                ax.set_yticks([])
+                ax.set_xticks(np.arange(len(columns)))
+                ax.set_xticklabels(
+                    [str(c).upper() if t else str(c)
+                     for c, t in zip(columns, is_trained)],
+                    rotation=35, ha="right", fontsize=8)
+                for tick, t in zip(ax.get_xticklabels(), is_trained):
+                    if t:
+                        tick.set_color("#1a3a6b")
+                        tick.set_weight("bold")
+                ax.set_title(title, fontsize=12, weight="bold")
+            cb = fig.colorbar(plt.cm.ScalarMappable(norm=norm, cmap=cmap),
+                              cax=cax, ticks=SCORES)
+            cb.set_label("Odor Response Score", fontsize=9, labelpad=4)
+            cb.ax.tick_params(labelsize=8, pad=2)
+            cb.ax.axhline(REACTION_BOUNDARY_Y, color="black", lw=2.2)
+            fig.suptitle(
+                f"Per-Fly Odor Response - {DISPLAY_LABEL.get(train_ds, train_ds)}",
+                fontsize=14, weight="bold")
+            fig.savefig(png_path, dpi=300, bbox_inches="tight")
+            plt.close(fig)
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -971,6 +1049,7 @@ def _summarise_and_plot(df: pd.DataFrame, out_dir: Path, *, overwrite: bool) -> 
     _plot_bar_charts(df, summary, out_dir, overwrite=overwrite)
     _plot_heatmap(summary, out_dir, overwrite=overwrite)
     _plot_training_vs_control_bars(train_ctrl_summary, out_dir, overwrite=overwrite)
+    _plot_score_pair(df, out_dir, overwrite=overwrite)
     print(f"[score_summary] Plots saved to {out_dir}")
 
 
