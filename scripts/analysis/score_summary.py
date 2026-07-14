@@ -249,7 +249,13 @@ def _load_scores(
             if ds_canon in panel_datasets:
                 return True
             trained = _trained_label(ds_canon)
-            return od.casefold() == trained.casefold()
+            # startswith, not ==: a per-dataset odor_remap may append text to the
+            # trained odor's display name (e.g. "Ethyl Butyrate (1%)"). Exact
+            # equality would fail there, the odor would stop being numbered, and
+            # its two presentations would silently merge into one column with
+            # n = 2 x flies. Matches the `is_trained` convention used elsewhere
+            # in this module.
+            return od.casefold().startswith(trained.casefold())
 
         df["odor_col"] = df.apply(
             lambda r: f"{r['odor_display']} {int(r['occurrence'])}" if _should_number(r) else r["odor_display"],

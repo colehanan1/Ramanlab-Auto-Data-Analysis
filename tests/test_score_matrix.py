@@ -466,3 +466,51 @@ def test_matrix_column_absent_from_data_is_all_nan(tmp_path):
     assert mat.shape == (len(flies), 3)
     assert np.isnan(mat[:, 2]).all(), "absent column should be entirely NaN"
     assert not np.isnan(mat[:, 0]).all(), "present column must still be filled"
+
+
+# ---------------------------------------------------------------------------
+# Task 1: trained-odor remap must not merge presentations (pseudoreplication)
+# ---------------------------------------------------------------------------
+
+
+def test_trained_odor_remap_does_not_merge_presentations(tmp_path):
+    """A remap of the trained odor's display name must NOT merge its two
+    presentations, and must NOT inflate n_flies.
+
+    Regression: _should_number gated on exact equality against _trained_label
+    ("Ethyl Butyrate"), so remapping the display to "Ethyl Butyrate (1%)" made
+    the equality fail, the odor stopped being numbered, and both presentations
+    collapsed into one column with n = 2 x flies. Silent pseudoreplication.
+    """
+    from scripts.analysis.envelope_visuals import set_protocol, set_dataset_odor_remap
+    set_protocol("v2")
+    rows = []
+    # 3 flies, Ethyl Butyrate presented TWICE each (trials 2 and 4).
+    for idx, fly in enumerate(("f1", "f2", "f3"), start=1):
+        for label in ("testing_1_hexanol", "testing_2_ethylbutyrate",
+                      "testing_4_ethylbutyrate"):
+            rows.append({
+                "dataset": "EB-Training", "fly": fly, "fly_number": str(idx),
+                "trial_label": label, "score": 3, "trial_type": "testing",
+            })
+    csv_path = tmp_path / "s.csv"
+    pd.DataFrame(rows).to_csv(csv_path, index=False)
+
+    set_dataset_odor_remap({"EB-Training": {"Ethyl Butyrate": "Ethyl Butyrate (1%)"}})
+    try:
+        df = module._load_scores(csv_path)
+        summary = module._compute_summary(df)
+    finally:
+        set_dataset_odor_remap({})
+
+    eb = summary[summary["odor_col"].str.startswith("Ethyl Butyrate")]
+    assert len(eb) == 2, (
+        f"trained odor's 2 presentations merged into {len(eb)} column(s): "
+        f"{eb['odor_col'].tolist()}"
+    )
+    assert sorted(eb["odor_col"]) == ["Ethyl Butyrate (1%) 1",
+                                      "Ethyl Butyrate (1%) 2"]
+    assert set(eb["n_flies"]) == {3}, (
+        f"n_flies inflated by pseudoreplication: {eb['n_flies'].tolist()} "
+        f"(3 flies measured twice must stay n=3, never 6)"
+    )
