@@ -21,7 +21,7 @@ from typing import Sequence
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-from matplotlib.colors import TwoSlopeNorm
+from matplotlib.colors import BoundaryNorm, ListedColormap, TwoSlopeNorm
 from scipy.stats import mannwhitneyu
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -78,6 +78,42 @@ _STATIC_PAIRS = {
     "Cit-Training": "Cit-Control",
     "Lin-Training": "Lin-Control",
 }
+
+
+# --- Per-fly score matrix palette -------------------------------------------
+# Diverging at the reaction boundary (score >= 2 is a reaction, see
+# fbpipe.config.binary_threshold), NOT at zero. Purple = no reaction,
+# green = reaction.
+#
+# Red->green was rejected: it collapses to worst-pair CVD dE 4.1 (protanopia),
+# i.e. a protanope cannot tell -1 from 5. This ramp measures dE 19.5.
+# The no-reaction arm is deliberately pale: score 0 is ~71% of cells, so an
+# even-stepped arm would make the modal "nothing happened" a wall of colour
+# that the signal has to fight.
+SCORE_MIN = -1
+SCORE_MAX = 5
+SCORES = list(range(SCORE_MIN, SCORE_MAX + 1))
+SCORE_COLORS = [
+    "#762a83",  # -1  strong purple  (rare, notable)
+    "#e2d4e8",  #  0  pale lavender  (modal, recedes)
+    "#f2ebf5",  #  1  palest lavender
+    # ---- reaction boundary (score >= 2) ----
+    "#a6dba0",  #  2  light green
+    "#5aae61",  #  3
+    "#1b7837",  #  4
+    "#00441b",  #  5  dark green
+]
+MISSING_COLOR = "0.70"        # matches reaction_matrix's cmap.set_bad(color="0.7")
+REACTION_BOUNDARY_Y = 1.5
+
+
+def _score_cmap() -> tuple[ListedColormap, BoundaryNorm]:
+    """Fixed score->colour map. Never rank-based: a 3 is the same green in
+    every dataset, whether or not that dataset happens to contain a 1."""
+    cmap = ListedColormap(SCORE_COLORS)
+    cmap.set_bad(color=MISSING_COLOR)
+    bounds = [s - 0.5 for s in SCORES] + [SCORE_MAX + 0.5]
+    return cmap, BoundaryNorm(bounds, cmap.N)
 
 
 def _auto_pairs(datasets: list[str]) -> dict[str, str]:
