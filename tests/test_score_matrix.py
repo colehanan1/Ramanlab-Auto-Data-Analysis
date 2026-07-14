@@ -418,6 +418,11 @@ def test_missing_cell_renders_as_missing_colour(tmp_path):
     assert r == g == b, (
         f"MISSING_COLOR must be a neutral grey, got rgb=({r}, {g}, {b})"
     )
+    # r == g == b still admits ANY grey, so MISSING_COLOR = "1.0" (white) would
+    # survive -- and a white gap is indistinguishable from score 1's near-white
+    # #f2ebf5, which is the exact silent misread this test exists to prevent.
+    # Pin the literal, as SCORE_COLORS is pinned above.
+    assert module.MISSING_COLOR == "0.70"
 
 
 def test_legacy_figure_has_no_matrix_panel(tmp_path):
