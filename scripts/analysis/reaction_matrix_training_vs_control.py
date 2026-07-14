@@ -898,11 +898,15 @@ def generate_training_vs_control_matrices(cfg: SpreadsheetMatrixConfig) -> None:
                 plt.close(fig_bar)
 
                 # --- Figure B: NEW \u2014 control (left) | training (right)
-                # matrix pair. Equal cell height is enforced by fixing BOTH
-                # panels' y-data-range to the larger fly count in a 1x2 grid
-                # (one row => both panels already share physical height), so
-                # cells stay the same size everywhere and only the panel
-                # heights differ when fly counts differ. ---
+                # matrix pair. Equal cell height needs BOTH halves of a pair:
+                # each imshow keeps its OWN true extent (mat.shape[0]), while
+                # set_ylim is shared at the larger fly count. ylim alone does
+                # NOT enforce it \u2014 imshow stretches the image to fill its
+                # extent, so a shared extent renders the shorter panel's cells
+                # too tall (this shipped once: control 1.54in vs training
+                # 1.03in). Cells then stay the same size everywhere and only
+                # the panel heights differ. See
+                # test_pair_figure_end_to_end_* which measures this. ---
                 n_ctrl = max(1, ctrl_matrix.shape[0])
                 n_train = max(1, during_matrix.shape[0])
                 cell_h = 0.26
