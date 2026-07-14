@@ -291,6 +291,28 @@ def test_bar_labels_survive_matrix_labelling(tmp_path):
     )
 
 
+def test_matrix_carries_its_own_odor_labels_below(tmp_path):
+    """Positive guard for the odor-label block.
+
+    The sibling bar-label test cannot cover this: with labelbottom=False,
+    ax_m.get_xticklabels() is [] against the CORRECT implementation, so a
+    negative assertion there passes over an empty list. Only a positive
+    assertion on the secondary axis kills the mutants that delete or misplace
+    the labels.
+    """
+    fig, _ = _render_v2(tmp_path)
+    ax_m = next(a for a in fig.axes if a.get_ylabel().endswith("Flies"))
+    assert ax_m.child_axes, "matrix has no secondary axis -> odor labels missing"
+    ax_lab = ax_m.child_axes[0]
+    texts = [t.get_text() for t in ax_lab.get_xticklabels()]
+    assert any("HEXANOL" == t or "Hexanol" == t for t in texts), texts
+    trained = [t for t in ax_lab.get_xticklabels()
+               if t.get_text() == "ETHYL BUTYRATE"]
+    assert trained, f"trained odor not uppercased on the matrix: {texts}"
+    assert trained[0].get_color() == "#1a3a6b"
+    assert trained[0].get_weight() == "bold"
+
+
 def test_bar_y_axis_spans_the_full_score_range(tmp_path):
     fig, _ = _render_v2(tmp_path)
     ax_b = next(a for a in fig.axes if a.get_ylabel() == "Mean Score")
