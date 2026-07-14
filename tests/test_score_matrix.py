@@ -732,6 +732,20 @@ def test_pair_panels_have_equal_width_and_one_shared_colorbar(tmp_path):
         f"expected exactly ONE shared key, found {len(colorbar_axes)}: "
         f"{[a.get_ylabel() for a in fig.axes]}"
     )
+    # The key must also mark the reaction boundary (score >= 2) with a
+    # horizontal line, same as the single-dataset band figure's colorbar --
+    # deleting `cb.ax.axhline(REACTION_BOUNDARY_Y, ...)` otherwise survives
+    # every other pair-figure test.
+    cb_ax = colorbar_axes[0]
+    boundary_lines = [
+        ln for ln in cb_ax.lines
+        if tuple(ln.get_ydata()) == (module.REACTION_BOUNDARY_Y,) * 2
+    ]
+    assert boundary_lines, (
+        f"colorbar key missing a reaction-boundary line at y="
+        f"{module.REACTION_BOUNDARY_Y}; lines found: "
+        f"{[ln.get_ydata() for ln in cb_ax.lines]}"
+    )
 
 
 def test_legacy_protocol_writes_no_score_pair_figure(tmp_path):
@@ -740,20 +754,92 @@ def test_legacy_protocol_writes_no_score_pair_figure(tmp_path):
     byte-for-byte identical, i.e. no mean_score_pair_*.png must appear at
     all under the legacy protocol -- mirrors the existing
     test_legacy_figure_has_no_matrix_panel guard for the band figure.
+
+    The fixture MUST contain both EB-Training and EB-Control (via
+    `_pair_rows`, the same two-dataset helper the other pair-figure tests
+    in this file use) so `_auto_pairs` actually yields a training/control
+    pair.
+    A training-only fixture is vacuous here: with no pair, `_plot_score_pair`
+    writes nothing under ANY protocol (the `for train_ds, ctrl_ds in
+    _auto_pairs(...).items()` loop body never runs), so the assertion would
+    pass for the wrong reason regardless of the `get_protocol() != "v2"`
+    guard it's supposed to be pinning.
     """
     from scripts.analysis.envelope_visuals import set_protocol
     set_protocol("legacy")
-    rows = []
-    for idx, fly in enumerate(("f1", "f2"), start=1):
-        for label, score in (("testing_1", 0), ("testing_2", 5)):
-            rows.append({
-                "dataset": "EB-Training", "fly": fly, "fly_number": str(idx),
-                "trial_label": label, "score": score, "trial_type": "testing",
-            })
+    rows = _pair_rows(
+        train_flies={"t1": (0, 5), "t2": (-1, 3)},
+        ctrl_flies={"c1": (0, 0), "c2": (1, -1)},
+    )
     csv_path = tmp_path / "s.csv"
     out_dir = tmp_path / "out"
     pd.DataFrame(rows).to_csv(csv_path, index=False)
     module.generate_score_summary(csv_path=csv_path, out_dir=out_dir, overwrite=True)
     assert not list(out_dir.glob("mean_score_pair_*.png")), (
         "legacy protocol must not emit the v2-only score-pair figure"
+    )
+
+
+def test_pair_columns_are_the_union_not_the_training_panel_alone(tmp_path):
+    """`columns` must be the union of BOTH datasets' odor_col values
+    (`pair_df["odor_col"].unique()`), not just the training dataset's.
+
+    Every other Task-3 fixture gives both datasets an identical odor set, so
+    computing `columns` from the training dataset alone survives them, as
+    does reversing which panel's columns get read. Here EB-Control carries
+    an extra odor (Citral) that EB-Training never sees.
+    """
+    from matplotlib.colors import to_rgba
+
+    train_flies = {"t1": (0, 5), "t2": (-1, 3)}
+    ctrl_flies = {"c1": (0, 0), "c2": (1, -1)}
+    rows = _pair_rows(train_flies, ctrl_flies)
+    # Control-only odor: every control fly also gets a Citral trial; no
+    # training fly ever does. Reuses the same fly/fly_number keys _pair_rows
+    # assigned each control fly, rather than hand-rolling a new identity
+    # scheme.
+    for idx, fly in enumerate(ctrl_flies, start=1):
+        rows.append({
+            "dataset": "EB-Control", "fly": f"EB-Control_{fly}",
+            "fly_number": str(idx), "trial_label": "testing_3_citral",
+            "score": 2, "trial_type": "testing",
+        })
+    fig, _ = _render_pair(tmp_path, rows)
+    ax_c, ax_t = _pair_panels(fig)
+
+    ctrl_labels = [t.get_text() for t in ax_c.get_xticklabels()]
+    train_labels = [t.get_text() for t in ax_t.get_xticklabels()]
+    # Parity: both panels must render the SAME columns, in the SAME order --
+    # catches a bug where the two panels' column lists are computed (or
+    # sorted) independently instead of sharing one list.
+    assert len(ctrl_labels) == len(train_labels), (
+        f"panels have different column counts: control={ctrl_labels} "
+        f"training={train_labels}"
+    )
+    assert ctrl_labels == train_labels, (
+        f"panels must share the SAME column order: control={ctrl_labels} "
+        f"training={train_labels}"
+    )
+    # Union: the control-only odor must actually be one of the shared
+    # columns -- if `columns` were derived from the training dataset alone,
+    # "Citral" would never appear on either panel (silently dropped, not
+    # merely shifted), which this positively rules out.
+    assert "Citral" in ctrl_labels, (
+        f"control-only odor missing from shared columns: {ctrl_labels}"
+    )
+
+    citral_j = ctrl_labels.index("Citral")
+    train_img = ax_t.images[0]
+    arr = train_img.get_array()
+    mask_col = np.ma.getmaskarray(arr)[:, citral_j]
+    assert mask_col.all(), (
+        "training panel's Citral column (absent from training data) must "
+        "be entirely NaN/masked, not shifted into another odor's data"
+    )
+    rgba = train_img.to_rgba(arr)
+    missing_rgba = to_rgba(module.MISSING_COLOR)
+    assert all(tuple(rgba[i, citral_j]) == missing_rgba
+               for i in range(arr.shape[0])), (
+        "training panel's Citral column must render as MISSING_COLOR grey, "
+        f"expected {missing_rgba}"
     )
