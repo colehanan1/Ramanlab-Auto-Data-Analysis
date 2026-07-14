@@ -552,3 +552,107 @@ def test_pair_figure_end_to_end_shares_cell_height_and_columns(tmp_path, monkeyp
         if len(f.axes) == 1 and not f.axes[0].images
     ]
     assert bar_figs, "no bars-only (matrix-free) figure was rendered"
+
+
+# ---------------------------------------------------------------------------
+# Regression (task 6): trained-odor remap must not merge presentations
+# ---------------------------------------------------------------------------
+#
+# Same class of bug already fixed in score_summary.py's _should_number
+# (commit d2a7b99): `trained_dup_odors` gated on EXACT EQUALITY between a
+# REMAPPED odor display name and the bare `_trained_label`. A per-dataset
+# odor_remap that appends text to the trained odor's display name (e.g.
+# config_new.yaml's "Ethyl Butyrate" -> "Ethyl Butyrate (1%)" for
+# EB-Training) makes that equality fail, so the odor is never numbered and
+# both its testing presentations silently collapse into ONE column/row.
+# Observed live: reaction_matrix_pair_EB-Training-24-1_*.png rendered 7
+# columns with "Ethyl Butyrate (1%)" appearing once, instead of 8 columns
+# with "Ethyl Butyrate (1%) 1" / "Ethyl Butyrate (1%) 2" kept separate.
+
+
+def test_trained_odor_remap_still_yields_two_numbered_columns_matrix():
+    """Matrix-column site (_build_during_matrix, v2 branch, around
+    reaction_matrix_training_vs_control.py:634-637) must still split the
+    trained odor's two presentations into separate columns when a dataset
+    odor_remap renames its display label."""
+    set_protocol("v2")
+    set_dataset_odor_remap({"EB-Training": {"Ethyl Butyrate": "Ethyl Butyrate (1%)"}})
+    try:
+        df = _v2_rows(
+            "EB-Training",
+            [
+                ("f1", "1", [
+                    ("testing_1_Ethylbutyrate", 1),
+                    ("testing_2_Hexanol", 0),
+                    ("testing_8_Ethylbutyrate", 0),
+                ]),
+                ("f2", "2", [
+                    ("testing_1_Ethylbutyrate", 0),
+                    ("testing_2_Hexanol", 1),
+                    ("testing_8_Ethylbutyrate", 1),
+                ]),
+            ],
+        )
+        mat, fly_pairs, cols, _ = module._build_during_matrix(
+            df, "EB-Training", None, remap_from="EB-Training"
+        )
+    finally:
+        set_dataset_odor_remap({})
+
+    eb_cols = [c for c in cols if c.startswith("Ethyl Butyrate (1%)")]
+    assert eb_cols == ["Ethyl Butyrate (1%) 1", "Ethyl Butyrate (1%) 2"], (
+        f"EB presentations merged into {len(eb_cols)} column(s): {eb_cols} "
+        f"(all columns: {cols})"
+    )
+    col1 = cols.index("Ethyl Butyrate (1%) 1")
+    col2 = cols.index("Ethyl Butyrate (1%) 2")
+    assert (mat[0, col1], mat[1, col1]) == (1.0, 0.0), "1st EB presentation values wrong"
+    assert (mat[0, col2], mat[1, col2]) == (0.0, 1.0), "2nd EB presentation values wrong"
+
+
+def test_trained_odor_remap_still_yields_two_numbered_bar_stats_rows(tmp_path):
+    """Bar-stats site (_load_rates_from_binary_csv, v2 branch, around
+    reaction_matrix_training_vs_control.py:365-368) must still split the
+    trained odor's two presentations into separate 'odor' rows feeding
+    plot_training_vs_control_bars.
+
+    binary_reactions_*.csv's odor_sent column already carries the REMAPPED
+    display name -- it is written upstream via _display_odor ->
+    apply_dataset_odor_remap (see reaction_matrix_from_spreadsheet.py:538)
+    -- so this fixture supplies the post-remap value directly, exactly as
+    the real CSV would contain it.
+    """
+    set_protocol("v2")
+    out_dir = tmp_path / "matrix"
+    ds_dir = module.resolve_dataset_output_dir(out_dir, "EB-Training")
+    ds_dir.mkdir(parents=True, exist_ok=True)
+
+    # 2 flies; each sees the (already-remapped) trained odor TWICE.
+    pd.DataFrame(
+        {
+            "fly": ["f1", "f1", "f1", "f2", "f2", "f2"],
+            "fly_number": ["1", "1", "1", "2", "2", "2"],
+            "trial_num": [1, 2, 8, 1, 2, 8],
+            "odor_sent": [
+                "Ethyl Butyrate (1%)", "Hexanol", "Ethyl Butyrate (1%)",
+                "Ethyl Butyrate (1%)", "Hexanol", "Ethyl Butyrate (1%)",
+            ],
+            "during_hit": [1, 0, 0, 0, 1, 1],
+        }
+    ).to_csv(ds_dir / "binary_reactions_EB-Training_unordered.csv", index=False)
+
+    stats = module._load_rates_from_binary_csv(
+        out_dir, "EB-Training", "EB-Training", include_hexanol=True,
+    )
+
+    eb_rows = stats[stats["odor"].str.startswith("Ethyl Butyrate")]
+    assert sorted(eb_rows["odor"]) == [
+        "Ethyl Butyrate (1%) 1", "Ethyl Butyrate (1%) 2",
+    ], (
+        f"EB presentations merged into {len(eb_rows)} row(s): "
+        f"{eb_rows['odor'].tolist()} (all odors: {stats['odor'].tolist()})"
+    )
+    assert set(eb_rows["num_trials"]) == {2}, (
+        "num_trials inflated by merged presentations: "
+        f"{eb_rows[['odor', 'num_trials']].to_dict('records')}"
+    )

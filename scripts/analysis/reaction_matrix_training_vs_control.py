@@ -361,10 +361,16 @@ def _load_rates_from_binary_csv(
         w = pd.DataFrame(rows_out)
         max_occ = w.groupby("odor")["occurrence"].max()
         dup_odors = set(max_occ[max_occ > 1].index)
-        # Only number the trained odor; non-trained duplicates get aggregated
+        # Only number the trained odor; non-trained duplicates get aggregated.
+        # startswith, not == : a per-dataset odor_remap may append text to the
+        # trained odor's display name (e.g. "Ethyl Butyrate" -> "Ethyl
+        # Butyrate (1%)"). Exact equality against the bare `highlight` then
+        # silently fails, the odor is never numbered, and its two
+        # presentations merge into one row. Matches the `is_trained`
+        # convention a few lines below (str.startswith).
         trained_dup_odors = {
             o for o in dup_odors
-            if o.casefold() == highlight.casefold()
+            if o.casefold().startswith(highlight.casefold())
         }
         w["odor_label"] = w.apply(
             lambda r: f"{r['odor']} {r['occurrence']}" if r["odor"] in trained_dup_odors else r["odor"],
@@ -631,9 +637,15 @@ def _build_during_matrix(
         duplicated_odors = {o for o, c in odor_occurrence_count.items() if c > n_fly_pairs}
         # Only number the trained odor in columns
         highlight = _trained_label(remap_from)
+        # startswith, not == : a per-dataset odor_remap may append text to the
+        # trained odor's display name (e.g. "Ethyl Butyrate" -> "Ethyl
+        # Butyrate (1%)"). Exact equality against the bare `highlight` then
+        # silently fails, the odor is never numbered, and both its
+        # presentations collapse into one matrix column. Matches the
+        # `is_trained` convention used in _load_rates_from_binary_csv.
         trained_dup_odors = {
             o for o in duplicated_odors
-            if o.casefold() == highlight.casefold()
+            if o.casefold().startswith(highlight.casefold())
         }
 
         if columns is not None:
