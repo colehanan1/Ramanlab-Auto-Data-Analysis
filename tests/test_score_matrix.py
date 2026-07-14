@@ -67,3 +67,121 @@ def test_score_cmap_missing_is_grey_and_distinct_from_every_score_colour():
 
 def test_reaction_boundary_sits_between_1_and_2():
     assert module.REACTION_BOUNDARY_Y == 1.5
+
+
+def _matrix_rows() -> list[dict[str, object]]:
+    """Two flies x three odors, v2-style labels with odor suffixes."""
+    rows = []
+    data = {
+        "fly_a": {"testing_1_hexanol": 0, "testing_2_ethylbutyrate": 5},
+        "fly_b": {"testing_1_hexanol": -1, "testing_2_ethylbutyrate": 3},
+    }
+    for idx, (fly, trials) in enumerate(data.items(), start=1):
+        for label, score in trials.items():
+            rows.append({
+                "dataset": "EB-Training",
+                "fly": fly,
+                "fly_number": str(idx),
+                "trial_label": label,
+                "score": score,
+                "trial_type": "testing",
+            })
+    return rows
+
+
+def test_per_fly_matrix_shape_and_column_alignment(tmp_path):
+    from scripts.analysis.envelope_visuals import set_protocol
+    set_protocol("v2")
+    csv_path = tmp_path / "s.csv"
+    pd.DataFrame(_matrix_rows()).to_csv(csv_path, index=False)
+    df = module._load_scores(csv_path)
+    summary = module._compute_summary(df)
+    columns = summary["odor_col"].tolist()
+
+    mat, flies = module._per_fly_score_matrix(df, "EB-Training", columns)
+
+    assert mat.shape == (len(flies), len(columns))
+    assert len(flies) == 2
+
+
+def test_per_fly_matrix_values_land_in_the_right_cell(tmp_path):
+    from scripts.analysis.envelope_visuals import set_protocol
+    set_protocol("v2")
+    csv_path = tmp_path / "s.csv"
+    pd.DataFrame(_matrix_rows()).to_csv(csv_path, index=False)
+    df = module._load_scores(csv_path)
+    summary = module._compute_summary(df)
+    columns = summary["odor_col"].tolist()
+
+    mat, flies = module._per_fly_score_matrix(df, "EB-Training", columns)
+
+    eb_col = columns.index("Ethyl Butyrate")
+    hex_col = columns.index("Hexanol")
+    a_row = flies.index("fly_a|1")
+    b_row = flies.index("fly_b|2")
+    assert mat[a_row, eb_col] == 5
+    assert mat[a_row, hex_col] == 0
+    assert mat[b_row, eb_col] == 3
+    assert mat[b_row, hex_col] == -1
+
+
+def test_per_fly_matrix_absent_pair_is_nan(tmp_path):
+    from scripts.analysis.envelope_visuals import set_protocol
+    set_protocol("v2")
+    rows = _matrix_rows()
+    # Drop fly_b's hexanol trial -> that cell must be NaN, not 0.
+    rows = [r for r in rows
+            if not (r["fly"] == "fly_b" and r["trial_label"] == "testing_1_hexanol")]
+    csv_path = tmp_path / "s.csv"
+    pd.DataFrame(rows).to_csv(csv_path, index=False)
+    df = module._load_scores(csv_path)
+    summary = module._compute_summary(df)
+    columns = summary["odor_col"].tolist()
+
+    mat, flies = module._per_fly_score_matrix(df, "EB-Training", columns)
+
+    assert np.isnan(mat[flies.index("fly_b|2"), columns.index("Hexanol")])
+
+
+def test_per_fly_matrix_keys_rows_on_fly_and_fly_number(tmp_path):
+    """Two flies sharing a `fly` value but differing `fly_number` stay distinct."""
+    from scripts.analysis.envelope_visuals import set_protocol
+    set_protocol("v2")
+    rows = []
+    for fly_number, score in (("1", 0), ("2", 5)):
+        rows.append({
+            "dataset": "EB-Training", "fly": "same_name",
+            "fly_number": fly_number, "trial_label": "testing_2_ethylbutyrate",
+            "score": score, "trial_type": "testing",
+        })
+    csv_path = tmp_path / "s.csv"
+    pd.DataFrame(rows).to_csv(csv_path, index=False)
+    df = module._load_scores(csv_path)
+    summary = module._compute_summary(df)
+    columns = summary["odor_col"].tolist()
+
+    mat, flies = module._per_fly_score_matrix(df, "EB-Training", columns)
+
+    assert len(flies) == 2, "same fly name with different fly_number collapsed"
+    assert mat.shape[0] == 2
+
+
+def test_per_fly_matrix_ignores_other_datasets(tmp_path):
+    from scripts.analysis.envelope_visuals import set_protocol
+    set_protocol("v2")
+    rows = _matrix_rows()
+    rows.append({
+        "dataset": "EB-Control", "fly": "ctrl_fly", "fly_number": "9",
+        "trial_label": "testing_2_ethylbutyrate", "score": 5,
+        "trial_type": "testing",
+    })
+    csv_path = tmp_path / "s.csv"
+    pd.DataFrame(rows).to_csv(csv_path, index=False)
+    df = module._load_scores(csv_path)
+    summary = module._compute_summary(df)
+    columns = summary[summary["dataset_canon"] == "EB-Training"]["odor_col"].tolist()
+
+    mat, flies = module._per_fly_score_matrix(df, "EB-Training", columns)
+
+    assert "ctrl_fly|9" not in flies
+    assert len(flies) == 2

@@ -285,6 +285,36 @@ def _compute_summary(df: pd.DataFrame) -> pd.DataFrame:
     return grouped
 
 
+def _per_fly_score_matrix(
+    df: pd.DataFrame, dataset: str, columns: Sequence[str]
+) -> tuple[np.ndarray, list[str]]:
+    """Build a (flies x columns) score matrix for one dataset.
+
+    ``columns`` must be the same ordered odor_col list the bar chart uses, so
+    the matrix and the bars align by construction. Absent (fly, odor) pairs are
+    NaN. Rows are keyed on (fly, fly_number) -- ``fly`` alone is not unique.
+    """
+    sub = df[df["dataset_canon"] == dataset]
+    if sub.empty or not len(columns):
+        return np.full((0, len(columns)), np.nan), []
+
+    fly_keys = sub["fly"].astype(str) + "|" + sub["fly_number"].astype(str)
+    sub = sub.assign(_fly_key=fly_keys)
+    flies = sorted(sub["_fly_key"].unique())
+
+    row_of = {f: i for i, f in enumerate(flies)}
+    col_of = {c: j for j, c in enumerate(columns)}
+    matrix = np.full((len(flies), len(columns)), np.nan, dtype=float)
+    for fly_key, odor, score in zip(
+        sub["_fly_key"], sub["odor_col"], sub["score"]
+    ):
+        i = row_of.get(fly_key)
+        j = col_of.get(odor)
+        if i is not None and j is not None:
+            matrix[i, j] = score
+    return matrix, flies
+
+
 def _sig_stars(p: float) -> str:
     if np.isnan(p):
         return ""
