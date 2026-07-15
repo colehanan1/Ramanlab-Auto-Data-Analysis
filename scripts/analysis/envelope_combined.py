@@ -3326,6 +3326,13 @@ def build_wide_csv(
         _rows, _ = frozen[_ds]
         aligned = _rows.reindex(columns=target_cols)
         trial_keys = aligned["trial_type"].astype(str).str.strip().str.lower()
+        if trial_type_allow is not None:
+            # Mirror the live-path gate at :2703-2704: a filtered-out trial
+            # type must never reach main_trial_allow / extra_paths routing,
+            # regardless of what the frozen cache contains.
+            _keep = trial_keys.isin(trial_type_allow)
+            aligned = aligned[_keep]
+            trial_keys = trial_keys[_keep]
         for trial_key, group in aligned.groupby(trial_keys):
             if trial_key in main_trial_allow:
                 group.to_csv(out_path, index=False, mode="a", header=False)
@@ -3333,6 +3340,39 @@ def build_wide_csv(
             extra_target = extra_paths.get(trial_key)
             if extra_target is not None:
                 group.to_csv(extra_target, index=False, mode="a", header=False)
+
+    if frozen:
+        # Live rows were written in items_sorted order, i.e. sorted by
+        # (dataset, fly, fly_number, csv_path) -- see items_sorted at
+        # :2880-2888 -- so each dataset's rows are already contiguous and
+        # internally ordered. Frozen rows are appended AFTER the entire live
+        # write loop, so a frozen dataset that sorts before a live one (e.g.
+        # "FROZEN" < "LIVE") lands in the wrong place unless we restore
+        # global order here. A dataset is never both live and frozen (frozen
+        # roots are skipped, never walked), so blocks never interleave: a
+        # STABLE sort keyed on `dataset` alone reproduces the exact ordering
+        # `items_sorted` would have produced.
+        #
+        # Sorted at the LINE level (not via pandas) so this can never alter
+        # float formatting or NaN rendering -- re-serializing through
+        # pd.read_csv/to_csv would itself break byte-identity with the
+        # unfrozen baseline. Applied to out_path AND every extra_paths target
+        # so the Parquet siblings below (read back via pd.read_csv) inherit
+        # the corrected order too.
+        for _sort_target in [out_path, *extra_paths.values()]:
+            _sort_target = Path(_sort_target)
+            _raw = _sort_target.read_bytes()
+            if not _raw:
+                continue
+            _lines = _raw.split(b"\n")
+            _header, _data = _lines[0], _lines[1:]
+            _trailing_newline = bool(_data) and _data[-1] == b""
+            if _trailing_newline:
+                _data = _data[:-1]
+            _data.sort(key=lambda _line: _line.split(b",", 1)[0])
+            if _trailing_newline:
+                _data.append(b"")
+            _sort_target.write_bytes(b"\n".join([_header, *_data]))
 
     flagged_path = out_path.with_name(out_path.stem + "_flagged_flies.txt")
     with flagged_path.open("w", encoding="utf-8") as fh:

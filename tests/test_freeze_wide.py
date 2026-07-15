@@ -38,6 +38,12 @@ def test_frozen_slice_round_trips_identically_when_frozen_is_longer(tmp_path):
     equal lengths this test would pass even if the own_max_len fold were missing
     entirely -- the global max would be correct by accident. Unequal lengths are
     what make it bite.
+
+    FROZEN also sorts alphabetically BEFORE LIVE ("F" < "L"). Live rows are
+    written first (during the walk loop) and frozen rows are spliced in after,
+    so a frozen dataset that sorts first is exactly the case that exposes a
+    missing re-sort: without it the spliced file would read LIVE-then-FROZEN
+    while the live-only baseline reads FROZEN-then-LIVE.
     """
     live = _make_dataset(tmp_path / "LIVE", 8)
     frozen = _make_dataset(tmp_path / "FROZEN", 20)  # LONGER than live
@@ -55,12 +61,12 @@ def test_frozen_slice_round_trips_identically_when_frozen_is_longer(tmp_path):
         [live, frozen], spliced_csv, frozen_slices={"FROZEN": (frozen_rows, own)}
     )
 
-    # Byte-identical output, frozen or not.
+    # Byte-identical output, frozen or not -- checked at the byte level so
+    # row ORDER and float/NaN formatting can't hide behind a sorted-frame
+    # comparison (a sort-then-compare would mask a splice that lands rows in
+    # the wrong block).
     assert baseline_csv.read_bytes() != b""
-    pd.testing.assert_frame_equal(
-        baseline.sort_values(["dataset", "fly"]).reset_index(drop=True),
-        spliced.sort_values(["dataset", "fly"]).reset_index(drop=True),
-    )
+    assert baseline_csv.read_bytes() == spliced_csv.read_bytes()
     # The global max grew to the FROZEN dataset's length, not the live one's.
     assert "dir_val_19" in spliced.columns
     assert "dir_val_20" not in spliced.columns
@@ -197,3 +203,58 @@ def test_frozen_training_rows_route_to_extra_export(tmp_path):
     )
     assert set(pd.read_csv(m2)["trial_type"].str.lower()) == {"testing"}
     assert set(pd.read_csv(t2)["trial_type"].str.lower()) == {"training"}
+
+
+def test_frozen_splice_respects_trial_type_filter(tmp_path):
+    """trial_type_allow must gate spliced rows exactly like it gates live rows.
+
+    A cached slice holds ALL trial types (see
+    test_frozen_training_rows_route_to_extra_export above). With
+    trial_type_filter="training" the LIVE path drops every testing trial at
+    ingest (:2703-2704), before routing ever sees it, so a live-only run
+    writes 0 testing rows to the main CSV. The splice must reproduce that: a
+    filtered-out trial type must never reach main_trial_allow / extra_paths
+    routing, regardless of what the cache contains.
+    """
+    root = tmp_path / "DS"
+    fly = "october_01_fly1"
+    out = root / fly / "angle_distance_rms_envelope"
+    out.mkdir(parents=True, exist_ok=True)
+    for tt in ("testing", "training"):
+        pd.DataFrame({"envelope_of_rms": np.linspace(0, 100, 9)}).to_csv(
+            out / f"{fly}_{tt}_1_angle_distance_rms_envelope.csv", index=False
+        )
+
+    # Live-only baseline: trial_type_filter="training" means no testing trial
+    # is ever collected, so the main CSV is header-only.
+    baseline_csv = tmp_path / "baseline.csv"
+    baseline = _build([root], baseline_csv, trial_type_filter="training")
+    assert len(baseline) == 0
+
+    # Cache holds BOTH trial types, as a real freeze snapshot (taken without a
+    # filter, main + extra export combined per test_frozen_training_rows_
+    # route_to_extra_export above) would.
+    unfiltered_main = tmp_path / "unfiltered.csv"
+    unfiltered_train = tmp_path / "unfiltered_train.csv"
+    ec.build_wide_csv(
+        [str(root)], str(unfiltered_main),
+        measure_cols=["envelope_of_rms"],
+        extra_trial_exports={"training": str(unfiltered_train)},
+    )
+    all_rows = pd.concat(
+        [pd.read_csv(unfiltered_main), pd.read_csv(unfiltered_train)],
+        ignore_index=True,
+    )
+    assert set(all_rows["trial_type"].str.lower()) == {"testing", "training"}
+
+    spliced_csv = tmp_path / "spliced.csv"
+    spliced = _build(
+        [root], spliced_csv,
+        trial_type_filter="training",
+        frozen_slices={"DS": (all_rows, 9)},
+    )
+
+    # No leaked testing rows, and the same (empty) main-CSV contents as the
+    # live-only equivalent.
+    assert len(spliced) == 0
+    assert baseline_csv.read_bytes() == spliced_csv.read_bytes()
