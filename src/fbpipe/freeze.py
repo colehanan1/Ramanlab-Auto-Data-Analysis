@@ -1,0 +1,209 @@
+"""Per-dataset freeze cache.
+
+A frozen dataset keeps its rows in the wide CSV without being re-derived. This
+module owns the cache only: fingerprinting, and saving/loading a dataset's row
+slice. It deliberately knows nothing about ``build_wide_csv`` -- the splice
+lives there, and the policy (which datasets are frozen) lives in the caller.
+
+Layout, under the configured ``cache_dir``::
+
+    <cache_dir>/frozen/<wide_block>/<dataset>/
+        rows.parquet    # the dataset's slice of that block's wide CSV
+        meta.json       # fingerprint + own_max_len
+
+The cache is a DERIVED artifact. Deleting it is always safe: every frozen
+dataset's raw data stays on disk, so a miss simply re-derives.
+
+The ``wide_block`` component is a partitioning LABEL, not the correctness
+mechanism. Correctness rests on the fingerprint (which includes
+``measure_cols``). Keying by block is a safe over-partition: it may duplicate an
+identical slice across two blocks that share parameters, but it can never serve
+the wrong rows.
+"""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from typing import Any, Iterable, Mapping, NamedTuple, Optional
+
+import pandas as pd
+
+FREEZE_SCHEMA_VERSION = 1
+
+
+class FrozenSlice(NamedTuple):
+    """A dataset's cached wide rows plus its OWN maximum trace length.
+
+    ``own_max_len`` is load-bearing. ``build_wide_csv`` pads *and truncates*
+    every row to one global ``max_len``; if a frozen dataset's own length is not
+    folded into that global max, its cached rows are silently chopped.
+    """
+
+    rows: pd.DataFrame
+    own_max_len: int
+
+
+def freeze_flags(
+    cfg: Any,
+    dataset: str,
+    *,
+    thawed: Iterable[str] = (),
+    thaw_all: bool = False,
+) -> tuple[bool, bool]:
+    """Return ``(freeze_data, freeze_figures)`` for *dataset*, honoring thaw.
+
+    ``thawed`` names datasets to treat as unfrozen for this run only;
+    ``thaw_all`` unfreezes everything. Neither edits config.
+    """
+    if thaw_all or dataset in set(thawed):
+        return (False, False)
+    override = (getattr(cfg, "dataset_overrides", None) or {}).get(dataset)
+    if override is None:
+        return (False, False)
+    return (bool(override.freeze_data), bool(override.freeze_figures))
+
+
+def build_fingerprint(
+    *,
+    protocol: str,
+    measure_cols: Iterable[str],
+    fps_fallback: float,
+    distance_limits: Optional[tuple[float, float]],
+    non_reactive_threshold: Optional[float],
+    low_max_threshold_px: float,
+    use_per_trial_baseline: bool,
+    override: Any,
+) -> dict:
+    """Everything that determines a dataset's rows OTHER than its raw data.
+
+    Raw data is deliberately absent: ``freeze.data`` never walks the root. Config
+    IS checked, because it is already in memory and free -- without this, changing
+    an analysis parameter while a dataset is frozen would leave one CSV silently
+    mixing two parameterizations.
+
+    ``figure_output_subdir`` is deliberately EXCLUDED: it routes figures and
+    cannot change a row value, so it must not invalidate a data cache.
+    """
+    return {
+        "protocol": str(protocol),
+        "measure_cols": [str(c) for c in measure_cols],
+        "fps_fallback": float(fps_fallback),
+        "distance_limits": (
+            None if distance_limits is None else [float(x) for x in distance_limits]
+        ),
+        "non_reactive_threshold": (
+            None if non_reactive_threshold is None else float(non_reactive_threshold)
+        ),
+        "low_max_threshold_px": float(low_max_threshold_px),
+        "use_per_trial_baseline": bool(use_per_trial_baseline),
+        "override": {
+            "trial_type_override": getattr(override, "trial_type_override", None),
+            "odor_on_s": getattr(override, "odor_on_s", None),
+            "odor_off_s": getattr(override, "odor_off_s", None),
+            "light_only": bool(getattr(override, "light_only", False)),
+            "light_start_s": getattr(override, "light_start_s", None),
+            "light_duration_s": getattr(override, "light_duration_s", None),
+            "odor_remap": dict(getattr(override, "odor_remap", {}) or {}),
+        },
+    }
+
+
+def _safe(name: str) -> str:
+    """Filesystem-safe cache component. Dataset names carry dots and dashes
+    (``Hex-Control-24-0.1``); only separators are unsafe."""
+    return str(name).replace("/", "_").replace("\\", "_").strip() or "_"
+
+
+def slice_dir(cache_dir: str | Path, wide_block: str, dataset: str) -> Path:
+    return Path(cache_dir).expanduser() / "frozen" / _safe(wide_block) / _safe(dataset)
+
+
+def own_max_len(rows: pd.DataFrame) -> int:
+    """This dataset's own maximum trace length, in samples.
+
+    ``trace_len`` is written as ``int(len(values))`` -- the UNPADDED length
+    (``envelope_combined.py:3114``). But a row whose values exceeded the run's
+    global max was truncated on write while ``trace_len`` kept the original
+    figure, so clamp to the dir_val columns actually present. Over-reporting
+    would pad the global max out to a width holding no data.
+    """
+    val_cols = [c for c in rows.columns if str(c).startswith("dir_val_")]
+    present = len(val_cols)
+    if "trace_len" not in rows.columns or rows.empty:
+        return present
+    tl = pd.to_numeric(rows["trace_len"], errors="coerce").max()
+    if pd.isna(tl):
+        return present
+    return max(0, min(int(tl), present))
+
+
+def save_slice(
+    cache_dir: str | Path,
+    wide_block: str,
+    dataset: str,
+    rows: pd.DataFrame,
+    fingerprint: Mapping[str, Any],
+) -> None:
+    """Persist *rows* as *dataset*'s slice of *wide_block*.
+
+    Stores the rows exactly as written, across ALL trial types -- the splice
+    routes them to the main output or an extra trial export the same way live
+    rows are routed.
+    """
+    target = slice_dir(cache_dir, wide_block, dataset)
+    target.mkdir(parents=True, exist_ok=True)
+    rows.to_parquet(target / "rows.parquet", index=False)
+    meta = {
+        "schema_version": FREEZE_SCHEMA_VERSION,
+        "dataset": str(dataset),
+        "wide_block": str(wide_block),
+        "own_max_len": own_max_len(rows),
+        "row_count": int(len(rows)),
+        "columns": [str(c) for c in rows.columns],
+        "fingerprint": dict(fingerprint),
+    }
+    (target / "meta.json").write_text(json.dumps(meta, indent=2, sort_keys=True))
+
+
+def load_slice(
+    cache_dir: str | Path,
+    wide_block: str,
+    dataset: str,
+    fingerprint: Mapping[str, Any],
+) -> Optional[FrozenSlice]:
+    """Return the cached slice, or ``None`` if it cannot be trusted.
+
+    ``None`` means "re-derive this dataset": cache miss, fingerprint drift,
+    schema-version bump, or an unreadable/corrupt cache. Callers implement
+    auto-rebuild by simply omitting the dataset from ``frozen_slices``, which
+    lets its root be walked normally.
+    """
+    target = slice_dir(cache_dir, wide_block, dataset)
+    meta_path = target / "meta.json"
+    rows_path = target / "rows.parquet"
+    if not meta_path.is_file() or not rows_path.is_file():
+        return None
+    try:
+        meta = json.loads(meta_path.read_text())
+    except Exception:
+        return None
+    if meta.get("schema_version") != FREEZE_SCHEMA_VERSION:
+        return None
+    if meta.get("fingerprint") != json.loads(json.dumps(dict(fingerprint))):
+        return None
+    try:
+        rows = pd.read_parquet(rows_path)
+    except Exception:
+        return None
+    return FrozenSlice(rows=rows, own_max_len=int(meta.get("own_max_len", 0)))
+
+
+def drift_reason(
+    cached: Mapping[str, Any], current: Mapping[str, Any]
+) -> Optional[str]:
+    """Name the first fingerprint field that differs, for a one-line log."""
+    for key in sorted(set(cached) | set(current)):
+        if cached.get(key) != current.get(key):
+            return f"{key}: {cached.get(key)!r} -> {current.get(key)!r}"
+    return None
