@@ -482,6 +482,15 @@ class DatasetOverride:
     # figures need a per-dataset override.
     odor_remap: Dict[str, str] = field(default_factory=dict)
 
+    # Per-dataset freeze. Two INDEPENDENT flags; either may be set alone.
+    # ``freeze_data``: do not re-derive this dataset's wide rows -- splice them
+    # from the freeze cache and never walk its root. ``freeze_figures``: do not
+    # regenerate figures that belong solely to this dataset. A figure drawn from
+    # several datasets is skipped only when EVERY contributor is frozen.
+    # Both default False, so an absent ``freeze:`` block is today's behavior.
+    freeze_data: bool = False
+    freeze_figures: bool = False
+
 
 @dataclass
 class Settings:
@@ -918,6 +927,8 @@ def load_settings(config_path: str | Path) -> Settings:
                 for k, v in (block.get("odor_remap") or {}).items()
                 if k is not None and v is not None
             },
+            freeze_data=bool((block.get("freeze") or {}).get("data", False)),
+            freeze_figures=bool((block.get("freeze") or {}).get("figures", False)),
         )
 
     flagged_root = str(
