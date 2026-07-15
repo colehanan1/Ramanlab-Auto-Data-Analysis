@@ -74,6 +74,7 @@ def build_fingerprint(
     low_max_threshold_px: float,
     use_per_trial_baseline: bool,
     override: Any,
+    tracking: Any,
 ) -> dict:
     """Everything that determines a dataset's rows OTHER than its raw data.
 
@@ -105,6 +106,23 @@ def build_fingerprint(
             "light_start_s": getattr(override, "light_start_s", None),
             "light_duration_s": getattr(override, "light_duration_s", None),
             "odor_remap": dict(getattr(override, "odor_remap", {}) or {}),
+        },
+        # build_wide_csv reads settings.tracking internally (envelope_combined.py:2622)
+        # and derives the tracking_missing_frames / tracking_pct_missing /
+        # tracking_flagged columns from it (:3050, :3067-3068, :3111). Omitting it
+        # would serve stale rows whose tracking flags used a different threshold.
+        # Recorded unconditionally even when apply_missing_frame_check is False:
+        # a needless rebuild is cheap and self-healing, a stale row is not.
+        "tracking": {
+            "apply_missing_frame_check": bool(
+                getattr(tracking, "apply_missing_frame_check", True)
+            ),
+            "max_missing_frames_per_trial": getattr(
+                tracking, "max_missing_frames_per_trial", None
+            ),
+            "max_missing_frames_pct_per_trial": getattr(
+                tracking, "max_missing_frames_pct_per_trial", None
+            ),
         },
     }
 

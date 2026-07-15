@@ -1,8 +1,9 @@
 """Freeze cache: fingerprint, own_max_len, save/load round-trip."""
 
+from types import SimpleNamespace
+
 import numpy as np
 import pandas as pd
-import pytest
 
 from fbpipe import freeze
 from fbpipe.config import DatasetOverride
@@ -19,6 +20,18 @@ def _rows(trace_lens, n_val_cols):
     return pd.DataFrame(recs)
 
 
+def _tracking(**kw):
+    """Duck-typed stand-in for ``TrackingConfig`` -- freeze.py must not import
+    fbpipe.config, so build_fingerprint reaches these fields via getattr."""
+    base = dict(
+        apply_missing_frame_check=True,
+        max_missing_frames_per_trial=5000,
+        max_missing_frames_pct_per_trial=50.0,
+    )
+    base.update(kw)
+    return SimpleNamespace(**base)
+
+
 def _fp(**kw):
     base = dict(
         protocol="v2",
@@ -29,6 +42,7 @@ def _fp(**kw):
         low_max_threshold_px=5.0,
         use_per_trial_baseline=False,
         override=DatasetOverride(),
+        tracking=_tracking(),
     )
     base.update(kw)
     return freeze.build_fingerprint(**base)
@@ -83,6 +97,34 @@ def test_odor_remap_drift_returns_none(tmp_path):
     assert freeze.load_slice(tmp_path, "combined_base", "DS", drifted) is None
 
 
+def test_tracking_max_missing_frames_per_trial_drift_returns_none(tmp_path):
+    """A changed missing-frames threshold must invalidate -- otherwise cached
+    rows keep tracking_flagged values computed under the old threshold."""
+    freeze.save_slice(tmp_path, "combined_base", "DS", _rows([5], 5), _fp())
+    drifted = _fp(tracking=_tracking(max_missing_frames_per_trial=100))
+    assert freeze.load_slice(tmp_path, "combined_base", "DS", drifted) is None
+
+
+def test_tracking_max_missing_frames_pct_per_trial_drift_returns_none(tmp_path):
+    freeze.save_slice(tmp_path, "combined_base", "DS", _rows([5], 5), _fp())
+    drifted = _fp(tracking=_tracking(max_missing_frames_pct_per_trial=25.0))
+    assert freeze.load_slice(tmp_path, "combined_base", "DS", drifted) is None
+
+
+def test_tracking_apply_missing_frame_check_toggle_returns_none(tmp_path):
+    freeze.save_slice(tmp_path, "combined_base", "DS", _rows([5], 5), _fp())
+    drifted = _fp(tracking=_tracking(apply_missing_frame_check=False))
+    assert freeze.load_slice(tmp_path, "combined_base", "DS", drifted) is None
+
+
+def test_tracking_unchanged_still_loads(tmp_path):
+    """Proves drift detection, not blanket invalidation: an identical tracking
+    config (even a fresh, separately-constructed stub) must still hit."""
+    freeze.save_slice(tmp_path, "combined_base", "DS", _rows([5], 5), _fp())
+    same = _fp(tracking=_tracking())
+    assert freeze.load_slice(tmp_path, "combined_base", "DS", same) is not None
+
+
 def test_figure_output_subdir_does_not_invalidate(tmp_path):
     """figure_output_subdir routes figures; it cannot change a row value, so it
     must NOT invalidate a data cache."""
@@ -107,6 +149,14 @@ def test_blocks_do_not_collide(tmp_path):
 def test_corrupt_cache_returns_none_not_raise(tmp_path):
     freeze.save_slice(tmp_path, "combined_base", "DS", _rows([5], 5), _fp())
     (freeze.slice_dir(tmp_path, "combined_base", "DS") / "meta.json").write_text("{not json")
+    assert freeze.load_slice(tmp_path, "combined_base", "DS", _fp()) is None
+
+
+def test_corrupt_parquet_returns_none_not_raise(tmp_path):
+    """Mirrors the meta.json-corruption case: a corrupt rows.parquet must also
+    miss cleanly rather than raise out of load_slice."""
+    freeze.save_slice(tmp_path, "combined_base", "DS", _rows([5], 5), _fp())
+    (freeze.slice_dir(tmp_path, "combined_base", "DS") / "rows.parquet").write_bytes(b"not parquet")
     assert freeze.load_slice(tmp_path, "combined_base", "DS", _fp()) is None
 
 
