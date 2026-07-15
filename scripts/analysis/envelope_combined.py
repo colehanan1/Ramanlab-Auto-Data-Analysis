@@ -2611,12 +2611,23 @@ def build_wide_csv(
     non_reactive_threshold: float | None = None,
     low_max_threshold_px: float = LOW_MAX_FLAG_THRESHOLD_PX,
     use_per_trial_baseline: bool = False,
+    frozen_slices: Mapping[str, tuple[pd.DataFrame, int]] | None = None,
 ) -> None:
     print(
         f"[DEBUG] build_wide_csv → roots={list(roots)} output={output_csv} measure_cols={list(measure_cols)}"
     )
     out_path = Path(output_csv).expanduser().resolve()
     out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # Frozen datasets: rows come from the freeze cache, their roots are NEVER
+    # walked. Keyed by the `dataset` column value == root basename (:2668).
+    # Values are (rows, own_max_len). This function stays config-free -- the
+    # caller decides what is frozen and loads the slices.
+    frozen: dict[str, tuple[pd.DataFrame, int]] = {
+        str(k): v for k, v in (frozen_slices or {}).items()
+    }
+    if frozen:
+        print(f"[FROZEN] Splicing cached rows for: {', '.join(sorted(frozen))}")
 
     # Load tracking config for proboscis detection quality checks
     settings = load_settings(config_path or DEFAULT_CONFIG_PATH)
@@ -2666,6 +2677,11 @@ def build_wide_csv(
             print(f"[SKIP] Excluding dataset root: {root}")
             continue
         dataset = root.name
+        if dataset in frozen:
+            # freeze.data is a promise, not a check: never stat/iterdir/hash a
+            # frozen root. This skip IS the performance win.
+            print(f"[FROZEN] Not walking root (cached rows will be spliced): {root}")
+            continue
         for fly_dir in sorted(p for p in root.iterdir() if p.is_dir()):
             fly = fly_dir.name
             # Resolve canonical genotype from the batch's session_metadata.txt and
@@ -2730,7 +2746,7 @@ def build_wide_csv(
                     }
                 )
 
-    if not items:
+    if not items and not frozen:
         raise RuntimeError("No eligible testing/training CSVs found in provided roots.")
 
     # Compute max_len via a cheap row count (parquet footer or csv line count;
@@ -2741,6 +2757,13 @@ def build_wide_csv(
         except Exception:
             n_rows = 0
         max_len = max(max_len, n_rows)
+
+    # Fold each frozen dataset's OWN max trace length into the global max.
+    # Without this, a frozen dataset whose traces are longer than any live
+    # dataset's has its cached rows silently CHOPPED by the truncation branch
+    # below (:3283-3284) -- data loss with no error.
+    for _frozen_rows, _own in frozen.values():
+        max_len = max(max_len, int(_own))
 
     fly_before_samples: dict[str, list[np.ndarray]] = {}
     baseline_types = trial_type_allow or {"testing"}
@@ -3294,6 +3317,22 @@ def build_wide_csv(
                 pd.DataFrame([row], columns=metadata + list(AUC_COLUMNS) + value_cols).to_csv(
                     extra_target, index=False, mode="a", header=False
                 )
+
+    # Splice frozen rows. reindex(columns=...) IS pad-and-truncate: it inserts
+    # NaN for dir_val_* columns the cache lacks and drops any beyond max_len --
+    # exactly the live semantics at :3281-3284, in one call.
+    target_cols = metadata + list(AUC_COLUMNS) + value_cols
+    for _ds in sorted(frozen):
+        _rows, _ = frozen[_ds]
+        aligned = _rows.reindex(columns=target_cols)
+        trial_keys = aligned["trial_type"].astype(str).str.strip().str.lower()
+        for trial_key, group in aligned.groupby(trial_keys):
+            if trial_key in main_trial_allow:
+                group.to_csv(out_path, index=False, mode="a", header=False)
+                main_rows_written += len(group)
+            extra_target = extra_paths.get(trial_key)
+            if extra_target is not None:
+                group.to_csv(extra_target, index=False, mode="a", header=False)
 
     flagged_path = out_path.with_name(out_path.stem + "_flagged_flies.txt")
     with flagged_path.open("w", encoding="utf-8") as fh:
