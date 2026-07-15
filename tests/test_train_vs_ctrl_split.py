@@ -540,6 +540,23 @@ def test_pair_figure_end_to_end_shares_cell_height_and_columns(tmp_path, monkeyp
         f"-- the eye would read a size difference that is not in the data"
     )
 
+    # The one user requirement this figure exists to serve: control on the
+    # LEFT, training on the RIGHT. Every check above (ylim, cell height,
+    # labels below) is symmetric between ax_c/ax_t and passes unchanged
+    # whichever physical column each panel lands in -- including the
+    # `ax_c, ax_t = fig.axes` unpacking itself, which only tracks CREATION
+    # order, not rendered position. This check must not reuse that pairing;
+    # it selects the panels BY TITLE instead, independent of gridspec column
+    # assignment, so it actually fails if the pair block's `gs_pair[0, 0]`/
+    # `gs_pair[0, 1]` subplot assignment were ever swapped.
+    title_c = next(a for a in fig.axes if a.get_title().startswith("Control"))
+    title_t = next(a for a in fig.axes if a.get_title().startswith("Training"))
+    assert title_c.get_position().x0 < title_t.get_position().x0, (
+        "control panel must render LEFT of training "
+        f"(control x0={title_c.get_position().x0:.4f}, "
+        f"training x0={title_t.get_position().x0:.4f})"
+    )
+
     labels_c = [t.get_text() for t in ax_c.get_xticklabels()]
     labels_t = [t.get_text() for t in ax_t.get_xticklabels()]
     assert labels_c, "no odor columns rendered on the control panel"

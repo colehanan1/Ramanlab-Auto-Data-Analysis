@@ -726,6 +726,18 @@ def test_pair_panels_have_equal_width_and_one_shared_colorbar(tmp_path):
         f"{pt.width:.4f} -- the colorbar must own its own gridspec column "
         f"(cax=...), not shrink one panel via fig.colorbar(ax=...)"
     )
+    # The one user requirement this figure exists to serve: control on the
+    # LEFT, training on the RIGHT. ax_c/ax_t above are already selected BY
+    # TITLE (via _pair_panels), so this check is independent of gridspec
+    # column order -- unlike every other assertion in this file (equal
+    # width, equal cell height, matching columns), which is symmetric
+    # between the two panels and therefore passes unchanged even if
+    # _plot_score_pair's `gs[0, 0]`/`gs[0, 1]` subplot assignment were
+    # swapped.
+    assert pc.x0 < pt.x0, (
+        "control panel must render LEFT of training "
+        f"(control x0={pc.x0:.4f}, training x0={pt.x0:.4f})"
+    )
     colorbar_axes = [a for a in fig.axes
                      if a.get_ylabel() == "Odor Response Score"]
     assert len(colorbar_axes) == 1, (
