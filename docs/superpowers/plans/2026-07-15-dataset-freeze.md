@@ -1411,11 +1411,15 @@ anyway for `config/config.yaml`, which does use it.
 
 Same shape, with `_block = "pair_groups"` and `resolved_roots`.
 
-This call site references `wide_measure_cols`, which is bound only inside the
-`if wide_cfg:` block at `:1097-1103`. Under `config_new.yaml` it would therefore
-`NameError` if `pair_groups` were configured. It is not configured, so the site is
-unreachable. **Do not fix that pre-existing latent bug here** — wire freeze in the
-same shape as the others and leave it untouched and out of scope.
+**Correction (verified 2026-07-15):** an earlier draft of this plan claimed this
+site would `NameError` because `wide_measure_cols` was bound only inside
+`if wide_cfg:`. That is **false**. `wide_measure_cols: Sequence[str] =
+["envelope_of_rms"]` is a function-level default at `run_workflows.py:1093`, as
+are `wide_fps_fallback` (`:1094`), `wide_exclude_cfg` (`:1095`) and
+`use_per_trial_baseline` (`:1099`) — the latter carrying an explicit comment that
+it exists so the `combined_base`/`distance_base` helper is safe when no top-level
+`wide` block is configured. The `if wide_cfg:` block at `:1156` merely *overrides*
+them. There is no latent bug here. Wire freeze in the same shape as the others.
 
 - [ ] **Step 9: Run the full suite**
 
@@ -2115,6 +2119,6 @@ stop: you are deleting the only thing the test proves.
   report you have not tried to break.
 
 **Out of scope; do not fix here:**
-- `wide_measure_cols` is bound only inside `if wide_cfg:` (`run_workflows.py:1097-1103`), so the `pair_groups` call site (`:1403`) would `NameError` if configured. Latent, pre-existing, currently unreachable.
+- ~~`wide_measure_cols` is bound only inside `if wide_cfg:`, so the `pair_groups` call site would `NameError` if configured.~~ **RETRACTED — this was false.** `wide_measure_cols` (`:1093`), `wide_fps_fallback` (`:1094`), `wide_exclude_cfg` (`:1095`) and `use_per_trial_baseline` (`:1099`) all have function-level defaults and are always bound; `if wide_cfg:` (`:1156`) only overrides them. The claim originated in an exploration report and was propagated into this plan without verification. There is no latent bug.
 - `_style_trained_xticks` (`envelope_visuals.py:1309`) compares odor names against a dataset display label, so sibling figures disagree about the trained odor. Pre-existing.
 - `docs/` and `config/` are gitignored (`.gitignore:116`), so `config/config_new.yaml` — and any `freeze:` block in it — is not tracked. Flagged in the spec.
