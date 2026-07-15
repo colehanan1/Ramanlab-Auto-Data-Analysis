@@ -200,7 +200,11 @@ git commit -m "feat(config): add independent freeze.data / freeze.figures per-da
   - `FREEZE_SCHEMA_VERSION: int = 1`
   - `class FrozenSlice(NamedTuple): rows: pd.DataFrame; own_max_len: int`
   - `freeze_flags(cfg, dataset: str, *, thawed=(), thaw_all=False) -> tuple[bool, bool]`
-  - `build_fingerprint(*, protocol, measure_cols, fps_fallback, distance_limits, non_reactive_threshold, low_max_threshold_px, use_per_trial_baseline, override) -> dict`
+  - `build_fingerprint(*, protocol, measure_cols, fps_fallback, distance_limits, non_reactive_threshold, low_max_threshold_px, use_per_trial_baseline, override, tracking) -> dict`
+    (`tracking` is REQUIRED, not defaulted: `build_wide_csv` reads `settings.tracking`
+    internally at `envelope_combined.py:2622` to derive the `tracking_missing_frames` /
+    `tracking_pct_missing` / `tracking_flagged` columns, so omitting it would serve
+    stale rows. A required parameter makes that omission impossible.)
   - `slice_dir(cache_dir, wide_block: str, dataset: str) -> Path`
   - `own_max_len(rows: pd.DataFrame) -> int`
   - `save_slice(cache_dir, wide_block, dataset, rows, fingerprint) -> None`
@@ -991,12 +995,21 @@ from fbpipe import freeze
 from fbpipe.config import DatasetOverride
 
 
+class _Tracking:
+    """Stub of fbpipe.config.TrackingConfig -- build_fingerprint duck-types it."""
+
+    apply_missing_frame_check = True
+    max_missing_frames_per_trial = 5000
+    max_missing_frames_pct_per_trial = 50.0
+
+
 class _Settings:
     def __init__(self, tmp_path, overrides, datasets):
         self.cache_dir = str(tmp_path / "cache")
         self.dataset_overrides = overrides
         self.datasets = tuple(datasets)
         self.protocol = "v2"
+        self.tracking = _Tracking()
 
 
 def _rows(dataset, tl=5):
@@ -1020,7 +1033,8 @@ def _fp_kw():
 def test_frozen_dataset_with_cache_resolves(tmp_path):
     s = _Settings(tmp_path, {"DS": DatasetOverride(freeze_data=True)}, ["DS"])
     fp = freeze.build_fingerprint(
-        protocol="v2", override=s.dataset_overrides["DS"], **_fp_kw()
+        protocol="v2", override=s.dataset_overrides["DS"], tracking=s.tracking,
+        **_fp_kw()
     )
     freeze.save_slice(s.cache_dir, "combined_base", "DS", _rows("DS"), fp)
 
@@ -1035,7 +1049,8 @@ def test_unfrozen_dataset_is_not_resolved_even_with_a_cache(tmp_path):
     """A cache exists but the dataset is not frozen -- it must be derived live."""
     s = _Settings(tmp_path, {"DS": DatasetOverride(freeze_data=False)}, ["DS"])
     fp = freeze.build_fingerprint(
-        protocol="v2", override=s.dataset_overrides["DS"], **_fp_kw()
+        protocol="v2", override=s.dataset_overrides["DS"], tracking=s.tracking,
+        **_fp_kw()
     )
     freeze.save_slice(s.cache_dir, "combined_base", "DS", _rows("DS"), fp)
 
@@ -1058,7 +1073,8 @@ def test_frozen_but_cache_miss_auto_rebuilds(tmp_path):
 def test_frozen_but_config_drift_auto_rebuilds(tmp_path):
     s = _Settings(tmp_path, {"DS": DatasetOverride(freeze_data=True)}, ["DS"])
     fp = freeze.build_fingerprint(
-        protocol="v2", override=s.dataset_overrides["DS"], **_fp_kw()
+        protocol="v2", override=s.dataset_overrides["DS"], tracking=s.tracking,
+        **_fp_kw()
     )
     freeze.save_slice(s.cache_dir, "combined_base", "DS", _rows("DS"), fp)
 
@@ -1073,7 +1089,8 @@ def test_frozen_but_config_drift_auto_rebuilds(tmp_path):
 def test_thaw_ignores_freeze(tmp_path):
     s = _Settings(tmp_path, {"DS": DatasetOverride(freeze_data=True)}, ["DS"])
     fp = freeze.build_fingerprint(
-        protocol="v2", override=s.dataset_overrides["DS"], **_fp_kw()
+        protocol="v2", override=s.dataset_overrides["DS"], tracking=s.tracking,
+        **_fp_kw()
     )
     freeze.save_slice(s.cache_dir, "combined_base", "DS", _rows("DS"), fp)
 
@@ -1091,10 +1108,13 @@ def test_write_freeze_cache_stores_each_dataset_slice(tmp_path):
     rw._write_freeze_cache(
         s, "combined_base", str(out), [],
         fingerprint_for=lambda ds: freeze.build_fingerprint(
-            protocol="v2", override=DatasetOverride(), **_fp_kw()
+            protocol="v2", override=DatasetOverride(), tracking=s.tracking,
+            **_fp_kw()
         ),
     )
-    fp = freeze.build_fingerprint(protocol="v2", override=DatasetOverride(), **_fp_kw())
+    fp = freeze.build_fingerprint(
+        protocol="v2", override=DatasetOverride(), tracking=s.tracking, **_fp_kw()
+    )
     a = freeze.load_slice(s.cache_dir, "combined_base", "A", fp)
     b = freeze.load_slice(s.cache_dir, "combined_base", "B", fp)
     assert a is not None and b is not None
@@ -1117,10 +1137,13 @@ def test_write_freeze_cache_includes_extra_trial_exports(tmp_path):
     rw._write_freeze_cache(
         s, "combined_base", str(main), [str(train)],
         fingerprint_for=lambda ds: freeze.build_fingerprint(
-            protocol="v2", override=DatasetOverride(), **_fp_kw()
+            protocol="v2", override=DatasetOverride(), tracking=s.tracking,
+            **_fp_kw()
         ),
     )
-    fp = freeze.build_fingerprint(protocol="v2", override=DatasetOverride(), **_fp_kw())
+    fp = freeze.build_fingerprint(
+        protocol="v2", override=DatasetOverride(), tracking=s.tracking, **_fp_kw()
+    )
     got = freeze.load_slice(s.cache_dir, "combined_base", "A", fp)
     assert set(got.rows["trial_type"].str.lower()) == {"testing", "training"}
 ```
@@ -1163,6 +1186,11 @@ def _freeze_fingerprint(
         low_max_threshold_px=low_max_threshold_px,
         use_per_trial_baseline=use_per_trial_baseline,
         override=(settings.dataset_overrides or {}).get(dataset),
+        # build_wide_csv reads settings.tracking internally
+        # (envelope_combined.py:2622) and derives the tracking_missing_frames /
+        # tracking_pct_missing / tracking_flagged columns from it. Required, not
+        # defaulted, so a caller cannot silently omit a value-affecting input.
+        tracking=settings.tracking,
     )
 
 
@@ -1902,6 +1930,18 @@ from fbpipe import freeze
 from fbpipe.config import DatasetOverride
 
 
+class _Tracking:
+    """Stub of fbpipe.config.TrackingConfig -- build_fingerprint duck-types it.
+
+    build_wide_csv reads settings.tracking internally (envelope_combined.py:2622)
+    to derive the tracking_* columns, so it is part of the fingerprint.
+    """
+
+    apply_missing_frame_check = True
+    max_missing_frames_per_trial = 5000
+    max_missing_frames_pct_per_trial = 50.0
+
+
 def _make(root, n, fly="october_01_fly1"):
     out = root / fly / "angle_distance_rms_envelope"
     out.mkdir(parents=True, exist_ok=True)
@@ -1935,6 +1975,7 @@ def test_freeze_then_rerun_is_byte_identical(tmp_path):
         low_max_threshold_px=ec.LOW_MAX_FLAG_THRESHOLD_PX,
         use_per_trial_baseline=False,
         override=DatasetOverride(),
+        tracking=_Tracking(),
     )
     fp = freeze.build_fingerprint(**fp_kw)
 
@@ -1980,6 +2021,7 @@ def test_deleting_the_cache_is_safe(tmp_path):
         distance_limits=None, non_reactive_threshold=None,
         low_max_threshold_px=ec.LOW_MAX_FLAG_THRESHOLD_PX,
         use_per_trial_baseline=False, override=DatasetOverride(),
+        tracking=_Tracking(),
     )
     out1 = tmp_path / "a.csv"
     ec.build_wide_csv([str(live), str(frozen)], str(out1), measure_cols=["envelope_of_rms"])
