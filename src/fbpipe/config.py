@@ -286,8 +286,11 @@ def infer_dataset_for_path(cfg: "Settings", path: str | Path) -> str:
 def get_dataset_override(cfg: "Settings", path: str | Path) -> "DatasetOverride":
     """Return the ``DatasetOverride`` for the dataset containing ``path``.
 
-    Returns an empty ``DatasetOverride`` (all fields ``None``) if no override
-    is configured for that dataset, so callers can use it unconditionally.
+    Returns a default ``DatasetOverride`` (each field at its dataclass default:
+    ``None`` for the optional windows, ``False`` for ``light_only`` /
+    ``freeze_data`` / ``freeze_figures``, ``{}`` for ``odor_remap``) if no
+    override is configured for that dataset, so callers can use it
+    unconditionally.
     """
     ds = infer_dataset_for_path(cfg, path)
     if ds and ds in cfg.dataset_overrides:

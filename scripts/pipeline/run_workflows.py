@@ -1329,7 +1329,7 @@ def _run_combined(
             # same value or every run reports drift.
             low_max_threshold_px=LOW_MAX_FLAG_THRESHOLD_PX,
             use_per_trial_baseline=use_per_trial_baseline,
-            # Same variable build_wide_csv is called with below (:1343) -- the
+            # Same variable passed to the build_wide_csv(...) call below -- the
             # fingerprint must record exactly what the build used.
             trial_type_filter=trial_type_filter,
         )
@@ -1483,7 +1483,7 @@ def _run_combined(
                 # same value or every run reports drift.
                 low_max_threshold_px=LOW_MAX_FLAG_THRESHOLD_PX,
                 use_per_trial_baseline=base_use_per_trial_baseline,
-                # Same variable build_wide_csv is called with below (:1497) --
+                # Same variable passed to the build_wide_csv(...) call below --
                 # the fingerprint must record exactly what the build used.
                 trial_type_filter=trial_type_filter,
             )
@@ -1661,7 +1661,7 @@ def _run_combined(
                 # same value or every run reports drift.
                 low_max_threshold_px=LOW_MAX_FLAG_THRESHOLD_PX,
                 use_per_trial_baseline=use_per_trial_baseline,
-                # Same variable build_wide_csv is called with below (:1675) --
+                # Same variable passed to the build_wide_csv(...) call below --
                 # the fingerprint must record exactly what the build used.
                 trial_type_filter=trial_type_filter,
             )
