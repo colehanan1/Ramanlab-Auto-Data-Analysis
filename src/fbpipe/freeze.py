@@ -73,6 +73,7 @@ def build_fingerprint(
     non_reactive_threshold: Optional[float],
     low_max_threshold_px: float,
     use_per_trial_baseline: bool,
+    trial_type_filter: Optional[str | bytes | Iterable[str]],
     override: Any,
     tracking: Any,
 ) -> dict:
@@ -86,6 +87,33 @@ def build_fingerprint(
     ``figure_output_subdir`` is deliberately EXCLUDED: it routes figures and
     cannot change a row value, so it must not invalidate a data cache.
     """
+    # build_wide_csv uses trial_type_filter to GATE which trials become rows at
+    # all (envelope_combined.py:2661-2673 build the allow-set, :2703 skips any
+    # trial whose type is not in it). Required, not defaulted -- same reasoning
+    # as `tracking` below -- so a caller cannot silently omit a value-affecting
+    # input. Without it: a dataset frozen while trial_type_filter=None (holds
+    # every trial type) would still fingerprint-match after the config narrowed
+    # the filter to e.g. "testing", so the stale cache would be trusted, spliced
+    # in pre-filtered, and then re-cached under the narrower filter --
+    # permanently evicting the dropped rows.
+    #
+    # Normalized identically to build_wide_csv's own ``trial_type_allow`` so the
+    # recorded value reflects the actual filtering, and SORTED so multi-value
+    # order (["testing","training"] vs ["training","testing"]) cannot cause
+    # spurious drift -- order never changes which rows exist.
+    if trial_type_filter is None:
+        trial_type_norm: Optional[list[str]] = None
+    else:
+        if isinstance(trial_type_filter, (str, bytes)):
+            _trial_type_allow = {str(trial_type_filter).strip().lower()}
+        else:
+            _trial_type_allow = {
+                str(value).strip().lower()
+                for value in trial_type_filter
+                if str(value).strip()
+            }
+        trial_type_norm = sorted(_trial_type_allow) if _trial_type_allow else None
+
     return {
         "protocol": str(protocol),
         "measure_cols": [str(c) for c in measure_cols],
@@ -98,6 +126,8 @@ def build_fingerprint(
         ),
         "low_max_threshold_px": float(low_max_threshold_px),
         "use_per_trial_baseline": bool(use_per_trial_baseline),
+        # Gates which trials become rows at all -- see the comment above.
+        "trial_type_filter": trial_type_norm,
         "override": {
             "trial_type_override": getattr(override, "trial_type_override", None),
             "odor_on_s": getattr(override, "odor_on_s", None),

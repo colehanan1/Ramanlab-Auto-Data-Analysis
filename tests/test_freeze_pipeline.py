@@ -48,6 +48,7 @@ def _fp_kw():
         non_reactive_threshold=12.5,
         low_max_threshold_px=5.0,
         use_per_trial_baseline=False,
+        trial_type_filter=None,
     )
 
 

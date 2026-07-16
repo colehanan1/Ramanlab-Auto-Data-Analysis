@@ -424,6 +424,7 @@ def _freeze_fingerprint(
     non_reactive_threshold,
     low_max_threshold_px: float,
     use_per_trial_baseline: bool,
+    trial_type_filter,
 ) -> dict:
     """Fingerprint for one dataset under one set of build_wide_csv parameters.
 
@@ -440,6 +441,10 @@ def _freeze_fingerprint(
         non_reactive_threshold=non_reactive_threshold,
         low_max_threshold_px=low_max_threshold_px,
         use_per_trial_baseline=use_per_trial_baseline,
+        # build_wide_csv uses trial_type_filter to gate which trials become
+        # rows at all (envelope_combined.py:2661-2673, :2703). Required, not
+        # defaulted, so a caller cannot silently omit a value-affecting input.
+        trial_type_filter=trial_type_filter,
         override=(settings.dataset_overrides or {}).get(dataset),
         # build_wide_csv reads settings.tracking internally
         # (envelope_combined.py:2622) and derives the tracking_missing_frames /
@@ -460,6 +465,7 @@ def _resolve_frozen_slices(
     non_reactive_threshold,
     low_max_threshold_px: float,
     use_per_trial_baseline: bool,
+    trial_type_filter,
     thawed=(),
     thaw_all: bool = False,
 ) -> dict:
@@ -491,6 +497,7 @@ def _resolve_frozen_slices(
             non_reactive_threshold=non_reactive_threshold,
             low_max_threshold_px=low_max_threshold_px,
             use_per_trial_baseline=use_per_trial_baseline,
+            trial_type_filter=trial_type_filter,
         )
         slice_ = _freeze.load_slice(settings.cache_dir, wide_block, dataset, fingerprint)
         if slice_ is None:
@@ -518,6 +525,11 @@ def _write_freeze_cache(
 
     Reads the main output plus every extra trial export, so a slice holds ALL
     trial types -- the splice routes them back the same way live rows are.
+
+    "A cache write must never fail the run" covers the whole function, not just
+    the per-dataset loop: building ``allrows`` (the concat + groupby below) can
+    itself raise -- e.g. mismatched columns across the main output and an extra
+    trial export -- so that step is guarded too.
     """
     from fbpipe import freeze as _freeze
 
@@ -532,10 +544,15 @@ def _write_freeze_cache(
             print(f"[FREEZE] Skipping cache read of {p}: {exc}")
     if not frames:
         return
-    allrows = pd.concat(frames, ignore_index=True)
-    if "dataset" not in allrows.columns:
+    try:
+        allrows = pd.concat(frames, ignore_index=True)
+        if "dataset" not in allrows.columns:
+            return
+        groups = list(allrows.groupby(allrows["dataset"].astype(str)))
+    except Exception as exc:  # a cache write must never fail the run
+        print(f"[FREEZE] Could not prepare rows to cache for {wide_block}: {exc}")
         return
-    for dataset, group in allrows.groupby(allrows["dataset"].astype(str)):
+    for dataset, group in groups:
         try:
             _freeze.save_slice(
                 settings.cache_dir,
@@ -1312,6 +1329,9 @@ def _run_combined(
             # same value or every run reports drift.
             low_max_threshold_px=LOW_MAX_FLAG_THRESHOLD_PX,
             use_per_trial_baseline=use_per_trial_baseline,
+            # Same variable build_wide_csv is called with below (:1343) -- the
+            # fingerprint must record exactly what the build used.
+            trial_type_filter=trial_type_filter,
         )
         _frozen = _resolve_frozen_slices(
             settings,
@@ -1463,6 +1483,9 @@ def _run_combined(
                 # same value or every run reports drift.
                 low_max_threshold_px=LOW_MAX_FLAG_THRESHOLD_PX,
                 use_per_trial_baseline=base_use_per_trial_baseline,
+                # Same variable build_wide_csv is called with below (:1497) --
+                # the fingerprint must record exactly what the build used.
+                trial_type_filter=trial_type_filter,
             )
             _frozen = _resolve_frozen_slices(
                 settings,
@@ -1638,6 +1661,9 @@ def _run_combined(
                 # same value or every run reports drift.
                 low_max_threshold_px=LOW_MAX_FLAG_THRESHOLD_PX,
                 use_per_trial_baseline=use_per_trial_baseline,
+                # Same variable build_wide_csv is called with below (:1675) --
+                # the fingerprint must record exactly what the build used.
+                trial_type_filter=trial_type_filter,
             )
             _frozen = _resolve_frozen_slices(
                 settings,

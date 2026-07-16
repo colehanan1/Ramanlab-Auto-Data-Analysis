@@ -54,6 +54,7 @@ def test_freeze_then_rerun_is_byte_identical(tmp_path):
         non_reactive_threshold=None,
         low_max_threshold_px=ec.LOW_MAX_FLAG_THRESHOLD_PX,
         use_per_trial_baseline=False,
+        trial_type_filter=None,
         override=DatasetOverride(),
         tracking=_Tracking(),
     )
@@ -102,7 +103,8 @@ def test_deleting_the_cache_is_safe(tmp_path):
         protocol="v2", measure_cols=["envelope_of_rms"], fps_fallback=40.0,
         distance_limits=None, non_reactive_threshold=None,
         low_max_threshold_px=ec.LOW_MAX_FLAG_THRESHOLD_PX,
-        use_per_trial_baseline=False, override=DatasetOverride(),
+        use_per_trial_baseline=False, trial_type_filter=None,
+        override=DatasetOverride(),
         tracking=_Tracking(),
     )
     out1 = tmp_path / "a.csv"

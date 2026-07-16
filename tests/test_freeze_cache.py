@@ -41,6 +41,7 @@ def _fp(**kw):
         non_reactive_threshold=12.5,
         low_max_threshold_px=5.0,
         use_per_trial_baseline=False,
+        trial_type_filter=None,
         override=DatasetOverride(),
         tracking=_tracking(),
     )
@@ -95,6 +96,36 @@ def test_odor_remap_drift_returns_none(tmp_path):
     freeze.save_slice(tmp_path, "combined_base", "DS", _rows([5], 5), _fp())
     drifted = _fp(override=DatasetOverride(odor_remap={"Citral": "Yeast"}))
     assert freeze.load_slice(tmp_path, "combined_base", "DS", drifted) is None
+
+
+def test_trial_type_filter_drift_returns_none(tmp_path):
+    """A dataset frozen while trial_type_filter=None (all trial types) must not
+    be trusted once the config narrows the filter -- otherwise the stale cache
+    is spliced in pre-filtered and then re-cached, permanently evicting the
+    rows the new filter excludes."""
+    freeze.save_slice(tmp_path, "wide", "DS", _rows([5], 5), _fp(trial_type_filter=None))
+    drifted = _fp(trial_type_filter="testing")
+    assert freeze.load_slice(tmp_path, "wide", "DS", drifted) is None
+
+
+def test_trial_type_filter_unchanged_still_loads(tmp_path):
+    """Positive control for the drift test above: proves drift detection, not
+    blanket invalidation -- the identical filter on both sides must still hit."""
+    freeze.save_slice(tmp_path, "wide", "DS", _rows([5], 5), _fp(trial_type_filter="testing"))
+    same = _fp(trial_type_filter="testing")
+    assert freeze.load_slice(tmp_path, "wide", "DS", same) is not None
+
+
+def test_trial_type_filter_order_insensitive(tmp_path):
+    """A multi-value filter's order must not affect the fingerprint: it never
+    changes which rows exist, only listing order would differ between two
+    equivalent config lists."""
+    freeze.save_slice(
+        tmp_path, "wide", "DS", _rows([5], 5),
+        _fp(trial_type_filter=["testing", "training"]),
+    )
+    reordered = _fp(trial_type_filter=["training", "testing"])
+    assert freeze.load_slice(tmp_path, "wide", "DS", reordered) is not None
 
 
 def test_tracking_max_missing_frames_per_trial_drift_returns_none(tmp_path):
