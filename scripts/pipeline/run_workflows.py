@@ -671,7 +671,25 @@ def _should_skip(settings: Settings, category: str, key: str, expected: dict[str
     return True
 
 
-def _matrix_plot_config(data: Mapping[str, Any]) -> tuple[MatrixPlotConfig, str | None]:
+def _apply_freeze_settings(config: Any, settings: Settings | None) -> None:
+    """Populate a plot config's dataset_overrides/thawed/thaw_all from *settings*.
+
+    Task 6 plumbing: ``should_skip_frozen_figure`` reads these three fields off
+    the plot config, but they default to None/()/False (no dataset frozen) so
+    that a caller which never wires *settings* through reproduces today's
+    figure output byte-for-byte. Only touch the fields when *settings* is
+    actually provided -- that is the default-off invariant.
+    """
+    if settings is None:
+        return
+    config.dataset_overrides = settings.dataset_overrides
+    config.thawed = getattr(settings, "_thawed", ())
+    config.thaw_all = getattr(settings, "_thaw_all", False)
+
+
+def _matrix_plot_config(
+    data: Mapping[str, Any], settings: Settings | None = None
+) -> tuple[MatrixPlotConfig, str | None]:
     """Parse matrix plot config and return config plus SMB path."""
     opts = dict(data)
     for key in ("matrix_npy", "codes_json", "out_dir"):
@@ -681,7 +699,9 @@ def _matrix_plot_config(data: Mapping[str, Any]) -> tuple[MatrixPlotConfig, str 
         opts["trial_orders"] = tuple(opts["trial_orders"])
     # Extract SMB path for later use
     smb_path = opts.pop("out_dir_smb", None)
-    return MatrixPlotConfig(**opts), smb_path  # type: ignore[arg-type]
+    config = MatrixPlotConfig(**opts)  # type: ignore[arg-type]
+    _apply_freeze_settings(config, settings)
+    return config, smb_path
 
 
 _PIPELINE_ENVELOPE_STYLE_DEFAULTS: dict[str, Any] = {
@@ -710,7 +730,9 @@ _PIPELINE_ENVELOPE_STYLE_DEFAULTS: dict[str, Any] = {
 }
 
 
-def _envelope_plot_config(data: Mapping[str, Any]) -> tuple[EnvelopePlotConfig, str | None]:
+def _envelope_plot_config(
+    data: Mapping[str, Any], settings: Settings | None = None
+) -> tuple[EnvelopePlotConfig, str | None]:
     """Parse envelope plot config and return config plus SMB path."""
     opts = dict(data)
     for key in ("matrix_npy", "codes_json", "out_dir"):
@@ -727,7 +749,9 @@ def _envelope_plot_config(data: Mapping[str, Any]) -> tuple[EnvelopePlotConfig, 
         opts.setdefault(key, value)
     # Extract SMB path for later use
     smb_path = opts.pop("out_dir_smb", None)
-    return EnvelopePlotConfig(**opts), smb_path  # type: ignore[arg-type]
+    config = EnvelopePlotConfig(**opts)  # type: ignore[arg-type]
+    _apply_freeze_settings(config, settings)
+    return config, smb_path
 
 
 def _copy_output_to_smb(local_path: Path | str, smb_path: str | None) -> None:
@@ -841,6 +865,7 @@ def _load_model_scores_for_envelopes(settings: Settings) -> None:
 def _rerender_envelope_block_with_scores(
     envelopes_cfg: Mapping[str, Any] | Sequence[Mapping[str, Any]],
     label: str,
+    settings: Settings | None = None,
 ) -> None:
     """Re-render an envelope-config block with overwrite forced on.
 
@@ -852,6 +877,11 @@ def _rerender_envelope_block_with_scores(
     this is required because every envelopes block in ``config_new.yaml``
     sets ``overwrite: False`` and the first render of these PNGs happens
     before reactions writes ``model_predictions.csv``.
+
+    *settings* is optional (defaults to None, preserving today's behaviour) so
+    that ``dataset_overrides``/``thawed``/``thaw_all`` reach the re-rendered
+    config only when a caller actually supplies it — see
+    ``_apply_freeze_settings``.
     """
     if isinstance(envelopes_cfg, Sequence) and not isinstance(envelopes_cfg, (str, bytes)):
         entries: list[Mapping[str, Any]] = list(envelopes_cfg)
@@ -867,7 +897,10 @@ def _rerender_envelope_block_with_scores(
             )
             continue
         forced = {**dict(entry), "overwrite": True}
-        config, _smb_path = _envelope_plot_config(forced)
+        if settings is not None:
+            config, _smb_path = _envelope_plot_config(forced, settings)
+        else:
+            config, _smb_path = _envelope_plot_config(forced)
         print(
             f"[analysis] envelope_visuals: re-rendering {label} → {config.out_dir} "
             "(scores annotated)."
@@ -889,13 +922,14 @@ def _run_envelope_visuals(
     cfg: Mapping[str, Any] | None,
     *,
     defer_envelopes: bool = False,
+    settings: Settings | None = None,
 ) -> None:
     if not cfg:
         return
 
     matrices_cfg = cfg.get("matrices")
     if matrices_cfg:
-        config, smb_path = _matrix_plot_config(matrices_cfg)
+        config, smb_path = _matrix_plot_config(matrices_cfg, settings)
         print(f"[analysis] envelope_visuals.matrices → {config.out_dir}")
         generate_reaction_matrices(config)
 
@@ -906,7 +940,7 @@ def _run_envelope_visuals(
             "(model scores will be annotated)."
         )
     elif envelopes_cfg:
-        config, smb_path = _envelope_plot_config(envelopes_cfg)
+        config, smb_path = _envelope_plot_config(envelopes_cfg, settings)
         print(f"[analysis] envelope_visuals.envelopes → {config.out_dir}")
         generate_envelope_plots(config)
 
@@ -933,7 +967,7 @@ def _csv_has_training_rows(csv_path: Path) -> bool:
     )
 
 
-def _run_training(cfg: Mapping[str, Any] | None) -> None:
+def _run_training(cfg: Mapping[str, Any] | None, settings: Settings | None = None) -> None:
     if not cfg:
         return
 
@@ -950,7 +984,7 @@ def _run_training(cfg: Mapping[str, Any] | None) -> None:
                 raise ValueError("training.envelopes entries must be mappings.")
             opts = dict(entry)
             opts.setdefault("trial_type", "training")
-            config, smb_path = _envelope_plot_config(opts)
+            config, smb_path = _envelope_plot_config(opts, settings)
             print(f"[analysis] training.envelopes → {config.out_dir}")
             generate_envelope_plots(config)
 
@@ -1501,7 +1535,7 @@ def _run_combined(
             for entry in entries:
                 if not isinstance(entry, Mapping):
                     raise ValueError(f"{label}.envelopes entries must be mappings.")
-                config, smb_path = _envelope_plot_config(entry)
+                config, smb_path = _envelope_plot_config(entry, settings)
                 print(f"[analysis] {label}.envelopes → {config.out_dir}")
                 generate_envelope_plots(config)
 
@@ -1529,7 +1563,7 @@ def _run_combined(
         matrices_cfg = cfg.get("matrices")
         matrices_template = None
         if matrices_cfg:
-            matrices_template, _ = _matrix_plot_config(matrices_cfg)
+            matrices_template, _ = _matrix_plot_config(matrices_cfg, settings)
 
         envelopes_cfg = cfg.get("envelopes")
         envelope_templates: list[EnvelopePlotConfig] = []
@@ -1543,7 +1577,7 @@ def _run_combined(
             for entry in entries:
                 if not isinstance(entry, Mapping):
                     raise ValueError("combined.envelopes entries must be mappings.")
-                config, _ = _envelope_plot_config(entry)
+                config, _ = _envelope_plot_config(entry, settings)
                 envelope_templates.append(config)
 
         entries = (
@@ -1655,7 +1689,7 @@ def _run_combined(
 
     matrices_cfg = cfg.get("matrices")
     if matrices_cfg:
-        config, smb_path = _matrix_plot_config(matrices_cfg)
+        config, smb_path = _matrix_plot_config(matrices_cfg, settings)
         print(f"[analysis] combined.matrices → {config.out_dir}")
         generate_reaction_matrices(config)
 
@@ -1675,7 +1709,7 @@ def _run_combined(
         for entry in entries:
             if not isinstance(entry, Mapping):
                 raise ValueError("combined.envelopes entries must be mappings.")
-            config, smb_path = _envelope_plot_config(entry)
+            config, smb_path = _envelope_plot_config(entry, settings)
             print(f"[analysis] combined.envelopes → {config.out_dir}")
             generate_envelope_plots(config)
 
@@ -1818,6 +1852,25 @@ def _run_secure_cleanup(
                 str(flagged_dest),
                 perform_cleanup=False,  # Never auto-delete flagged experiment source data
             )
+
+
+def _thaw_cli_args(settings: Settings) -> list[str]:
+    """CLI args forwarding this run's --thaw / --thaw-all selection.
+
+    ``score_summary.py`` runs as a subprocess (see the ``score_cmd`` build
+    below) and does not share the parent's ``settings`` object, so its own
+    ``--thaw``/``--thaw-all`` flags (parsed in its ``_parse_args``) must be
+    forwarded explicitly. ``settings._thawed``/``settings._thaw_all`` are the
+    same run-only attributes ``main()`` stashes on ``settings`` from this
+    process's own --thaw/--thaw-all (search for ``settings._thawed =`` in
+    ``main()``) -- read defensively since they are not dataclass fields.
+    """
+    args: list[str] = []
+    for name in getattr(settings, "_thawed", ()):
+        args.extend(["--thaw", str(name)])
+    if getattr(settings, "_thaw_all", False):
+        args.append("--thaw-all")
+    return args
 
 
 def _run_reactions(settings: Settings, config_path: Path | None = None) -> None:
@@ -2044,6 +2097,7 @@ def _run_reactions(settings: Settings, config_path: Path | None = None) -> None:
             if config_path is not None:
                 score_cmd.extend(["--config", str(config_path)])
             score_cmd.extend(["--protocol", str(settings.protocol)])
+            score_cmd.extend(_thaw_cli_args(settings))
             print("[analysis] score_summary →", " ".join(score_cmd))
             subprocess.run(score_cmd, check=True, env=env)
 
@@ -2515,11 +2569,11 @@ def main(argv: Sequence[str] | None = None) -> None:
                 "Set force.envelope_visuals=true to recompute."
             )
         else:
-            _run_envelope_visuals(env_vis_cfg, defer_envelopes=defer_envelopes)
+            _run_envelope_visuals(env_vis_cfg, defer_envelopes=defer_envelopes, settings=settings)
             payload = dict(ev_expected, version=STATE_VERSION)
             _write_state(settings, "envelope_visuals", "analysis", payload)
     else:
-        _run_envelope_visuals(None, defer_envelopes=defer_envelopes)
+        _run_envelope_visuals(None, defer_envelopes=defer_envelopes, settings=settings)
 
     # -- training with cache skip --
     training_cfg = analysis_cfg.get("training")
@@ -2535,11 +2589,11 @@ def main(argv: Sequence[str] | None = None) -> None:
                 "Set force.training=true to recompute."
             )
         else:
-            _run_training(training_cfg)
+            _run_training(training_cfg, settings=settings)
             payload = dict(tr_expected, version=STATE_VERSION)
             _write_state(settings, "training", "analysis", payload)
     else:
-        _run_training(None)
+        _run_training(None, settings=settings)
 
     # -- light-only PER traces (per-fly figures, sorted by dataset) --
     _run_light_only_traces(analysis_cfg.get("light_only_traces"))
@@ -2563,21 +2617,21 @@ def main(argv: Sequence[str] | None = None) -> None:
 
         if raw_envelopes_cfg:
             _rerender_envelope_block_with_scores(
-                raw_envelopes_cfg, "Raw envelopes (combined_base)"
+                raw_envelopes_cfg, "Raw envelopes (combined_base)", settings=settings
             )
         if distance_envelopes_cfg:
             _rerender_envelope_block_with_scores(
-                distance_envelopes_cfg, "Distance envelopes (distance_base)"
+                distance_envelopes_cfg, "Distance envelopes (distance_base)", settings=settings
             )
         if rms_envelopes_cfg:
             _rerender_envelope_block_with_scores(
-                rms_envelopes_cfg, "RMS envelopes (combined)"
+                rms_envelopes_cfg, "RMS envelopes (combined)", settings=settings
             )
         if env_vis_cfg:
             vis_envelopes_cfg = env_vis_cfg.get("envelopes")
             if vis_envelopes_cfg:
                 _rerender_envelope_block_with_scores(
-                    vis_envelopes_cfg, "envelope_visuals.envelopes"
+                    vis_envelopes_cfg, "envelope_visuals.envelopes", settings=settings
                 )
             payload = dict(ev_expected, version=STATE_VERSION)
             _write_state(settings, "envelope_visuals", "analysis", payload)

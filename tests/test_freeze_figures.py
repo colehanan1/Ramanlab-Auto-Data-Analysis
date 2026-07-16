@@ -7,6 +7,7 @@ import pandas as pd
 import scripts.analysis.envelope_combined as ec
 import scripts.analysis.envelope_visuals as ev
 import scripts.analysis.score_summary as ss
+import scripts.pipeline.run_workflows as rw
 from fbpipe.config import DatasetOverride
 
 
@@ -288,3 +289,91 @@ def test_plot_score_pair_mixed_frozen_live_still_draws(tmp_path):
     out_dir_2 = tmp_path / "out2"
     ss.generate_score_summary(csv_path=csv_path, out_dir=out_dir_2, overwrite=True, cfg=cfg_frozen)
     assert not (out_dir_2 / "mean_score_pair_EB-Training.png").exists()
+
+
+# ---------------------------------------------------------------------------
+# Task 6 plumbing: settings -> plot-config freeze fields (Part A), and
+# --thaw/--thaw-all -> score_summary subprocess (Part B).
+# ---------------------------------------------------------------------------
+
+
+class _StubSettings:
+    """Duck-types the bits of ``Settings`` the plot-config builders read:
+    ``dataset_overrides`` (a real field) plus the run-only ``_thawed`` /
+    ``_thaw_all`` attributes ``main()`` stashes from ``--thaw``/``--thaw-all``
+    (search for ``settings._thawed =`` in run_workflows.py's ``main()``)."""
+
+    def __init__(self, dataset_overrides=None, thawed=(), thaw_all=False):
+        self.dataset_overrides = dataset_overrides
+        self._thawed = thawed
+        self._thaw_all = thaw_all
+
+
+def _plot_config_kwargs(tmp_path):
+    return {
+        "matrix_npy": tmp_path / "matrix.npy",
+        "codes_json": tmp_path / "codes.json",
+        "out_dir": tmp_path / "plots",
+        "latency_sec": 0.0,
+    }
+
+
+def test_envelope_plot_config_wires_freeze_fields_from_settings(tmp_path):
+    settings = _StubSettings(dataset_overrides={"A": F}, thawed=("A",), thaw_all=True)
+    cfg, _smb = rw._envelope_plot_config(_plot_config_kwargs(tmp_path), settings)
+    assert cfg.dataset_overrides == {"A": F}
+    assert cfg.thawed == ("A",)
+    assert cfg.thaw_all is True
+
+
+def test_matrix_plot_config_wires_freeze_fields_from_settings(tmp_path):
+    settings = _StubSettings(dataset_overrides={"A": F}, thawed=("B",), thaw_all=False)
+    cfg, _smb = rw._matrix_plot_config(_plot_config_kwargs(tmp_path), settings)
+    assert cfg.dataset_overrides == {"A": F}
+    assert cfg.thawed == ("B",)
+    assert cfg.thaw_all is False
+
+
+def test_envelope_plot_config_default_off_without_settings(tmp_path):
+    """No settings passed -> every freeze field stays at its dataclass default,
+    so figure output is byte-for-byte identical to before Task 6's plumbing."""
+    cfg, _smb = rw._envelope_plot_config(_plot_config_kwargs(tmp_path))
+    assert cfg.dataset_overrides is None
+    assert cfg.thawed == ()
+    assert cfg.thaw_all is False
+
+
+def test_matrix_plot_config_default_off_without_settings(tmp_path):
+    cfg, _smb = rw._matrix_plot_config(_plot_config_kwargs(tmp_path))
+    assert cfg.dataset_overrides is None
+    assert cfg.thawed == ()
+    assert cfg.thaw_all is False
+
+
+def test_score_summary_parse_args_thaw_and_thaw_all(tmp_path):
+    args = ss._parse_args(
+        [
+            "--csv-path", str(tmp_path / "scores.csv"),
+            "--out-dir", str(tmp_path / "out"),
+            "--config", "x",
+            "--thaw", "DS",
+            "--thaw-all",
+        ]
+    )
+    assert args.thaw == ["DS"]
+    assert args.thaw_all is True
+
+
+def test_run_workflows_thaw_cli_args_forwards_thawed_names_and_thaw_all():
+    """Smallest testable seam for the score_cmd forwarding: score_cmd itself is
+    built inline inside _run_reactions (a large function with heavy I/O
+    prerequisites), so the --thaw/--thaw-all forwarding logic lives in its own
+    helper, ``_thaw_cli_args``, that score_cmd construction calls into."""
+    settings = _StubSettings(thawed=("DS",), thaw_all=False)
+    assert rw._thaw_cli_args(settings) == ["--thaw", "DS"]
+
+    settings_all = _StubSettings(thawed=(), thaw_all=True)
+    assert rw._thaw_cli_args(settings_all) == ["--thaw-all"]
+
+    settings_none = _StubSettings()
+    assert rw._thaw_cli_args(settings_none) == []
