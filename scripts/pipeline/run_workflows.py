@@ -2127,7 +2127,7 @@ def _run_pipeline(
         raise subprocess.CalledProcessError(rc, cmd)
 
 
-def main(argv: Sequence[str] | None = None) -> None:
+def _build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--config",
@@ -2154,6 +2154,41 @@ def main(argv: Sequence[str] | None = None) -> None:
         help="Emit an editable .svg next to every .png figure (vector, fully "
              "editable in Illustrator/Inkscape). PNGs are still written.",
     )
+    parser.add_argument(
+        "--thaw",
+        action="append",
+        default=[],
+        metavar="DATASET",
+        help=(
+            "Ignore freeze for DATASET this run (repeatable). Re-derives and "
+            "re-caches it. Does not edit config."
+        ),
+    )
+    parser.add_argument(
+        "--thaw-all",
+        action="store_true",
+        help="Ignore every dataset freeze this run.",
+    )
+    return parser
+
+
+def _validate_thaw(thaw, *, datasets) -> None:
+    """Exit on an unknown --thaw name rather than silently ignoring it.
+
+    A typo'd name would otherwise look exactly like a successful thaw: the run
+    proceeds, the dataset stays frozen, and nothing says so.
+    """
+    known = set(datasets or ())
+    unknown = [t for t in (thaw or []) if t not in known]
+    if unknown:
+        raise SystemExit(
+            f"[FREEZE] Unknown --thaw dataset(s): {', '.join(sorted(unknown))}\n"
+            f"         Known datasets: {', '.join(sorted(known)) or '(none)'}"
+        )
+
+
+def main(argv: Sequence[str] | None = None) -> None:
+    parser = _build_arg_parser()
     args = parser.parse_args(argv)
 
     # Install the SVG sidecar before any plotting happens (covers in-process
@@ -2173,6 +2208,9 @@ def main(argv: Sequence[str] | None = None) -> None:
 
     settings = load_settings(config_path)
     set_protocol(settings.protocol)
+
+    # Fail fast on a typo'd --thaw name before any YOLO/pipeline work runs.
+    _validate_thaw(args.thaw, datasets=getattr(settings, "datasets", ()))
 
     # Register light-only datasets so envelope_visuals draws a light span
     # instead of the odor span for those plots.
@@ -2342,6 +2380,17 @@ def main(argv: Sequence[str] | None = None) -> None:
             _run_pipeline(config_path)
     else:
         LOGGER.info("[figures-only] Skipping YOLO inference and pipeline processing.")
+
+    # Stash the thaw selection on the final `settings` object (after any
+    # `dc_replace` above, which — being `dataclasses.replace` — would drop a
+    # non-field attribute set any earlier) so `_run_combined`'s
+    # `_resolve_frozen_slices` calls see it.
+    settings._thawed = tuple(args.thaw or ())
+    settings._thaw_all = bool(args.thaw_all)
+    if settings._thaw_all:
+        print("[FREEZE] --thaw-all: every dataset freeze ignored this run.")
+    elif settings._thawed:
+        print(f"[FREEZE] Thawed this run: {', '.join(settings._thawed)}")
 
     analysis_cfg = data.get("analysis") or {}
 
