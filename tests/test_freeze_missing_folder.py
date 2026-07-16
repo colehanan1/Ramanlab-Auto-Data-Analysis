@@ -91,3 +91,40 @@ def test_frozen_dataset_present_on_disk_is_fine(tmp_path):
     )
     data = load_raw_config(str(cfg))
     assert any("HERE-24-1" in d for d in data["main_directories"])
+
+
+def test_figures_only_frozen_dataset_missing_from_disk_does_not_raise(tmp_path):
+    """freeze.figures (without freeze.data) does not depend on the raw folder --
+    a dataset missing from disk that is frozen only for figures must be
+    skipped silently, exactly like an unfrozen missing dataset."""
+    cfg = _cfg(
+        tmp_path,
+        """
+            datasets:
+              - GONE-24-1
+            dataset_overrides:
+              GONE-24-1:
+                freeze:
+                  figures: true
+        """,
+    )
+    data = load_raw_config(str(cfg))
+    assert data["main_directories"] == []
+
+
+def test_bare_bool_freeze_missing_dataset_does_not_raise(tmp_path):
+    """A hand-typed ``freeze: true`` (bare bool, not a dict) is malformed --
+    it is not ``freeze.data: true``, so it must be treated as no freeze flags
+    set (same as an absent freeze block), not crash with AttributeError."""
+    cfg = _cfg(
+        tmp_path,
+        """
+            datasets:
+              - GONE-24-1
+            dataset_overrides:
+              GONE-24-1:
+                freeze: true
+        """,
+    )
+    data = load_raw_config(str(cfg))
+    assert data["main_directories"] == []

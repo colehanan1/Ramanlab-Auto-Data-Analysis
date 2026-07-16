@@ -90,3 +90,35 @@ def test_empty_freeze_block_defaults_false(tmp_path):
     ov = s.dataset_overrides["EB-Control-24-1"]
     assert ov.freeze_data is False
     assert ov.freeze_figures is False
+
+
+def test_bare_bool_freeze_block_defaults_false(tmp_path):
+    """A hand-typed ``freeze: true`` (bare bool, not a dict like
+    ``freeze: {data: true}``) is malformed -- treat it as no freeze flags
+    set rather than crashing with AttributeError."""
+    cfg = _write_cfg(
+        tmp_path,
+        """
+              EB-Control-24-1:
+                freeze: true
+        """,
+    )
+    s = load_settings(str(cfg))
+    ov = s.dataset_overrides["EB-Control-24-1"]
+    assert ov.freeze_data is False
+    assert ov.freeze_figures is False
+
+
+def test_string_freeze_block_defaults_false(tmp_path):
+    """Same tolerance for a hand-typed string value, e.g. ``freeze: "yes"``."""
+    cfg = _write_cfg(
+        tmp_path,
+        """
+              EB-Control-24-1:
+                freeze: "yes"
+        """,
+    )
+    s = load_settings(str(cfg))
+    ov = s.dataset_overrides["EB-Control-24-1"]
+    assert ov.freeze_data is False
+    assert ov.freeze_figures is False

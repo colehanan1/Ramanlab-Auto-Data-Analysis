@@ -24,6 +24,15 @@ def _as_bool(value, default: bool) -> bool:
     return bool(value)
 
 
+def _freeze_block(raw: object) -> dict:
+    """Return the freeze mapping from a raw override block, or {} if absent or
+    malformed (e.g. a hand-typed ``freeze: true`` instead of ``freeze: {data: true}``)."""
+    if not isinstance(raw, dict):
+        return {}
+    fz = raw.get("freeze")
+    return fz if isinstance(fz, dict) else {}
+
+
 _flagged_cache: dict[tuple[str, float], set[tuple[str, str, str]]] = {}
 
 
@@ -151,8 +160,7 @@ def _expand_datasets(data: dict) -> dict:
     raw_overrides = data.get("dataset_overrides") or {}
     frozen_missing = [
         ds for ds in skipped
-        if isinstance(raw_overrides.get(ds), dict)
-        and (raw_overrides[ds].get("freeze") or {}).get("data", False)
+        if _freeze_block(raw_overrides.get(ds)).get("data", False)
     ]
     if frozen_missing:
         raise RuntimeError(
@@ -942,8 +950,8 @@ def load_settings(config_path: str | Path) -> Settings:
                 for k, v in (block.get("odor_remap") or {}).items()
                 if k is not None and v is not None
             },
-            freeze_data=bool((block.get("freeze") or {}).get("data", False)),
-            freeze_figures=bool((block.get("freeze") or {}).get("figures", False)),
+            freeze_data=bool(_freeze_block(block).get("data", False)),
+            freeze_figures=bool(_freeze_block(block).get("figures", False)),
         )
 
     flagged_root = str(
