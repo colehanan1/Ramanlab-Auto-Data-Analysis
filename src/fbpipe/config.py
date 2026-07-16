@@ -145,6 +145,21 @@ def _expand_datasets(data: dict) -> dict:
                      for ds in datasets if Path(secured_base, ds).is_dir()]
     skipped = [ds for ds in datasets
                if not Path(data_base, ds).is_dir() and not Path(secured_base, ds).is_dir()]
+    # A frozen dataset that is not on disk cannot be silently dropped: freeze
+    # assumes the raw data stays put, and we cannot auto-rebuild what is absent.
+    # Dropping it would quietly delete its rows from the wide CSV.
+    raw_overrides = data.get("dataset_overrides") or {}
+    frozen_missing = [
+        ds for ds in skipped
+        if isinstance(raw_overrides.get(ds), dict)
+        and (raw_overrides[ds].get("freeze") or {}).get("data", False)
+    ]
+    if frozen_missing:
+        raise RuntimeError(
+            f"[config] Frozen dataset(s) not found on disk: {', '.join(sorted(frozen_missing))}\n"
+            f"         freeze.data assumes the raw data stays on disk. Restore the "
+            f"folder(s), or remove freeze.data from the dataset_overrides block."
+        )
     if skipped:
         print(f"[config] Skipping datasets not yet on disk: {', '.join(skipped)}")
 
