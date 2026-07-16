@@ -1084,6 +1084,7 @@ def _run_combined(
     folder_filter: str | None = None,
     defer_envelopes: bool = False,
     defer_secure_cleanup: bool = False,
+    config_path: str | Path | None = None,
 ) -> Callable[[], None] | None:
     if not cfg:
         return None
@@ -1294,6 +1295,7 @@ def _run_combined(
             fps_fallback=wide_fps_fallback,
             exclude_roots=wide_exclude_cfg,
             distance_limits=limits,
+            config_path=config_path,
             trial_type_filter=trial_type_filter,
             extra_trial_exports=extra_exports or None,
             non_reactive_threshold=non_reactive_threshold,
@@ -1444,6 +1446,7 @@ def _run_combined(
                 fps_fallback=base_fps_fallback,
                 exclude_roots=base_exclude_cfg,
                 distance_limits=limits,
+                config_path=config_path,
                 trial_type_filter=trial_type_filter,
                 extra_trial_exports=extra_exports or None,
                 non_reactive_threshold=non_reactive_threshold,
@@ -1618,6 +1621,7 @@ def _run_combined(
                 fps_fallback=wide_fps_fallback,
                 exclude_roots=wide_exclude_cfg,
                 distance_limits=limits,
+                config_path=config_path,
                 trial_type_filter=trial_type_filter,
                 extra_trial_exports=extra_exports,
                 non_reactive_threshold=non_reactive_threshold,
@@ -2423,6 +2427,7 @@ def main(argv: Sequence[str] | None = None) -> None:
                 folder_filter=folder_filter,
                 defer_envelopes=defer_envelopes,
                 defer_secure_cleanup=True,
+                config_path=config_path,
             )
             # Only write combined cache when running ALL folders; a single-folder
             # run is partial so the next full run must recompute.
@@ -2440,6 +2445,7 @@ def main(argv: Sequence[str] | None = None) -> None:
             settings,
             folder_filter=folder_filter,
             defer_envelopes=defer_envelopes,
+            config_path=config_path,
         )
     # Load per-trial model scores (if the reactions step has run on a prior
     # invocation) so envelope plots can annotate each subplot with the score
