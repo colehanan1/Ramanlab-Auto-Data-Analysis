@@ -35,8 +35,11 @@ def test_existing_flags_survive():
 
 def test_unknown_thaw_name_raises_listing_valid_names():
     """A silently ignored typo looks exactly like a successful thaw."""
-    with pytest.raises(SystemExit):
+    with pytest.raises(SystemExit) as exc_info:
         rw._validate_thaw(["Nope-24-1"], datasets=("EB-Control-24-1",))
+    error_msg = str(exc_info.value)
+    assert "Nope-24-1" in error_msg
+    assert "EB-Control-24-1" in error_msg
 
 
 def test_known_thaw_name_passes():
