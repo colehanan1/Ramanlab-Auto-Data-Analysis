@@ -16,7 +16,7 @@ import argparse
 import re
 import sys
 from pathlib import Path
-from typing import Sequence
+from typing import Any, Sequence
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -46,6 +46,7 @@ from scripts.analysis.envelope_visuals import (
     compute_non_reactive_flags,
     get_protocol,
     set_protocol,
+    should_skip_frozen_figure,
     should_write,
 )
 
@@ -562,7 +563,14 @@ def _draw_score_matrix(
 
 
 def _plot_bar_charts(
-    df: pd.DataFrame, summary: pd.DataFrame, out_dir: Path, *, overwrite: bool
+    df: pd.DataFrame,
+    summary: pd.DataFrame,
+    out_dir: Path,
+    *,
+    overwrite: bool,
+    cfg: Any = None,
+    thawed: Sequence[str] = (),
+    thaw_all: bool = False,
 ) -> None:
     """One figure per dataset: mean score per odor, with a per-fly score
     matrix band above it under the v2 protocol."""
@@ -582,6 +590,9 @@ def _plot_bar_charts(
         label = DISPLAY_LABEL.get(odor, odor)
         png_path = out_dir / f"mean_score_{odor.replace(' ', '_')}.png"
         if not should_write(png_path, overwrite):
+            continue
+        if should_skip_frozen_figure(cfg, [odor], thawed=thawed, thaw_all=thaw_all):
+            print(f"[FROZEN] Skipping figure (all contributors frozen): {png_path}")
             continue
 
         x = np.arange(len(sub))
@@ -725,7 +736,13 @@ def _draw_score_significance_brackets(
 
 
 def _plot_training_vs_control_bars(
-    summary: pd.DataFrame, out_dir: Path, *, overwrite: bool
+    summary: pd.DataFrame,
+    out_dir: Path,
+    *,
+    overwrite: bool,
+    cfg: Any = None,
+    thawed: Sequence[str] = (),
+    thaw_all: bool = False,
 ) -> None:
     if summary.empty:
         return
@@ -739,6 +756,13 @@ def _plot_training_vs_control_bars(
         label = DISPLAY_LABEL.get(train_ds, train_ds)
         png_path = out_dir / f"mean_score_train_vs_ctrl_{train_ds.replace(' ', '_')}.png"
         if not should_write(png_path, overwrite):
+            continue
+        # This figure draws Training beside its paired Control -- the exact
+        # "frozen Control beside live Training" case: both datasets must
+        # count, or adding flies to a live Training silently fails to appear.
+        contributing = {train_ds, *sub["control_dataset"].dropna().unique().tolist()}
+        if should_skip_frozen_figure(cfg, contributing, thawed=thawed, thaw_all=thaw_all):
+            print(f"[FROZEN] Skipping figure (all contributors frozen): {png_path}")
             continue
 
         if "trial_num" in sub.columns:
@@ -856,11 +880,24 @@ def _plot_training_vs_control_bars(
 
 
 def _plot_heatmap(
-    summary: pd.DataFrame, out_dir: Path, *, overwrite: bool
+    summary: pd.DataFrame,
+    out_dir: Path,
+    *,
+    overwrite: bool,
+    cfg: Any = None,
+    thawed: Sequence[str] = (),
+    thaw_all: bool = False,
 ) -> None:
     """Heatmap: datasets (rows) x testing numbers (columns), colored by mean score."""
     png_path = out_dir / "mean_score_heatmap.png"
     if not should_write(png_path, overwrite):
+        return
+    # One figure pooling every dataset in `summary`: skip only when every one
+    # of them is frozen for figures, or a live dataset's row would silently
+    # never appear.
+    contributing = set(summary["dataset_canon"].unique()) if "dataset_canon" in summary.columns else set()
+    if should_skip_frozen_figure(cfg, contributing, thawed=thawed, thaw_all=thaw_all):
+        print(f"[FROZEN] Skipping figure (all contributors frozen): {png_path}")
         return
 
     col_key = "odor_col" if "odor_col" in summary.columns and get_protocol() == "v2" else "trial_num"
@@ -925,7 +962,15 @@ def _plot_heatmap(
         plt.close(fig)
 
 
-def _plot_score_pair(df: pd.DataFrame, out_dir: Path, *, overwrite: bool) -> None:
+def _plot_score_pair(
+    df: pd.DataFrame,
+    out_dir: Path,
+    *,
+    overwrite: bool,
+    cfg: Any = None,
+    thawed: Sequence[str] = (),
+    thaw_all: bool = False,
+) -> None:
     """One figure per training dataset: control score matrix LEFT, training
     RIGHT, sharing columns, cell height, and a single key."""
     if get_protocol() != "v2" or "odor_col" not in df.columns:
@@ -936,6 +981,11 @@ def _plot_score_pair(df: pd.DataFrame, out_dir: Path, *, overwrite: bool) -> Non
             continue
         png_path = out_dir / f"mean_score_pair_{train_ds.replace(' ', '_')}.png"
         if not should_write(png_path, overwrite):
+            continue
+        # Same pairing subtlety as _plot_training_vs_control_bars: a frozen
+        # Control beside a live Training must still redraw.
+        if should_skip_frozen_figure(cfg, [train_ds, ctrl_ds], thawed=thawed, thaw_all=thaw_all):
+            print(f"[FROZEN] Skipping figure (all contributors frozen): {png_path}")
             continue
         pair_df = df[df["dataset_canon"].isin((train_ds, ctrl_ds))]
         columns = sorted(pair_df["odor_col"].unique(), key=str.casefold)
@@ -1029,7 +1079,15 @@ def _genotype_score_groups(
     ]
 
 
-def _summarise_and_plot(df: pd.DataFrame, out_dir: Path, *, overwrite: bool) -> None:
+def _summarise_and_plot(
+    df: pd.DataFrame,
+    out_dir: Path,
+    *,
+    overwrite: bool,
+    cfg: Any = None,
+    thawed: Sequence[str] = (),
+    thaw_all: bool = False,
+) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     summary = _compute_summary(df)
 
@@ -1046,10 +1104,12 @@ def _summarise_and_plot(df: pd.DataFrame, out_dir: Path, *, overwrite: bool) -> 
             train_ctrl_summary.to_csv(train_ctrl_csv, index=False, float_format="%.4f")
             print(f"[score_summary] Wrote {train_ctrl_csv}")
 
-    _plot_bar_charts(df, summary, out_dir, overwrite=overwrite)
-    _plot_heatmap(summary, out_dir, overwrite=overwrite)
-    _plot_training_vs_control_bars(train_ctrl_summary, out_dir, overwrite=overwrite)
-    _plot_score_pair(df, out_dir, overwrite=overwrite)
+    _plot_bar_charts(df, summary, out_dir, overwrite=overwrite, cfg=cfg, thawed=thawed, thaw_all=thaw_all)
+    _plot_heatmap(summary, out_dir, overwrite=overwrite, cfg=cfg, thawed=thawed, thaw_all=thaw_all)
+    _plot_training_vs_control_bars(
+        train_ctrl_summary, out_dir, overwrite=overwrite, cfg=cfg, thawed=thawed, thaw_all=thaw_all
+    )
+    _plot_score_pair(df, out_dir, overwrite=overwrite, cfg=cfg, thawed=thawed, thaw_all=thaw_all)
     print(f"[score_summary] Plots saved to {out_dir}")
 
 
@@ -1060,6 +1120,9 @@ def generate_score_summary(
     overwrite: bool = True,
     non_reactive_threshold: float | None = None,
     flagged_flies_csv: str = "",
+    cfg: Any = None,
+    thawed: Sequence[str] = (),
+    thaw_all: bool = False,
 ) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1077,7 +1140,9 @@ def generate_score_summary(
     for sub_df, sub_out in _genotype_score_groups(df, out_dir):
         if sub_df.empty:
             continue
-        _summarise_and_plot(sub_df, sub_out, overwrite=overwrite)
+        _summarise_and_plot(
+            sub_df, sub_out, overwrite=overwrite, cfg=cfg, thawed=thawed, thaw_all=thaw_all
+        )
 
 
 def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
@@ -1105,7 +1170,19 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--config", type=str, default="",
-        help="Pipeline config YAML; used to load dataset_overrides.odor_remap.",
+        help="Pipeline config YAML; used to load dataset_overrides.odor_remap "
+             "and dataset_overrides.freeze.figures.",
+    )
+    parser.add_argument(
+        "--thaw", action="append", default=[], metavar="DATASET",
+        help=(
+            "Ignore freeze.figures for DATASET this run (repeatable). Does "
+            "not edit config."
+        ),
+    )
+    parser.add_argument(
+        "--thaw-all", action="store_true",
+        help="Ignore every dataset's freeze.figures this run.",
     )
     return parser.parse_args(argv)
 
@@ -1118,6 +1195,13 @@ def main(argv: Sequence[str] | None = None) -> None:
         maybe_install_from_env()
     except Exception:  # noqa: BLE001 — sidecar is optional
         pass
+    # This process runs as a subprocess (run_workflows.py invokes it with
+    # --config), so it does not share the parent's `settings` object -- it
+    # must load config itself. `settings` doubles as the `cfg` argument to
+    # should_skip_frozen_figure (duck-typed via getattr on
+    # `dataset_overrides`, see fbpipe.freeze.freeze_flags), so a load failure
+    # must leave it None -- that reads as "no freeze info", never as "skip".
+    settings = None
     if args.config:
         try:
             from fbpipe.config import load_settings
@@ -1132,12 +1216,16 @@ def main(argv: Sequence[str] | None = None) -> None:
                 set_dataset_odor_remap(remap)
         except Exception as exc:  # noqa: BLE001 — defensive
             print(f"[WARN] Failed to load odor_remap from {args.config}: {exc}")
+            settings = None
     generate_score_summary(
         csv_path=args.csv_path,
         out_dir=args.out_dir,
         overwrite=args.overwrite,
         non_reactive_threshold=args.non_reactive_threshold,
         flagged_flies_csv=args.flagged_flies_csv,
+        cfg=settings,
+        thawed=tuple(args.thaw or ()),
+        thaw_all=bool(args.thaw_all),
     )
 
 

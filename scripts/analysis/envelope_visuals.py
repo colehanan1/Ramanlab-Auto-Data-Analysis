@@ -31,7 +31,7 @@ import re
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Iterable, Mapping, Sequence, Tuple
+from typing import Any, Iterable, Mapping, Sequence, Tuple
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -347,6 +347,35 @@ def should_write(path: Path, overwrite: bool) -> bool:
         return True
 
     path.parent.mkdir(parents=True, exist_ok=True)
+    return True
+
+
+def should_skip_frozen_figure(
+    cfg: Any,
+    datasets: Iterable[str],
+    *,
+    thawed: Iterable[str] = (),
+    thaw_all: bool = False,
+) -> bool:
+    """True when EVERY dataset contributing to a figure is frozen for figures.
+
+    Deliberately NOT "any contributor is frozen". A figure drawn from a frozen
+    Control and a live Training must still redraw, or adding flies to Training
+    would silently fail to appear in it.
+
+    An empty or unknown contributor set counts as LIVE. Note all([]) is True, so
+    an empty set would otherwise skip every such figure -- an empty set means
+    "we do not know", not "all frozen".
+    """
+    from fbpipe.freeze import freeze_flags
+
+    names = [str(d) for d in (datasets or []) if str(d).strip()]
+    if not names:
+        return False
+    for name in names:
+        _, freeze_figures = freeze_flags(cfg, name, thawed=thawed, thaw_all=thaw_all)
+        if not freeze_figures:
+            return False
     return True
 
 
@@ -1062,6 +1091,14 @@ class MatrixPlotConfig:
     trial_orders: Sequence[str] = field(default_factory=lambda: ("observed", "trained-first"))
     include_hexanol: bool = True
     overwrite: bool = True
+    # Dataset-freeze plumbing (Task 6). Optional and unused by any caller that
+    # does not set them, so the default (no dataset frozen) reproduces today's
+    # behaviour byte-for-byte. ``dataset_overrides`` is read defensively by
+    # ``fbpipe.freeze.freeze_flags`` via getattr -- this dataclass is passed
+    # directly as the ``cfg`` argument to ``should_skip_frozen_figure``.
+    dataset_overrides: Mapping[str, Any] | None = None
+    thawed: Sequence[str] = ()
+    thaw_all: bool = False
 
 
 def _score_trial(env: np.ndarray, fps: float, cfg: MatrixPlotConfig) -> tuple[int, int]:
@@ -1519,6 +1556,18 @@ def generate_reaction_matrices(cfg: MatrixPlotConfig) -> None:
             if subset.empty:
                 continue
 
+            # Each reaction-matrix figure belongs to exactly one dataset (the
+            # loop variable, confusingly named "odor" for historical reasons,
+            # IS the canonical dataset). Skipping here also skips the
+            # plot_reaction_rate_bars() call further down for this dataset --
+            # it draws into this figure's axis and has no independent output.
+            if should_skip_frozen_figure(cfg, [odor], thawed=cfg.thawed, thaw_all=cfg.thaw_all):
+                print(
+                    f"[FROZEN] Skipping figure (all contributors frozen): "
+                    f"dataset={odor} order={order_suffix}"
+                )
+                continue
+
             subset = subset.copy()
             subset = _normalise_fly_columns(subset)
             drop_mask = subset["trial"].apply(_is_testing_11_label)
@@ -1909,6 +1958,14 @@ class EnvelopePlotConfig:
     odor_on_label_scale: float = 1.0
     odor_on_label_y: float | None = None
     tight_h_pad: float | None = None
+    # Dataset-freeze plumbing (Task 6). Optional and unused by any caller that
+    # does not set them, so the default (no dataset frozen) reproduces today's
+    # behaviour byte-for-byte. ``dataset_overrides`` is read defensively by
+    # ``fbpipe.freeze.freeze_flags`` via getattr -- this dataclass is passed
+    # directly as the ``cfg`` argument to ``should_skip_frozen_figure``.
+    dataset_overrides: Mapping[str, Any] | None = None
+    thawed: Sequence[str] = ()
+    thaw_all: bool = False
 
 
 def _envelope_ylabel(cfg: EnvelopePlotConfig) -> str:
@@ -2199,6 +2256,9 @@ def generate_envelope_plots(cfg: EnvelopePlotConfig) -> None:
             f"trials={len(indices)}",
             f"output={out_path}",
         )
+        if should_skip_frozen_figure(cfg, dataset_candidates, thawed=cfg.thawed, thaw_all=cfg.thaw_all):
+            print(f"[FROZEN] Skipping figure (all contributors frozen): {out_path}")
+            continue
         if out_path.exists() and not cfg.overwrite:
             continue
 
