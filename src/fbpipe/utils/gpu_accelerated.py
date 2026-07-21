@@ -37,6 +37,7 @@ from .columns import (
     PROBOSCIS_MAX_DISTANCE_COL,
     PROBOSCIS_MIN_DISTANCE_COL,
 )
+from .rig_anchor import DEFAULT_ANCHOR
 
 
 class GPUBatchProcessor:
@@ -181,8 +182,8 @@ class GPUBatchProcessor:
         p2y: np.ndarray,
         p3x: np.ndarray,
         p3y: np.ndarray,
-        anchor_x: float = 1079.0,
-        anchor_y: float = 540.0
+        anchor_x: float = DEFAULT_ANCHOR[0],
+        anchor_y: float = DEFAULT_ANCHOR[1]
     ) -> np.ndarray:
         """
         Compute angle at point2 (eye) between anchor and proboscis vectors.
