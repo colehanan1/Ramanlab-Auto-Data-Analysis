@@ -57,6 +57,7 @@ from fbpipe.utils.trial_metadata import (
     load_trial_metadata,
 )
 from fbpipe.utils.fly_type import UNKNOWN_FLY_TYPE, fly_type_for_dir
+from fbpipe.utils.rig_anchor import resolve_anchor
 from fbpipe.utils.tables import (
     read_table,
     write_table,
@@ -1490,7 +1491,9 @@ def _resolve_column_alias(df: pd.DataFrame, *aliases: str) -> str | None:
     return None
 
 
-def _compute_angle_deg(df: pd.DataFrame) -> pd.Series:
+def _compute_angle_deg(
+    df: pd.DataFrame, anchor: tuple[float, float] | None = None
+) -> pd.Series:
     x2_col = _resolve_column_alias(
         df,
         f"x_class{EYE_CLASS}",
@@ -1543,8 +1546,9 @@ def _compute_angle_deg(df: pd.DataFrame) -> pd.Series:
     p3x = pd.to_numeric(df[x_prob_col], errors="coerce").astype(float)
     p3y = pd.to_numeric(df[y_prob_col], errors="coerce").astype(float)
 
-    ux = ANCHOR_X - p2x
-    uy = ANCHOR_Y - p2y
+    ax, ay = (ANCHOR_X, ANCHOR_Y) if anchor is None else anchor
+    ux = ax - p2x
+    uy = ay - p2y
     vx = p3x - p2x
     vy = p3y - p2y
 
@@ -1585,12 +1589,14 @@ def _trial_csv_candidates(fly_dir: Path, suffix_globs: Iterable[str] | str) -> l
     return sorted(candidates)
 
 
-def _find_reference_angle(csv_paths: Sequence[Path]) -> float:
+def _find_reference_angle(
+    csv_paths: Sequence[Path], anchor: tuple[float, float] | None = None
+) -> float:
     best: tuple[int, float, float] | None = None
     for path in csv_paths:
         try:
             df = read_table(path)
-            angles = _compute_angle_deg(df).to_numpy(dtype=float)
+            angles = _compute_angle_deg(df, anchor).to_numpy(dtype=float)
         except Exception:
             continue
 
@@ -1626,7 +1632,11 @@ def _find_reference_angle(csv_paths: Sequence[Path]) -> float:
     return float("nan") if best is None else best[2]
 
 
-def _fly_max_centered(csv_paths: Sequence[Path], reference_angle: float) -> float:
+def _fly_max_centered(
+    csv_paths: Sequence[Path],
+    reference_angle: float,
+    anchor: tuple[float, float] | None = None,
+) -> float:
     if not np.isfinite(reference_angle):
         return float("nan")
 
@@ -1634,7 +1644,7 @@ def _fly_max_centered(csv_paths: Sequence[Path], reference_angle: float) -> floa
     for path in csv_paths:
         try:
             df = read_table(path)
-            angles = _compute_angle_deg(df).to_numpy(dtype=float)
+            angles = _compute_angle_deg(df, anchor).to_numpy(dtype=float)
         except Exception:
             continue
 
@@ -1672,8 +1682,9 @@ def _ensure_angle_percentages(fly_dir: Path, suffix_globs: Iterable[str] | str) 
     if not csv_paths:
         return
 
-    reference = _find_reference_angle(csv_paths)
-    fly_max = _fly_max_centered(csv_paths, reference)
+    anchor = resolve_anchor(fly_dir)
+    reference = _find_reference_angle(csv_paths, anchor)
+    fly_max = _fly_max_centered(csv_paths, reference, anchor)
 
     if not np.isfinite(reference):
         reference = 0.0
@@ -1688,7 +1699,7 @@ def _ensure_angle_percentages(fly_dir: Path, suffix_globs: Iterable[str] | str) 
     for path in csv_paths:
         try:
             df = read_table(path)
-            angles = _compute_angle_deg(df)
+            angles = _compute_angle_deg(df, anchor)
         except Exception:
             continue
 
