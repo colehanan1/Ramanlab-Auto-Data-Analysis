@@ -19,8 +19,14 @@ Scope of affected data (survey of both trees):
 | rig_3 (mirrored) | 8 dirs | 6 dirs |
 
 No `rig_1` exists in either tree, so `rig_2` is the non-mirrored reference
-throughout this document. The recompute pass must cover both trees, which are
-not currently in sync (8 vs 6).
+throughout this document.
+
+Of the 8 rig_3 directories only 6 hold `*_distances.parquet` data, all under
+`EB-Training-24-1` (5) and `EB-Control-24-1` (1). The remaining two live in
+`3Oct-Training-24-0.11` / `3Oct-Control-24-0.11`, which have been recorded but
+never processed and are absent from the config's `datasets:` list — they have
+no stale angle data to correct, and will be written correctly on first
+processing once the correct-on-write change is in place.
 
 ### Mechanism
 
