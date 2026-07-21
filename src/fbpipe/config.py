@@ -530,8 +530,6 @@ class Settings:
     cuda_allow_tf32: bool = True
     non_reactive_span_px: float = 5.0
     flagged_flies_csv: str = ""
-    anchor_x: float = 1079.0
-    anchor_y: float = 540.0
     fps_default: float = 40.0
     window_sec: float = 0.25
     odor_on_s: float = 30.0
@@ -985,8 +983,6 @@ def load_settings(config_path: str | Path) -> Settings:
         cuda_allow_tf32=cuda_allow_tf32,
         non_reactive_span_px=non_reactive_span_px,
         flagged_flies_csv=flagged_flies_csv,
-        anchor_x=float(os.getenv("ANCHOR_X", _get(data, "anchor_x", 1079.0))),
-        anchor_y=float(os.getenv("ANCHOR_Y", _get(data, "anchor_y", 540.0))),
         fps_default=float(os.getenv("FPS_DEFAULT", _get(data, "fps_default", 40.0))),
         window_sec=float(os.getenv("WINDOW_SEC", _get(data, "window_sec", 0.25))),
         odor_on_s=float(os.getenv("ODOR_ON_S", _get(data, "odor_on_s", 30.0))),
