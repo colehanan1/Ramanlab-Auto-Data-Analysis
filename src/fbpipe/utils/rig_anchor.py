@@ -23,12 +23,16 @@ MIRRORED_ANCHOR: Tuple[float, float] = (0.0, 540.0)
 MIRRORED_RIGS = frozenset({"rig_3"})
 
 # Matches "rig_3" but deliberately NOT "rig3" (no underscore). The underscore
-# is required: rig_token scans every ancestor path component, and a directory
-# meaning "excluding rig3" -- e.g. "EB-Training-24-1_excl_rig3", which exists
-# on disk under /home/ramanlab/Documents/cole/Results/Figures -- would
-# otherwise be misread as a rig_3 trial and silently mirror correct rig_2
-# data. Every real rig directory on disk uses the underscore form
-# (rig_2, rig_3), so this loses no real matches.
+# is required as a defensive measure: rig_token scans every ancestor path
+# component, so an ancestor directory whose NAME merely mentions a rig --
+# e.g. "EB-Training-24-1_excl_rig3", which exists on disk under
+# /home/ramanlab/Documents/cole/Results/Figures -- could otherwise be
+# misread as a rig_3 trial. This is latent, not an observed production bug:
+# resolve_anchor is only ever called on data paths (cfg.root.iterdir(),
+# _discover_month_folders, video_path), never on Results/Figures, so that
+# directory was never actually reachable through this code. Every real rig
+# directory on disk uses the underscore form (rig_2, rig_3), so requiring it
+# loses no real matches.
 _RIG_RE = re.compile(r"rig_(\d+)", re.IGNORECASE)
 
 

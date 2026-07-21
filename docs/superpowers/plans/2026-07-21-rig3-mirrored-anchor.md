@@ -722,6 +722,17 @@ of the video loop. New rig_3 trials are now correct on first write."
 
 ### Task 5: Recompute existing rig_3 data and validate
 
+> **Post-merge review note:** the invalidation pass below (Steps 6-7's
+> write) is **not required** for today's data. `envelope_combined._ensure_angle_percentages`
+> has no short-circuit guard on the cached angle columns -- it recomputes
+> them unconditionally and rewrites whenever `_series_matches` finds the
+> recomputed values differ. Rerunning the analysis for `EB-Training-24-1`
+> and `EB-Control-24-1` alone is sufficient to correct rig_3 (verified: corr
+> went from -0.269 to +0.269 on a scratch copy with no invalidation pass at
+> all). `recompute_rig3_angles.py`'s main value is its `--dry-run` audit,
+> which confirms whether any table carries a stale `angle_multiplier` (today
+> none of the 474 real rig_3 parquets do) -- see the module docstring.
+
 **Files:**
 
 - Create: `scripts/pipeline/recompute_rig3_angles.py`
@@ -985,11 +996,18 @@ skip added to `_run_combined` does not suppress this recompute. Confirm the run
 log does **not** print `[FROZEN] combined.combine → skipping recompute` for
 either dataset; if it does, the recompute silently did nothing.
 
-Each dataset also contains rig_2 directories, which is expected and safe: their
-cached angle columns are still present and their anchor is unchanged, so
-`_process_fly_angles` short-circuits on `"angle_multiplier" in df.columns` and
-`_ensure_angle_percentages` writes nothing because `_series_matches` finds the
-recomputed values identical. That is exactly what Step 8 verifies.
+Each dataset also contains rig_2 directories, which is expected and safe:
+`resolve_anchor` returns the identical `DEFAULT_ANCHOR` for rig_2 as before
+this branch, so the recomputed angle arrays are bitwise-identical to the
+cached ones and `_ensure_angle_percentages` writes nothing because
+`_series_matches` finds them equal. (`_process_fly_angles` in
+`compose_videos_rms` is not part of this path -- it is not wired into
+`ORDERED_STEPS` and is not called by `pipeline.py` or `run_workflows.py`. Its
+"short-circuits on `angle_multiplier` in df.columns" behavior does not apply
+here; when run manually against a real rig_2 copy it in fact rewrote 60
+files and changed `angle_centered_deg`, because it re-centers on compose's
+own reference angle, which differs from envelope's. Do not rely on it for
+rig_2 safety.) That is exactly what Step 8 verifies.
 
 YOLO does not re-run: `config_new.yaml` sets `force.yolo: false`, and
 `yolo_infer` skips any video whose output directory already exists

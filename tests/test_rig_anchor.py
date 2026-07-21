@@ -8,10 +8,12 @@ The rig token match requires the underscore between "rig" and the digit
 without the underscore a directory merely *mentioning* rig3 in prose --
 e.g. "EB-Training-24-1_excl_rig3" (real directory under
 /home/ramanlab/Documents/cole/Results/Figures, meaning "excluding rig3") --
-would be misread as a rig_3 trial and silently mirror correct rig_2 data
-beneath it. Every real rig directory on disk uses the underscore form, so
-requiring it loses no real matches; see the poisoner-name regression tests
-below.
+could be misread as a rig_3 trial. This is a defensive/latent concern rather
+than an observed production bug: ``resolve_anchor`` is only ever called on
+data paths, never on ``Results/Figures``, so that directory was never
+actually reachable through this code. Every real rig directory on disk uses
+the underscore form, so requiring it loses no real matches; see the
+poisoner-name regression tests below.
 """
 from __future__ import annotations
 
@@ -81,19 +83,21 @@ def test_rig_token(path, expected):
     ],
 )
 def test_resolve_anchor_ignores_no_underscore_ancestor_mentions(path, expected):
-    """Regression test for the ancestor false-positive production bug.
+    """Regression test for a defensive/latent ancestor false-positive.
 
     ``rig_token`` scans every ancestor path component, so any ancestor
-    directory containing the bare substring "rig3"/"rig2" used to silently
-    mirror every fly beneath it. The real directory
+    directory containing the bare substring "rig3"/"rig2" would, without the
+    underscore requirement, be misread as naming a rig. The real directory
     ``EB-Training-24-1_excl_rig3_and_july17b2rig2`` (under
     /home/ramanlab/Documents/cole/Results/Figures) and
     ``scripts/analysis/reaction_matrix_specific_flies_vs_control.py``'s
     ``EB-Training-24-1_excl_rig3`` output both trip this: they mean
-    "excluding rig3" but used to resolve AS rig_3, silently mirroring
-    correct rig_2 data. Requiring the underscore between "rig" and the
-    digit fixes this without losing any real match (every real rig
-    directory on disk uses the underscore form).
+    "excluding rig3" but without the underscore requirement would resolve
+    AS rig_3. This was never an observed production bug -- ``resolve_anchor``
+    is only ever called on data paths, never on ``Results/Figures`` -- but
+    requiring the underscore between "rig" and the digit closes the gap
+    defensively without losing any real match (every real rig directory on
+    disk uses the underscore form).
 
     Verified to bite: reverting ``_RIG_RE`` to the old ``rig_?(\\d+)``
     makes the first two cases here fail (they resolve to MIRRORED_ANCHOR

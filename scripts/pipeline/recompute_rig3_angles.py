@@ -1,14 +1,29 @@
-"""Drop cached angle columns from rig_3 tables so they recompute correctly.
+"""Diagnostic / belt-and-braces tool for cached rig_3 angle columns.
 
 rig_3 is a physically mirrored rig and its angles were computed against the
-wrong (right-edge) anchor. Both producers of the angle columns short-circuit
-when the columns already exist:
+wrong (right-edge) anchor. Rerunning the analysis alone already corrects
+rig_3: `envelope_combined._ensure_angle_percentages` has no short-circuit
+guard on the cached angle columns -- it recomputes them unconditionally and
+rewrites whenever `_series_matches` finds the recomputed values differ. On
+the real rig_3 tables (474 of them, as of this writing) none carry a stale
+`angle_multiplier` column, so today there is nothing for this script to find
+or drop.
 
-  compose_videos_rms._process_fly_angles      -- "if 'angle_multiplier' in df"
-  envelope_combined._ensure_angle_percentages -- via _series_matches
+This script exists for two situations where an invalidation pass would
+matter:
 
-so the stale values must be removed before rerunning the analysis. This is a
-pure recalculation from the stored eye/proboscis coordinates: no video is
+  1. If a table ever does carry a stale `angle_multiplier` (or the other
+     `ANGLE_COLUMNS`) written by some path that predates or bypasses
+     `_ensure_angle_percentages`'s unconditional recompute.
+  2. If `compose_videos_rms._process_fly_angles` is ever run manually --
+     it is not wired into `ORDERED_STEPS` and is not called by `pipeline.py`
+     or `run_workflows.py`, so it is unreachable from the live pipeline, but
+     if invoked directly it does short-circuit on `"angle_multiplier" in df`
+     and would need the cached columns dropped first.
+
+`--dry-run` is the primary intended use: it reports which tables (if any)
+carry a stale angle column, without writing anything. This is a pure
+recalculation from the stored eye/proboscis coordinates: no video is
 re-encoded and YOLO is not re-run.
 
 Usage:
