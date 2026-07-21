@@ -21,6 +21,7 @@ from ..utils.vision import xyxy_to_cxcywh
 from ..utils.yolo_results import collect_detections
 from ..utils.video_writer import FFmpegFrameWriter
 from ..utils.distance_sanity import anisotropic_boundary_offsets
+from ..utils.rig_anchor import resolve_anchor
 from ..utils.track import MultiObjectTracker, SingleClassTracker
 from ..utils.multi_fly import EyeAnchorManager, StablePairing, enforce_zero_iou_and_topk
 from ..utils.columns import (
@@ -544,8 +545,6 @@ def main(cfg: Settings):
     def predict_fn(image, conf_thres):   # single-frame adapter for the warm-up scan
         return batched_predict_fn([image], conf_thres)
 
-    AX, AY = cfg.anchor_x, cfg.anchor_y
-
     # Optional video-level parallelism: N worker processes each handle a disjoint
     # slice of the deterministically-ordered video list via global_index % N.
     # Defaults (1/0) preserve the original single-process behaviour exactly.
@@ -581,6 +580,9 @@ def main(cfg: Settings):
                 if _job_idx % num_workers != worker_index:
                     continue
                 base = video_path.stem
+                # rig_3 is physically mirrored, so its anchor is on the other
+                # side. Resolved per video because one run can span both rigs.
+                AX, AY = resolve_anchor(video_path)
                 csv_file_path = fly / f"{base.replace('_preprocessed','')}.csv"
                 parts = base.split("_")
                 folder_name = "_".join(parts[1:7]) if len(parts)>=7 else base
