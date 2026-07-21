@@ -22,9 +22,14 @@ MIRRORED_ANCHOR: Tuple[float, float] = (0.0, 540.0)
 
 MIRRORED_RIGS = frozenset({"rig_3"})
 
-# Matches "rig_3" and "rig3" in a path component such as
-# "july_17_batch_2_rig_3".
-_RIG_RE = re.compile(r"rig_?(\d+)", re.IGNORECASE)
+# Matches "rig_3" but deliberately NOT "rig3" (no underscore). The underscore
+# is required: rig_token scans every ancestor path component, and a directory
+# meaning "excluding rig3" -- e.g. "EB-Training-24-1_excl_rig3", which exists
+# on disk under /home/ramanlab/Documents/cole/Results/Figures -- would
+# otherwise be misread as a rig_3 trial and silently mirror correct rig_2
+# data. Every real rig directory on disk uses the underscore form
+# (rig_2, rig_3), so this loses no real matches.
+_RIG_RE = re.compile(r"rig_(\d+)", re.IGNORECASE)
 
 
 def rig_token(path: str | Path) -> Optional[str]:

@@ -23,6 +23,30 @@ def _frame():
     )
 
 
+def _non_collinear_frame():
+    """Eye and proboscis NOT on the same horizontal line as each other.
+
+    ``_frame()`` puts the eye, the proboscis, AND both anchors all on
+    y=540, so every cross product in ``compute_angle_deg_at_point2`` is
+    exactly zero there -- a genuine geometric divergence between this
+    module's angle math and ``envelope_combined``'s duplicate
+    implementation (e.g. a sign or scale error on the ``vy`` component)
+    would go completely undetected by a test built on that fixture. Only
+    ``test_agrees_with_envelope_combined_implementation`` should use this
+    fixture; ``test_mirrored_anchor_is_supplement_of_default`` genuinely
+    requires p2y == anchor_y for the ``180 - angle`` supplement identity to
+    hold and must keep using the collinear ``_frame()``.
+    """
+    return pd.DataFrame(
+        {
+            "x_class0": [500.0],
+            "y_class0": [540.0],
+            "x_class1": [550.0],
+            "y_class1": [500.0],
+        }
+    )
+
+
 def test_default_argument_preserves_current_values():
     df = _frame()
     assert np.allclose(
@@ -40,10 +64,17 @@ def test_mirrored_anchor_is_supplement_of_default():
 
 
 def test_agrees_with_envelope_combined_implementation():
-    """The two duplicate implementations must not drift apart."""
+    """The two duplicate implementations must not drift apart.
+
+    Uses ``_non_collinear_frame()``, not ``_frame()``: on the collinear
+    fixture every cross product is zero for both implementations
+    regardless of how ``vy``/``vx`` are computed, so a real divergence
+    (e.g. scaling ``vy`` in one implementation but not the other) would
+    silently pass. See ``_non_collinear_frame``'s docstring.
+    """
     from scripts.analysis.envelope_combined import _compute_angle_deg
 
-    df = _frame()
+    df = _non_collinear_frame()
     for anchor in (DEFAULT_ANCHOR, MIRRORED_ANCHOR):
         a = compute_angle_deg_at_point2(df, anchor).to_numpy(dtype=float)
         b = _compute_angle_deg(df, anchor).to_numpy(dtype=float)
