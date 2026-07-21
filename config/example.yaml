@@ -53,10 +53,6 @@ yolo:
   pair_rebind_ratio: 0.20
   zero_iou_epsilon: 1.0e-8
 
-# Geometry
-anchor_x: 1079.0
-anchor_y: 540.0
-
 # Distance stats
 distance_limits:
   class2_min: 10.0
