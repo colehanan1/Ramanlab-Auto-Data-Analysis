@@ -27,6 +27,7 @@ from ..utils.columns import (
     find_proboscis_xy_columns,
 )
 from ..utils.fly_files import iter_fly_distance_csvs
+from ..utils.rig_anchor import resolve_anchor
 from ..utils.tables import read_table, write_table
 
 # Display defaults mirror the notebook example
@@ -211,7 +212,9 @@ def odor_window_from_ofm(df: pd.DataFrame, time_col: str) -> Optional[Tuple[floa
     return None
 
 
-def compute_angle_deg_at_point2(df: pd.DataFrame) -> pd.Series:
+def compute_angle_deg_at_point2(
+    df: pd.DataFrame, anchor: tuple[float, float] | None = None
+) -> pd.Series:
     x2_col = find_col(
         df,
         [
@@ -241,7 +244,8 @@ def compute_angle_deg_at_point2(df: pd.DataFrame) -> pd.Series:
     p2y = pd.to_numeric(df[y2_col], errors="coerce").to_numpy()
     p3x = pd.to_numeric(df[x_prob], errors="coerce").to_numpy()
     p3y = pd.to_numeric(df[y_prob], errors="coerce").to_numpy()
-    ux, uy = (ANCHOR_X - p2x), (ANCHOR_Y - p2y)
+    ax, ay = (ANCHOR_X, ANCHOR_Y) if anchor is None else anchor
+    ux, uy = (ax - p2x), (ay - p2y)
     vx, vy = (p3x - p2x), (p3y - p2y)
     dot = ux * vx + uy * vy
     cross = ux * vy - uy * vx
@@ -324,7 +328,11 @@ def compute_angle_multiplier_series(angle_series: pd.Series) -> pd.Series:
     return pd.Series(multipliers, index=angle_series.index, name="angle_multiplier")
 
 
-def find_fly_reference_angle(csvs_raw: List[Path], trimmed_min: Optional[float] = None) -> float:
+def find_fly_reference_angle(
+    csvs_raw: List[Path],
+    trimmed_min: Optional[float] = None,
+    anchor: tuple[float, float] | None = None,
+) -> float:
     """
     Find the fly's reference angle (0°) for baseline measurements.
 
@@ -345,7 +353,7 @@ def find_fly_reference_angle(csvs_raw: List[Path], trimmed_min: Optional[float] 
         except Exception:
             continue
         try:
-            angle = compute_angle_deg_at_point2(df)
+            angle = compute_angle_deg_at_point2(df, anchor)
         except Exception:
             continue
         # Use flexible column finder instead of hardcoded names
@@ -397,7 +405,11 @@ def find_fly_reference_angle(csvs_raw: List[Path], trimmed_min: Optional[float] 
     return best[2] if best is not None else float("nan")
 
 
-def compute_fly_max_abs_centered(csvs_raw: List[Path], ref_angle: float) -> float:
+def compute_fly_max_abs_centered(
+    csvs_raw: List[Path],
+    ref_angle: float,
+    anchor: tuple[float, float] | None = None,
+) -> float:
     fly_max = 0.0
     for path in csvs_raw:
         try:
@@ -405,7 +417,7 @@ def compute_fly_max_abs_centered(csvs_raw: List[Path], ref_angle: float) -> floa
         except Exception:
             continue
         try:
-            angle = compute_angle_deg_at_point2(df)
+            angle = compute_angle_deg_at_point2(df, anchor)
         except Exception:
             continue
         centered = angle - ref_angle if np.isfinite(ref_angle) else angle * 0.0
@@ -820,7 +832,10 @@ def _process_fly_angles(fly_dir: Path) -> None:
         return
 
     # Calculate reference angle using trimmed_min (Modification #5)
-    reference_angle = find_fly_reference_angle(csv_paths, trimmed_min=trimmed_min)
+    anchor = resolve_anchor(fly_dir)
+    reference_angle = find_fly_reference_angle(
+        csv_paths, trimmed_min=trimmed_min, anchor=anchor
+    )
     if not np.isfinite(reference_angle):
         print(f"[ANGLES] {fly_dir.name}: Could not determine reference angle, using 0.0")
         reference_angle = 0.0
@@ -838,7 +853,7 @@ def _process_fly_angles(fly_dir: Path) -> None:
 
             # Compute raw angles
             try:
-                angles = compute_angle_deg_at_point2(df)
+                angles = compute_angle_deg_at_point2(df, anchor)
             except Exception as e:
                 print(f"[ANGLES] {csv_path.name}: Could not compute angles: {e}")
                 continue
