@@ -1200,8 +1200,26 @@ def _run_combined(
             if "odor_latency" in run_opts and "odor_latency_s" not in run_opts:
                 run_opts["odor_latency_s"] = float(run_opts.pop("odor_latency"))
             config = CombineConfig(**run_opts)  # type: ignore[arg-type]
-            print(f"[analysis] combined.combine → {config.root}")
-            combine_distance_angle(config)
+            dataset_name = config.root.name
+            from fbpipe import freeze as _freeze
+
+            freeze_data, _ = _freeze.freeze_flags(
+                settings,
+                dataset_name,
+                thawed=getattr(settings, "_thawed", ()),
+                thaw_all=getattr(settings, "_thaw_all", False),
+            )
+            if freeze_data:
+                # freeze.data is a promise the raw data won't change, and a
+                # frozen dataset's wide rows are spliced from the freeze cache
+                # (build_wide_csv never reads angle_distance_rms_envelope/ for
+                # it) -- so recomputing those per-trial files here is pure
+                # waste. This mirrors build_wide_csv's own "never walk a
+                # frozen root" skip (envelope_combined.py:2676).
+                print(f"[FROZEN] combined.combine → skipping recompute for {config.root}")
+            else:
+                print(f"[analysis] combined.combine → {config.root}")
+                combine_distance_angle(config)
             combine_roots[config.root.name.lower()] = config.root
 
     wide_cfg = cfg.get("wide")
@@ -2015,6 +2033,7 @@ def _run_reactions(settings: Settings, config_path: Path | None = None) -> None:
 
     flagged_csv = str(getattr(settings, "flagged_flies_csv", "") or "")
     env = os.environ.copy()
+    env["MPLBACKEND"] = "Agg"
     extra_path = str(REPO_ROOT / "src")
     pythonpath = env.get("PYTHONPATH")
     env["PYTHONPATH"] = os.pathsep.join(filter(None, [extra_path, pythonpath]))

@@ -46,6 +46,11 @@ _SIDECAR_RE = re.compile(r"^output_.+_(training|testing)_\d+_.+_\d{8}_\d{6}\.txt
 
 CACHE_FILENAME = "_trial_meta.json"
 
+# Bump whenever a field is added to TrialMetadata so caches written by an
+# older version are treated as stale and re-derived (rather than silently
+# filling the new field with a default/None forever).
+_CACHE_SCHEMA_VERSION = 2
+
 
 @dataclass(frozen=True)
 class TrialMetadata:
@@ -70,10 +75,11 @@ class TrialMetadata:
     sidecar_txt: Optional[Path]
     sidecar_csv: Optional[Path]
     source: str                # "sidecar" | "fallback" | "cache"
-    # First optogenetic-LED on time (seconds from recording start), read from
-    # the sibling ``sensors_output_*.csv`` ``OFM_Event`` column. ``None`` when
-    # no sensors log / no light-on event exists for the trial.
+    # First optogenetic-LED on/off times (seconds from recording start), read
+    # from the sibling ``sensors_output_*.csv`` ``OFM_Event`` column. ``None``
+    # when no sensors log / no light-on(/off) event exists for the trial.
     light_on_s: Optional[float] = None
+    light_off_s: Optional[float] = None
 
     @property
     def odor_on_s(self) -> Optional[float]:
@@ -182,25 +188,16 @@ def parse_active_ofm(csv_path: Path) -> tuple[Optional[int], Optional[int], Opti
     return on_frame, off_frame, channel
 
 
-# Optogenetic-LED "on" markers in the sensors-log ``OFM_Event`` column. The rig
-# emits ``LIGHT_SOLID_ON`` / ``LIGHT_PULSE_ON`` (which toggles many thousands of
-# times during a pulse train) plus manual / network triggers. Any of these is an
-# "on"; ``LIGHT_OFF`` / ``LIGHT_PULSE_OFF`` are explicitly not.
+# Optogenetic-LED "on"/"off" markers in the sensors-log ``OFM_Event`` column.
+# The rig emits ``LIGHT_SOLID_ON`` / ``LIGHT_PULSE_ON`` (which toggles many
+# thousands of times during a pulse train) plus manual / network triggers as
+# "on"; ``LIGHT_OFF`` / ``LIGHT_PULSE_OFF`` mark the light going off.
 _LIGHT_ON_RE = re.compile(r"^LIGHT_.*(?:_ON|_START|_TRIGGER)$", re.IGNORECASE)
+_LIGHT_OFF_RE = re.compile(r"^LIGHT_(?:PULSE_)?OFF$", re.IGNORECASE)
 
 
-def parse_light_on_seconds(sensors_csv: Path) -> Optional[float]:
-    """First light-on time (seconds from recording start) from a sensors CSV.
-
-    The Pi rig logs LED transitions in the ``OFM_Event`` column of
-    ``sensors_output_*.csv`` with nanosecond ``MonoNs`` timestamps. The light
-    pulses on/off many times within a trial, so we return the time of the
-    *first* on-event (``LIGHT_SOLID_ON`` / ``LIGHT_PULSE_ON`` /
-    ``LIGHT_PULSE_MANUAL_START`` / ``LIGHT_PULSE_NET_TRIGGER``) relative to the
-    first ``RECORDING_START`` row (or the earliest row if that marker is
-    absent). Returns ``None`` when the file, columns, or any on-event is
-    missing.
-    """
+def _read_sensors_events(sensors_csv: Path) -> Optional[tuple["pd.Series", "pd.Series", float]]:
+    """Return ``(mono_ns, events, start_ns)`` from a sensors CSV, or None."""
     try:
         df = pd.read_csv(
             sensors_csv,
@@ -229,6 +226,25 @@ def parse_light_on_seconds(sensors_csv: Path) -> Optional[float]:
         if valid.empty:
             return None
         start_ns = float(valid.min())
+    return mono, events, start_ns
+
+
+def parse_light_on_seconds(sensors_csv: Path) -> Optional[float]:
+    """First light-on time (seconds from recording start) from a sensors CSV.
+
+    The Pi rig logs LED transitions in the ``OFM_Event`` column of
+    ``sensors_output_*.csv`` with nanosecond ``MonoNs`` timestamps. The light
+    pulses on/off many times within a trial, so we return the time of the
+    *first* on-event (``LIGHT_SOLID_ON`` / ``LIGHT_PULSE_ON`` /
+    ``LIGHT_PULSE_MANUAL_START`` / ``LIGHT_PULSE_NET_TRIGGER``) relative to the
+    first ``RECORDING_START`` row (or the earliest row if that marker is
+    absent). Returns ``None`` when the file, columns, or any on-event is
+    missing.
+    """
+    parsed = _read_sensors_events(sensors_csv)
+    if parsed is None:
+        return None
+    mono, events, start_ns = parsed
 
     on_mask = events.str.match(_LIGHT_ON_RE) & mono.notna()
     on_vals = mono[on_mask]
@@ -236,6 +252,31 @@ def parse_light_on_seconds(sensors_csv: Path) -> Optional[float]:
         return None
 
     return (float(on_vals.iloc[0]) - start_ns) / 1e9
+
+
+def parse_light_window_seconds(sensors_csv: Path) -> tuple[Optional[float], Optional[float]]:
+    """Return ``(light_on_s, light_off_s)`` from a sensors CSV.
+
+    ``light_off_s`` is the first ``LIGHT_OFF``/``LIGHT_PULSE_OFF`` event that
+    follows the first on-event; ``None`` if no such event is logged (e.g. the
+    trial was cut short before the rig logged the off transition).
+    """
+    parsed = _read_sensors_events(sensors_csv)
+    if parsed is None:
+        return None, None
+    mono, events, start_ns = parsed
+
+    on_mask = events.str.match(_LIGHT_ON_RE) & mono.notna()
+    on_vals = mono[on_mask]
+    if on_vals.empty:
+        return None, None
+    on_ns = float(on_vals.iloc[0])
+    on_s = (on_ns - start_ns) / 1e9
+
+    off_mask = events.str.match(_LIGHT_OFF_RE) & mono.notna() & (mono > on_ns)
+    off_vals = mono[off_mask]
+    off_s = (float(off_vals.iloc[0]) - start_ns) / 1e9 if not off_vals.empty else None
+    return on_s, off_s
 
 
 def find_sensors_csv(
@@ -391,12 +432,15 @@ def _load_cache(trial_dir: Path, sidecar_mtime: Optional[float]) -> Optional[dic
     cached_mtime = data.get("_sidecar_mtime")
     if sidecar_mtime is not None and cached_mtime != sidecar_mtime:
         return None
+    if data.get("_schema_version") != _CACHE_SCHEMA_VERSION:
+        return None
     return data
 
 
 def _save_cache(trial_dir: Path, meta: TrialMetadata, sidecar_mtime: Optional[float]) -> None:
     payload = meta.to_dict()
     payload["_sidecar_mtime"] = sidecar_mtime
+    payload["_schema_version"] = _CACHE_SCHEMA_VERSION
     try:
         _cache_path(trial_dir).write_text(json.dumps(payload, indent=2), encoding="utf-8")
     except OSError as exc:
@@ -421,6 +465,7 @@ def _meta_from_cache(data: dict) -> TrialMetadata:
         sidecar_csv=(Path(data["sidecar_csv"]) if data.get("sidecar_csv") else None),
         source="cache",
         light_on_s=(float(data["light_on_s"]) if data.get("light_on_s") is not None else None),
+        light_off_s=(float(data["light_off_s"]) if data.get("light_off_s") is not None else None),
     )
 
 
@@ -608,7 +653,9 @@ def load_trial_metadata(
         trial_type=raw_trial_type,
         trial_index=trial_index,
     )
-    light_on_s = parse_light_on_seconds(sensors_csv) if sensors_csv is not None else None
+    light_on_s, light_off_s = (
+        parse_light_window_seconds(sensors_csv) if sensors_csv is not None else (None, None)
+    )
 
     meta = TrialMetadata(
         dataset=dataset,
@@ -627,6 +674,7 @@ def load_trial_metadata(
         sidecar_csv=sidecar_csv,
         source=source,
         light_on_s=light_on_s,
+        light_off_s=light_off_s,
     )
 
     if use_cache:

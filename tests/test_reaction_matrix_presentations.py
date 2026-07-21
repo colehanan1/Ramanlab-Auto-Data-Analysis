@@ -3,6 +3,7 @@ import sys
 from pathlib import Path
 
 import pandas as pd
+import pytest
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 for candidate in (PROJECT_ROOT, PROJECT_ROOT / "scripts", PROJECT_ROOT / "src"):
@@ -97,3 +98,44 @@ def test_training_vs_control_loader_keeps_presentations_separate(tmp_path):
         "Benzaldehyde",
     ]
     assert stats["is_trained"].tolist() == [False, True, False, True, True]
+
+
+def _raw_v2_frame(reactions: dict[str, list[int]]) -> pd.DataFrame:
+    """Two flies, each presented "EB" twice (trial_num 1 and 3), plus one
+    "Hexanol" presentation (trial_num 2) that is never duplicated."""
+    rows = []
+    for fly, hits in reactions.items():
+        eb_hit_1, eb_hit_2, hex_hit = hits
+        rows.append({"fly": fly, "fly_number": "1", "trial_num": 1, "odor_sent": "EB", "during_hit": eb_hit_1})
+        rows.append({"fly": fly, "fly_number": "1", "trial_num": 2, "odor_sent": "Hexanol", "during_hit": hex_hit})
+        rows.append({"fly": fly, "fly_number": "1", "trial_num": 3, "odor_sent": "EB", "during_hit": eb_hit_2})
+    return pd.DataFrame(rows)
+
+
+def test_fisher_test_per_presentation_scores_each_occurrence_independently():
+    """The training-vs-control Fisher's exact test for a twice-presented
+    trained odor ("EB 1" / "EB 2") must compare each occurrence against its
+    matching control occurrence separately, not pool both presentations into
+    one combined contingency table."""
+    train_raw = _raw_v2_frame({
+        "fly1": [1, 0, 1],  # EB occurrence 1: hit, EB occurrence 2: miss
+        "fly2": [1, 0, 1],
+    })
+    ctrl_raw = _raw_v2_frame({
+        "fly1": [0, 0, 0],
+        "fly2": [0, 0, 0],
+    })
+
+    p_values = tvc_module._fisher_test_per_presentation(
+        train_raw, ctrl_raw, [(0, "EB 1"), (0, "EB 2")]
+    )
+
+    p_occ1 = p_values[(0, "EB 1")]
+    p_occ2 = p_values[(0, "EB 2")]
+
+    # occurrence 1: train 2/2 react vs ctrl 0/2 react -> fisher_exact([[2,0],[0,2]])
+    assert p_occ1 == pytest.approx(0.3333333333333333)
+    # occurrence 2: train 0/2 react vs ctrl 0/2 react -> fisher_exact([[0,2],[0,2]])
+    assert p_occ2 == pytest.approx(1.0)
+    # The two occurrences must not collapse onto the same pooled p-value.
+    assert p_occ1 != pytest.approx(p_occ2)

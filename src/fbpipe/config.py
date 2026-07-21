@@ -36,6 +36,24 @@ def _freeze_block(raw: object) -> dict:
 _flagged_cache: dict[tuple[str, float], set[tuple[str, str, str]]] = {}
 
 
+def canon_fly_number(value) -> str:
+    """Canonical string form of a fly number for cross-source matching.
+
+    The flagged-flies truth CSV parses ``fly_number`` as float64 whenever any
+    row leaves it blank (one NaN promotes the whole column), so a raw
+    ``str(1.0)`` yields ``"1.0"`` while the predictions data carries a clean
+    ``"1"``. Both sides must be canonicalised or the tuple keys never match and
+    flagged flies are silently kept. Strips a trailing ``.0`` from an otherwise
+    integral value; leaves anything non-integral untouched.
+    """
+    s = str(value).strip()
+    try:
+        f = float(s)
+    except (TypeError, ValueError):
+        return s
+    return str(int(f)) if f.is_integer() else s
+
+
 def load_flagged_fly_exclusions(csv_path: str | Path) -> set[tuple[str, str, str]]:
     """Load the flagged-flies truth CSV and return (dataset, fly, fly_number) tuples to EXCLUDE.
 
@@ -76,7 +94,7 @@ def load_flagged_fly_exclusions(csv_path: str | Path) -> set[tuple[str, str, str
     for _, row in df[exclude_mask].iterrows():
         dataset = str(row.get("dataset", "")).strip()
         fly = str(row.get("fly", "")).strip()
-        fly_number = str(row.get("fly_number", "")).strip()
+        fly_number = canon_fly_number(row.get("fly_number", ""))
         excluded.add((dataset, fly, fly_number))
 
     if excluded:

@@ -284,3 +284,35 @@ def test_run_combined_threads_config_path_to_build_wide_csv(tmp_path, monkeypatc
     # fallback build_wide_csv silently applies when config_path is None.
     assert len(captured_config_paths) == 3
     assert all(p == sentinel_config_path for p in captured_config_paths)
+
+
+def test_run_combined_skips_combine_for_frozen_dataset(tmp_path, monkeypatch):
+    """combine.roots must never recompute a frozen dataset's per-trial
+    angle_distance_rms_envelope files -- build_wide_csv never reads them for a
+    frozen dataset (it splices the freeze cache instead), so recomputing them
+    is pure waste that also defeats the "every run after priming is fast"
+    promise of freeze.data."""
+    called_roots = []
+    monkeypatch.setattr(
+        rw, "combine_distance_angle", lambda cfg: called_roots.append(cfg.root.name)
+    )
+
+    frozen_root = tmp_path / "Frozen-DS"
+    frozen_root.mkdir()
+    live_root = tmp_path / "Live-DS"
+    live_root.mkdir()
+
+    cfg = {
+        "combine": {
+            "roots": [str(frozen_root), str(live_root)],
+        },
+    }
+    s = _Settings(
+        tmp_path,
+        {"Frozen-DS": DatasetOverride(freeze_data=True)},
+        ["Frozen-DS", "Live-DS"],
+    )
+
+    rw._run_combined(cfg, s)
+
+    assert called_roots == ["Live-DS"]

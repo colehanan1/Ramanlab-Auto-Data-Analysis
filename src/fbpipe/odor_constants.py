@@ -443,6 +443,13 @@ def _auto_display_label(canon: str) -> str | None:
     return base[1] if base else None
 
 
+# Public alias: analysis modules resolve a cohort's trained-odor display label
+# from its canonical dataset name (see envelope_visuals._trained_label). Reuses
+# _BASE_ODORS so every starvation/concentration variant works without being
+# listed by hand.
+auto_display_label = _auto_display_label
+
+
 def _auto_testing_alias(canon: str) -> str | None:
     """
     Derive the testing alias (base control dataset) from a canonical name.

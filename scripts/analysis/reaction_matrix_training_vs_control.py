@@ -194,21 +194,50 @@ def _load_raw_binary_csv(out_dir: Path, dataset: str, subdir: str | None = None)
     return df
 
 
+def _nth_occurrence_rows(df: pd.DataFrame, base_odor: str, occurrence: int) -> pd.DataFrame:
+    """Rows where ``odor_sent`` matches ``base_odor`` AND the row is that
+    fly's Nth (1-indexed, in trial order) presentation of it.
+
+    Mirrors the per-fly occurrence numbering in ``_load_rates_from_binary_csv``
+    so a duplicate-presentation label like "EB 2" resolves to the same subset
+    of raw trials that produced its "EB 2" rate/count.
+    """
+    matches = df[df["odor_sent"].str.casefold() == base_odor.casefold()]
+    if matches.empty or "fly" not in matches.columns or "fly_number" not in matches.columns:
+        return matches.iloc[0:0]
+    keep_idx = []
+    for _, grp in matches.sort_values("trial_num").groupby(["fly", "fly_number"]):
+        if len(grp) >= occurrence:
+            keep_idx.append(grp.index[occurrence - 1])
+    return matches.loc[keep_idx]
+
+
 def _fisher_test_per_presentation(
     train_raw: pd.DataFrame,
     ctrl_raw: pd.DataFrame,
     presentations: Sequence[tuple[int, str]],
 ) -> dict[tuple[int, str], float]:
-    """Run Fisher's exact test for each trial presentation."""
+    """Run Fisher's exact test for each trial presentation.
+
+    An odor presented more than once (e.g. the trained odor as "EB 1"/"EB 2")
+    gets one INDEPENDENT test per occurrence rather than pooling every
+    presentation of that odor into a single combined contingency table.
+    """
     results = {}
     for trial_num, odor in presentations:
         if trial_num == 0:
-            # V2: match by odor name across all trials.
-            # Strip occurrence suffix (e.g. "Hexanol 1" → "Hexanol") so we
-            # match the raw CSV's odor_sent column which has no suffix.
-            base_odor = _pair_re.sub(r"\s+\d+$", "", odor)
-            t = train_raw[train_raw["odor_sent"].str.casefold() == base_odor.casefold()]
-            c = ctrl_raw[ctrl_raw["odor_sent"].str.casefold() == base_odor.casefold()]
+            # V2: match by odor name. A trailing " <n>" marks a numbered
+            # duplicate occurrence (e.g. "Hexanol 2" -> base "Hexanol",
+            # occurrence 2); resolve it to just that fly-by-fly occurrence's
+            # rows instead of every trial where the base odor was sent.
+            m = _pair_re.match(r"^(.*\S)\s+(\d+)$", odor)
+            if m:
+                base_odor, occurrence = m.group(1), int(m.group(2))
+                t = _nth_occurrence_rows(train_raw, base_odor, occurrence)
+                c = _nth_occurrence_rows(ctrl_raw, base_odor, occurrence)
+            else:
+                t = train_raw[train_raw["odor_sent"].str.casefold() == odor.casefold()]
+                c = ctrl_raw[ctrl_raw["odor_sent"].str.casefold() == odor.casefold()]
         else:
             t = train_raw[train_raw["trial_num"] == int(trial_num)]
             c = ctrl_raw[ctrl_raw["trial_num"] == int(trial_num)]

@@ -49,6 +49,7 @@ from fbpipe.odor_constants import (
     DISPLAY_LABEL,
     ODOR_ORDER,
     TESTING_DATASET_ALIAS,
+    auto_display_label as _auto_display_label,
     canon_dataset as _canon_dataset,
     odor_dataset_key as _odor_dataset_key,
     resolve_dataset_label,
@@ -110,9 +111,20 @@ _MODEL_SCORES: dict[tuple[str, str, str, str], int] = {}
 
 
 def set_model_scores(scores: dict[tuple[str, str, str, str], int]) -> None:
-    """Register per-trial model scores keyed by (dataset, fly, fly_number, trial_label)."""
+    """Register per-trial model scores keyed by (dataset, fly, fly_number, trial_label).
+
+    The predictions CSV carries dataset FOLDER names but the trace plots look
+    scores up by canonical name, and the two differ for some cohorts
+    ("3Oct-Training-24-0.1" -> "3OCT-Training-24-0.1"). Register the canonical
+    spelling alongside the one supplied so either resolves; an explicitly
+    supplied key always wins over an alias.
+    """
     _MODEL_SCORES.clear()
     _MODEL_SCORES.update(scores)
+    for (dataset, fly, fly_number, trial_label), score in scores.items():
+        canon_key = (_canon_dataset(str(dataset)), str(fly), str(fly_number), str(trial_label))
+        if canon_key not in scores:
+            _MODEL_SCORES.setdefault(canon_key, score)
 
 
 def _lookup_model_score(
@@ -137,11 +149,23 @@ _DATASET_ODOR_REMAP: dict[str, dict[str, str]] = {}
 
 
 def set_dataset_odor_remap(remap: dict[str, dict[str, str]]) -> None:
-    """Register per-dataset odor display-label substitutions."""
+    """Register per-dataset odor display-label substitutions.
+
+    Config keys are dataset *folder* names, but every call site looks the remap
+    up by canonical name, and the two differ for some datasets (config
+    "3Oct-Training-24-0.1" -> canon "3OCT-Training-24-0.1"). Register both
+    spellings so the lookup hits either way; an explicit key always wins over
+    an alias so two folders canonicalising alike cannot clobber each other.
+    """
     _DATASET_ODOR_REMAP.clear()
     _DATASET_ODOR_REMAP.update(
         {str(ds): dict(mapping) for ds, mapping in remap.items() if mapping}
     )
+    for ds, mapping in remap.items():
+        if not mapping:
+            continue
+        canon = _canon_dataset(str(ds))
+        _DATASET_ODOR_REMAP.setdefault(canon, dict(mapping))
 
 
 def apply_dataset_odor_remap(dataset_canon: object, odor_name: object) -> str:
@@ -449,6 +473,14 @@ def _trained_label(dataset_canon: str) -> str:
         label = _display_label_ci(base)
         if label != base:
             return label
+    # Same auto-derive against odor_constants._BASE_ODORS, which knows base
+    # tokens _DISPLAY_LABEL_LOWER does not ("3oct" — that table only carries the
+    # rig spelling "3-octonol"). Without this, "3OCT-Training-24-0.1" fell
+    # through to the dataset NAME, so nothing matched the trained odor: its two
+    # presentations pooled into one reaction-rate bar and no odor was bolded.
+    auto = _auto_display_label(dataset_key)
+    if auto:
+        return auto
     return DISPLAY_LABEL.get(dataset_key, dataset_key)
 
 
@@ -818,12 +850,14 @@ def compute_non_reactive_flags(
             _src = str(Path(__file__).resolve().parents[2] / "src")
             if _src not in sys.path:
                 sys.path.insert(0, _src)
-            from fbpipe.config import load_flagged_fly_exclusions
+            from fbpipe.config import canon_fly_number, load_flagged_fly_exclusions
             exclusions = load_flagged_fly_exclusions(flagged_flies_csv)
             if exclusions:
                 ds = df["dataset"].astype(str).str.strip() if "dataset" in df.columns else pd.Series("", index=df.index)
                 fl = df["fly"].astype(str).str.strip() if "fly" in df.columns else pd.Series("", index=df.index)
-                fn = df["fly_number"].astype(str).str.strip() if "fly_number" in df.columns else pd.Series("", index=df.index)
+                # canon_fly_number both sides: the truth CSV and the predictions
+                # data disagree on "1" vs "1.0" depending on how each was parsed.
+                fn = df["fly_number"].map(canon_fly_number) if "fly_number" in df.columns else pd.Series("", index=df.index)
                 keys = list(zip(ds, fl, fn))
                 mask = pd.Series([k in exclusions for k in keys], index=df.index)
                 n_flagged = mask.sum()
