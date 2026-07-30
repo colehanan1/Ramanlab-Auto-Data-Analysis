@@ -503,3 +503,117 @@ def test_hero_axis_is_equal_aspect() -> None:
     fig, ax = _hero_axes()
     assert ax.get_aspect() == 1.0
     plt.close(fig)
+
+
+from scripts.analysis.per_gate_rejection_figure import (
+    SCHEMATIC_PANELS,
+    draw_cap_panel,
+    draw_jump_panel,
+    draw_norm_panel,
+    draw_release_panel,
+)
+
+
+def test_schematic_panels_are_declared() -> None:
+    """This fly has 2 flies and a max jump of 5.7 px, so the cap, release and
+    jump panels are illustrations -- they must be flagged, not passed off as data."""
+    assert SCHEMATIC_PANELS == frozenset({"cap", "release", "jump"})
+    assert "norm" not in SCHEMATIC_PANELS, "panel E plots this fly's real spread"
+
+
+def test_jump_ring_is_centred_on_the_last_ACCEPTED_point() -> None:
+    """The rule the panel exists to show: a rejected point never becomes the new
+    reference, so the 80 px ring stays on the last accepted position."""
+    s = load_gate_settings()
+    fig, ax = plt.subplots()
+    info = draw_jump_panel(ax, s)
+    assert info["ring_radius"] == s.max_jump_px
+
+    # The DRAWN circle must use the same value, or the test proves nothing about
+    # the picture. Panel D works in px data coordinates for exactly this reason.
+    circles = [p for p in ax.patches if isinstance(p, plt.Circle)]
+    assert len(circles) == 1
+    assert circles[0].get_radius() == pytest.approx(s.max_jump_px)
+    assert circles[0].center == pytest.approx(info["ring_centre"])
+
+    # The ring must sit on the LAST ACCEPTED point, never on the rejected one.
+    # Asserting the exact coordinates is what makes this test able to fail.
+    assert info["ring_centre"] == pytest.approx((130.0, 114.0))
+    assert info["ring_centre"] != pytest.approx((250.0, 112.0))
+    plt.close(fig)
+
+
+def test_jump_ring_radius_tracks_settings_not_a_hardcoded_80() -> None:
+    """config_new.yaml's max_jump_px happens to BE 80, so a circle built with a
+    literal ``80`` would slip past the test above undetected. Feed a settings
+    object with a different value and require the drawn circle to follow it --
+    this is what makes "not hardcoded" an actual, falsifiable claim."""
+    s = GateSettings(max_px=160.0, up_divisor=4.0, max_jump_px=55.0,
+                      norm_min_px=10.0, norm_max_px=160.0)
+    fig, ax = plt.subplots()
+    info = draw_jump_panel(ax, s)
+    assert info["ring_radius"] == 55.0
+
+    circles = [p for p in ax.patches if isinstance(p, plt.Circle)]
+    assert len(circles) == 1
+    assert circles[0].get_radius() == pytest.approx(55.0)
+    assert circles[0].get_radius() != pytest.approx(80.0)
+    plt.close(fig)
+
+
+def test_norm_panel_band_edges_come_from_settings() -> None:
+    s = load_gate_settings()
+    off = Offsets(
+        dx=np.array([0.0, 0.0]), dy=np.array([94.4, 145.8]),
+        frames=np.array([0, 1]), eye_xy=SUBJECT.eye_xy,
+    )
+    fig, ax = plt.subplots()
+    info = draw_norm_panel(ax, off, s)
+    assert info["band"] == (s.norm_min_px, s.norm_max_px) == (10.0, 160.0)
+    drawn = {t.get_text() for t in ax.texts}
+    assert "10" in drawn and "160" in drawn
+    plt.close(fig)
+
+
+def test_release_panel_shows_the_three_fly_limit() -> None:
+    s = load_gate_settings()
+    fig, ax = plt.subplots()
+    draw_release_panel(ax, s)
+    drawn = {t.get_text() for t in ax.texts}
+    assert str(int(s.max_px)) in drawn
+    marks = [ln for ln in ax.lines if ln.get_marker() in {"x", "X"}]
+    assert marks, "the released binding terminates in an X"
+    plt.close(fig)
+
+
+def test_cap_panel_keeps_the_highest_confidence_detections() -> None:
+    """Two flies resolved -> the two highest-confidence proboscis detections are
+    kept and the rest dropped."""
+    fig, ax = plt.subplots()
+    draw_cap_panel(ax, n_flies=2)
+    drawn = {t.get_text() for t in ax.texts}
+    assert "2-fly cap" in drawn
+    kept = [ln for ln in ax.lines if ln.get_marker() == "o"
+            and ln.get_markerfacecolor() not in ("none", "None")]
+    dropped = [ln for ln in ax.lines if ln.get_marker() in {"x", "X"}]
+    assert len(kept) == 2
+    assert len(dropped) == 2
+    plt.close(fig)
+
+
+def test_every_side_panel_title_is_short() -> None:
+    """Minimal-text rule applies to the side strip too."""
+    s = load_gate_settings()
+    off = Offsets(dx=np.array([0.0]), dy=np.array([100.0]),
+                  frames=np.array([0]), eye_xy=SUBJECT.eye_xy)
+    for draw in (
+        lambda ax: draw_cap_panel(ax, 2),
+        lambda ax: draw_release_panel(ax, s),
+        lambda ax: draw_jump_panel(ax, s),
+        lambda ax: draw_norm_panel(ax, off, s),
+    ):
+        fig, ax = plt.subplots()
+        draw(ax)
+        for t in ax.texts:
+            assert len(t.get_text().split()) <= 3, f"too wordy: {t.get_text()!r}"
+        plt.close(fig)

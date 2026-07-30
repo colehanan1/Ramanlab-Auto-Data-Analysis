@@ -414,3 +414,132 @@ def draw_hero(ax, offsets: Offsets, settings: GateSettings, image: np.ndarray | 
     ax.set_ylim(y1 - ey, y0 - ey)   # image convention: +dy is ventral, downward
     ax.set_aspect(1.0)
     ax.axis("off")
+
+
+# Panels whose marks are illustrations rather than this fly's measurements. The
+# subject has 2 flies (so the >=3-fly release never fires) and a max real
+# displacement of 5.7 px (so the 80 px gate is never approached). These get a
+# dashed border, and the caption says so once.
+SCHEMATIC_PANELS = frozenset({"cap", "release", "jump"})
+
+
+def _mark_schematic(ax) -> None:
+    """Hairline dashed border: this panel is an illustration, not measured data."""
+    for spine in ax.spines.values():
+        spine.set_visible(True)
+        spine.set_linestyle((0, (3, 3)))
+        spine.set_linewidth(0.8)
+        spine.set_edgecolor(MUTED)
+
+
+def _panel_title(ax, text: str) -> None:
+    ax.text(0.0, 1.0, text, transform=ax.transAxes, color=INK, fontsize=11,
+            fontweight="bold", va="bottom", ha="left")
+
+
+def draw_cap_panel(ax, n_flies: int) -> None:
+    """Panel B: detections ranked by confidence, capped at the resolved fly count."""
+    confidences = [0.93, 0.88, 0.71, 0.40]
+    for i, conf in enumerate(confidences):
+        x = 0.12 + 0.25 * i
+        keep = i < n_flies
+        if keep:
+            ax.plot([x], [0.55], marker="o", ms=13, color=ACCEPTED, mew=2.0,
+                    mec="white")
+        else:
+            ax.plot([x], [0.55], marker="X", ms=13, mfc="none", mec=REJECTED,
+                    mew=2.5)
+        ax.text(x, 0.28, f"{conf:.2f}",
+                color=ACCEPTED if keep else REJECTED,
+                fontsize=10, ha="center", va="top")
+
+    _panel_title(ax, f"{n_flies}-fly cap")
+    ax.set_xlim(0, 1)
+    ax.set_ylim(0, 1)
+    ax.set_xticks([])
+    ax.set_yticks([])
+    _mark_schematic(ax)
+
+
+def draw_release_panel(ax, settings: GateSettings) -> None:
+    """Panel C: with >=3 flies, an over-distance pairing is dropped, not stretched."""
+    ax.plot([0.15], [0.55], marker="P", ms=12, color=EYE, mew=0)
+    ax.plot([0.85], [0.55], marker="P", ms=12, color=EYE, mew=0)
+    ax.plot([0.42], [0.55], marker="o", ms=11, color=ACCEPTED, mew=2.0, mec="white")
+
+    ax.plot([0.15, 0.42], [0.55, 0.55], color=ACCEPTED, lw=1.8)
+    ax.plot([0.85, 0.56], [0.55, 0.55], color=REJECTED, lw=1.8, ls=(0, (4, 3)))
+    ax.plot([0.55], [0.55], marker="X", ms=13, mfc="none", mec=REJECTED, mew=2.5)
+
+    ax.text(0.70, 0.30, str(int(settings.max_px)), color=REJECTED, fontsize=11,
+            ha="center", va="top")
+    _panel_title(ax, "≥3 flies")
+    ax.set_xlim(0, 1)
+    ax.set_ylim(0, 1)
+    ax.set_xticks([])
+    ax.set_yticks([])
+    _mark_schematic(ax)
+
+
+def draw_jump_panel(ax, settings: GateSettings) -> dict:
+    """Panel D: the displacement gate, measured from the last ACCEPTED position.
+
+    Drawn in PIXEL data coordinates so the ring radius on screen is literally
+    ``settings.max_jump_px``. Returns the ring geometry so the tests can assert
+    both that the drawn circle uses the gate value and that it is centred on the
+    last accepted point rather than on the rejected one.
+    """
+    accepted_x = [40.0, 70.0, 100.0, 130.0]
+    accepted_y = [110.0, 118.0, 106.0, 114.0]
+    ax.plot(accepted_x, accepted_y, color=ACCEPTED, lw=1.8, marker="o", ms=9,
+            mew=1.6, mec="white")
+
+    last_x, last_y = accepted_x[-1], accepted_y[-1]
+    rej_x, rej_y = 250.0, 112.0  # 120 px away -- outside the 80 px gate
+    ax.plot([last_x, rej_x], [last_y, rej_y], color=REJECTED, lw=1.8,
+            ls=(0, (4, 3)))
+    ax.plot([rej_x], [rej_y], marker="X", ms=13, mfc="none", mec=REJECTED,
+            mew=2.5)
+
+    ax.add_patch(plt.Circle((last_x, last_y), settings.max_jump_px, fill=False,
+                            color=INK, lw=1.2, ls=(0, (2, 2))))
+    ax.text(last_x, last_y - settings.max_jump_px - 6, str(int(settings.max_jump_px)),
+            color=INK, fontsize=11, ha="center", va="top")
+
+    _panel_title(ax, "jump gate")
+    ax.set_xlim(0, 320)
+    ax.set_ylim(0, 210)
+    ax.set_xticks([])
+    ax.set_yticks([])
+    ax.set_aspect(1.0)
+    _mark_schematic(ax)
+    return {"ring_centre": (last_x, last_y), "ring_radius": settings.max_jump_px}
+
+
+def draw_norm_panel(ax, offsets: Offsets, settings: GateSettings) -> dict:
+    """Panel E: the normalization window, with this fly's real spread inside it."""
+    lo, hi = settings.norm_min_px, settings.norm_max_px
+    axis_max = 200.0
+
+    ax.axhspan(0.42, 0.68, xmin=lo / axis_max, xmax=hi / axis_max,
+               color=ACCEPTED, alpha=0.16, lw=0)
+
+    r = np.hypot(offsets.dx, offsets.dy)
+    ax.plot([np.percentile(r, 1), np.percentile(r, 99)], [0.55, 0.55],
+            color=ACCEPTED, lw=4.0, solid_capstyle="round")
+    ax.plot([r.max()], [0.55], marker="o", ms=9, color=ACCEPTED, mew=1.6,
+            mec="white")
+
+    for value in (lo, hi):
+        ax.plot([value, value], [0.42, 0.68], color=INK, lw=1.2)
+        ax.text(value, 0.34, str(int(value)), color=INK, fontsize=11,
+                ha="center", va="top")
+
+    _panel_title(ax, "normalize")
+    ax.set_xlim(0, axis_max)
+    ax.set_ylim(0, 1)
+    ax.set_xticks([])
+    ax.set_yticks([])
+    for spine in ax.spines.values():
+        spine.set_visible(False)
+    return {"band": (lo, hi)}
