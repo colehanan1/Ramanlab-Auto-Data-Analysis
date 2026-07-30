@@ -456,11 +456,15 @@ def draw_hero(ax, offsets: Offsets, settings: GateSettings, image: np.ndarray | 
             ha="center", style="italic", path_effects=_halo(3.0))
     # No halo: SVG text with a path-effect stroke renders as glyph paths, not
     # <text>, even with svg.fonttype='none' (see test_svg_keeps_text_editable).
-    # This title sits in the panel's bottom-left corner over the dark
-    # background, where plain HERO_INK already reads clearly without relief.
+    # But this corner is NOT uniformly dark -- measured on the subject frame,
+    # 24.5% of the pixels under this title exceed luminance 140, so plain white
+    # text washes out across roughly a quarter of it (the fly's legs sit here).
+    # A translucent backing box supplies the relief instead: it is a separate
+    # Rectangle patch, so unlike a path effect it leaves the glyphs as <text>.
     ax.text(0.02, 0.02, "ACCEPTANCE BOUNDARY", transform=ax.transAxes,
             color=HERO_INK, fontsize=13, fontweight="bold", va="bottom",
-            ha="left")
+            ha="left",
+            bbox=dict(facecolor="black", alpha=0.55, edgecolor="none", pad=4.0))
 
     ax.set_xlim(x0 - ex, x1 - ex)
     ax.set_ylim(y1 - ey, y0 - ey)   # image convention: +dy is ventral, downward
