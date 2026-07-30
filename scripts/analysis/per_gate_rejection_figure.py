@@ -253,15 +253,23 @@ def offsets_survive_geometry_gate(dx, dy, settings: GateSettings) -> np.ndarray:
 # at eye + (185, 120). Verified to sit inside the 1080x1080 frame.
 CROP: tuple[int, int, int, int] = (645, 63, 1045, 383)
 
-# Blend fraction toward white. Not stylistic: the palette validator WARNs at
-# every mid-gray surface tested (orange falls to 1.61:1 on #b8b8b6), so a raw
+# Blend fraction toward white, applied AFTER the contrast stretch and
+# inversion below. Not stylistic: the palette validator WARNs at every
+# mid-gray surface tested (orange falls to 1.61:1 on #b8b8b6), so a raw
 # photographic background would void the contrast guarantees.
 #
-# Raised from the brief's 0.60 (crop mean 159, min 155 -- too dark for the
-# palette's contrast guarantee) to 0.80 on this footage: raw (unghosted) crop
-# mean 17.0, min 5; at 0.80 mean 206.8, min 205, clearing the >200 / >120
-# thresholds with margin.
-GHOST_BLEND = 0.80
+# This footage is near-black IR video (raw crop mean 17.0, min 5, max 79):
+# a naive "blend toward white" (gray + (255-gray)*ghost) at any ghost strong
+# enough to pale the surface also flattens that whole narrow raw range into a
+# handful of grey levels -- at ghost=0.80 the naive approach produced mean
+# 206.8 but a range of only 14 (205..219): a blank pale rectangle with no
+# visible fly. So the pipeline contrast-stretches by percentile first (to use
+# the full 0-255 range) and INVERTS (the footage is dark-background/
+# bright-fly; inverting puts the fly dark-on-pale, which is the correct
+# polarity for a light surface the coloured overlay marks need). GHOST_BLEND
+# is then a much gentler final blend on top of that already-pale surface.
+# Verified at 0.40: mean 199.3, min 102, max 255, range 153.
+GHOST_BLEND = 0.40
 
 
 def load_frame_crop(
@@ -270,7 +278,15 @@ def load_frame_crop(
     crop: tuple[int, int, int, int] = CROP,
     ghost: float = GHOST_BLEND,
 ) -> np.ndarray:
-    """Pull one frame, crop it, grayscale it, and blend it toward white.
+    """Pull one frame, crop it, grayscale it, contrast-stretch, invert, and
+    ghost it toward white.
+
+    The stretch and inversion are what keep the fly visible: this footage is
+    near-black IR video occupying a narrow raw range, so a naive blend toward
+    white would flatten it to a handful of grey levels before it reads as
+    pale enough for the overlay palette. Stretching first uses the full 0-255
+    range, and inverting puts the (naturally bright) fly down as a dark shape
+    on a light surface -- the polarity the coloured overlay marks need.
 
     Returns an RGB uint8 array so matplotlib can draw it directly.
     """
@@ -287,5 +303,10 @@ def load_frame_crop(
 
     x0, y0, x1, y1 = crop
     gray = cv2.cvtColor(frame[y0:y1, x0:x1], cv2.COLOR_BGR2GRAY).astype(float)
-    pale = gray + (255.0 - gray) * float(ghost)
+
+    lo, hi = np.percentile(gray, 1), np.percentile(gray, 99.5)
+    stretched = np.clip((gray - lo) / max(hi - lo, 1e-6), 0, 1) * 255.0
+    inverted = 255.0 - stretched
+
+    pale = inverted + (255.0 - inverted) * float(ghost)
     return np.repeat(np.clip(pale, 0, 255).astype(np.uint8)[:, :, None], 3, axis=2)

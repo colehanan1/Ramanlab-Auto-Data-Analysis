@@ -328,12 +328,23 @@ def test_frame_crop_is_grayscale() -> None:
 
 
 @requires_video
-def test_frame_crop_is_ghosted_pale_enough_for_the_palette() -> None:
-    """A raw photographic background voids the palette's contrast guarantees --
-    orange falls to 1.61:1 on mid-gray. Ghosting restores a light surface."""
+def test_frame_crop_surface_is_light() -> None:
+    """The background the coloured overlay marks sit on must be genuinely
+    light -- the palette validator WARNs at every mid-gray surface tested
+    (orange falls to 1.61:1 on #b8b8b6), so a dim surface would void the
+    overlay palette's contrast guarantees."""
     img = load_frame_crop(subject_video_path(), SUBJECT.peak_frame)
-    assert img.mean() > 200, "crop must read as a pale surface, not a photo"
-    assert img.min() > 120, "even the darkest pixel stays well clear of mid-gray"
+    assert np.percentile(img, 90) > 230
+
+
+@requires_video
+def test_frame_crop_fly_is_still_visible() -> None:
+    """The hero panel's entire purpose is that the audience sees a real fly.
+    The naive blend-toward-white approach (no contrast stretch, no invert)
+    produced a range of 14 here -- a blank rectangle that passed every other
+    assertion. This checks that real structure survives ghosting."""
+    img = load_frame_crop(subject_video_path(), SUBJECT.peak_frame)
+    assert np.percentile(img, 99) - np.percentile(img, 1) > 100
 
 
 @requires_video
