@@ -281,3 +281,65 @@ def test_peak_per_is_near_the_boundary_but_inside() -> None:
     norms = gate_norm(off.dx, off.dy, s)
     assert 0.80 < norms.max() < 1.0
     assert norms.max() == pytest.approx(0.830, abs=0.005)
+
+
+from scripts.analysis.per_gate_rejection_figure import (
+    CROP,
+    GHOST_BLEND,
+    load_frame_crop,
+)
+
+requires_video = pytest.mark.skipif(
+    not subject_video_path().exists(),
+    reason="subject video not mounted on this machine",
+)
+
+
+def test_crop_contains_the_whole_gate() -> None:
+    """The crop must show the full boundary plus margin, and stay inside the
+    1080x1080 frame."""
+    s = load_gate_settings()
+    ex, ey = SUBJECT.eye_xy
+    x0, y0, x1, y1 = CROP
+
+    assert 0 <= x0 < x1 <= 1080
+    assert 0 <= y0 < y1 <= 1080
+    assert x0 <= ex - s.max_px and x1 >= ex + s.max_px
+    assert y0 <= ey - s.dorsal_px and y1 >= ey + s.max_px
+    # and room for the constructed rejection
+    rdx, rdy = REJECTED_OFFSET
+    assert x1 >= ex + rdx and y1 >= ey + rdy
+
+
+@requires_video
+def test_frame_crop_shape_and_type() -> None:
+    x0, y0, x1, y1 = CROP
+    img = load_frame_crop(subject_video_path(), SUBJECT.peak_frame)
+    assert img.shape == (y1 - y0, x1 - x0, 3)
+    assert img.dtype == np.uint8
+
+
+@requires_video
+def test_frame_crop_is_grayscale() -> None:
+    """Ghosting is grayscale: the three channels must be identical."""
+    img = load_frame_crop(subject_video_path(), SUBJECT.peak_frame)
+    assert np.array_equal(img[:, :, 0], img[:, :, 1])
+    assert np.array_equal(img[:, :, 1], img[:, :, 2])
+
+
+@requires_video
+def test_frame_crop_is_ghosted_pale_enough_for_the_palette() -> None:
+    """A raw photographic background voids the palette's contrast guarantees --
+    orange falls to 1.61:1 on mid-gray. Ghosting restores a light surface."""
+    img = load_frame_crop(subject_video_path(), SUBJECT.peak_frame)
+    assert img.mean() > 200, "crop must read as a pale surface, not a photo"
+    assert img.min() > 120, "even the darkest pixel stays well clear of mid-gray"
+
+
+@requires_video
+def test_ghost_blend_zero_returns_the_unghosted_frame() -> None:
+    """Sanity check that the ghosting parameter actually does the work."""
+    raw = load_frame_crop(subject_video_path(), SUBJECT.peak_frame, ghost=0.0)
+    ghosted = load_frame_crop(subject_video_path(), SUBJECT.peak_frame)
+    assert GHOST_BLEND > 0
+    assert ghosted.mean() > raw.mean()

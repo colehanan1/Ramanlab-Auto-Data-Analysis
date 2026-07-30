@@ -78,6 +78,7 @@ def load_gate_settings(config_path: Path | str = CONFIG_PATH) -> GateSettings:
         ) from exc
 
 
+import cv2  # noqa: E402
 import numpy as np  # noqa: E402
 import pandas as pd  # noqa: E402
 
@@ -245,3 +246,46 @@ def offsets_survive_geometry_gate(dx, dy, settings: GateSettings) -> np.ndarray:
         frame, settings.max_px, settings.up_divisor
     )
     return pd.to_numeric(cleaned["x_class1"], errors="coerce").notna().to_numpy()
+
+
+# Crop window around the frozen eye at (845, 183): the full gate (160 px lateral
+# and ventral, 40 px dorsal) plus margin, and room for the constructed rejection
+# at eye + (185, 120). Verified to sit inside the 1080x1080 frame.
+CROP: tuple[int, int, int, int] = (645, 63, 1045, 383)
+
+# Blend fraction toward white. Not stylistic: the palette validator WARNs at
+# every mid-gray surface tested (orange falls to 1.61:1 on #b8b8b6), so a raw
+# photographic background would void the contrast guarantees.
+#
+# Raised from the brief's 0.60 (crop mean 159, min 155 -- too dark for the
+# palette's contrast guarantee) to 0.80 on this footage: raw (unghosted) crop
+# mean 17.0, min 5; at 0.80 mean 206.8, min 205, clearing the >200 / >120
+# thresholds with margin.
+GHOST_BLEND = 0.80
+
+
+def load_frame_crop(
+    video_path: Path,
+    frame_index: int,
+    crop: tuple[int, int, int, int] = CROP,
+    ghost: float = GHOST_BLEND,
+) -> np.ndarray:
+    """Pull one frame, crop it, grayscale it, and blend it toward white.
+
+    Returns an RGB uint8 array so matplotlib can draw it directly.
+    """
+    cap = cv2.VideoCapture(str(video_path))
+    if not cap.isOpened():
+        raise FileNotFoundError(f"cannot open video: {video_path}")
+    try:
+        cap.set(cv2.CAP_PROP_POS_FRAMES, int(frame_index))
+        ok, frame = cap.read()
+    finally:
+        cap.release()
+    if not ok or frame is None:
+        raise ValueError(f"cannot read frame {frame_index} of {video_path}")
+
+    x0, y0, x1, y1 = crop
+    gray = cv2.cvtColor(frame[y0:y1, x0:x1], cv2.COLOR_BGR2GRAY).astype(float)
+    pale = gray + (255.0 - gray) * float(ghost)
+    return np.repeat(np.clip(pale, 0, 255).astype(np.uint8)[:, :, None], 3, axis=2)
