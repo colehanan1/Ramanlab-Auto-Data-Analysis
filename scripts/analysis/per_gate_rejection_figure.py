@@ -362,8 +362,10 @@ def draw_hero(ax, offsets: Offsets, settings: GateSettings, image: np.ndarray | 
         ax.imshow(image, extent=(x0 - ex, x1 - ex, y1 - ey, y0 - ey),
                   interpolation="bilinear", zorder=0)
 
-    # accepted cloud -- all real detections
-    ax.scatter(offsets.dx, offsets.dy, s=9, c=ACCEPTED, alpha=0.10,
+    # accepted cloud -- all real detections. This is the figure's only
+    # measured evidence, and it has to read as a narrow ventral column (the
+    # anatomical argument for the gate's shape), not an incidental smudge.
+    ax.scatter(offsets.dx, offsets.dy, s=12, c=ACCEPTED, alpha=0.22,
                linewidths=0, zorder=2)
 
     # the acceptance boundary, traced by the production function
@@ -398,7 +400,7 @@ def draw_hero(ax, offsets: Offsets, settings: GateSettings, image: np.ndarray | 
     lat, dorsal = settings.max_px, settings.dorsal_px
     ax.text(lat + 6, 0, str(int(lat)), color=INK, fontsize=12, va="center",
             ha="left", path_effects=_halo())
-    ax.text(0, lat + 6, str(int(lat)), color=INK, fontsize=12, va="top",
+    ax.text(0, lat + 20, str(int(lat)), color=INK, fontsize=12, va="top",
             ha="center", path_effects=_halo())
     ax.text(0, -dorsal - 6, str(int(dorsal)), color=INK, fontsize=12,
             va="bottom", ha="center", path_effects=_halo())
@@ -511,7 +513,11 @@ def draw_jump_panel(ax, settings: GateSettings) -> dict:
     ax.set_ylim(0, 210)
     ax.set_xticks([])
     ax.set_yticks([])
-    ax.set_aspect(1.0)
+    # adjustable="datalim" (not the default "box") keeps the ring circular by
+    # expanding the data limits rather than shrinking the axes box -- with the
+    # default, this panel rendered visibly narrower than cap/release/normalize,
+    # breaking the side strip's shared left edge and width.
+    ax.set_aspect(1.0, adjustable="datalim")
     _mark_schematic(ax)
     return {"ring_centre": (last_x, last_y), "ring_radius": settings.max_jump_px}
 

@@ -714,6 +714,15 @@ def test_caption_declares_what_is_measured_and_what_is_constructed() -> None:
     )
 
 
+def test_caption_is_pure_ascii() -> None:
+    """Arial (this deck's font) has no glyph for U+2717 BALLOT X ('X'): a
+    stray non-ASCII character in CAPTION renders as a hollow missing-glyph
+    box on the slide, as '✗' did before it was replaced with a plain
+    'X'. This guards CAPTION only -- the '>=3 flies' panel title legitimately
+    uses U+2265 (GREATER-THAN OR EQUAL TO), which Arial does render."""
+    assert CAPTION.isascii(), "non-ASCII character would risk a missing glyph box"
+
+
 def test_figure_has_five_panels() -> None:
     s = load_gate_settings()
     off = Offsets(
