@@ -311,10 +311,18 @@ def offsets_survive_geometry_gate(dx, dy, settings: GateSettings) -> np.ndarray:
 
 
 # Crop window around the frozen eye at (604, 830): the full gate (160 px lateral
-# and ventral, 40 px dorsal) plus margin, and room for the constructed rejection
-# at eye + (185, 120) = (789, 950). 405 x 260 px. Verified to sit inside the
-# 1080x1080 frame.
-CROP: tuple[int, int, int, int] = (414, 740, 819, 1000)
+# and ventral, 40 px dorsal) plus margin, room for the constructed rejection at
+# eye + (185, 120) = (789, 950), AND room for every hero label -- the ventral
+# gate number sits at dy=+180 and the "ventral" word at dy=+194..+201 (measured
+# render bbox), which is why the crop extends to dy=+220 (y1=1050), not just to
+# the +160 gate edge. A first pass at (414, 740, 819, 1000) satisfied the gate
+# and rejection margins but put those two labels' rendered bounding boxes past
+# the bottom of the image (dy > 170), where they fell on the white page
+# background and read as invisible white-on-white text, saved only by their
+# black halo -- see test_hero_text_labels_stay_within_the_image_extent, which
+# checks every label's anchor against this extent from CROP itself, not a
+# hardcoded number. 405 x 340 px. Verified to sit inside the 1080x1080 frame.
+CROP: tuple[int, int, int, int] = (414, 710, 819, 1050)
 
 # Gamma applied AFTER the percentile contrast-stretch below, to lift
 # mid-tones without blowing out the fly's brightest points. The footage is a
@@ -419,7 +427,10 @@ def draw_hero(ax, offsets: Offsets, settings: GateSettings, image: np.ndarray | 
     ax.plot([0, pdx], [0, pdy], color=ACCEPTED, lw=1.6, zorder=5)
     ax.plot([pdx], [pdy], marker="o", ms=11, color=ACCEPTED, mew=2.0,
             mec="white", zorder=7)
-    ax.text(pdx + 12, pdy, "128 px", color=ACCEPTED, fontsize=12,
+    # +12 px used to nearly touch the acceptance boundary here (peak PER sits
+    # close to it laterally): the boundary passes x=136 at this dy, and the
+    # rendered label ran to x=135.4, a 0.5 px gap. +6 clears it by ~6.5 px.
+    ax.text(pdx + 6, pdy, "128 px", color=ACCEPTED, fontsize=12,
             fontweight="bold", va="center", ha="left", path_effects=_halo())
 
     # constructed rejection -- verified against the real gate in the tests

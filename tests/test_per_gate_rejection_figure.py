@@ -687,6 +687,52 @@ def test_hero_marks_use_a_black_halo_not_white() -> None:
     plt.close(fig)
 
 
+def test_hero_text_labels_stay_within_the_image_extent() -> None:
+    """A label anchored past the CROP edge lands on the white page
+    background rather than the dark video frame, and (being HERO_INK,
+    white) is invisible there -- saved only by its black halo, which reads
+    as an ugly floating outline. A first version of the tighter CROP put
+    the ventral gate number and the "ventral" word past the bottom edge
+    exactly this way. This checks every hero text artist's anchor position
+    against the image extent computed FROM CROP and SUBJECT.eye_xy (not a
+    hardcoded box), so it keeps working if the crop is ever changed again.
+
+    "ACCEPTANCE BOUNDARY" is drawn in axes-fraction coordinates
+    (transform=ax.transAxes), not data coordinates, so it is excluded here
+    -- confirmed separately, by eye, that it sits on dark pixels.
+    """
+    off = Offsets(
+        dx=np.array([5.0, 10.0, 96.1]),
+        dy=np.array([95.0, 110.0, 84.5]),
+        frames=np.array([0, 1, 1233]),
+        eye_xy=SUBJECT.eye_xy,
+    )
+    s = load_gate_settings()
+    fig, ax = plt.subplots()
+    draw_hero(ax, off, s, None)
+
+    ex, ey = SUBJECT.eye_xy
+    x0, y0, x1, y1 = CROP
+    xmin, xmax = x0 - ex, x1 - ex
+    ymin, ymax = y0 - ey, y1 - ey
+
+    data_texts = [t for t in ax.texts if t.get_transform() != ax.transAxes]
+    assert len(data_texts) >= 6, (
+        "expected to check the gate-number, direction and PER labels"
+    )
+    for t in data_texts:
+        x, y = t.get_position()
+        assert xmin <= x <= xmax, (
+            f"{t.get_text()!r} anchor x={x} falls outside the image extent "
+            f"[{xmin}, {xmax}] -- it would render off the dark frame"
+        )
+        assert ymin <= y <= ymax, (
+            f"{t.get_text()!r} anchor y={y} falls outside the image extent "
+            f"[{ymin}, {ymax}] -- it would render off the dark frame"
+        )
+    plt.close(fig)
+
+
 from scripts.analysis.per_gate_rejection_figure import (
     MUTED,
     SCHEMATIC_PANELS,
