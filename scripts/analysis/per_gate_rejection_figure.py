@@ -76,3 +76,93 @@ def load_gate_settings(config_path: Path | str = CONFIG_PATH) -> GateSettings:
             f"{config_path} is missing gate settings: {exc}. "
             "The figure must not fall back to repo defaults (150/180/250)."
         ) from exc
+
+
+import numpy as np  # noqa: E402
+import pandas as pd  # noqa: E402
+
+from fbpipe.utils.columns import (  # noqa: E402
+    find_eye_xy_columns,
+    find_proboscis_xy_columns,
+)
+from fbpipe.utils.tables import read_table  # noqa: E402
+
+DATA_ROOT = Path("/home/ramanlab/Documents/cole/Data/flys_New")
+VIDEO_ROOT = Path("/securedstorage/DATAsec/cole/Data-secured-New")
+
+
+@dataclass(frozen=True)
+class Subject:
+    """The one fly the hero panel zooms in on.
+
+    Chosen from a scan of 2029 fly-trials that still have their source video: it
+    is the closest-to-boundary *odor testing* trial in the set, and the only
+    near-edge candidate with a perfect detection record (3605/3605).
+    """
+
+    dataset: str
+    trial_rel: str
+    slot: str
+    odor: str
+    eye_xy: tuple[float, float]
+    peak_frame: int
+    video_name: str
+
+
+SUBJECT = Subject(
+    dataset="3Oct-Control-24-0.1",
+    trial_rel="july_26_batch_1/july_26_batch_1_testing_1",
+    slot="fly1",
+    odor="3-Octonol",
+    eye_xy=(845.0, 183.0),
+    peak_frame=1102,
+    video_name="output_july_26_batch_1_testing_1_3-Octonol_20260726_161155.mp4",
+)
+
+
+@dataclass(frozen=True)
+class Offsets:
+    """Accepted eye->proboscis offsets, in pixels, for one fly-trial."""
+
+    dx: np.ndarray
+    dy: np.ndarray
+    frames: np.ndarray
+    eye_xy: tuple[float, float]
+
+
+def subject_parquet_path(subject: Subject = SUBJECT) -> Path:
+    trial_name = subject.trial_rel.split("/")[-1]
+    return (
+        DATA_ROOT
+        / subject.dataset
+        / subject.trial_rel
+        / f"{trial_name}_{subject.slot}_distances.parquet"
+    )
+
+
+def subject_video_path(subject: Subject = SUBJECT) -> Path:
+    batch_dir = subject.trial_rel.split("/")[0]
+    return VIDEO_ROOT / subject.dataset / batch_dir / subject.video_name
+
+
+def load_subject_offsets(subject: Subject = SUBJECT) -> Offsets:
+    """Read the fly's accepted proboscis positions as offsets from its frozen eye."""
+    df = read_table(subject_parquet_path(subject))
+    ex_col, ey_col = find_eye_xy_columns(df)
+    px_col, py_col = find_proboscis_xy_columns(df)
+    if not (ex_col and ey_col and px_col and py_col):
+        raise ValueError(f"missing eye/proboscis columns in {subject_parquet_path(subject)}")
+
+    ex = pd.to_numeric(df[ex_col], errors="coerce").to_numpy(float)
+    ey = pd.to_numeric(df[ey_col], errors="coerce").to_numpy(float)
+    px = pd.to_numeric(df[px_col], errors="coerce").to_numpy(float)
+    py = pd.to_numeric(df[py_col], errors="coerce").to_numpy(float)
+
+    dx, dy = px - ex, py - ey
+    ok = np.isfinite(dx) & np.isfinite(dy)
+    return Offsets(
+        dx=dx[ok],
+        dy=dy[ok],
+        frames=np.flatnonzero(ok),
+        eye_xy=(float(np.nanmedian(ex)), float(np.nanmedian(ey))),
+    )

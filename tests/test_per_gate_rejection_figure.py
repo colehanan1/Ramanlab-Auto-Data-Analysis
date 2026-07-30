@@ -63,3 +63,67 @@ def test_gate_settings_rejects_missing_keys(tmp_path: Path) -> None:
     empty.write_text("{}\n", encoding="utf-8")
     with pytest.raises(KeyError):
         load_gate_settings(empty)
+
+
+import numpy as np
+
+from scripts.analysis.per_gate_rejection_figure import (
+    SUBJECT,
+    Offsets,
+    load_subject_offsets,
+    subject_parquet_path,
+    subject_video_path,
+)
+
+requires_data = pytest.mark.skipif(
+    not subject_parquet_path().exists(),
+    reason="subject parquet not mounted on this machine",
+)
+
+
+def test_subject_identity() -> None:
+    """The subject is pinned so the figure caption cannot drift from the data."""
+    assert SUBJECT.dataset == "3Oct-Control-24-0.1"
+    assert SUBJECT.trial_rel == "july_26_batch_1/july_26_batch_1_testing_1"
+    assert SUBJECT.slot == "fly1"
+    assert SUBJECT.odor == "3-Octonol"
+    assert SUBJECT.eye_xy == (845.0, 183.0)
+    assert SUBJECT.peak_frame == 1102
+
+
+@requires_data
+def test_subject_offsets_match_spec() -> None:
+    """Golden numbers from the candidate scan. If the parquet is ever
+    reprocessed, this fails loudly rather than the figure quietly changing."""
+    off = load_subject_offsets()
+    assert len(off.dx) == 3605, "subject was chosen for its perfect detection record"
+    assert len(off.dx) == len(off.dy) == len(off.frames)
+
+    ex, ey = off.eye_xy
+    assert round(ex) == 845 and round(ey) == 183
+
+    r = np.hypot(off.dx, off.dy)
+    assert r.max() == pytest.approx(145.8, abs=0.1)
+
+    peak_i = int(np.argmax(r))
+    assert off.frames[peak_i] == SUBJECT.peak_frame
+    assert off.dx[peak_i] == pytest.approx(28.9, abs=0.1)
+    assert off.dy[peak_i] == pytest.approx(142.8, abs=0.1)
+
+
+@requires_data
+def test_subject_per_is_ventral() -> None:
+    """The figure's argument: PER is a near-vertical ventral excursion, so the
+    gate is generous ventrally and tight dorsally."""
+    off = load_subject_offsets()
+    assert off.dy.min() > 0, "this fly never goes dorsal"
+    assert np.abs(off.dx).max() < 40.0
+    assert off.dy.max() > 140.0
+
+
+def test_subject_video_path_is_the_raw_recording() -> None:
+    """The '*_distance_annotated.mp4' sibling is the pipeline's own overlay and
+    must not be used -- we draw our own."""
+    path = subject_video_path()
+    assert path.name.startswith("output_")
+    assert "distance_annotated" not in path.name
