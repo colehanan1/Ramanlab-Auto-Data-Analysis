@@ -506,6 +506,7 @@ def test_hero_axis_is_equal_aspect() -> None:
 
 
 from scripts.analysis.per_gate_rejection_figure import (
+    MUTED,
     SCHEMATIC_PANELS,
     draw_cap_panel,
     draw_jump_panel,
@@ -519,6 +520,42 @@ def test_schematic_panels_are_declared() -> None:
     jump panels are illustrations -- they must be flagged, not passed off as data."""
     assert SCHEMATIC_PANELS == frozenset({"cap", "release", "jump"})
     assert "norm" not in SCHEMATIC_PANELS, "panel E plots this fly's real spread"
+
+
+def test_schematic_panels_actually_draw_a_dashed_border() -> None:
+    """SCHEMATIC_PANELS is just a set of strings -- it says nothing about what
+    ends up on the axes. Panels B (cap), C (release) and D (jump) are
+    illustrations because this subject has only 2 flies (the >=3-fly release
+    never fires) and a real max displacement of 5.7 px (the 80 px jump gate is
+    never approached), so their marks must be visually flagged as invented,
+    not measured. Panel E (normalize) plots this fly's REAL radius spread, so
+    it must be left unmarked. If someone deleted the `_mark_schematic(ax)`
+    call from a schematic panel, every other test would still pass -- this is
+    the one that would catch it."""
+    s = load_gate_settings()
+    off = Offsets(dx=np.array([0.0]), dy=np.array([100.0]),
+                  frames=np.array([0]), eye_xy=SUBJECT.eye_xy)
+    muted_rgba = matplotlib.colors.to_rgba(MUTED)
+
+    for draw in (
+        lambda ax: draw_cap_panel(ax, 2),
+        lambda ax: draw_release_panel(ax, s),
+        lambda ax: draw_jump_panel(ax, s),
+    ):
+        fig, ax = plt.subplots()
+        draw(ax)
+        for spine in ax.spines.values():
+            assert spine.get_visible()
+            assert spine.get_linestyle() != "solid"
+            assert matplotlib.colors.to_rgba(spine.get_edgecolor()) == muted_rgba
+        plt.close(fig)
+
+    fig, ax = plt.subplots()
+    draw_norm_panel(ax, off, s)
+    assert not any(spine.get_visible() for spine in ax.spines.values()), (
+        "panel E plots real data and must not carry the schematic border"
+    )
+    plt.close(fig)
 
 
 def test_jump_ring_is_centred_on_the_last_ACCEPTED_point() -> None:
@@ -575,6 +612,27 @@ def test_norm_panel_band_edges_come_from_settings() -> None:
     plt.close(fig)
 
 
+def test_norm_panel_band_edges_track_settings_not_hardcoded_10_and_160() -> None:
+    """config_new.yaml's class2_min/max happen to BE 10/160, so text literals
+    "10"/"160" written straight into draw_norm_panel would slip past the test
+    above undetected -- the same coincidence already caught on the jump ring.
+    Feed settings with different band edges and require the drawn numbers,
+    and the returned band, to follow them."""
+    s = GateSettings(max_px=160.0, up_divisor=4.0, max_jump_px=80.0,
+                      norm_min_px=25.0, norm_max_px=90.0)
+    off = Offsets(
+        dx=np.array([0.0, 0.0]), dy=np.array([94.4, 145.8]),
+        frames=np.array([0, 1]), eye_xy=SUBJECT.eye_xy,
+    )
+    fig, ax = plt.subplots()
+    info = draw_norm_panel(ax, off, s)
+    assert info["band"] == (25.0, 90.0)
+    drawn = {t.get_text() for t in ax.texts}
+    assert "25" in drawn and "90" in drawn
+    assert "10" not in drawn and "160" not in drawn
+    plt.close(fig)
+
+
 def test_release_panel_shows_the_three_fly_limit() -> None:
     s = load_gate_settings()
     fig, ax = plt.subplots()
@@ -583,6 +641,21 @@ def test_release_panel_shows_the_three_fly_limit() -> None:
     assert str(int(s.max_px)) in drawn
     marks = [ln for ln in ax.lines if ln.get_marker() in {"x", "X"}]
     assert marks, "the released binding terminates in an X"
+    plt.close(fig)
+
+
+def test_release_panel_limit_tracks_settings_not_a_hardcoded_160() -> None:
+    """Same coincidence as the jump ring and the norm band: config_new.yaml's
+    max_eye_prob_distance_px happens to BE 160, so a literal "160" written
+    into draw_release_panel would pass the test above undetected. Feed a
+    different max_px and require the drawn label to follow it."""
+    s = GateSettings(max_px=140.0, up_divisor=4.0, max_jump_px=80.0,
+                      norm_min_px=10.0, norm_max_px=160.0)
+    fig, ax = plt.subplots()
+    draw_release_panel(ax, s)
+    drawn = {t.get_text() for t in ax.texts}
+    assert "140" in drawn
+    assert "160" not in drawn
     plt.close(fig)
 
 
