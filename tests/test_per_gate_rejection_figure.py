@@ -420,13 +420,72 @@ def test_hero_labels_the_acceptance_boundary_and_both_marks() -> None:
 
 
 def test_hero_gate_numbers_come_from_settings() -> None:
-    """Change the config, and the numbers on the boundary change with it."""
+    """Change the config, and the numbers on the boundary change with it.
+
+    A hardcoded-literal implementation (drawing "160"/"40" directly instead of
+    ``str(int(settings.max_px))``/``str(int(settings.dorsal_px))``) would pass
+    the old form of this test identically, because today's config happens to
+    produce exactly those two strings and they are already baked into
+    HERO_TEXTS. So this drives draw_hero with DIFFERENT synthetic settings and
+    asserts the drawn numbers follow -- and separately re-checks the real
+    settings values, to keep both the derivation and the production numbers
+    pinned. Deliberately does not assert set-equality against HERO_TEXTS:
+    under synthetic settings the drawn set legitimately differs from it.
+    """
+    synthetic = GateSettings(
+        max_px=100.0, up_divisor=5.0, max_jump_px=80.0,
+        norm_min_px=10.0, norm_max_px=100.0,
+    )
+    assert synthetic.dorsal_px == 20.0
+
     fig, ax = _hero_axes()
+    fig2, ax2 = plt.subplots()
+    off = Offsets(
+        dx=np.array([5.0, 10.0, 28.9]),
+        dy=np.array([95.0, 110.0, 142.8]),
+        frames=np.array([0, 1, 1102]),
+        eye_xy=SUBJECT.eye_xy,
+    )
+    draw_hero(ax2, off, synthetic, None)
+    drawn_synthetic = {t.get_text() for t in ax2.texts}
+    assert "100" in drawn_synthetic
+    assert "20" in drawn_synthetic
+    assert "160" not in drawn_synthetic
+    assert "40" not in drawn_synthetic
+    plt.close(fig2)
+
     drawn = {t.get_text() for t in ax.texts}
     s = load_gate_settings()
     assert str(int(s.max_px)) in drawn
     assert str(int(s.dorsal_px)) in drawn
+    assert "160" in drawn
+    assert "40" in drawn
     plt.close(fig)
+
+
+@requires_data
+def test_hero_labels_are_pinned_to_the_underlying_data() -> None:
+    """"146 px" and "220 px" are literal strings in draw_hero -- HERO_TEXTS is
+    asserted as an exact set, so they cannot be computed dynamically inside
+    draw_hero without changing that set. These assertions are what keep the
+    literals honest: if the real data or the constructed rejection ever
+    drifts, this fails loudly instead of the slide quietly lying.
+
+    The two labels use different rounding conventions on purpose, and the
+    assertions follow the label they pin rather than a uniform rule:
+    the rejection's true radius is 220.51 px, and "220 px" is that value
+    TRUNCATED (matching the module's own "r = 220.5 px" comment next to
+    REJECTED_OFFSET) -- round() would give 221 and wrongly fail here. The
+    peak PER's true radius is ~145.75 px, and "146 px" is that value
+    ROUNDED per the brief's ambiguity ruling -- int() would give 145 and
+    wrongly fail here.
+    """
+    rdx, rdy = REJECTED_OFFSET
+    assert int(np.hypot(rdx, rdy)) == 220, "label reads '220 px' (truncated)"
+
+    off = load_subject_offsets()
+    r = np.hypot(off.dx, off.dy)
+    assert round(float(r.max())) == 146, "label reads '146 px' (rounded)"
 
 
 def test_hero_rejected_marker_is_hollow() -> None:
