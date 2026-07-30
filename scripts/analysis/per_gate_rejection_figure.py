@@ -160,9 +160,24 @@ def load_subject_offsets(subject: Subject = SUBJECT) -> Offsets:
 
     dx, dy = px - ex, py - ey
     ok = np.isfinite(dx) & np.isfinite(dy)
+
+    # Prefer the parquet's own frame column over row position: row index and
+    # frame number coincide for this subject (rows are contiguous), but need
+    # not in general, and `frames` is what later tasks use to seek the video
+    # to the right frame -- silently using row position would be wrong for
+    # any subject with dropped/non-contiguous rows.
+    frame_col = next(
+        (c for c in ("frame", "frame_number", "frame_idx") if c in df.columns),
+        None,
+    )
+    if frame_col is not None:
+        frames = pd.to_numeric(df[frame_col], errors="coerce").to_numpy()[ok].astype(int)
+    else:
+        frames = np.flatnonzero(ok)
+
     return Offsets(
         dx=dx[ok],
         dy=dy[ok],
-        frames=np.flatnonzero(ok),
+        frames=frames,
         eye_xy=(float(np.nanmedian(ex)), float(np.nanmedian(ey))),
     )

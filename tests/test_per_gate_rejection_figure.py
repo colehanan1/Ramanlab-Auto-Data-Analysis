@@ -127,3 +127,32 @@ def test_subject_video_path_is_the_raw_recording() -> None:
     path = subject_video_path()
     assert path.name.startswith("output_")
     assert "distance_annotated" not in path.name
+
+
+@requires_data
+def test_subject_offsets_frames_match_parquet_frame_column() -> None:
+    """`frames` must come from the parquet's own frame column, not row position.
+
+    This asserts against the column itself (not against arange/contiguity), so
+    it would fail if the implementation silently reverted to
+    ``np.flatnonzero(ok)`` and the column ever diverged from row position --
+    unlike an ``arange(3605)`` check, which both implementations satisfy today.
+    """
+    import pandas as pd
+
+    from fbpipe.utils.columns import find_eye_xy_columns, find_proboscis_xy_columns
+    from fbpipe.utils.tables import read_table
+
+    df = read_table(subject_parquet_path())
+    ex_col, ey_col = find_eye_xy_columns(df)
+    px_col, py_col = find_proboscis_xy_columns(df)
+
+    ex = pd.to_numeric(df[ex_col], errors="coerce").to_numpy(float)
+    ey = pd.to_numeric(df[ey_col], errors="coerce").to_numpy(float)
+    px = pd.to_numeric(df[px_col], errors="coerce").to_numpy(float)
+    py = pd.to_numeric(df[py_col], errors="coerce").to_numpy(float)
+    ok = np.isfinite(px - ex) & np.isfinite(py - ey)
+    expected_frames = pd.to_numeric(df["frame"], errors="coerce").to_numpy()[ok].astype(int)
+
+    off = load_subject_offsets()
+    np.testing.assert_array_equal(off.frames, expected_frames)
