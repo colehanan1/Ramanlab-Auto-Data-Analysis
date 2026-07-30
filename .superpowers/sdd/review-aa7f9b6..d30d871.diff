@@ -1,0 +1,90 @@
+# Review package: aa7f9b6..d30d871
+
+## Commits
+d30d871 feat(config): add inference_batch_size and engine_supports_batch knobs
+
+## Files changed
+ src/fbpipe/config.py                 |  4 ++++
+ tests/test_config_inference_batch.py | 23 +++++++++++++++++++++++
+ 2 files changed, 27 insertions(+)
+
+## Diff
+diff --git a/src/fbpipe/config.py b/src/fbpipe/config.py
+index 18b0236..9cd0302 100644
+--- a/src/fbpipe/config.py
++++ b/src/fbpipe/config.py
+@@ -509,20 +509,22 @@ class Settings:
+     iou_match_thres: float = 0.25
+     max_age: int = 15
+     ema_alpha: float = 0.20
+     use_optical_flow: bool = True
+     flow_skip_edge: int = 10
+     max_flies: int = 4
+     max_proboscis_tracks: int = 4  # Backward-compatible config field; YOLO now mirrors the initial eye count.
+     proboscis_match_max_dist_px: float = 80.0  # Center-distance gate for proboscis track association (small/fast object).
+     pair_rebind_ratio: float = 0.20
+     zero_iou_epsilon: float = 1e-8
++    inference_batch_size: int = 32  # YOLO predict() chunk size; clamped to 1 for non-batch-capable .engine models
++    engine_supports_batch: bool = False  # set True only for a dynamic-batch .engine (see scripts/convert/export_tensorrt.py --dynamic)
+ 
+     # distance limits
+     class2_min: float = 70.0
+     class2_max: float = 250.0
+     three_fly_max_eye_prob_distance_px: float = 180.0
+ 
+     # reaction prediction
+     reaction_prediction: ReactionPredictionSettings = field(default_factory=ReactionPredictionSettings)
+     force: ForceSettings = field(default_factory=ForceSettings)
+ 
+@@ -960,20 +962,22 @@ def load_settings(config_path: str | Path) -> Settings:
+         ema_alpha=float(os.getenv("EMA_ALPHA", yolo.get("ema_alpha", 0.20))),
+         use_optical_flow=(os.getenv("USE_OPTICAL_FLOW", str(yolo.get("use_optical_flow", True))).lower()=="true"),
+         flow_skip_edge=int(os.getenv("FLOW_SKIP_EDGE", yolo.get("flow_skip_edge", 10))),
+         max_flies=int(os.getenv("MAX_FLIES", yolo.get("max_flies", 4))),
+         max_proboscis_tracks=int(os.getenv("MAX_PROBOSCIS_TRACKS", yolo.get("max_proboscis_tracks", 4))),
+         proboscis_match_max_dist_px=float(
+             os.getenv("PROBOSCIS_MATCH_MAX_DIST_PX", yolo.get("proboscis_match_max_dist_px", 80.0))
+         ),
+         pair_rebind_ratio=float(os.getenv("PAIR_REBIND_RATIO", yolo.get("pair_rebind_ratio", 0.20))),
+         zero_iou_epsilon=float(os.getenv("ZERO_IOU_EPSILON", yolo.get("zero_iou_epsilon", 1e-8))),
++        inference_batch_size=int(os.getenv("INFERENCE_BATCH_SIZE", yolo.get("inference_batch_size", 32))),
++        engine_supports_batch=(os.getenv("ENGINE_SUPPORTS_BATCH", str(yolo.get("engine_supports_batch", False))).lower()=="true"),
+ 
+         class2_min=float(os.getenv("CLASS2_MIN", dist_limits.get("class2_min", 70.0))),
+         class2_max=float(os.getenv("CLASS2_MAX", dist_limits.get("class2_max", 250.0))),
+         three_fly_max_eye_prob_distance_px=float(
+             os.getenv(
+                 "THREE_FLY_MAX_EYE_PROB_DISTANCE_PX",
+                 dist_limits.get("three_fly_max_eye_prob_distance_px", 180.0),
+             )
+         ),
+         reaction_prediction=reaction_prediction,
+diff --git a/tests/test_config_inference_batch.py b/tests/test_config_inference_batch.py
+new file mode 100644
+index 0000000..d4af5ab
+--- /dev/null
++++ b/tests/test_config_inference_batch.py
+@@ -0,0 +1,23 @@
++import os
++from pathlib import Path
++from fbpipe.config import Settings, load_settings
++
++def test_default_inference_batch_size():
++    assert Settings(model_path="m.pt", main_directories="/tmp").inference_batch_size == 32
++
++def test_default_engine_supports_batch_is_false():
++    assert Settings(model_path="m.pt", main_directories="/tmp").engine_supports_batch is False
++
++def test_env_override(tmp_path, monkeypatch):
++    cfg = tmp_path / "c.yaml"
++    cfg.write_text("yolo:\n  inference_batch_size: 4\n  engine_supports_batch: true\n")
++    monkeypatch.setenv("INFERENCE_BATCH_SIZE", "16")
++    s = load_settings(str(cfg))
++    assert s.inference_batch_size == 16
++    assert s.engine_supports_batch is True
++
++def test_yaml_value_when_no_env(tmp_path, monkeypatch):
++    cfg = tmp_path / "c.yaml"
++    cfg.write_text("yolo:\n  inference_batch_size: 8\n")
++    monkeypatch.delenv("INFERENCE_BATCH_SIZE", raising=False)
++    assert load_settings(str(cfg)).inference_batch_size == 8

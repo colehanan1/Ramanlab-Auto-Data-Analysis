@@ -1,0 +1,370 @@
+# Review package: 8829cab..ca326c3
+
+## Commits
+ca326c3 fix(run_workflows): thread --config through to build_wide_csv's tracking columns
+004270a docs(plan): retract the false pair_groups NameError claim
+
+## Files changed
+ .../superpowers/plans/2026-07-15-dataset-freeze.md |  16 ++-
+ scripts/pipeline/run_workflows.py                  |   6 +
+ tests/test_freeze_pipeline.py                      | 127 ++++++++++++++++++++-
+ 3 files changed, 141 insertions(+), 8 deletions(-)
+
+## Diff
+diff --git a/docs/superpowers/plans/2026-07-15-dataset-freeze.md b/docs/superpowers/plans/2026-07-15-dataset-freeze.md
+index 28373a3..4a2db7c 100644
+--- a/docs/superpowers/plans/2026-07-15-dataset-freeze.md
++++ b/docs/superpowers/plans/2026-07-15-dataset-freeze.md
+@@ -1404,25 +1404,29 @@ Same shape, with `_block = "wide"`, `wide_root_paths` as roots,
+ `wide_measure_cols`, `wide_cfg.output_csv`, and that block's extra exports.
+ 
+ Note `config/config_new.yaml` has no `analysis.combined.wide` block (only
+ `combined_base.wide`), so this site does not fire under the v2 config. Wire it
+ anyway for `config/config.yaml`, which does use it.
+ 
+ - [ ] **Step 8: Wire the `pair_groups` call site (`:1403`)**
+ 
+ Same shape, with `_block = "pair_groups"` and `resolved_roots`.
+ 
+-This call site references `wide_measure_cols`, which is bound only inside the
+-`if wide_cfg:` block at `:1097-1103`. Under `config_new.yaml` it would therefore
+-`NameError` if `pair_groups` were configured. It is not configured, so the site is
+-unreachable. **Do not fix that pre-existing latent bug here** — wire freeze in the
+-same shape as the others and leave it untouched and out of scope.
++**Correction (verified 2026-07-15):** an earlier draft of this plan claimed this
++site would `NameError` because `wide_measure_cols` was bound only inside
++`if wide_cfg:`. That is **false**. `wide_measure_cols: Sequence[str] =
++["envelope_of_rms"]` is a function-level default at `run_workflows.py:1093`, as
++are `wide_fps_fallback` (`:1094`), `wide_exclude_cfg` (`:1095`) and
++`use_per_trial_baseline` (`:1099`) — the latter carrying an explicit comment that
++it exists so the `combined_base`/`distance_base` helper is safe when no top-level
++`wide` block is configured. The `if wide_cfg:` block at `:1156` merely *overrides*
++them. There is no latent bug here. Wire freeze in the same shape as the others.
+ 
+ - [ ] **Step 9: Run the full suite**
+ 
+ Run: `python -m pytest tests/ -q`
+ Expected: PASS, ≥538 passed
+ 
+ - [ ] **Step 10: Commit**
+ 
+ ```bash
+ git add scripts/pipeline/run_workflows.py tests/test_freeze_pipeline.py
+@@ -2108,13 +2112,13 @@ the fold deleted. If you find yourself simplifying a fixture to equal lengths,
+ stop: you are deleting the only thing the test proves.
+ 
+ **This branch's recorded failure modes** — check your own tests against them:
+ - An assertion that reads its expectation from the constant it validates.
+ - An assertion over an empty collection (empty for the wrong reason).
+ - An assertion on a quantity that is equal by construction.
+ - Place mutants INSIDE the unit under test and re-run. Do not trust a passing
+   report you have not tried to break.
+ 
+ **Out of scope; do not fix here:**
+-- `wide_measure_cols` is bound only inside `if wide_cfg:` (`run_workflows.py:1097-1103`), so the `pair_groups` call site (`:1403`) would `NameError` if configured. Latent, pre-existing, currently unreachable.
++- ~~`wide_measure_cols` is bound only inside `if wide_cfg:`, so the `pair_groups` call site would `NameError` if configured.~~ **RETRACTED — this was false.** `wide_measure_cols` (`:1093`), `wide_fps_fallback` (`:1094`), `wide_exclude_cfg` (`:1095`) and `use_per_trial_baseline` (`:1099`) all have function-level defaults and are always bound; `if wide_cfg:` (`:1156`) only overrides them. The claim originated in an exploration report and was propagated into this plan without verification. There is no latent bug.
+ - `_style_trained_xticks` (`envelope_visuals.py:1309`) compares odor names against a dataset display label, so sibling figures disagree about the trained odor. Pre-existing.
+ - `docs/` and `config/` are gitignored (`.gitignore:116`), so `config/config_new.yaml` — and any `freeze:` block in it — is not tracked. Flagged in the spec.
+diff --git a/scripts/pipeline/run_workflows.py b/scripts/pipeline/run_workflows.py
+index 90f56af..a722c32 100755
+--- a/scripts/pipeline/run_workflows.py
++++ b/scripts/pipeline/run_workflows.py
+@@ -1077,20 +1077,21 @@ def _render_pair_visuals(
+         generate_envelope_plots(cfg)
+ 
+ 
+ def _run_combined(
+     cfg: Mapping[str, Any] | None,
+     settings: Settings | None,
+     *,
+     folder_filter: str | None = None,
+     defer_envelopes: bool = False,
+     defer_secure_cleanup: bool = False,
++    config_path: str | Path | None = None,
+ ) -> Callable[[], None] | None:
+     if not cfg:
+         return None
+ 
+     combine_roots: dict[str, Path] = {}
+     wide_root_paths: list[Path] = []
+     wide_measure_cols: Sequence[str] = ["envelope_of_rms"]
+     wide_fps_fallback = 40.0
+     wide_exclude_cfg: list[str] = []
+     # Default so the combined_base / distance_base helper below is safe even
+@@ -1287,20 +1288,21 @@ def _run_combined(
+             **_fp_kw,
+         )
+         print(f"[analysis] combined.wide → {output_csv}")
+         build_wide_csv(
+             roots,
+             str(output_csv),
+             measure_cols=wide_measure_cols,
+             fps_fallback=wide_fps_fallback,
+             exclude_roots=wide_exclude_cfg,
+             distance_limits=limits,
++            config_path=config_path,
+             trial_type_filter=trial_type_filter,
+             extra_trial_exports=extra_exports or None,
+             non_reactive_threshold=non_reactive_threshold,
+             use_per_trial_baseline=use_per_trial_baseline,
+             frozen_slices=_frozen or None,
+         )
+         _write_freeze_cache(
+             settings,
+             _block,
+             str(output_csv),
+@@ -1437,20 +1439,21 @@ def _run_combined(
+                 **_fp_kw,
+             )
+             print(f"[analysis] {label}.wide → {output_csv}")
+             build_wide_csv(
+                 roots,
+                 str(output_csv),
+                 measure_cols=base_measure_cols,
+                 fps_fallback=base_fps_fallback,
+                 exclude_roots=base_exclude_cfg,
+                 distance_limits=limits,
++                config_path=config_path,
+                 trial_type_filter=trial_type_filter,
+                 extra_trial_exports=extra_exports or None,
+                 non_reactive_threshold=non_reactive_threshold,
+                 use_per_trial_baseline=base_use_per_trial_baseline,
+                 frozen_slices=_frozen or None,
+             )
+             _write_freeze_cache(
+                 settings,
+                 _block,
+                 str(output_csv),
+@@ -1611,20 +1614,21 @@ def _run_combined(
+                 **_fp_kw,
+             )
+             print(f"[analysis] combined.pair_groups[{pair_name}].wide → {pair_wide_csv}")
+             build_wide_csv(
+                 [str(path) for path in resolved_roots],
+                 str(pair_wide_csv),
+                 measure_cols=wide_measure_cols,
+                 fps_fallback=wide_fps_fallback,
+                 exclude_roots=wide_exclude_cfg,
+                 distance_limits=limits,
++                config_path=config_path,
+                 trial_type_filter=trial_type_filter,
+                 extra_trial_exports=extra_exports,
+                 non_reactive_threshold=non_reactive_threshold,
+                 use_per_trial_baseline=use_per_trial_baseline,
+                 frozen_slices=_frozen or None,
+             )
+             _write_freeze_cache(
+                 settings,
+                 _block,
+                 str(pair_wide_csv),
+@@ -2416,37 +2420,39 @@ def main(argv: Sequence[str] | None = None) -> None:
+                 print(
+                     "[analysis] combined analysis cached → skipping. Set force.combined=true to recompute."
+                 )
+         if not skip_combined:
+             deferred_secure_cleanup = _run_combined(
+                 combined_cfg_input,
+                 settings,
+                 folder_filter=folder_filter,
+                 defer_envelopes=defer_envelopes,
+                 defer_secure_cleanup=True,
++                config_path=config_path,
+             )
+             # Only write combined cache when running ALL folders; a single-folder
+             # run is partial so the next full run must recompute.
+             if not folder_filter:
+                 payload = dict(combined_expected)
+                 payload["version"] = STATE_VERSION
+                 _write_state(settings, "combined", "analysis", payload)
+             else:
+                 LOGGER.info(
+                     "Single-folder mode: skipping combined cache write so next full run recomputes."
+                 )
+     else:
+         _run_combined(
+             None,
+             settings,
+             folder_filter=folder_filter,
+             defer_envelopes=defer_envelopes,
++            config_path=config_path,
+         )
+     # Load per-trial model scores (if the reactions step has run on a prior
+     # invocation) so envelope plots can annotate each subplot with the score
+     # in the upper-right corner. Empty registry on a fresh pipeline run.
+     _load_model_scores_for_envelopes(settings)
+ 
+     # -- envelope_visuals with cache skip --
+     env_vis_cfg = analysis_cfg.get("envelope_visuals")
+     if env_vis_cfg:
+         ev_expected = _analysis_expected(env_vis_cfg)
+diff --git a/tests/test_freeze_pipeline.py b/tests/test_freeze_pipeline.py
+index 5218810..d57efcc 100644
+--- a/tests/test_freeze_pipeline.py
++++ b/tests/test_freeze_pipeline.py
+@@ -1,30 +1,37 @@
+ """Freeze resolution + cache writing in run_workflows."""
+ 
+-import numpy as np
+ import pandas as pd
+-import pytest
+ 
+ import scripts.pipeline.run_workflows as rw
+ from fbpipe import freeze
+ from fbpipe.config import DatasetOverride
+ 
+ 
+ class _Tracking:
+     """Stub of fbpipe.config.TrackingConfig -- build_fingerprint duck-types it."""
+ 
+     apply_missing_frame_check = True
+     max_missing_frames_per_trial = 5000
+     max_missing_frames_pct_per_trial = 50.0
+ 
+ 
+ class _Settings:
++    # Class-level defaults for the extra attributes _run_combined touches
++    # (flagged-dir auto-discovery, non-reactive threshold, class2 limits).
++    # None/neutral so they're no-ops unless a test overrides them.
++    flagged_root = None
++    flagged_secured_root = None
++    non_reactive_span_px = 12.5
++    class2_min = 0.0
++    class2_max = 100.0
++
+     def __init__(self, tmp_path, overrides, datasets):
+         self.cache_dir = str(tmp_path / "cache")
+         self.dataset_overrides = overrides
+         self.datasets = tuple(datasets)
+         self.protocol = "v2"
+         self.tracking = _Tracking()
+ 
+ 
+ def _rows(dataset, tl=5):
+     rec = {"dataset": dataset, "fly": "f1", "trial_type": "testing", "trace_len": tl}
+@@ -153,10 +160,126 @@ def test_write_freeze_cache_includes_extra_trial_exports(tmp_path):
+         fingerprint_for=lambda ds: freeze.build_fingerprint(
+             protocol="v2", override=DatasetOverride(), tracking=s.tracking,
+             **_fp_kw()
+         ),
+     )
+     fp = freeze.build_fingerprint(
+         protocol="v2", override=DatasetOverride(), tracking=s.tracking, **_fp_kw()
+     )
+     got = freeze.load_slice(s.cache_dir, "combined_base", "A", fp)
+     assert set(got.rows["trial_type"].str.lower()) == {"testing", "training"}
++
++
++# --- FIX 2: a real round-trip through _freeze_fingerprint -----------------
++#
++# The tests above verify the write half (test_write_freeze_cache_*) and the
++# read half (test_frozen_dataset_with_cache_resolves) SEPARATELY, each
++# building its own fingerprint by hand. Neither exercises the exact pattern
++# _run_combined relies on: _write_freeze_cache(..., fingerprint_for=lambda
++# ds: _freeze_fingerprint(settings, ds, **kw)) followed by
++# _resolve_frozen_slices(settings, roots, block, **kw) with the SAME kw. A
++# mutation that made the two call sites' fingerprints diverge (e.g. one using
++# base_measure_cols where the other uses wide_measure_cols) would slip past
++# every test above while silently disabling freeze for good.
++
++
++def test_freeze_round_trip_write_then_resolve(tmp_path):
++    """_write_freeze_cache (via _freeze_fingerprint) seeds the cache; then
++    _resolve_frozen_slices, given the identical kw, must find that dataset."""
++    s = _Settings(tmp_path, {"DS": DatasetOverride(freeze_data=True)}, ["DS"])
++    out = tmp_path / "wide.csv"
++    _rows("DS", 4).to_csv(out, index=False)
++    kw = _fp_kw()
++
++    rw._write_freeze_cache(
++        s, "combined_base", str(out), [],
++        fingerprint_for=lambda ds: rw._freeze_fingerprint(s, ds, **kw),
++    )
++
++    got = rw._resolve_frozen_slices(
++        s, [str(tmp_path / "DS")], "combined_base", thawed=(), thaw_all=False, **kw
++    )
++    assert "DS" in got
++    assert got["DS"].own_max_len == 4
++
++
++def test_freeze_round_trip_misses_when_resolve_kw_diverges(tmp_path):
++    """Proves the round-trip test above is not vacuous: if the resolve-side kw
++    differs from what was used to write the cache (e.g. a different
++    measure_cols, mimicking a base_measure_cols/wide_measure_cols mixup), the
++    dataset must NOT resolve -- it must fall back to a live rebuild."""
++    s = _Settings(tmp_path, {"DS": DatasetOverride(freeze_data=True)}, ["DS"])
++    out = tmp_path / "wide.csv"
++    _rows("DS", 4).to_csv(out, index=False)
++    write_kw = _fp_kw()
++
++    rw._write_freeze_cache(
++        s, "combined_base", str(out), [],
++        fingerprint_for=lambda ds: rw._freeze_fingerprint(s, ds, **write_kw),
++    )
++
++    resolve_kw = _fp_kw()
++    resolve_kw["measure_cols"] = ["distance_percentage"]  # diverges from write_kw
++    got = rw._resolve_frozen_slices(
++        s, [str(tmp_path / "DS")], "combined_base", thawed=(), thaw_all=False, **resolve_kw
++    )
++    assert got == {}
++
++
++# --- FIX 1: build_wide_csv must honor the caller's --config ---------------
++#
++# build_wide_csv derives tracking_missing_frames / tracking_pct_missing /
++# tracking_flagged from `load_settings(config_path or DEFAULT_CONFIG_PATH)`
++# (scripts/analysis/envelope_combined.py:2633). None of _run_combined's three
++# build_wide_csv call sites passed config_path, so a run started with
++# `--config config_new.yaml` silently computed those columns from
++# config/config.yaml's thresholds instead. This test proves _run_combined
++# threads its config_path through to every build_wide_csv call by spying on
++# the call rather than trying to compute real tracking columns (which needs
++# video/RMS data this unit test doesn't have).
++
++
++def test_run_combined_threads_config_path_to_build_wide_csv(tmp_path, monkeypatch):
++    captured_config_paths = []
++
++    def _spy_build_wide_csv(*args, **kwargs):
++        captured_config_paths.append(kwargs.get("config_path"))
++
++    monkeypatch.setattr(rw, "build_wide_csv", _spy_build_wide_csv)
++    # wide_to_matrix runs unconditionally after the pair_groups build_wide_csv
++    # call; stub it so the (nonexistent, since build_wide_csv is a spy) wide
++    # CSV is never read from disk.
++    monkeypatch.setattr(rw, "wide_to_matrix", lambda *a, **k: None)
++
++    ds_root = tmp_path / "DS1"
++    ds_root.mkdir()
++
++    cfg = {
++        "wide": {
++            "roots": [str(ds_root)],
++            "output_csv": str(tmp_path / "wide.csv"),
++        },
++        # Exercises the second build_wide_csv call site (_process_base_block).
++        "combined_base": {
++            "wide": {
++                "output_csv": str(tmp_path / "wide_base.csv"),
++            },
++        },
++        # Exercises the third build_wide_csv call site (pair_groups).
++        "pair_groups": [
++            {
++                "name": "pair1",
++                "datasets": [ds_root.name],
++                "out_dir": str(tmp_path / "pair1"),
++            }
++        ],
++    }
++    s = _Settings(tmp_path, {}, ["DS1"])
++    sentinel_config_path = tmp_path / "config_new.yaml"
++
++    rw._run_combined(cfg, s, config_path=sentinel_config_path)
++
++    # All three build_wide_csv call sites must have fired, and every one must
++    # have received the caller's config_path -- not the DEFAULT_CONFIG_PATH
++    # fallback build_wide_csv silently applies when config_path is None.
++    assert len(captured_config_paths) == 3
++    assert all(p == sentinel_config_path for p in captured_config_paths)

@@ -1,0 +1,460 @@
+# Review package: 548e4a9..1c2fe2f
+
+## Commits
+1c2fe2f fix(freeze): fingerprint trial_type_filter; guard _write_freeze_cache concat
+
+## Files changed
+ scripts/pipeline/run_workflows.py | 32 +++++++++++++++++++++++++++++---
+ src/fbpipe/freeze.py              | 30 ++++++++++++++++++++++++++++++
+ tests/test_freeze_cache.py        | 31 +++++++++++++++++++++++++++++++
+ tests/test_freeze_e2e.py          |  4 +++-
+ tests/test_freeze_pipeline.py     |  1 +
+ 5 files changed, 94 insertions(+), 4 deletions(-)
+
+## Diff
+diff --git a/scripts/pipeline/run_workflows.py b/scripts/pipeline/run_workflows.py
+index ca7d106..2634fd2 100755
+--- a/scripts/pipeline/run_workflows.py
++++ b/scripts/pipeline/run_workflows.py
+@@ -417,56 +417,62 @@ def _compare_manifests(
+ def _freeze_fingerprint(
+     settings,
+     dataset: str,
+     *,
+     measure_cols,
+     fps_fallback: float,
+     distance_limits,
+     non_reactive_threshold,
+     low_max_threshold_px: float,
+     use_per_trial_baseline: bool,
++    trial_type_filter,
+ ) -> dict:
+     """Fingerprint for one dataset under one set of build_wide_csv parameters.
+ 
+     Shared by the load and save paths so they can never disagree -- if they did,
+     every run would see spurious drift and re-derive.
+     """
+     from fbpipe import freeze as _freeze
+ 
+     return _freeze.build_fingerprint(
+         protocol=settings.protocol,
+         measure_cols=measure_cols,
+         fps_fallback=fps_fallback,
+         distance_limits=distance_limits,
+         non_reactive_threshold=non_reactive_threshold,
+         low_max_threshold_px=low_max_threshold_px,
+         use_per_trial_baseline=use_per_trial_baseline,
++        # build_wide_csv uses trial_type_filter to gate which trials become
++        # rows at all (envelope_combined.py:2661-2673, :2703). Required, not
++        # defaulted, so a caller cannot silently omit a value-affecting input.
++        trial_type_filter=trial_type_filter,
+         override=(settings.dataset_overrides or {}).get(dataset),
+         # build_wide_csv reads settings.tracking internally
+         # (envelope_combined.py:2622) and derives the tracking_missing_frames /
+         # tracking_pct_missing / tracking_flagged columns from it. Required, not
+         # defaulted, so a caller cannot silently omit a value-affecting input.
+         tracking=settings.tracking,
+     )
+ 
+ 
+ def _resolve_frozen_slices(
+     settings,
+     roots,
+     wide_block: str,
+     *,
+     measure_cols,
+     fps_fallback: float,
+     distance_limits,
+     non_reactive_threshold,
+     low_max_threshold_px: float,
+     use_per_trial_baseline: bool,
++    trial_type_filter,
+     thawed=(),
+     thaw_all: bool = False,
+ ) -> dict:
+     """Return {dataset: FrozenSlice} for every root frozen for DATA with a
+     trustworthy cache.
+ 
+     A dataset is omitted when it is not frozen, is thawed, has no cache, or its
+     fingerprint drifted. Omission IS the auto-rebuild: build_wide_csv then walks
+     the root normally.
+     """
+@@ -484,20 +490,21 @@ def _resolve_frozen_slices(
+             continue
+         fingerprint = _freeze_fingerprint(
+             settings,
+             dataset,
+             measure_cols=measure_cols,
+             fps_fallback=fps_fallback,
+             distance_limits=distance_limits,
+             non_reactive_threshold=non_reactive_threshold,
+             low_max_threshold_px=low_max_threshold_px,
+             use_per_trial_baseline=use_per_trial_baseline,
++            trial_type_filter=trial_type_filter,
+         )
+         slice_ = _freeze.load_slice(settings.cache_dir, wide_block, dataset, fingerprint)
+         if slice_ is None:
+             print(
+                 f"[FREEZE] {dataset} is frozen but its {wide_block} cache is "
+                 f"missing or stale -- rebuilding it once, then re-caching."
+             )
+             continue
+         out[dataset] = slice_
+     return out
+@@ -511,38 +518,48 @@ def _write_freeze_cache(
+     *,
+     fingerprint_for,
+ ) -> None:
+     """Cache each dataset's slice of a freshly written wide CSV.
+ 
+     Runs after EVERY live derivation, frozen or not, so that freezing a dataset
+     later finds a cache already waiting rather than needing a priming run.
+ 
+     Reads the main output plus every extra trial export, so a slice holds ALL
+     trial types -- the splice routes them back the same way live rows are.
++
++    "A cache write must never fail the run" covers the whole function, not just
++    the per-dataset loop: building ``allrows`` (the concat + groupby below) can
++    itself raise -- e.g. mismatched columns across the main output and an extra
++    trial export -- so that step is guarded too.
+     """
+     from fbpipe import freeze as _freeze
+ 
+     frames = []
+     for path in [output_csv, *(extra_export_paths or [])]:
+         p = Path(str(path))
+         if not p.is_file():
+             continue
+         try:
+             frames.append(pd.read_csv(p))
+         except Exception as exc:
+             print(f"[FREEZE] Skipping cache read of {p}: {exc}")
+     if not frames:
+         return
+-    allrows = pd.concat(frames, ignore_index=True)
+-    if "dataset" not in allrows.columns:
++    try:
++        allrows = pd.concat(frames, ignore_index=True)
++        if "dataset" not in allrows.columns:
++            return
++        groups = list(allrows.groupby(allrows["dataset"].astype(str)))
++    except Exception as exc:  # a cache write must never fail the run
++        print(f"[FREEZE] Could not prepare rows to cache for {wide_block}: {exc}")
+         return
+-    for dataset, group in allrows.groupby(allrows["dataset"].astype(str)):
++    for dataset, group in groups:
+         try:
+             _freeze.save_slice(
+                 settings.cache_dir,
+                 wide_block,
+                 dataset,
+                 group.reset_index(drop=True),
+                 fingerprint_for(dataset),
+             )
+         except Exception as exc:  # a cache write must never fail the run
+             print(f"[FREEZE] Could not cache {dataset}/{wide_block}: {exc}")
+@@ -1305,20 +1322,23 @@ def _run_combined(
+         _fp_kw = dict(
+             measure_cols=wide_measure_cols,
+             fps_fallback=wide_fps_fallback,
+             distance_limits=limits,
+             non_reactive_threshold=non_reactive_threshold,
+             # build_wide_csv is not passed low_max_threshold_px at this call
+             # site, so it uses the default. The fingerprint must record the
+             # same value or every run reports drift.
+             low_max_threshold_px=LOW_MAX_FLAG_THRESHOLD_PX,
+             use_per_trial_baseline=use_per_trial_baseline,
++            # Same variable build_wide_csv is called with below (:1343) -- the
++            # fingerprint must record exactly what the build used.
++            trial_type_filter=trial_type_filter,
+         )
+         _frozen = _resolve_frozen_slices(
+             settings,
+             roots,
+             _block,
+             thawed=getattr(settings, "_thawed", ()),
+             thaw_all=getattr(settings, "_thaw_all", False),
+             **_fp_kw,
+         )
+         print(f"[analysis] combined.wide → {output_csv}")
+@@ -1456,20 +1476,23 @@ def _run_combined(
+             _fp_kw = dict(
+                 measure_cols=base_measure_cols,
+                 fps_fallback=base_fps_fallback,
+                 distance_limits=limits,
+                 non_reactive_threshold=non_reactive_threshold,
+                 # build_wide_csv is not passed low_max_threshold_px at this call
+                 # site, so it uses the default. The fingerprint must record the
+                 # same value or every run reports drift.
+                 low_max_threshold_px=LOW_MAX_FLAG_THRESHOLD_PX,
+                 use_per_trial_baseline=base_use_per_trial_baseline,
++                # Same variable build_wide_csv is called with below (:1497) --
++                # the fingerprint must record exactly what the build used.
++                trial_type_filter=trial_type_filter,
+             )
+             _frozen = _resolve_frozen_slices(
+                 settings,
+                 roots,
+                 _block,
+                 thawed=getattr(settings, "_thawed", ()),
+                 thaw_all=getattr(settings, "_thaw_all", False),
+                 **_fp_kw,
+             )
+             print(f"[analysis] {label}.wide → {output_csv}")
+@@ -1631,20 +1654,23 @@ def _run_combined(
+             _fp_kw = dict(
+                 measure_cols=wide_measure_cols,
+                 fps_fallback=wide_fps_fallback,
+                 distance_limits=limits,
+                 non_reactive_threshold=non_reactive_threshold,
+                 # build_wide_csv is not passed low_max_threshold_px at this call
+                 # site, so it uses the default. The fingerprint must record the
+                 # same value or every run reports drift.
+                 low_max_threshold_px=LOW_MAX_FLAG_THRESHOLD_PX,
+                 use_per_trial_baseline=use_per_trial_baseline,
++                # Same variable build_wide_csv is called with below (:1675) --
++                # the fingerprint must record exactly what the build used.
++                trial_type_filter=trial_type_filter,
+             )
+             _frozen = _resolve_frozen_slices(
+                 settings,
+                 [str(path) for path in resolved_roots],
+                 _block,
+                 thawed=getattr(settings, "_thawed", ()),
+                 thaw_all=getattr(settings, "_thaw_all", False),
+                 **_fp_kw,
+             )
+             print(f"[analysis] combined.pair_groups[{pair_name}].wide → {pair_wide_csv}")
+diff --git a/src/fbpipe/freeze.py b/src/fbpipe/freeze.py
+index 53ae605..a21432d 100644
+--- a/src/fbpipe/freeze.py
++++ b/src/fbpipe/freeze.py
+@@ -66,45 +66,75 @@ def freeze_flags(
+ 
+ def build_fingerprint(
+     *,
+     protocol: str,
+     measure_cols: Iterable[str],
+     fps_fallback: float,
+     distance_limits: Optional[tuple[float, float]],
+     non_reactive_threshold: Optional[float],
+     low_max_threshold_px: float,
+     use_per_trial_baseline: bool,
++    trial_type_filter: Optional[str | bytes | Iterable[str]],
+     override: Any,
+     tracking: Any,
+ ) -> dict:
+     """Everything that determines a dataset's rows OTHER than its raw data.
+ 
+     Raw data is deliberately absent: ``freeze.data`` never walks the root. Config
+     IS checked, because it is already in memory and free -- without this, changing
+     an analysis parameter while a dataset is frozen would leave one CSV silently
+     mixing two parameterizations.
+ 
+     ``figure_output_subdir`` is deliberately EXCLUDED: it routes figures and
+     cannot change a row value, so it must not invalidate a data cache.
+     """
++    # build_wide_csv uses trial_type_filter to GATE which trials become rows at
++    # all (envelope_combined.py:2661-2673 build the allow-set, :2703 skips any
++    # trial whose type is not in it). Required, not defaulted -- same reasoning
++    # as `tracking` below -- so a caller cannot silently omit a value-affecting
++    # input. Without it: a dataset frozen while trial_type_filter=None (holds
++    # every trial type) would still fingerprint-match after the config narrowed
++    # the filter to e.g. "testing", so the stale cache would be trusted, spliced
++    # in pre-filtered, and then re-cached under the narrower filter --
++    # permanently evicting the dropped rows.
++    #
++    # Normalized identically to build_wide_csv's own ``trial_type_allow`` so the
++    # recorded value reflects the actual filtering, and SORTED so multi-value
++    # order (["testing","training"] vs ["training","testing"]) cannot cause
++    # spurious drift -- order never changes which rows exist.
++    if trial_type_filter is None:
++        trial_type_norm: Optional[list[str]] = None
++    else:
++        if isinstance(trial_type_filter, (str, bytes)):
++            _trial_type_allow = {str(trial_type_filter).strip().lower()}
++        else:
++            _trial_type_allow = {
++                str(value).strip().lower()
++                for value in trial_type_filter
++                if str(value).strip()
++            }
++        trial_type_norm = sorted(_trial_type_allow) if _trial_type_allow else None
++
+     return {
+         "protocol": str(protocol),
+         "measure_cols": [str(c) for c in measure_cols],
+         "fps_fallback": float(fps_fallback),
+         "distance_limits": (
+             None if distance_limits is None else [float(x) for x in distance_limits]
+         ),
+         "non_reactive_threshold": (
+             None if non_reactive_threshold is None else float(non_reactive_threshold)
+         ),
+         "low_max_threshold_px": float(low_max_threshold_px),
+         "use_per_trial_baseline": bool(use_per_trial_baseline),
++        # Gates which trials become rows at all -- see the comment above.
++        "trial_type_filter": trial_type_norm,
+         "override": {
+             "trial_type_override": getattr(override, "trial_type_override", None),
+             "odor_on_s": getattr(override, "odor_on_s", None),
+             "odor_off_s": getattr(override, "odor_off_s", None),
+             "light_only": bool(getattr(override, "light_only", False)),
+             "light_start_s": getattr(override, "light_start_s", None),
+             "light_duration_s": getattr(override, "light_duration_s", None),
+             "odor_remap": dict(getattr(override, "odor_remap", {}) or {}),
+         },
+         # build_wide_csv reads settings.tracking internally (envelope_combined.py:2622)
+diff --git a/tests/test_freeze_cache.py b/tests/test_freeze_cache.py
+index b9b5883..57791df 100644
+--- a/tests/test_freeze_cache.py
++++ b/tests/test_freeze_cache.py
+@@ -34,20 +34,21 @@ def _tracking(**kw):
+ 
+ def _fp(**kw):
+     base = dict(
+         protocol="v2",
+         measure_cols=["envelope_of_rms"],
+         fps_fallback=40.0,
+         distance_limits=None,
+         non_reactive_threshold=12.5,
+         low_max_threshold_px=5.0,
+         use_per_trial_baseline=False,
++        trial_type_filter=None,
+         override=DatasetOverride(),
+         tracking=_tracking(),
+     )
+     base.update(kw)
+     return freeze.build_fingerprint(**base)
+ 
+ 
+ def test_own_max_len_is_max_trace_len(tmp_path):
+     assert freeze.own_max_len(_rows([10, 7, 3], 10)) == 10
+ 
+@@ -90,20 +91,50 @@ def test_protocol_drift_returns_none(tmp_path):
+     freeze.save_slice(tmp_path, "combined_base", "DS", _rows([5], 5), _fp())
+     assert freeze.load_slice(tmp_path, "combined_base", "DS", _fp(protocol="legacy")) is None
+ 
+ 
+ def test_odor_remap_drift_returns_none(tmp_path):
+     freeze.save_slice(tmp_path, "combined_base", "DS", _rows([5], 5), _fp())
+     drifted = _fp(override=DatasetOverride(odor_remap={"Citral": "Yeast"}))
+     assert freeze.load_slice(tmp_path, "combined_base", "DS", drifted) is None
+ 
+ 
++def test_trial_type_filter_drift_returns_none(tmp_path):
++    """A dataset frozen while trial_type_filter=None (all trial types) must not
++    be trusted once the config narrows the filter -- otherwise the stale cache
++    is spliced in pre-filtered and then re-cached, permanently evicting the
++    rows the new filter excludes."""
++    freeze.save_slice(tmp_path, "wide", "DS", _rows([5], 5), _fp(trial_type_filter=None))
++    drifted = _fp(trial_type_filter="testing")
++    assert freeze.load_slice(tmp_path, "wide", "DS", drifted) is None
++
++
++def test_trial_type_filter_unchanged_still_loads(tmp_path):
++    """Positive control for the drift test above: proves drift detection, not
++    blanket invalidation -- the identical filter on both sides must still hit."""
++    freeze.save_slice(tmp_path, "wide", "DS", _rows([5], 5), _fp(trial_type_filter="testing"))
++    same = _fp(trial_type_filter="testing")
++    assert freeze.load_slice(tmp_path, "wide", "DS", same) is not None
++
++
++def test_trial_type_filter_order_insensitive(tmp_path):
++    """A multi-value filter's order must not affect the fingerprint: it never
++    changes which rows exist, only listing order would differ between two
++    equivalent config lists."""
++    freeze.save_slice(
++        tmp_path, "wide", "DS", _rows([5], 5),
++        _fp(trial_type_filter=["testing", "training"]),
++    )
++    reordered = _fp(trial_type_filter=["training", "testing"])
++    assert freeze.load_slice(tmp_path, "wide", "DS", reordered) is not None
++
++
+ def test_tracking_max_missing_frames_per_trial_drift_returns_none(tmp_path):
+     """A changed missing-frames threshold must invalidate -- otherwise cached
+     rows keep tracking_flagged values computed under the old threshold."""
+     freeze.save_slice(tmp_path, "combined_base", "DS", _rows([5], 5), _fp())
+     drifted = _fp(tracking=_tracking(max_missing_frames_per_trial=100))
+     assert freeze.load_slice(tmp_path, "combined_base", "DS", drifted) is None
+ 
+ 
+ def test_tracking_max_missing_frames_pct_per_trial_drift_returns_none(tmp_path):
+     freeze.save_slice(tmp_path, "combined_base", "DS", _rows([5], 5), _fp())
+diff --git a/tests/test_freeze_e2e.py b/tests/test_freeze_e2e.py
+index bc858d5..02a7738 100644
+--- a/tests/test_freeze_e2e.py
++++ b/tests/test_freeze_e2e.py
+@@ -47,20 +47,21 @@ def test_freeze_then_rerun_is_byte_identical(tmp_path):
+     cache = tmp_path / "cache"
+ 
+     fp_kw = dict(
+         protocol="v2",
+         measure_cols=["envelope_of_rms"],
+         fps_fallback=40.0,
+         distance_limits=None,
+         non_reactive_threshold=None,
+         low_max_threshold_px=ec.LOW_MAX_FLAG_THRESHOLD_PX,
+         use_per_trial_baseline=False,
++        trial_type_filter=None,
+         override=DatasetOverride(),
+         tracking=_Tracking(),
+     )
+     fp = freeze.build_fingerprint(**fp_kw)
+ 
+     # Pass 1: fully live.
+     first = tmp_path / "first.csv"
+     ec.build_wide_csv(
+         [str(live), str(frozen)], str(first), measure_cols=["envelope_of_rms"]
+     )
+@@ -95,21 +96,22 @@ def test_deleting_the_cache_is_safe(tmp_path):
+     """The cache is a derived artifact: deleting it must only cost time."""
+     import shutil
+ 
+     live = _make(tmp_path / "LIVE", 9)
+     frozen = _make(tmp_path / "FROZEN", 21)
+     cache = tmp_path / "cache"
+     fp = freeze.build_fingerprint(
+         protocol="v2", measure_cols=["envelope_of_rms"], fps_fallback=40.0,
+         distance_limits=None, non_reactive_threshold=None,
+         low_max_threshold_px=ec.LOW_MAX_FLAG_THRESHOLD_PX,
+-        use_per_trial_baseline=False, override=DatasetOverride(),
++        use_per_trial_baseline=False, trial_type_filter=None,
++        override=DatasetOverride(),
+         tracking=_Tracking(),
+     )
+     out1 = tmp_path / "a.csv"
+     ec.build_wide_csv([str(live), str(frozen)], str(out1), measure_cols=["envelope_of_rms"])
+     base = pd.read_csv(out1)
+     freeze.save_slice(
+         cache, "wide", "FROZEN", base[base["dataset"] == "FROZEN"].reset_index(drop=True), fp
+     )
+     shutil.rmtree(cache)
+     assert freeze.load_slice(cache, "wide", "FROZEN", fp) is None
+diff --git a/tests/test_freeze_pipeline.py b/tests/test_freeze_pipeline.py
+index d57efcc..9022f0e 100644
+--- a/tests/test_freeze_pipeline.py
++++ b/tests/test_freeze_pipeline.py
+@@ -41,20 +41,21 @@ def _rows(dataset, tl=5):
+ 
+ 
+ def _fp_kw():
+     return dict(
+         measure_cols=["envelope_of_rms"],
+         fps_fallback=40.0,
+         distance_limits=None,
+         non_reactive_threshold=12.5,
+         low_max_threshold_px=5.0,
+         use_per_trial_baseline=False,
++        trial_type_filter=None,
+     )
+ 
+ 
+ def test_frozen_dataset_with_cache_resolves(tmp_path):
+     s = _Settings(tmp_path, {"DS": DatasetOverride(freeze_data=True)}, ["DS"])
+     fp = freeze.build_fingerprint(
+         protocol="v2", override=s.dataset_overrides["DS"], tracking=s.tracking,
+         **_fp_kw()
+     )
+     freeze.save_slice(s.cache_dir, "combined_base", "DS", _rows("DS"), fp)

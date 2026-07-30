@@ -1,0 +1,363 @@
+# Review package: 04e4e2a..7fa4d8b
+
+## Commits
+7fa4d8b feat(build_wide_csv): splice frozen dataset slices, folding own_max_len into the global max
+
+## Files changed
+ scripts/analysis/envelope_combined.py |  41 ++++++-
+ tests/test_freeze_wide.py             | 199 ++++++++++++++++++++++++++++++++++
+ 2 files changed, 239 insertions(+), 1 deletion(-)
+
+## Diff
+diff --git a/scripts/analysis/envelope_combined.py b/scripts/analysis/envelope_combined.py
+index 64264eb..1903e9a 100644
+--- a/scripts/analysis/envelope_combined.py
++++ b/scripts/analysis/envelope_combined.py
+@@ -2604,27 +2604,38 @@ def build_wide_csv(
+     measure_cols: Sequence[str],
+     fps_fallback: float = 40.0,
+     exclude_roots: Sequence[str] | None = None,
+     distance_limits: tuple[float, float] | None = None,
+     config_path: str | Path | None = None,
+     trial_type_filter: str | Sequence[str] | None = None,
+     extra_trial_exports: Mapping[str, str] | None = None,
+     non_reactive_threshold: float | None = None,
+     low_max_threshold_px: float = LOW_MAX_FLAG_THRESHOLD_PX,
+     use_per_trial_baseline: bool = False,
++    frozen_slices: Mapping[str, tuple[pd.DataFrame, int]] | None = None,
+ ) -> None:
+     print(
+         f"[DEBUG] build_wide_csv → roots={list(roots)} output={output_csv} measure_cols={list(measure_cols)}"
+     )
+     out_path = Path(output_csv).expanduser().resolve()
+     out_path.parent.mkdir(parents=True, exist_ok=True)
+ 
++    # Frozen datasets: rows come from the freeze cache, their roots are NEVER
++    # walked. Keyed by the `dataset` column value == root basename (:2668).
++    # Values are (rows, own_max_len). This function stays config-free -- the
++    # caller decides what is frozen and loads the slices.
++    frozen: dict[str, tuple[pd.DataFrame, int]] = {
++        str(k): v for k, v in (frozen_slices or {}).items()
++    }
++    if frozen:
++        print(f"[FROZEN] Splicing cached rows for: {', '.join(sorted(frozen))}")
++
+     # Load tracking config for proboscis detection quality checks
+     settings = load_settings(config_path or DEFAULT_CONFIG_PATH)
+     tracking_cfg = settings.tracking
+ 
+     class2_min, class2_max = _resolve_distance_limits(distance_limits, config_path)
+     print(
+         f"[DEBUG] build_wide_csv: applying distance limits [{class2_min:.3f}, {class2_max:.3f}] for local extrema"
+     )
+     trimmed_threshold = (
+         float(non_reactive_threshold)
+@@ -2659,20 +2670,25 @@ def build_wide_csv(
+                 if str(value).strip()
+             }
+         if not trial_type_allow:
+             trial_type_allow = None
+ 
+     for root in _normalise_roots(roots):
+         if root in exclude:
+             print(f"[SKIP] Excluding dataset root: {root}")
+             continue
+         dataset = root.name
++        if dataset in frozen:
++            # freeze.data is a promise, not a check: never stat/iterdir/hash a
++            # frozen root. This skip IS the performance win.
++            print(f"[FROZEN] Not walking root (cached rows will be spliced): {root}")
++            continue
+         for fly_dir in sorted(p for p in root.iterdir() if p.is_dir()):
+             fly = fly_dir.name
+             # Resolve canonical genotype from the batch's session_metadata.txt and
+             # ntfy-alert (once) on any uncatalogued "Fly Type:" so it can be added.
+             # v1 ("legacy") has no genotype concept and no session_metadata.txt, so
+             # skip the lookup there (fly_type is not written into the wide CSV).
+             if _is_legacy(fly_dir):
+                 # Legacy (v1) has no genotype concept and no session_metadata.txt;
+                 # keep a neutral placeholder so the per-trial items dict stays
+                 # uniform. The fly_type column itself is dropped from the legacy
+@@ -2723,32 +2739,39 @@ def build_wide_csv(
+                         "fly_type": fly_type,
+                         "fly_dir": str(fly_dir),
+                         "csv_path": csv_path,
+                         "measure_col": measure,
+                         "trial_type": trial_type,
+                         "slot_label": slot_label,
+                         "_header_cols": list(header.columns),
+                     }
+                 )
+ 
+-    if not items:
++    if not items and not frozen:
+         raise RuntimeError("No eligible testing/training CSVs found in provided roots.")
+ 
+     # Compute max_len via a cheap row count (parquet footer or csv line count;
+     # avoids a full read per file).
+     for item in items:
+         try:
+             n_rows = _table_num_rows(Path(item["csv_path"]))
+         except Exception:
+             n_rows = 0
+         max_len = max(max_len, n_rows)
+ 
++    # Fold each frozen dataset's OWN max trace length into the global max.
++    # Without this, a frozen dataset whose traces are longer than any live
++    # dataset's has its cached rows silently CHOPPED by the truncation branch
++    # below (:3283-3284) -- data loss with no error.
++    for _frozen_rows, _own in frozen.values():
++        max_len = max(max_len, int(_own))
++
+     fly_before_samples: dict[str, list[np.ndarray]] = {}
+     baseline_types = trial_type_allow or {"testing"}
+     for item in items:
+         csv_path = Path(item["csv_path"])
+         measure = str(item["measure_col"])
+         if item.get("trial_type") not in baseline_types:
+             continue
+         # Read up to the per-trial odor-on frame so the baseline sample for
+         # RandomPanel-style short trials does not bleed into the stim window.
+         # Legacy protocol always uses the hardcoded 1260-frame before window.
+@@ -3288,20 +3311,36 @@ def build_wide_csv(
+                 pd.DataFrame([row], columns=metadata + list(AUC_COLUMNS) + value_cols).to_csv(
+                     out_path, index=False, mode="a", header=False
+                 )
+                 main_rows_written += 1
+             extra_target = extra_paths.get(trial_key)
+             if extra_target is not None:
+                 pd.DataFrame([row], columns=metadata + list(AUC_COLUMNS) + value_cols).to_csv(
+                     extra_target, index=False, mode="a", header=False
+                 )
+ 
++    # Splice frozen rows. reindex(columns=...) IS pad-and-truncate: it inserts
++    # NaN for dir_val_* columns the cache lacks and drops any beyond max_len --
++    # exactly the live semantics at :3281-3284, in one call.
++    target_cols = metadata + list(AUC_COLUMNS) + value_cols
++    for _ds in sorted(frozen):
++        _rows, _ = frozen[_ds]
++        aligned = _rows.reindex(columns=target_cols)
++        trial_keys = aligned["trial_type"].astype(str).str.strip().str.lower()
++        for trial_key, group in aligned.groupby(trial_keys):
++            if trial_key in main_trial_allow:
++                group.to_csv(out_path, index=False, mode="a", header=False)
++                main_rows_written += len(group)
++            extra_target = extra_paths.get(trial_key)
++            if extra_target is not None:
++                group.to_csv(extra_target, index=False, mode="a", header=False)
++
+     flagged_path = out_path.with_name(out_path.stem + "_flagged_flies.txt")
+     with flagged_path.open("w", encoding="utf-8") as fh:
+         fh.write(
+             f"# Flies flagged as non-reactive after 1st–99th percentile pixel trimming (span ≤ {trimmed_threshold:g} px)\n"
+         )
+         fh.write("# dataset,fly,fly_number,trimmed_global_min,trimmed_global_max\n")
+         if flagged_summary:
+             for key in sorted(flagged_summary):
+                 dataset, fly, fly_number = key
+                 gmin, gmax = flagged_summary[key]
+diff --git a/tests/test_freeze_wide.py b/tests/test_freeze_wide.py
+new file mode 100644
+index 0000000..f97c71f
+--- /dev/null
++++ b/tests/test_freeze_wide.py
+@@ -0,0 +1,199 @@
++"""build_wide_csv splices frozen slices without walking their roots."""
++
++import numpy as np
++import pandas as pd
++import pytest
++
++import scripts.analysis.envelope_combined as ec
++import scripts.analysis.envelope_visuals as ev
++
++
++def _make_dataset(root, n_samples, fly="october_01_fly1"):
++    """One testing trial of *n_samples* points, in the layout build_wide_csv walks."""
++    out = root / fly / "angle_distance_rms_envelope"
++    out.mkdir(parents=True, exist_ok=True)
++    values = np.linspace(0, 100, n_samples, dtype=float)
++    pd.DataFrame({"envelope_of_rms": values}).to_csv(
++        out / f"{fly}_testing_1_angle_distance_rms_envelope.csv", index=False
++    )
++    return root
++
++
++def _build(roots, out_csv, **kw):
++    ec.build_wide_csv(
++        [str(r) for r in roots], str(out_csv), measure_cols=["envelope_of_rms"], **kw
++    )
++    return pd.read_csv(out_csv)
++
++
++@pytest.fixture(autouse=True)
++def _v2():
++    ev.set_protocol("v2")
++
++
++def test_frozen_slice_round_trips_identically_when_frozen_is_longer(tmp_path):
++    """THE load-bearing test.
++
++    The frozen dataset is given a LONGER trace than the live one on purpose. With
++    equal lengths this test would pass even if the own_max_len fold were missing
++    entirely -- the global max would be correct by accident. Unequal lengths are
++    what make it bite.
++    """
++    live = _make_dataset(tmp_path / "LIVE", 8)
++    frozen = _make_dataset(tmp_path / "FROZEN", 20)  # LONGER than live
++
++    baseline_csv = tmp_path / "baseline.csv"
++    baseline = _build([live, frozen], baseline_csv)
++
++    # Seed the cache from the baseline, exactly as Task 4's caller will.
++    frozen_rows = baseline[baseline["dataset"] == "FROZEN"].reset_index(drop=True)
++    own = int(frozen_rows["trace_len"].max())
++    assert own == 20
++
++    spliced_csv = tmp_path / "spliced.csv"
++    spliced = _build(
++        [live, frozen], spliced_csv, frozen_slices={"FROZEN": (frozen_rows, own)}
++    )
++
++    # Byte-identical output, frozen or not.
++    assert baseline_csv.read_bytes() != b""
++    pd.testing.assert_frame_equal(
++        baseline.sort_values(["dataset", "fly"]).reset_index(drop=True),
++        spliced.sort_values(["dataset", "fly"]).reset_index(drop=True),
++    )
++    # The global max grew to the FROZEN dataset's length, not the live one's.
++    assert "dir_val_19" in spliced.columns
++    assert "dir_val_20" not in spliced.columns
++
++
++def test_frozen_rows_not_truncated_when_no_live_dataset_is_as_long(tmp_path):
++    """Directly pins the failure the own_max_len fold prevents: silent chopping."""
++    live = _make_dataset(tmp_path / "LIVE", 5)
++    frozen = _make_dataset(tmp_path / "FROZEN", 30)
++
++    baseline = _build([live, frozen], tmp_path / "b.csv")
++    frozen_rows = baseline[baseline["dataset"] == "FROZEN"].reset_index(drop=True)
++
++    spliced = _build(
++        [live, frozen], tmp_path / "s.csv", frozen_slices={"FROZEN": (frozen_rows, 30)}
++    )
++    row = spliced[spliced["dataset"] == "FROZEN"].iloc[0]
++    # Sample 29 is real data, not padding, and must survive.
++    assert not pd.isna(row["dir_val_29"])
++    assert int(row["trace_len"]) == 30
++
++
++def test_frozen_shorter_than_live_is_nan_padded(tmp_path):
++    live = _make_dataset(tmp_path / "LIVE", 25)
++    frozen = _make_dataset(tmp_path / "FROZEN", 6)
++
++    baseline = _build([live, frozen], tmp_path / "b.csv")
++    frozen_rows = baseline[baseline["dataset"] == "FROZEN"].reset_index(drop=True)
++
++    spliced = _build(
++        [live, frozen], tmp_path / "s.csv", frozen_slices={"FROZEN": (frozen_rows, 6)}
++    )
++    row = spliced[spliced["dataset"] == "FROZEN"].iloc[0]
++    assert not pd.isna(row["dir_val_5"])   # last real sample
++    assert pd.isna(row["dir_val_24"])      # padding out to the live max
++    assert int(row["trace_len"]) == 6
++
++
++def test_frozen_root_is_never_walked(tmp_path):
++    """The entire performance claim. If this passes vacuously the feature is a lie."""
++    live = _make_dataset(tmp_path / "LIVE", 8)
++    frozen = _make_dataset(tmp_path / "FROZEN", 8)
++
++    baseline = _build([live, frozen], tmp_path / "b.csv")
++    frozen_rows = baseline[baseline["dataset"] == "FROZEN"].reset_index(drop=True)
++
++    walked = []
++    real_iterdir = ec.Path.iterdir
++
++    def _spy(self):
++        walked.append(str(self))
++        return real_iterdir(self)
++
++    ec.Path.iterdir = _spy
++    try:
++        _build(
++            [live, frozen], tmp_path / "s.csv",
++            frozen_slices={"FROZEN": (frozen_rows, 8)},
++        )
++    finally:
++        ec.Path.iterdir = real_iterdir
++
++    assert not any("FROZEN" in w for w in walked), f"frozen root was walked: {walked}"
++    # Guard against the spy simply never firing -- the live root MUST be walked.
++    assert any("LIVE" in w for w in walked), "spy never fired; test proves nothing"
++
++
++def test_all_datasets_frozen_does_not_raise(tmp_path):
++    """items is empty when every root is frozen. The pre-existing guard at
++    envelope_combined.py:2733 raises RuntimeError on empty items -- it must not
++    fire when frozen rows are present."""
++    a = _make_dataset(tmp_path / "A", 8)
++    b = _make_dataset(tmp_path / "B", 12)
++
++    baseline = _build([a, b], tmp_path / "b.csv")
++    rows_a = baseline[baseline["dataset"] == "A"].reset_index(drop=True)
++    rows_b = baseline[baseline["dataset"] == "B"].reset_index(drop=True)
++
++    out = _build(
++        [a, b], tmp_path / "s.csv",
++        frozen_slices={"A": (rows_a, 8), "B": (rows_b, 12)},
++    )
++    assert set(out["dataset"]) == {"A", "B"}
++    assert len(out) == len(baseline)
++
++
++def test_no_eligible_data_and_no_frozen_still_raises(tmp_path):
++    """The empty-items guard must survive for the case it was written for."""
++    empty = tmp_path / "EMPTY"
++    empty.mkdir()
++    with pytest.raises(RuntimeError, match="No eligible"):
++        _build([empty], tmp_path / "s.csv")
++
++
++def test_frozen_slices_none_is_todays_behavior(tmp_path):
++    """Default off: absent frozen_slices must not perturb output."""
++    live = _make_dataset(tmp_path / "LIVE", 8)
++    a = _build([live], tmp_path / "a.csv")
++    b = _build([live], tmp_path / "b.csv", frozen_slices=None)
++    pd.testing.assert_frame_equal(a, b)
++
++
++def test_frozen_training_rows_route_to_extra_export(tmp_path):
++    """A cached slice holds ALL trial types; the splice must route them the same
++    way live rows are routed (testing -> main, training -> extra export)."""
++    root = tmp_path / "DS"
++    fly = "october_01_fly1"
++    out = root / fly / "angle_distance_rms_envelope"
++    out.mkdir(parents=True, exist_ok=True)
++    for tt in ("testing", "training"):
++        pd.DataFrame({"envelope_of_rms": np.linspace(0, 100, 9)}).to_csv(
++            out / f"{fly}_{tt}_1_angle_distance_rms_envelope.csv", index=False
++        )
++
++    main_csv = tmp_path / "main.csv"
++    train_csv = tmp_path / "train.csv"
++    ec.build_wide_csv(
++        [str(root)], str(main_csv),
++        measure_cols=["envelope_of_rms"],
++        extra_trial_exports={"training": str(train_csv)},
++    )
++    all_rows = pd.concat(
++        [pd.read_csv(main_csv), pd.read_csv(train_csv)], ignore_index=True
++    )
++    assert set(all_rows["trial_type"].str.lower()) == {"testing", "training"}
++
++    m2 = tmp_path / "main2.csv"
++    t2 = tmp_path / "train2.csv"
++    ec.build_wide_csv(
++        [str(root)], str(m2),
++        measure_cols=["envelope_of_rms"],
++        extra_trial_exports={"training": str(t2)},
++        frozen_slices={"DS": (all_rows, 9)},
++    )
++    assert set(pd.read_csv(m2)["trial_type"].str.lower()) == {"testing"}
++    assert set(pd.read_csv(t2)["trial_type"].str.lower()) == {"training"}

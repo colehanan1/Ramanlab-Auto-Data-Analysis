@@ -1,0 +1,443 @@
+# Review package: a4b8b57..7a6beab
+
+## Commits
+7a6beab fix(freeze): fingerprint settings.tracking; address review findings
+88b1df0 feat(freeze): add per-dataset freeze cache (fingerprint, slice save/load)
+
+## Files changed
+ src/fbpipe/freeze.py       | 227 +++++++++++++++++++++++++++++++++++++++++++++
+ tests/test_freeze_cache.py | 192 ++++++++++++++++++++++++++++++++++++++
+ 2 files changed, 419 insertions(+)
+
+## Diff
+diff --git a/src/fbpipe/freeze.py b/src/fbpipe/freeze.py
+new file mode 100644
+index 0000000..53ae605
+--- /dev/null
++++ b/src/fbpipe/freeze.py
+@@ -0,0 +1,227 @@
++"""Per-dataset freeze cache.
++
++A frozen dataset keeps its rows in the wide CSV without being re-derived. This
++module owns the cache only: fingerprinting, and saving/loading a dataset's row
++slice. It deliberately knows nothing about ``build_wide_csv`` -- the splice
++lives there, and the policy (which datasets are frozen) lives in the caller.
++
++Layout, under the configured ``cache_dir``::
++
++    <cache_dir>/frozen/<wide_block>/<dataset>/
++        rows.parquet    # the dataset's slice of that block's wide CSV
++        meta.json       # fingerprint + own_max_len
++
++The cache is a DERIVED artifact. Deleting it is always safe: every frozen
++dataset's raw data stays on disk, so a miss simply re-derives.
++
++The ``wide_block`` component is a partitioning LABEL, not the correctness
++mechanism. Correctness rests on the fingerprint (which includes
++``measure_cols``). Keying by block is a safe over-partition: it may duplicate an
++identical slice across two blocks that share parameters, but it can never serve
++the wrong rows.
++"""
++
++from __future__ import annotations
++
++import json
++from pathlib import Path
++from typing import Any, Iterable, Mapping, NamedTuple, Optional
++
++import pandas as pd
++
++FREEZE_SCHEMA_VERSION = 1
++
++
++class FrozenSlice(NamedTuple):
++    """A dataset's cached wide rows plus its OWN maximum trace length.
++
++    ``own_max_len`` is load-bearing. ``build_wide_csv`` pads *and truncates*
++    every row to one global ``max_len``; if a frozen dataset's own length is not
++    folded into that global max, its cached rows are silently chopped.
++    """
++
++    rows: pd.DataFrame
++    own_max_len: int
++
++
++def freeze_flags(
++    cfg: Any,
++    dataset: str,
++    *,
++    thawed: Iterable[str] = (),
++    thaw_all: bool = False,
++) -> tuple[bool, bool]:
++    """Return ``(freeze_data, freeze_figures)`` for *dataset*, honoring thaw.
++
++    ``thawed`` names datasets to treat as unfrozen for this run only;
++    ``thaw_all`` unfreezes everything. Neither edits config.
++    """
++    if thaw_all or dataset in set(thawed):
++        return (False, False)
++    override = (getattr(cfg, "dataset_overrides", None) or {}).get(dataset)
++    if override is None:
++        return (False, False)
++    return (bool(override.freeze_data), bool(override.freeze_figures))
++
++
++def build_fingerprint(
++    *,
++    protocol: str,
++    measure_cols: Iterable[str],
++    fps_fallback: float,
++    distance_limits: Optional[tuple[float, float]],
++    non_reactive_threshold: Optional[float],
++    low_max_threshold_px: float,
++    use_per_trial_baseline: bool,
++    override: Any,
++    tracking: Any,
++) -> dict:
++    """Everything that determines a dataset's rows OTHER than its raw data.
++
++    Raw data is deliberately absent: ``freeze.data`` never walks the root. Config
++    IS checked, because it is already in memory and free -- without this, changing
++    an analysis parameter while a dataset is frozen would leave one CSV silently
++    mixing two parameterizations.
++
++    ``figure_output_subdir`` is deliberately EXCLUDED: it routes figures and
++    cannot change a row value, so it must not invalidate a data cache.
++    """
++    return {
++        "protocol": str(protocol),
++        "measure_cols": [str(c) for c in measure_cols],
++        "fps_fallback": float(fps_fallback),
++        "distance_limits": (
++            None if distance_limits is None else [float(x) for x in distance_limits]
++        ),
++        "non_reactive_threshold": (
++            None if non_reactive_threshold is None else float(non_reactive_threshold)
++        ),
++        "low_max_threshold_px": float(low_max_threshold_px),
++        "use_per_trial_baseline": bool(use_per_trial_baseline),
++        "override": {
++            "trial_type_override": getattr(override, "trial_type_override", None),
++            "odor_on_s": getattr(override, "odor_on_s", None),
++            "odor_off_s": getattr(override, "odor_off_s", None),
++            "light_only": bool(getattr(override, "light_only", False)),
++            "light_start_s": getattr(override, "light_start_s", None),
++            "light_duration_s": getattr(override, "light_duration_s", None),
++            "odor_remap": dict(getattr(override, "odor_remap", {}) or {}),
++        },
++        # build_wide_csv reads settings.tracking internally (envelope_combined.py:2622)
++        # and derives the tracking_missing_frames / tracking_pct_missing /
++        # tracking_flagged columns from it (:3050, :3067-3068, :3111). Omitting it
++        # would serve stale rows whose tracking flags used a different threshold.
++        # Recorded unconditionally even when apply_missing_frame_check is False:
++        # a needless rebuild is cheap and self-healing, a stale row is not.
++        "tracking": {
++            "apply_missing_frame_check": bool(
++                getattr(tracking, "apply_missing_frame_check", True)
++            ),
++            "max_missing_frames_per_trial": getattr(
++                tracking, "max_missing_frames_per_trial", None
++            ),
++            "max_missing_frames_pct_per_trial": getattr(
++                tracking, "max_missing_frames_pct_per_trial", None
++            ),
++        },
++    }
++
++
++def _safe(name: str) -> str:
++    """Filesystem-safe cache component. Dataset names carry dots and dashes
++    (``Hex-Control-24-0.1``); only separators are unsafe."""
++    return str(name).replace("/", "_").replace("\\", "_").strip() or "_"
++
++
++def slice_dir(cache_dir: str | Path, wide_block: str, dataset: str) -> Path:
++    return Path(cache_dir).expanduser() / "frozen" / _safe(wide_block) / _safe(dataset)
++
++
++def own_max_len(rows: pd.DataFrame) -> int:
++    """This dataset's own maximum trace length, in samples.
++
++    ``trace_len`` is written as ``int(len(values))`` -- the UNPADDED length
++    (``envelope_combined.py:3114``). But a row whose values exceeded the run's
++    global max was truncated on write while ``trace_len`` kept the original
++    figure, so clamp to the dir_val columns actually present. Over-reporting
++    would pad the global max out to a width holding no data.
++    """
++    val_cols = [c for c in rows.columns if str(c).startswith("dir_val_")]
++    present = len(val_cols)
++    if "trace_len" not in rows.columns or rows.empty:
++        return present
++    tl = pd.to_numeric(rows["trace_len"], errors="coerce").max()
++    if pd.isna(tl):
++        return present
++    return max(0, min(int(tl), present))
++
++
++def save_slice(
++    cache_dir: str | Path,
++    wide_block: str,
++    dataset: str,
++    rows: pd.DataFrame,
++    fingerprint: Mapping[str, Any],
++) -> None:
++    """Persist *rows* as *dataset*'s slice of *wide_block*.
++
++    Stores the rows exactly as written, across ALL trial types -- the splice
++    routes them to the main output or an extra trial export the same way live
++    rows are routed.
++    """
++    target = slice_dir(cache_dir, wide_block, dataset)
++    target.mkdir(parents=True, exist_ok=True)
++    rows.to_parquet(target / "rows.parquet", index=False)
++    meta = {
++        "schema_version": FREEZE_SCHEMA_VERSION,
++        "dataset": str(dataset),
++        "wide_block": str(wide_block),
++        "own_max_len": own_max_len(rows),
++        "row_count": int(len(rows)),
++        "columns": [str(c) for c in rows.columns],
++        "fingerprint": dict(fingerprint),
++    }
++    (target / "meta.json").write_text(json.dumps(meta, indent=2, sort_keys=True))
++
++
++def load_slice(
++    cache_dir: str | Path,
++    wide_block: str,
++    dataset: str,
++    fingerprint: Mapping[str, Any],
++) -> Optional[FrozenSlice]:
++    """Return the cached slice, or ``None`` if it cannot be trusted.
++
++    ``None`` means "re-derive this dataset": cache miss, fingerprint drift,
++    schema-version bump, or an unreadable/corrupt cache. Callers implement
++    auto-rebuild by simply omitting the dataset from ``frozen_slices``, which
++    lets its root be walked normally.
++    """
++    target = slice_dir(cache_dir, wide_block, dataset)
++    meta_path = target / "meta.json"
++    rows_path = target / "rows.parquet"
++    if not meta_path.is_file() or not rows_path.is_file():
++        return None
++    try:
++        meta = json.loads(meta_path.read_text())
++    except Exception:
++        return None
++    if meta.get("schema_version") != FREEZE_SCHEMA_VERSION:
++        return None
++    if meta.get("fingerprint") != json.loads(json.dumps(dict(fingerprint))):
++        return None
++    try:
++        rows = pd.read_parquet(rows_path)
++    except Exception:
++        return None
++    return FrozenSlice(rows=rows, own_max_len=int(meta.get("own_max_len", 0)))
++
++
++def drift_reason(
++    cached: Mapping[str, Any], current: Mapping[str, Any]
++) -> Optional[str]:
++    """Name the first fingerprint field that differs, for a one-line log."""
++    for key in sorted(set(cached) | set(current)):
++        if cached.get(key) != current.get(key):
++            return f"{key}: {cached.get(key)!r} -> {current.get(key)!r}"
++    return None
+diff --git a/tests/test_freeze_cache.py b/tests/test_freeze_cache.py
+new file mode 100644
+index 0000000..b9b5883
+--- /dev/null
++++ b/tests/test_freeze_cache.py
+@@ -0,0 +1,192 @@
++"""Freeze cache: fingerprint, own_max_len, save/load round-trip."""
++
++from types import SimpleNamespace
++
++import numpy as np
++import pandas as pd
++
++from fbpipe import freeze
++from fbpipe.config import DatasetOverride
++
++
++def _rows(trace_lens, n_val_cols):
++    """Build a wide-CSV-shaped frame: trace_len + NaN-padded dir_val_* columns."""
++    recs = []
++    for tl in trace_lens:
++        rec = {"dataset": "DS", "trial_type": "testing", "trace_len": tl}
++        for i in range(n_val_cols):
++            rec[f"dir_val_{i}"] = float(i) if i < tl else np.nan
++        recs.append(rec)
++    return pd.DataFrame(recs)
++
++
++def _tracking(**kw):
++    """Duck-typed stand-in for ``TrackingConfig`` -- freeze.py must not import
++    fbpipe.config, so build_fingerprint reaches these fields via getattr."""
++    base = dict(
++        apply_missing_frame_check=True,
++        max_missing_frames_per_trial=5000,
++        max_missing_frames_pct_per_trial=50.0,
++    )
++    base.update(kw)
++    return SimpleNamespace(**base)
++
++
++def _fp(**kw):
++    base = dict(
++        protocol="v2",
++        measure_cols=["envelope_of_rms"],
++        fps_fallback=40.0,
++        distance_limits=None,
++        non_reactive_threshold=12.5,
++        low_max_threshold_px=5.0,
++        use_per_trial_baseline=False,
++        override=DatasetOverride(),
++        tracking=_tracking(),
++    )
++    base.update(kw)
++    return freeze.build_fingerprint(**base)
++
++
++def test_own_max_len_is_max_trace_len(tmp_path):
++    assert freeze.own_max_len(_rows([10, 7, 3], 10)) == 10
++
++
++def test_own_max_len_clamped_to_present_columns():
++    """A truncated row can carry trace_len > the dir_val columns it actually has.
++    own_max_len must not over-report, or reload pads to a width with no data."""
++    rows = _rows([10], 10)
++    rows["trace_len"] = 99  # claims 99 samples, only 10 dir_val columns exist
++    assert freeze.own_max_len(rows) == 10
++
++
++def test_save_load_round_trip(tmp_path):
++    rows = _rows([10, 7], 10)
++    fp = _fp()
++    freeze.save_slice(tmp_path, "combined_base", "DS", rows, fp)
++    got = freeze.load_slice(tmp_path, "combined_base", "DS", fp)
++    assert got is not None
++    assert got.own_max_len == 10
++    pd.testing.assert_frame_equal(
++        got.rows.reset_index(drop=True), rows.reset_index(drop=True)
++    )
++
++
++def test_load_miss_returns_none(tmp_path):
++    assert freeze.load_slice(tmp_path, "combined_base", "NOPE", _fp()) is None
++
++
++def test_fingerprint_drift_returns_none(tmp_path):
++    """A changed analysis parameter must invalidate -- else one CSV mixes two
++    parameterizations."""
++    freeze.save_slice(tmp_path, "combined_base", "DS", _rows([5], 5), _fp())
++    drifted = _fp(non_reactive_threshold=10.0)
++    assert freeze.load_slice(tmp_path, "combined_base", "DS", drifted) is None
++
++
++def test_protocol_drift_returns_none(tmp_path):
++    """legacy and v2 have different column sets -- a schema mismatch, not a value
++    drift."""
++    freeze.save_slice(tmp_path, "combined_base", "DS", _rows([5], 5), _fp())
++    assert freeze.load_slice(tmp_path, "combined_base", "DS", _fp(protocol="legacy")) is None
++
++
++def test_odor_remap_drift_returns_none(tmp_path):
++    freeze.save_slice(tmp_path, "combined_base", "DS", _rows([5], 5), _fp())
++    drifted = _fp(override=DatasetOverride(odor_remap={"Citral": "Yeast"}))
++    assert freeze.load_slice(tmp_path, "combined_base", "DS", drifted) is None
++
++
++def test_tracking_max_missing_frames_per_trial_drift_returns_none(tmp_path):
++    """A changed missing-frames threshold must invalidate -- otherwise cached
++    rows keep tracking_flagged values computed under the old threshold."""
++    freeze.save_slice(tmp_path, "combined_base", "DS", _rows([5], 5), _fp())
++    drifted = _fp(tracking=_tracking(max_missing_frames_per_trial=100))
++    assert freeze.load_slice(tmp_path, "combined_base", "DS", drifted) is None
++
++
++def test_tracking_max_missing_frames_pct_per_trial_drift_returns_none(tmp_path):
++    freeze.save_slice(tmp_path, "combined_base", "DS", _rows([5], 5), _fp())
++    drifted = _fp(tracking=_tracking(max_missing_frames_pct_per_trial=25.0))
++    assert freeze.load_slice(tmp_path, "combined_base", "DS", drifted) is None
++
++
++def test_tracking_apply_missing_frame_check_toggle_returns_none(tmp_path):
++    freeze.save_slice(tmp_path, "combined_base", "DS", _rows([5], 5), _fp())
++    drifted = _fp(tracking=_tracking(apply_missing_frame_check=False))
++    assert freeze.load_slice(tmp_path, "combined_base", "DS", drifted) is None
++
++
++def test_tracking_unchanged_still_loads(tmp_path):
++    """Proves drift detection, not blanket invalidation: an identical tracking
++    config (even a fresh, separately-constructed stub) must still hit."""
++    freeze.save_slice(tmp_path, "combined_base", "DS", _rows([5], 5), _fp())
++    same = _fp(tracking=_tracking())
++    assert freeze.load_slice(tmp_path, "combined_base", "DS", same) is not None
++
++
++def test_figure_output_subdir_does_not_invalidate(tmp_path):
++    """figure_output_subdir routes figures; it cannot change a row value, so it
++    must NOT invalidate a data cache."""
++    freeze.save_slice(tmp_path, "combined_base", "DS", _rows([5], 5), _fp())
++    same = _fp(override=DatasetOverride(figure_output_subdir="RandomPanel"))
++    assert freeze.load_slice(tmp_path, "combined_base", "DS", same) is not None
++
++
++def test_blocks_do_not_collide(tmp_path):
++    """combined_base and distance_base have different measure_cols and so
++    different rows. Serving one for the other is a silent data corruption."""
++    cb = _rows([5], 5)
++    db = _rows([9], 9)
++    freeze.save_slice(tmp_path, "combined_base", "DS", cb, _fp(measure_cols=["combined_pct"]))
++    freeze.save_slice(tmp_path, "distance_base", "DS", db, _fp(measure_cols=["distance_percentage"]))
++    got_cb = freeze.load_slice(tmp_path, "combined_base", "DS", _fp(measure_cols=["combined_pct"]))
++    got_db = freeze.load_slice(tmp_path, "distance_base", "DS", _fp(measure_cols=["distance_percentage"]))
++    assert got_cb.own_max_len == 5
++    assert got_db.own_max_len == 9
++
++
++def test_corrupt_cache_returns_none_not_raise(tmp_path):
++    freeze.save_slice(tmp_path, "combined_base", "DS", _rows([5], 5), _fp())
++    (freeze.slice_dir(tmp_path, "combined_base", "DS") / "meta.json").write_text("{not json")
++    assert freeze.load_slice(tmp_path, "combined_base", "DS", _fp()) is None
++
++
++def test_corrupt_parquet_returns_none_not_raise(tmp_path):
++    """Mirrors the meta.json-corruption case: a corrupt rows.parquet must also
++    miss cleanly rather than raise out of load_slice."""
++    freeze.save_slice(tmp_path, "combined_base", "DS", _rows([5], 5), _fp())
++    (freeze.slice_dir(tmp_path, "combined_base", "DS") / "rows.parquet").write_bytes(b"not parquet")
++    assert freeze.load_slice(tmp_path, "combined_base", "DS", _fp()) is None
++
++
++class _Cfg:
++    def __init__(self, overrides):
++        self.dataset_overrides = overrides
++
++
++def test_freeze_flags_reads_override():
++    cfg = _Cfg({"DS": DatasetOverride(freeze_data=True, freeze_figures=False)})
++    assert freeze.freeze_flags(cfg, "DS") == (True, False)
++
++
++def test_freeze_flags_unknown_dataset_is_unfrozen():
++    assert freeze.freeze_flags(_Cfg({}), "NOPE") == (False, False)
++
++
++def test_thaw_overrides_named_dataset():
++    cfg = _Cfg({"DS": DatasetOverride(freeze_data=True, freeze_figures=True)})
++    assert freeze.freeze_flags(cfg, "DS", thawed=["DS"]) == (False, False)
++
++
++def test_thaw_does_not_affect_other_datasets():
++    cfg = _Cfg({
++        "DS": DatasetOverride(freeze_data=True, freeze_figures=True),
++        "OTHER": DatasetOverride(freeze_data=True, freeze_figures=True),
++    })
++    assert freeze.freeze_flags(cfg, "OTHER", thawed=["DS"]) == (True, True)
++
++
++def test_thaw_all_overrides_everything():
++    cfg = _Cfg({"DS": DatasetOverride(freeze_data=True, freeze_figures=True)})
++    assert freeze.freeze_flags(cfg, "DS", thaw_all=True) == (False, False)

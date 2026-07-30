@@ -1,0 +1,1130 @@
+# Review package: d2a7b99..26ee52f
+
+## Commits
+26ee52f fix(reaction_matrix): equalise pair-figure cell height, guard it with a real test
+1380918 fix(.gitignore): ensure docs/ and CLAUDE.md are tracked
+e2c07e5 feat(reaction_matrix): split train-vs-ctrl into bars + control|training pair
+
+## Files changed
+ .gitignore                                         |   4 +-
+ .../reaction_matrix_training_vs_control.py         | 447 ++++++++++-------
+ tests/test_train_vs_ctrl_split.py                  | 554 +++++++++++++++++++++
+ 3 files changed, 829 insertions(+), 176 deletions(-)
+
+## Diff
+diff --git a/.gitignore b/.gitignore
+index 945df7e..1640c6e 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -106,11 +106,13 @@ PiCode/
+ combinedv2_1.py
+ combinedv2_1_pi1.py
+ combinedv2_pi1.py
+ combinedv2_pi2.py
+ combinedv3_pi1.py
+ combinedv3_pi2.py
+ esphomeflynursery2.yaml
+ 
+ figures/
+ 
+-docs/
+\ No newline at end of file
++docs/
++
++CLAUDE.md
+\ No newline at end of file
+diff --git a/scripts/analysis/reaction_matrix_training_vs_control.py b/scripts/analysis/reaction_matrix_training_vs_control.py
+index 7f93e06..4453f4f 100644
+--- a/scripts/analysis/reaction_matrix_training_vs_control.py
++++ b/scripts/analysis/reaction_matrix_training_vs_control.py
+@@ -501,20 +501,206 @@ def plot_training_vs_control_bars(
+             )
+ 
+     _annotate(bars_train, "rate_train", "num_trials_train")
+     _annotate(bars_ctrl, "rate_ctrl", "num_trials_ctrl")
+ 
+     # Draw significance brackets if p-values provided
+     if p_values:
+         _draw_significance_brackets(ax, x, bar_w, merged, p_values)
+ 
+ 
++# ---------------------------------------------------------------------------
++# Binary during-reaction matrix builder (training OR control)
++# ---------------------------------------------------------------------------
++
++def _build_during_matrix(
++    df: pd.DataFrame,
++    dataset: str,
++    genotype: str | None,
++    *,
++    remap_from: str,
++    columns: list[str] | None = None,
++    order: str = "observed",
++) -> tuple[np.ndarray, list[tuple], list[str], set]:
++    """Build the binary during-reaction matrix for one dataset.
++
++    ``remap_from`` names the dataset whose label-resolution dictates the
++    display labels — for both the v2 per-dataset odor_remap
++    (``apply_dataset_odor_remap``) and the legacy schedule-based
++    ``_display_odor`` lookup. The TRAINING dataset dictates substitute
++    labels for BOTH panels so train and control heatmap rows align (see the
++    note this was extracted from, originally at
++    reaction_matrix_training_vs_control.py:676-678). Callers always pass
++    ``remap_from=train_ds`` for both the training and the control call —
++    resolving the control's remap from its own dataset would let the two
++    panels disagree on a column's label and make the comparison meaningless.
++
++    ``columns`` forces a caller-supplied column list/order (v2: matched by
++    odor-display key, so an odor absent from this dataset's own data becomes
++    an all-NaN/grey column at the training-assigned position rather than
++    shifting the layout; legacy: the derived per-dataset trial order already
++    matches by construction for a real training/control pair — see the
++    module-level note above ``generate_training_vs_control_matrices`` — so
++    ``columns`` only overrides the returned display labels there).
++
++    ``order`` ("observed" | "trained-first") only affects the legacy branch
++    (v2 has one fixed ordering scheme; see ``_trial_order_for``), but must
++    still be threaded through explicitly by the caller — defaulting it
++    silently inside this function would make the "trained-first"/unordered
++    output silently regress to "observed" ordering.
++
++    Returns ``(during_matrix, fly_pairs, odor_columns, flagged_pairs)``, or
++    ``(np.empty((0, 0)), [], [], set())`` when everything filters out.
++    """
++    subset = df[df["dataset_canon"] == dataset].copy()
++    if genotype is not None:
++        subset = subset[subset["fly_type"].astype(str).str.strip() == genotype].copy()
++        if subset.empty:
++            return np.empty((0, 0)), [], [], set()
++    subset = _normalise_fly_columns(subset)
++    drop_mask = subset["trial"].apply(_is_testing_11_label)
++    if drop_mask.any():
++        subset = subset.loc[~drop_mask].copy()
++        if subset.empty:
++            return np.empty((0, 0)), [], [], set()
++
++    flagged_pairs = set()
++    fm = non_reactive_mask(subset)
++    if fm.any():
++        flagged_pairs = {
++            (r.fly, r.fly_number)
++            for r in subset[fm][["fly", "fly_number"]].drop_duplicates().itertuples(index=False)
++        }
++        fly_pair_series = subset[["fly", "fly_number"]].apply(tuple, axis=1)
++        subset = subset.loc[~fly_pair_series.isin(flagged_pairs)]
++        if subset.empty:
++            return np.empty((0, 0)), [], [], set()
++
++    fly_pairs = sorted(
++        [(r.fly, r.fly_number)
++         for r in subset[["fly", "fly_number"]].drop_duplicates().itertuples(index=False)],
++        key=lambda p: _fly_sort_key(*p),
++    )
++
++    # Drop light-only trials
++    drop_mask = subset["trial"].apply(_is_light_only_label)
++    if drop_mask.any():
++        subset = subset.loc[~drop_mask].copy()
++
++    # Also drop trials whose label has no odor suffix (RandomPanel's
++    # training_15 / training_16 light-only — see reaction_matrix_from_spreadsheet.py).
++    # V2 only: legacy labels are plain ``testing_N`` (odor from the schedule),
++    # so this filter would drop every trial and empty the matrix.
++    if get_protocol() == "v2":
++        no_odor_mask = subset["trial"].apply(
++            lambda t: _extract_odor_from_label(t) == str(t)
++        )
++        if no_odor_mask.any():
++            subset = subset.loc[~no_odor_mask].copy()
++
++    # All trials filtered out (e.g. a legacy dataset whose labels carry no
++    # odor suffix, so the no-odor drop empties it). Skip this pair —
++    # an empty DataFrame.apply(axis=1) would raise below.
++    if subset.empty:
++        return np.empty((0, 0)), [], [], set()
++
++    if get_protocol() == "v2":
++        subset = subset.copy()
++        subset["_odor"] = subset["trial"].apply(_extract_odor_from_label)
++        # Per-dataset odor remap (training side dictates substitute labels
++        # so train + control heatmap rows align). Falls through to no
++        # change when the training dataset registers no override.
++        subset["_odor_display"] = subset.apply(
++            lambda r: (
++                None
++                if r["_odor"].lower() == "lightonly"
++                else apply_dataset_odor_remap(
++                    remap_from,
++                    _display_label_ci(r["_odor"]),
++                )
++            ),
++            axis=1,
++        )
++        subset = subset[subset["_odor_display"].notna()]
++
++        unique_odors = sorted(set(subset["_odor_display"]), key=str.lower)
++        n_fly_pairs = len(fly_pairs)
++        odor_occurrence_count: dict[str, int] = {}
++        for _, row in subset.iterrows():
++            disp = row["_odor_display"]
++            odor_occurrence_count[disp] = odor_occurrence_count.get(disp, 0) + 1
++        duplicated_odors = {o for o, c in odor_occurrence_count.items() if c > n_fly_pairs}
++        # Only number the trained odor in columns
++        highlight = _trained_label(remap_from)
++        trained_dup_odors = {
++            o for o in duplicated_odors
++            if o.casefold() == highlight.casefold()
++        }
++
++        if columns is not None:
++            odor_columns = list(columns)
++        else:
++            odor_columns = []
++            for o in unique_odors:
++                if o in trained_dup_odors:
++                    odor_columns.append(f"{o} 1")
++                    odor_columns.append(f"{o} 2")
++                else:
++                    odor_columns.append(o)
++
++        during_matrix = np.full((len(fly_pairs), len(odor_columns)), np.nan, dtype=float)
++        fly_map = {p: i for i, p in enumerate(fly_pairs)}
++        col_map = {col: idx for idx, col in enumerate(odor_columns)}
++
++        for (fly_val, fn_val), fly_subset in subset.groupby(["fly", "fly_number"]):
++            i = fly_map.get((fly_val, fn_val))
++            if i is None:
++                continue
++            seen_odors: dict[str, int] = {}
++            for _, row in fly_subset.sort_values("trial", key=lambda s: s.map(_trial_num)).iterrows():
++                disp = row["_odor_display"]
++                seen_odors[disp] = seen_odors.get(disp, 0) + 1
++                if disp in trained_dup_odors:
++                    col_label = f"{disp} {seen_odors[disp]}"
++                else:
++                    col_label = disp
++                j = col_map.get(col_label)
++                if j is not None:
++                    during_matrix[i, j] = int(row["during_hit"])
++    else:
++        trial_list = _drop_testing_11(_trial_order_for(list(subset["trial"].unique()), order))
++        trial_set = set(trial_list)
++        subset = subset[subset["trial"].isin(trial_set)]
++        pretty_labels = [_display_odor(remap_from, t) for t in trial_list]
++
++        during_matrix = np.full((len(fly_pairs), len(trial_list)), np.nan, dtype=float)
++        fly_map = {p: i for i, p in enumerate(fly_pairs)}
++        trial_map = {t: i for i, t in enumerate(trial_list)}
++        for _, row in subset.iterrows():
++            during_matrix[fly_map[(row["fly"], row["fly_number"])], trial_map[row["trial"]]] = int(row["during_hit"])
++
++        # `trial_list`/`trial_map` (raw labels like "testing_1") are the real
++        # matching key for legacy — pretty_labels can repeat text (e.g. two
++        # "Hexanol" columns) so it cannot double as a lookup key the way v2's
++        # odor_columns does. A forced `columns` therefore overrides only the
++        # returned display labels here; the matrix itself is still built from
++        # THIS dataset's own (position-deterministic, dataset-name-agnostic)
++        # trial ordering. This is safe whenever training and control expose
++        # the same set of testing trial numbers, which holds for every real
++        # training/control pair verified against production data (see the
++        # task-2 report) — a mismatched pair would misalign columns, a
++        # documented limitation rather than a silent-crash risk.
++        odor_columns = list(columns) if columns is not None else pretty_labels
++
++    return during_matrix, fly_pairs, odor_columns, flagged_pairs
++
++
+ # ---------------------------------------------------------------------------
+ # Main generation
+ # ---------------------------------------------------------------------------
+ 
+ def generate_training_vs_control_matrices(cfg: SpreadsheetMatrixConfig) -> None:
+     # Load and prepare predictions (same as reaction_matrix_from_spreadsheet)
+     df = read_table(cfg.csv_path)
+     required = {"dataset", "fly", "fly_number", "trial_label", "prediction"}
+     missing = required.difference(df.columns)
+     if missing:
+@@ -610,147 +796,31 @@ def generate_training_vs_control_matrices(cfg: SpreadsheetMatrixConfig) -> None:
+ 
+         for train_ds, ctrl_ds, genotype in pair_units:
+             # Skip training datasets with no control data
+             if train_ds in ("ACV-Training", "3OCT-Training"):
+                 print(f"[INFO] {train_ds} has no control data, skipping train vs control plots.")
+                 continue
+             if train_ds not in present:
+                 print(f"[INFO] {train_ds} not in predictions CSV, skipping.")
+                 continue
+ 
+-            # --- Build the MATRIX from the training dataset ---
+-            subset = df[df["dataset_canon"] == train_ds].copy()
+-            if genotype is not None:
+-                subset = subset[subset["fly_type"].astype(str).str.strip() == genotype].copy()
+-                if subset.empty:
+-                    continue
+-            subset = _normalise_fly_columns(subset)
+-            drop_mask = subset["trial"].apply(_is_testing_11_label)
+-            if drop_mask.any():
+-                subset = subset.loc[~drop_mask].copy()
+-                if subset.empty:
+-                    continue
+-
+-            flagged_pairs = set()
+-            fm = non_reactive_mask(subset)
+-            if fm.any():
+-                flagged_pairs = {
+-                    (r.fly, r.fly_number)
+-                    for r in subset[fm][["fly", "fly_number"]].drop_duplicates().itertuples(index=False)
+-                }
+-                fly_pair_series = subset[["fly", "fly_number"]].apply(tuple, axis=1)
+-                subset = subset.loc[~fly_pair_series.isin(flagged_pairs)]
+-                if subset.empty:
+-                    continue
+-
+-            fly_pairs = sorted(
+-                [(r.fly, r.fly_number)
+-                 for r in subset[["fly", "fly_number"]].drop_duplicates().itertuples(index=False)],
+-                key=lambda p: _fly_sort_key(*p),
++            # --- Build the training matrix, then the control matrix using
++            # the SAME (training-derived) columns and remap resolution so
++            # the two panels are directly comparable. ---
++            during_matrix, fly_pairs, odor_columns, flagged_pairs = _build_during_matrix(
++                df, train_ds, genotype, remap_from=train_ds, order=order
+             )
+-
+-            # Drop light-only trials
+-            drop_mask = subset["trial"].apply(_is_light_only_label)
+-            if drop_mask.any():
+-                subset = subset.loc[~drop_mask].copy()
+-
+-            # Also drop trials whose label has no odor suffix (RandomPanel's
+-            # training_15 / training_16 light-only — see reaction_matrix_from_spreadsheet.py).
+-            # V2 only: legacy labels are plain ``testing_N`` (odor from the schedule),
+-            # so this filter would drop every trial and empty the matrix.
+-            if get_protocol() == "v2":
+-                no_odor_mask = subset["trial"].apply(
+-                    lambda t: _extract_odor_from_label(t) == str(t)
+-                )
+-                if no_odor_mask.any():
+-                    subset = subset.loc[~no_odor_mask].copy()
+-
+-            # All trials filtered out (e.g. a legacy dataset whose labels carry no
+-            # odor suffix, so the no-odor drop empties it). Skip this pair —
+-            # an empty DataFrame.apply(axis=1) would raise below.
+-            if subset.empty:
++            if not len(fly_pairs):
+                 continue
+-
+-            if get_protocol() == "v2":
+-                subset = subset.copy()
+-                subset["_odor"] = subset["trial"].apply(_extract_odor_from_label)
+-                # Per-dataset odor remap (training side dictates substitute labels
+-                # so train + control heatmap rows align). Falls through to no
+-                # change when neither dataset registers an override.
+-                subset["_odor_display"] = subset.apply(
+-                    lambda r: (
+-                        None
+-                        if r["_odor"].lower() == "lightonly"
+-                        else apply_dataset_odor_remap(
+-                            r.get("dataset", train_ds),
+-                            _display_label_ci(r["_odor"]),
+-                        )
+-                    ),
+-                    axis=1,
+-                )
+-                subset = subset[subset["_odor_display"].notna()]
+-
+-                unique_odors = sorted(set(subset["_odor_display"]), key=str.lower)
+-                n_fly_pairs = len(fly_pairs)
+-                odor_occurrence_count: dict[str, int] = {}
+-                for _, row in subset.iterrows():
+-                    disp = row["_odor_display"]
+-                    odor_occurrence_count[disp] = odor_occurrence_count.get(disp, 0) + 1
+-                duplicated_odors = {o for o, c in odor_occurrence_count.items() if c > n_fly_pairs}
+-                # Only number the trained odor in columns
+-                highlight = _trained_label(train_ds)
+-                trained_dup_odors = {
+-                    o for o in duplicated_odors
+-                    if o.casefold() == highlight.casefold()
+-                }
+-
+-                odor_columns: list[str] = []
+-                for o in unique_odors:
+-                    if o in trained_dup_odors:
+-                        odor_columns.append(f"{o} 1")
+-                        odor_columns.append(f"{o} 2")
+-                    else:
+-                        odor_columns.append(o)
+-
+-                during_matrix = np.full((len(fly_pairs), len(odor_columns)), np.nan, dtype=float)
+-                fly_map = {p: i for i, p in enumerate(fly_pairs)}
+-                col_map = {col: idx for idx, col in enumerate(odor_columns)}
+-
+-                for (fly_val, fn_val), fly_subset in subset.groupby(["fly", "fly_number"]):
+-                    i = fly_map.get((fly_val, fn_val))
+-                    if i is None:
+-                        continue
+-                    seen_odors: dict[str, int] = {}
+-                    for _, row in fly_subset.sort_values("trial", key=lambda s: s.map(_trial_num)).iterrows():
+-                        disp = row["_odor_display"]
+-                        seen_odors[disp] = seen_odors.get(disp, 0) + 1
+-                        if disp in trained_dup_odors:
+-                            col_label = f"{disp} {seen_odors[disp]}"
+-                        else:
+-                            col_label = disp
+-                        j = col_map.get(col_label)
+-                        if j is not None:
+-                            during_matrix[i, j] = int(row["during_hit"])
+-
+-                pretty_labels = list(odor_columns)
+-                trial_list = odor_columns
+-            else:
+-                trial_list = _drop_testing_11(_trial_order_for(list(subset["trial"].unique()), order))
+-                trial_set = set(trial_list)
+-                subset = subset[subset["trial"].isin(trial_set)]
+-                pretty_labels = [_display_odor(train_ds, t) for t in trial_list]
+-
+-                during_matrix = np.full((len(fly_pairs), len(trial_list)), np.nan, dtype=float)
+-                fly_map = {p: i for i, p in enumerate(fly_pairs)}
+-                trial_map = {t: i for i, t in enumerate(trial_list)}
+-                for _, row in subset.iterrows():
+-                    during_matrix[fly_map[(row["fly"], row["fly_number"])], trial_map[row["trial"]]] = int(row["during_hit"])
++            ctrl_matrix, ctrl_fly_pairs, _ctrl_cols, ctrl_flagged_pairs = _build_during_matrix(
++                df, ctrl_ds, genotype, remap_from=train_ds, columns=odor_columns, order=order
++            )
+ 
+             # --- Load PRE-COMPUTED reaction rates from existing binary CSVs ---
+             train_subdir = _binary_subdir(train_ds, genotype)
+             ctrl_subdir = _binary_subdir(ctrl_ds, genotype)
+             train_rate = _load_rates_from_binary_csv(
+                 cfg.out_dir, train_ds, train_ds,
+                 include_hexanol=cfg.include_hexanol,
+                 subdir=train_subdir,
+             )
+             ctrl_rate = _load_rates_from_binary_csv(
+@@ -777,89 +847,116 @@ def generate_training_vs_control_matrices(cfg: SpreadsheetMatrixConfig) -> None:
+                 for (trial_num, odor), p in p_values.items():
+                     if pd.isna(p):
+                         continue
+                     print(
+                         f"  Fisher's exact: {odor:25s} p={p:.4f} {_sig_stars(p)}"
+                     )
+ 
+             # --- Figure layout ---
+             odor_label = DISPLAY_LABEL.get(train_ds, train_ds)
+             trained_display = DISPLAY_LABEL.get(train_ds, train_ds)
+-            n_flies = len(fly_pairs)
+-            n_trials = len(trial_list)
++            n_trials = len(odor_columns)
+ 
+             base_w = max(10.0, 0.70 * n_trials + 6.0)
+-            base_h = max(5.0, n_flies * 0.26 + 3.8)
+             fig_w = base_w
+-            gap_scale = 0.6
+-            fig_h = base_h + cfg.row_gap * cfg.height_per_gap_in * gap_scale + cfg.bottom_shift_in
+             xtick_fs = 9 if n_trials <= 10 else (8 if n_trials <= 16 else 7)
+ 
++            odor_dir = resolve_dataset_output_dir(cfg.out_dir, train_ds)
++            if genotype is not None:
++                odor_dir = odor_dir / _safe_dirname(genotype)
++            png_name = (
++                f"reaction_matrix_train_vs_ctrl_{train_ds.replace(' ', '_')}"
++                f"_{int(cfg.after_window_sec)}_latency_{cfg.latency_sec:.3f}s"
++            )
++            if order_suffix != "observed":
++                png_name += f"_{order_suffix}"
++
+             with plt.rc_context(_RC_CONTEXT):
+-                fig = plt.figure(figsize=(fig_w, fig_h), constrained_layout=False)
+-                gs = gridspec.GridSpec(2, 1, height_ratios=[3.0, 1.25], hspace=cfg.row_gap * gap_scale)
+-
+-                ax_mat = fig.add_subplot(gs[0, 0])
+-                ax_bar = fig.add_subplot(gs[1, 0])
+-
+-                # Matrix heatmap (white/black, same as original)
+-                ax_mat.imshow(during_matrix, cmap=cmap, norm=norm, aspect="auto", interpolation="nearest")
+-                ax_mat.set_title(_matrix_title(train_ds), fontsize=14, weight="bold")
+-                _style_trained_xticks(ax_mat, pretty_labels, trained_display, xtick_fs)
+-                ax_mat.set_yticks([])
+-                ax_mat.set_ylabel(f"{n_flies} Flies", fontsize=11)
+-                for idx, pair in enumerate(fly_pairs):
+-                    if pair in flagged_pairs:
+-                        ax_mat.text(
+-                            -0.35, idx, "*",
+-                            ha="right", va="center", color="red",
+-                            fontsize=12, fontweight="bold", clip_on=False,
+-                        )
+-
+-                # Bar chart: training vs control
++                # --- Figure A: bars only (the renamed continuation of the
++                # figure this script has always produced under this filename;
++                # the matrix panel it used to carry moves to Figure B below). ---
++                fig_bar, ax_bar = plt.subplots(figsize=(fig_w, 5.0))
+                 if not train_rate.empty and not ctrl_rate.empty:
+                     plot_training_vs_control_bars(
+                         ax_bar, train_rate, ctrl_rate,
+                         title=f"Reaction Rates \u2013 {odor_label} (Training vs Control)",
+                         p_values=p_values if p_values else None,
+                     )
+                 elif not train_rate.empty:
+                     from scripts.analysis.envelope_visuals import plot_reaction_rate_bars
+                     plot_reaction_rate_bars(ax_bar, train_rate, title="Reaction Rates by Odor")
+                 else:
+                     ax_bar.text(0.5, 0.5, "No odors available for rate summary",
+-                                ha="center", va="center", fontsize=11, transform=ax_bar.transAxes)
++                                ha="center", va="center", fontsize=11,
++                                transform=ax_bar.transAxes)
+                     ax_bar.set_axis_off()
+-
+-                # Shift bottom panel down
+-                shift_frac = cfg.bottom_shift_in / fig_h if fig_h else 0.0
+-                pos = ax_bar.get_position()
+-                ax_bar.set_position([pos.x0, max(0.05, pos.y0 - shift_frac), pos.width, pos.height])
+-
+-                # Save
+-                odor_dir = resolve_dataset_output_dir(cfg.out_dir, train_ds)
+-                if genotype is not None:
+-                    odor_dir = odor_dir / _safe_dirname(genotype)
+-                png_name = (
+-                    f"reaction_matrix_train_vs_ctrl_{train_ds.replace(' ', '_')}"
+-                    f"_{int(cfg.after_window_sec)}_latency_{cfg.latency_sec:.3f}s"
+-                )
+-                if order_suffix != "observed":
+-                    png_name += f"_{order_suffix}"
+-                png_path = odor_dir / f"{png_name}.png"
+-                if should_write(png_path, cfg.overwrite):
+-                    fig.savefig(png_path, dpi=300, bbox_inches="tight")
+-                    print(f"[SAVED] {png_path}")
++                bar_path = odor_dir / f"{png_name}.png"
++                if should_write(bar_path, cfg.overwrite):
++                    fig_bar.savefig(bar_path, dpi=300, bbox_inches="tight")
++                    print(f"[SAVED] {bar_path}")
+                     if "unordered" in png_name:
+-                        saved_unordered_pngs.append(png_path)
+-
+-                plt.close(fig)
++                        saved_unordered_pngs.append(bar_path)
++                plt.close(fig_bar)
++
++                # --- Figure B: NEW \u2014 control (left) | training (right)
++                # matrix pair. Equal cell height is enforced by fixing BOTH
++                # panels' y-data-range to the larger fly count in a 1x2 grid
++                # (one row => both panels already share physical height), so
++                # cells stay the same size everywhere and only the panel
++                # heights differ when fly counts differ. ---
++                n_ctrl = max(1, ctrl_matrix.shape[0])
++                n_train = max(1, during_matrix.shape[0])
++                cell_h = 0.26
++                pair_h = max(4.0, max(n_ctrl, n_train) * cell_h + 3.0)
++                fig_pair = plt.figure(figsize=(fig_w * 1.15, pair_h))
++                gs_pair = gridspec.GridSpec(1, 2, wspace=0.12)
++                ax_c = fig_pair.add_subplot(gs_pair[0, 0])
++                ax_t = fig_pair.add_subplot(gs_pair[0, 1])
++                for ax, mat, title, pairs, flagged in (
++                    (ax_c, ctrl_matrix, f"Control ({ctrl_matrix.shape[0]} Flies)",
++                     ctrl_fly_pairs, ctrl_flagged_pairs),
++                    (ax_t, during_matrix, f"Training ({during_matrix.shape[0]} Flies)",
++                     fly_pairs, flagged_pairs),
++                ):
++                    if mat.size:
++                        # Same cell height in both panels: each panel's imshow
++                        # extent uses its OWN true row count (mat.shape[0]), so
++                        # imshow never stretches its cells to fill a taller
++                        # range than it actually has data for. set_ylim is the
++                        # SHARED max(n_ctrl, n_train), so both panels occupy the
++                        # same physical axes height -- one data-row is then one
++                        # cell of identical physical size in both panels, and
++                        # the shorter panel's cells simply stop partway down
++                        # (its rows end early) instead of being stretched.
++                        ax.imshow(mat, cmap=cmap, norm=norm, aspect="auto",
++                                  interpolation="nearest",
++                                  extent=(-0.5, len(odor_columns) - 0.5,
++                                          mat.shape[0] - 0.5, -0.5))
++                        ax.set_ylim(max(n_ctrl, n_train) - 0.5, -0.5)
++                    _style_trained_xticks(ax, list(odor_columns), trained_display, xtick_fs)
++                    ax.set_yticks([])
++                    ax.set_title(title, fontsize=12, weight="bold")
++                    for idx, pair in enumerate(pairs):
++                        if pair in flagged:
++                            ax.text(
++                                -0.35, idx, "*",
++                                ha="right", va="center", color="red",
++                                fontsize=12, fontweight="bold", clip_on=False,
++                            )
++                fig_pair.suptitle(_matrix_title(train_ds), fontsize=14, weight="bold")
++                pair_name = png_name.replace("reaction_matrix_train_vs_ctrl_",
++                                             "reaction_matrix_pair_")
++                pair_path = odor_dir / f"{pair_name}.png"
++                if should_write(pair_path, cfg.overwrite):
++                    fig_pair.savefig(pair_path, dpi=300, bbox_inches="tight")
++                    print(f"[SAVED] {pair_path}")
++                plt.close(fig_pair)
+ 
+     # --- Symlink all unordered plots into Figures dir ---
+     figures_dir = Path("/home/ramanlab/Documents/cole/Results/Figures")
+     figures_dir.mkdir(parents=True, exist_ok=True)
+     for png_path in saved_unordered_pngs:
+         dest = figures_dir / png_path.name
+         try:
+             if dest.exists() or dest.is_symlink():
+                 dest.unlink()
+             dest.symlink_to(png_path)
+diff --git a/tests/test_train_vs_ctrl_split.py b/tests/test_train_vs_ctrl_split.py
+new file mode 100644
+index 0000000..4516f6c
+--- /dev/null
++++ b/tests/test_train_vs_ctrl_split.py
+@@ -0,0 +1,554 @@
++"""Tests for splitting ``reaction_matrix_train_vs_ctrl_*`` into two figures:
++a bars-only figure (today's file name, matrix removed) and a NEW
++``reaction_matrix_pair_*`` figure with the control matrix on the left and the
++training matrix on the right.
++
++Covers:
++  - ``_build_during_matrix`` exists and is reusable for both datasets.
++  - Every filter carried over from the original inlined block (testing_11
++    drop, non-reactive flagging, fly-pair sort order, light-only drop, the
++    v2-only no-odor-suffix drop) still behaves as it did before extraction.
++  - The load-bearing detail: BOTH panels resolve odor-display substitutions
++    from the TRAINING dataset (``remap_from``), never from whichever dataset
++    is actually being rendered.
++  - Column-union: a caller-supplied ``columns`` list is honoured verbatim,
++    and an odor absent from that dataset's own data becomes an all-NaN
++    (grey) column rather than shifting the layout.
++  - A real end-to-end run of ``generate_training_vs_control_matrices``
++    produces both files, and the pair figure's two matrix panels have the
++    same RENDERED cell height in inches -- measured from each panel's own
++    image extent and axes geometry, not just an equal-by-construction
++    y-limit -- and identical column labels.
++  - ``_build_during_matrix`` filters by ``genotype`` (the ``fly_type``
++    column) when one is given, excluding flies of other genotypes.
++"""
++
++from __future__ import annotations
++
++import importlib.util
++import sys
++from pathlib import Path
++
++import matplotlib
++import numpy as np
++import pandas as pd
++import pytest
++
++matplotlib.use("Agg")
++
++PROJECT_ROOT = Path(__file__).resolve().parents[1]
++for candidate in (PROJECT_ROOT, PROJECT_ROOT / "scripts", PROJECT_ROOT / "src"):
++    if str(candidate) not in sys.path:
++        sys.path.insert(0, str(candidate))
++
++MODULE_PATH = PROJECT_ROOT / "scripts" / "analysis" / "reaction_matrix_training_vs_control.py"
++spec = importlib.util.spec_from_file_location("rm_tvc", MODULE_PATH)
++module = importlib.util.module_from_spec(spec)
++sys.modules[spec.name] = module
++spec.loader.exec_module(module)
++
++from scripts.analysis.envelope_visuals import (  # noqa: E402
++    set_dataset_odor_remap,
++    set_protocol,
++)
++
++
++def _v2_rows(dataset: str, flies: list[tuple[str, str, list[tuple[str, int]]]]) -> pd.DataFrame:
++    """Build a minimal frame with the columns ``_build_during_matrix`` reads
++    directly (bypassing the CSV-loading / trial-label-normalisation prologue
++    in ``generate_training_vs_control_matrices``, which is not under test
++    here)."""
++    rows = []
++    for fly, fly_number, trials in flies:
++        for trial_label, hit in trials:
++            rows.append(
++                {
++                    "dataset_canon": dataset,
++                    "fly": fly,
++                    "fly_number": fly_number,
++                    "trial": trial_label,
++                    "during_hit": hit,
++                }
++            )
++    return pd.DataFrame(rows)
++
++
++# ---------------------------------------------------------------------------
++# Step 1 (brief): extraction + signature
++# ---------------------------------------------------------------------------
++
++
++def test_build_during_matrix_is_extracted_and_callable():
++    """The matrix builder must be reusable for BOTH datasets, not inlined in
++    the training-only loop."""
++    assert hasattr(module, "_build_during_matrix"), (
++        "matrix construction still inlined; cannot build the control panel"
++    )
++
++
++def test_build_during_matrix_respects_caller_supplied_columns():
++    """The pair figure needs identical columns in both panels, so the control
++    call must accept the training call's column list and honour its order."""
++    import inspect
++
++    sig = inspect.signature(module._build_during_matrix)
++    assert "columns" in sig.parameters, (
++        f"no way to force shared columns: {list(sig.parameters)}"
++    )
++    assert "remap_from" in sig.parameters, (
++        "control panel must resolve its odor remap from the TRAINING dataset "
++        f"(see the comment at reaction_matrix_training_vs_control.py:676): "
++        f"{list(sig.parameters)}"
++    )
++
++
++# ---------------------------------------------------------------------------
++# Behavioural tests: v2 matrix construction
++# ---------------------------------------------------------------------------
++
++
++def test_v2_matrix_values_land_in_the_right_fly_odor_cell():
++    set_protocol("v2")
++    df = _v2_rows(
++        "Zz-Training",
++        [
++            ("f1", "1", [("testing_1_Hexanol", 1), ("testing_2_Ethylbutyrate", 0)]),
++            ("f2", "2", [("testing_1_Hexanol", 0), ("testing_2_Ethylbutyrate", 1)]),
++        ],
++    )
++    mat, fly_pairs, cols, flagged = module._build_during_matrix(
++        df, "Zz-Training", None, remap_from="Zz-Training"
++    )
++    assert fly_pairs == [("f1", "1"), ("f2", "2")]
++    assert sorted(cols) == ["Ethyl Butyrate", "Hexanol"]
++    hex_idx, eb_idx = cols.index("Hexanol"), cols.index("Ethyl Butyrate")
++    assert (mat[0, hex_idx], mat[1, hex_idx]) == (1.0, 0.0)
++    assert (mat[0, eb_idx], mat[1, eb_idx]) == (0.0, 1.0)
++    assert flagged == set()
++
++
++def test_remap_resolves_from_remap_from_not_from_the_rendered_dataset():
++    """THE load-bearing detail (reaction_matrix_training_vs_control.py:676-678):
++    the control panel's odor-display substitution must come from the TRAINING
++    dataset's remap, never its own. Otherwise the two panels can carry
++    different column labels for what is supposed to be the same column, and
++    the visual comparison is meaningless.
++    """
++    set_protocol("v2")
++    set_dataset_odor_remap({"Zz-Training": {"Hexanol": "Hexanol Custom"}})
++    try:
++        train_df = _v2_rows("Zz-Training", [("f1", "1", [("testing_1_Hexanol", 1)])])
++        ctrl_df = _v2_rows("Zz-Control", [("c1", "1", [("testing_1_Hexanol", 0)])])
++        df = pd.concat([train_df, ctrl_df], ignore_index=True)
++
++        _, _, train_cols, _ = module._build_during_matrix(
++            df, "Zz-Training", None, remap_from="Zz-Training"
++        )
++        assert train_cols == ["Hexanol Custom"]
++
++        # The exact call the loop makes for the control panel: remap_from is
++        # still the TRAINING dataset, even though `dataset` is now Control.
++        ctrl_mat, ctrl_pairs, ctrl_cols, _ = module._build_during_matrix(
++            df, "Zz-Control", None, remap_from="Zz-Training", columns=train_cols
++        )
++        assert ctrl_cols == ["Hexanol Custom"], (
++            "control panel resolved its own dataset's remap instead of the "
++            f"training dataset's: got {ctrl_cols}"
++        )
++        assert ctrl_pairs == [("c1", "1")]
++        assert ctrl_mat[0, 0] == 0.0
++
++        # Sanity/contrast: resolving from the control's OWN dataset (which has
++        # no remap registered) gives a DIFFERENT label. This proves the two
++        # resolutions are not accidentally identical for some unrelated
++        # reason (e.g. the remap dict being empty) -- remap_from is actually
++        # doing the steering.
++        _, _, ctrl_cols_own, _ = module._build_during_matrix(
++            df, "Zz-Control", None, remap_from="Zz-Control"
++        )
++        assert ctrl_cols_own == ["Hexanol"]
++    finally:
++        set_dataset_odor_remap({})
++
++
++def test_columns_forcing_absent_odor_becomes_all_nan_column_not_a_shift():
++    """Column union: an odor tested in training but never tested in control
++    must appear as an all-NaN (grey) column in the SAME position, not be
++    dropped (which would shift every later column left)."""
++    set_protocol("v2")
++    train_df = _v2_rows(
++        "Zz-Training",
++        [("f1", "1", [("testing_1_Hexanol", 1), ("testing_2_Ethylbutyrate", 1)])],
++    )
++    # Control never tested Ethyl Butyrate at all.
++    ctrl_df = _v2_rows("Zz-Control", [("c1", "1", [("testing_1_Hexanol", 0)])])
++    df = pd.concat([train_df, ctrl_df], ignore_index=True)
++
++    _, _, train_cols, _ = module._build_during_matrix(
++        df, "Zz-Training", None, remap_from="Zz-Training"
++    )
++    assert sorted(train_cols) == ["Ethyl Butyrate", "Hexanol"]
++
++    ctrl_mat, ctrl_pairs, ctrl_cols, _ = module._build_during_matrix(
++        df, "Zz-Control", None, remap_from="Zz-Training", columns=train_cols
++    )
++    assert ctrl_cols == train_cols, "control must reuse training's exact column order"
++    eb_idx, hex_idx = ctrl_cols.index("Ethyl Butyrate"), ctrl_cols.index("Hexanol")
++    assert np.isnan(ctrl_mat[:, eb_idx]).all(), "odor absent from control must be all-NaN"
++    assert ctrl_mat[0, hex_idx] == 0.0
++
++
++# ---------------------------------------------------------------------------
++# Behavioural tests: every filter from the original block, preserved exactly
++# ---------------------------------------------------------------------------
++
++
++def test_testing_11_trials_are_dropped():
++    """_is_testing_11_label must drop testing_11 regardless of its odor
++    suffix -- verified by a suffix that would otherwise create a brand-new,
++    easily-detected column."""
++    set_protocol("v2")
++    df = _v2_rows(
++        "Zz-Training",
++        [("f1", "1", [("testing_1_Hexanol", 1), ("testing_11_Citral", 1)])],
++    )
++    _, _, cols, _ = module._build_during_matrix(
++        df, "Zz-Training", None, remap_from="Zz-Training"
++    )
++    assert cols == ["Hexanol"], f"testing_11 leaked into columns: {cols}"
++
++
++def test_light_only_trial_number_dropped_regardless_of_odor_suffix():
++    """_is_light_only_label drops by TRIAL NUMBER (9 under v2), independent
++    of whatever odor suffix happens to be in the label."""
++    set_protocol("v2")
++    df = _v2_rows(
++        "Zz-Training",
++        [("f1", "1", [("testing_1_Hexanol", 1), ("testing_9_Citral", 1)])],
++    )
++    _, _, cols, _ = module._build_during_matrix(
++        df, "Zz-Training", None, remap_from="Zz-Training"
++    )
++    assert cols == ["Hexanol"], f"trial 9 (light-only slot) leaked into columns: {cols}"
++
++
++def test_non_reactive_flies_are_excluded_and_reported_as_flagged():
++    set_protocol("v2")
++    df = _v2_rows(
++        "Zz-Training",
++        [
++            ("f1", "1", [("testing_1_Hexanol", 1)]),
++            ("f2", "2", [("testing_1_Hexanol", 0)]),
++        ],
++    )
++    df["_non_reactive"] = [False, True]
++    _, fly_pairs, _, flagged = module._build_during_matrix(
++        df, "Zz-Training", None, remap_from="Zz-Training"
++    )
++    assert fly_pairs == [("f1", "1")], f"non-reactive fly not excluded: {fly_pairs}"
++    assert flagged == {("f2", "2")}, f"flagged pair not reported back: {flagged}"
++
++
++def test_genotype_filter_excludes_flies_of_other_genotypes():
++    """``genotype`` (matched against the ``fly_type`` column) must restrict
++    the matrix to flies of that genotype only. This is a verbatim 3-line
++    substitution per the Task 2 brief (see reaction_matrix_training_vs_control.py
++    around line 555-556), so risk is low, but it was previously untested --
++    a fixture with two genotypes must show the other genotype's fly and its
++    data excluded, not merely ignored positionally."""
++    set_protocol("v2")
++    df = _v2_rows(
++        "Zz-Training",
++        [
++            ("f1", "1", [("testing_1_Hexanol", 1)]),
++            ("f2", "2", [("testing_1_Hexanol", 0)]),
++        ],
++    )
++    df["fly_type"] = ["GenoA", "GenoB"]
++    mat, fly_pairs, cols, _ = module._build_during_matrix(
++        df, "Zz-Training", "GenoA", remap_from="Zz-Training"
++    )
++    assert fly_pairs == [("f1", "1")], (
++        f"genotype filter let a fly of another genotype through: {fly_pairs}"
++    )
++    assert cols == ["Hexanol"]
++    assert list(mat[:, 0]) == [1.0], "wrong fly's data landed in the filtered matrix"
++
++
++def test_fly_pairs_sorted_by_fly_sort_key_not_encounter_order():
++    """fly_pairs must be name-then-numeric sorted (2 before 10), not row
++    encounter order and not a plain string sort (which would put '10' before
++    '2')."""
++    set_protocol("v2")
++    df = _v2_rows(
++        "Zz-Training",
++        [
++            ("Zebra", "10", [("testing_1_Hexanol", 1)]),
++            ("Zebra", "2", [("testing_1_Hexanol", 1)]),
++            ("Alpha", "1", [("testing_1_Hexanol", 1)]),
++        ],
++    )
++    _, fly_pairs, _, _ = module._build_during_matrix(
++        df, "Zz-Training", None, remap_from="Zz-Training"
++    )
++    assert fly_pairs == [("Alpha", "1"), ("Zebra", "2"), ("Zebra", "10")], fly_pairs
++
++
++def test_no_odor_suffix_drop_is_v2_only_legacy_keeps_plain_testing_n():
++    """Legacy labels are plain testing_N (the odor comes from the fixed
++    schedule via _display_odor, not the label). Applying the v2-only
++    no-odor-suffix filter under legacy would drop every trial and empty the
++    matrix -- exactly the regression tests/test_reaction_matrix_legacy_odor.py
++    guards against in reaction_matrix_from_spreadsheet.py's sibling filter."""
++    set_protocol("legacy")
++    df = pd.DataFrame(
++        [
++            {"dataset_canon": "Hex-Training", "fly": "f1", "fly_number": "1",
++             "trial": "testing_1", "during_hit": 1},
++            {"dataset_canon": "Hex-Training", "fly": "f1", "fly_number": "1",
++             "trial": "testing_2", "during_hit": 0},
++        ]
++    )
++    mat, fly_pairs, cols, _ = module._build_during_matrix(
++        df, "Hex-Training", None, remap_from="Hex-Training"
++    )
++    assert len(fly_pairs) == 1, "legacy matrix wrongly emptied by the v2-only filter"
++    assert mat.size > 0
++    assert cols == ["Apple Cider Vinegar", "Hexanol"]
++
++
++def test_returns_empty_tuple_contract_when_dataset_absent():
++    """Every `continue` guard in the original inlined block becomes an early
++    return of this exact empty tuple."""
++    set_protocol("v2")
++    df = _v2_rows("Zz-Training", [("f1", "1", [("testing_1_Hexanol", 1)])])
++    mat, fly_pairs, cols, flagged = module._build_during_matrix(
++        df, "Nonexistent-Training", None, remap_from="Nonexistent-Training"
++    )
++    assert mat.shape == (0, 0)
++    assert fly_pairs == []
++    assert cols == []
++    assert flagged == set()
++
++
++# ---------------------------------------------------------------------------
++# Legacy branch: values + order parameter
++# ---------------------------------------------------------------------------
++
++
++def test_legacy_matrix_values_and_schedule_based_labels():
++    set_protocol("legacy")
++    df = pd.DataFrame(
++        [
++            {"dataset_canon": "Hex-Training", "fly": "f1", "fly_number": "1",
++             "trial": "testing_1", "during_hit": 1},
++            {"dataset_canon": "Hex-Training", "fly": "f1", "fly_number": "1",
++             "trial": "testing_2", "during_hit": 0},
++        ]
++    )
++    mat, fly_pairs, cols, _ = module._build_during_matrix(
++        df, "Hex-Training", None, remap_from="Hex-Training", order="observed"
++    )
++    assert fly_pairs == [("f1", "1")]
++    # testing_1 -> Apple Cider Vinegar, testing_2 -> Hexanol per the fixed
++    # legacy schedule resolved by envelope_visuals._display_odor.
++    assert cols == ["Apple Cider Vinegar", "Hexanol"]
++    assert list(mat[0]) == [1.0, 0.0]
++
++
++def test_legacy_remap_from_controls_label_resolution_not_dataset():
++    """Legacy has no per-dataset odor_remap dict, but _display_odor still
++    takes a dataset_canon argument that selects WHICH fixed schedule to
++    read (see envelope_visuals._display_odor's testing-trial branch). The
++    load-bearing detail applies here too: label resolution must come from
++    remap_from, not from whichever dataset is actually being rendered.
++
++    Hex-Training and Hex-Control happen to resolve to identical labels in
++    real data (both alias to the same testing schedule via
++    resolve_testing_alias), which is why test_legacy_matrix_values_and_
++    schedule_based_labels alone cannot distinguish remap_from from dataset
++    -- confirmed by mutation testing (see the report). AIR-Training's
++    testing-trial 2 slot ("AIR") has no such alias to a generic dataset
++    name's slot 2 (falls through to DISPLAY_LABEL, i.e. the literal dataset
++    name), so this pair of dataset_canon values DOES distinguish the two
++    parameters.
++    """
++    set_protocol("legacy")
++    df = pd.DataFrame(
++        [
++            {"dataset_canon": "Zz-Training", "fly": "f1", "fly_number": "1",
++             "trial": "testing_2", "during_hit": 1},
++        ]
++    )
++    _, _, cols_own, _ = module._build_during_matrix(
++        df, "Zz-Training", None, remap_from="Zz-Training"
++    )
++    assert cols_own == ["Zz-Training"], cols_own
++
++    _, _, cols_from_air, _ = module._build_during_matrix(
++        df, "Zz-Training", None, remap_from="AIR-Training"
++    )
++    assert cols_from_air == ["AIR"], (
++        f"legacy label resolution used `dataset` instead of `remap_from`: {cols_from_air}"
++    )
++
++
++def test_order_parameter_actually_changes_legacy_column_order():
++    """`order` must be threaded all the way through to _trial_order_for, not
++    silently defaulted to 'observed' for every call. TRAINED_FIRST_ORDER =
++    (2, 4, 5, 1, 3, ...), so with trials 1-5 present, 'trained-first' must
++    reorder them; 'observed' must not."""
++    set_protocol("legacy")
++    df = pd.DataFrame(
++        [
++            {"dataset_canon": "Hex-Training", "fly": "f1", "fly_number": "1",
++             "trial": f"testing_{n}", "during_hit": 0}
++            for n in range(1, 6)
++        ]
++    )
++    _, _, cols_observed, _ = module._build_during_matrix(
++        df, "Hex-Training", None, remap_from="Hex-Training", order="observed"
++    )
++    _, _, cols_trained_first, _ = module._build_during_matrix(
++        df, "Hex-Training", None, remap_from="Hex-Training", order="trained-first"
++    )
++    assert cols_observed != cols_trained_first, (
++        "changing order had no effect -- the `order` argument is not being "
++        "threaded through to _trial_order_for"
++    )
++    # observed: trial-number order. Hex-Training testing_1/3 -> ACV,
++    # testing_2/4/5 -> Hexanol (see envelope_visuals._display_odor).
++    assert cols_observed == [
++        "Apple Cider Vinegar", "Hexanol", "Apple Cider Vinegar", "Hexanol", "Hexanol",
++    ]
++    # trained-first: TRAINED_FIRST_ORDER = (2, 4, 5, 1, 3, ...) -> trials
++    # 2,4,5,1,3 in that order -> Hexanol,Hexanol,Hexanol,ACV,ACV.
++    assert cols_trained_first == [
++        "Hexanol", "Hexanol", "Hexanol", "Apple Cider Vinegar", "Apple Cider Vinegar",
++    ]
++
++
++# ---------------------------------------------------------------------------
++# End-to-end: real figure emission (bars-only + control|training pair)
++# ---------------------------------------------------------------------------
++
++
++def _write_predictions_csv(path: Path) -> None:
++    rows = []
++    # Training: 3 flies. Control: 2 flies -- deliberately unequal so the
++    # cell-height-equalisation logic in Step 5 is actually exercised.
++    for fly, fn in (("t1", "1"), ("t2", "2"), ("t3", "3")):
++        for label, hit in (("testing_1_Hexanol", 1), ("testing_2_Ethylbutyrate", 0)):
++            rows.append({"dataset": "Zz-Training", "fly": fly, "fly_number": fn,
++                         "trial_label": label, "prediction": hit})
++    for fly, fn in (("c1", "1"), ("c2", "2")):
++        for label, hit in (("testing_1_Hexanol", 0), ("testing_2_Ethylbutyrate", 0)):
++            rows.append({"dataset": "Zz-Control", "fly": fly, "fly_number": fn,
++                         "trial_label": label, "prediction": hit})
++    pd.DataFrame(rows).to_csv(path, index=False)
++
++
++def _measured_cell_height_in(ax, fig):
++    """Rendered height, in inches, of ONE matrix cell on ``ax``.
++
++    ``imshow`` stretches its image to fill ``extent`` in DATA coordinates;
++    ``set_ylim`` then maps a DATA span onto the axes' fixed PHYSICAL height.
++    A cell's rendered height is therefore the axes' physical height scaled
++    by the fraction of the ylim span that one image row occupies. Reading
++    only ``get_ylim()`` cannot detect a mismatched image ``extent`` -- it is
++    equal by construction whenever ``set_ylim`` is shared, bug or no bug.
++    """
++    im = ax.images[0]
++    x0, x1, y_bottom, y_top = im.get_extent()   # y_bottom > y_top (inverted)
++    rows = im.get_array().shape[0]
++    ylo, yhi = ax.get_ylim()                    # ylo > yhi (inverted)
++    data_span = abs(ylo - yhi)
++    ax_h_in = ax.get_position().height * fig.get_figheight()
++    img_span = abs(y_bottom - y_top)
++    return (ax_h_in * (img_span / data_span)) / rows
++
++
++def test_pair_figure_end_to_end_shares_cell_height_and_columns(tmp_path, monkeypatch):
++    """Real end-to-end check driven through the actual rendering code, not a
++    hand-rolled parallel implementation.
++
++    The brief's Step 6 test (``test_pair_panels_share_cell_height_and_columns``)
++    built its own throwaway figure using matplotlib calls that merely MIRROR
++    Step 5's approach; it never called into the module, so it could not fail
++    no matter what ``generate_training_vs_control_matrices`` actually
++    renders -- it has been deleted as dead weight.
++
++    This test's own ``get_ylim()`` equality checks below are ALSO
++    insufficient on their own: ``set_ylim`` is fixed to
++    ``max(n_ctrl, n_train)`` in both panels regardless of whether each
++    panel's ``imshow`` ``extent`` uses its OWN row count (correct) or the
++    shared max (buggy, stretches the shorter panel's cells), so those ylim
++    values are equal BY CONSTRUCTION either way and can never expose that
++    bug. The assertion below instead measures each panel's ACTUAL rendered
++    cell height in inches (``_measured_cell_height_in``), which does differ
++    between the two versions -- confirmed by reverting the extent fix and
++    observing this assertion fail with a ~1.5x ratio (see the report).
++    """
++    import matplotlib.pyplot as plt
++
++    set_protocol("v2")
++    plt.close("all")
++    monkeypatch.setattr(plt, "close", lambda *a, **k: None)
++
++    csv_path = tmp_path / "predictions.csv"
++    _write_predictions_csv(csv_path)
++    out_dir = tmp_path / "out"
++    cfg = module.SpreadsheetMatrixConfig(
++        csv_path=csv_path, out_dir=out_dir, latency_sec=2.15,
++        trial_orders=("observed",),
++    )
++    module.generate_training_vs_control_matrices(cfg)
++
++    bar_files = list(out_dir.glob("**/reaction_matrix_train_vs_ctrl_Zz-Training_*.png"))
++    pair_files = list(out_dir.glob("**/reaction_matrix_pair_Zz-Training_*.png"))
++    assert bar_files, "bars-only figure was not written under the pre-existing filename"
++    assert pair_files, "control|training pair figure was not written"
++
++    pair_figs = [
++        f for f in map(plt.figure, plt.get_fignums())
++        if len(f.axes) == 2 and all(ax.images for ax in f.axes)
++    ]
++    assert pair_figs, "no rendered figure has two matrix (imshow) axes"
++    fig = pair_figs[-1]
++    ax_c, ax_t = fig.axes
++    fig.canvas.draw()
++
++    n_ctrl, n_train = 2, 3
++    n_max = max(n_ctrl, n_train)
++    for ax, name in ((ax_c, "control"), (ax_t, "training")):
++        ylim = ax.get_ylim()
++        assert ylim == pytest.approx((n_max - 0.5, -0.5)), (
++            f"{name} panel's y-range is not fixed to the larger fly count: {ylim}"
++        )
++    assert ax_c.get_ylim() == ax_t.get_ylim(), (
++        "both panels sit in one GridSpec row (equal physical height); an "
++        "equal data range is what makes their cell height equal"
++    )
++
++    # The load-bearing check: the ylim equality above is necessary but NOT
++    # sufficient -- it holds by construction even when imshow's extent is
++    # wrong. Measure each panel's ACTUAL rendered cell height instead.
++    ctrl_cell = _measured_cell_height_in(ax_c, fig)
++    train_cell = _measured_cell_height_in(ax_t, fig)
++    assert ctrl_cell == pytest.approx(train_cell, rel=1e-6), (
++        f"cell heights differ: control {ctrl_cell:.4f}in vs training {train_cell:.4f}in "
++        f"-- the eye would read a size difference that is not in the data"
++    )
++
++    labels_c = [t.get_text() for t in ax_c.get_xticklabels()]
++    labels_t = [t.get_text() for t in ax_t.get_xticklabels()]
++    assert labels_c, "no odor columns rendered on the control panel"
++    assert labels_c == labels_t, (
++        f"panels show different columns: control={labels_c} training={labels_t}"
++    )
++
++    bar_figs = [
++        f for f in map(plt.figure, plt.get_fignums())
++        if len(f.axes) == 1 and not f.axes[0].images
++    ]
++    assert bar_figs, "no bars-only (matrix-free) figure was rendered"

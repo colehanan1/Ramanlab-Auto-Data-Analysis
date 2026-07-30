@@ -1,0 +1,543 @@
+# Review package: 758105d..8829cab
+
+## Commits
+8829cab feat(run_workflows): resolve frozen slices and write the freeze cache after live derivations
+
+## Files changed
+ scripts/pipeline/run_workflows.py | 219 ++++++++++++++++++++++++++++++++++++++
+ tests/test_freeze_pipeline.py     | 162 ++++++++++++++++++++++++++++
+ 2 files changed, 381 insertions(+)
+
+## Diff
+diff --git a/scripts/pipeline/run_workflows.py b/scripts/pipeline/run_workflows.py
+index f6d18a3..90f56af 100755
+--- a/scripts/pipeline/run_workflows.py
++++ b/scripts/pipeline/run_workflows.py
+@@ -59,20 +59,21 @@ from scripts.analysis.envelope_visuals import (
+     generate_envelope_plots,
+     generate_reaction_matrices,
+     set_dataset_light_windows,
+     set_dataset_odor_remap,
+     set_model_scores,
+     set_protocol,
+ )
+ from scripts.analysis.envelope_training import latency_reports
+ from scripts.analysis.envelope_combined import (
+     CombineConfig,
++    LOW_MAX_FLAG_THRESHOLD_PX,
+     build_wide_csv,
+     combine_distance_angle,
+     mirror_directory,
+     overlay_sources,
+     secure_copy_and_cleanup,
+     wide_to_matrix,
+ )
+ 
+ 
+ def _resolve_path(value: str | Path | None) -> Path | None:
+@@ -406,20 +407,154 @@ def _compare_manifests(
+         is_valid = False
+     else:
+         # Valid cache: report an explicit "unchanged" summary (callers and tests
+         # rely on a non-empty changes list describing the no-change outcome).
+         changes.append(f"unchanged: {len(current)} files")
+         is_valid = True
+ 
+     return is_valid, changes
+ 
+ 
++def _freeze_fingerprint(
++    settings,
++    dataset: str,
++    *,
++    measure_cols,
++    fps_fallback: float,
++    distance_limits,
++    non_reactive_threshold,
++    low_max_threshold_px: float,
++    use_per_trial_baseline: bool,
++) -> dict:
++    """Fingerprint for one dataset under one set of build_wide_csv parameters.
++
++    Shared by the load and save paths so they can never disagree -- if they did,
++    every run would see spurious drift and re-derive.
++    """
++    from fbpipe import freeze as _freeze
++
++    return _freeze.build_fingerprint(
++        protocol=settings.protocol,
++        measure_cols=measure_cols,
++        fps_fallback=fps_fallback,
++        distance_limits=distance_limits,
++        non_reactive_threshold=non_reactive_threshold,
++        low_max_threshold_px=low_max_threshold_px,
++        use_per_trial_baseline=use_per_trial_baseline,
++        override=(settings.dataset_overrides or {}).get(dataset),
++        # build_wide_csv reads settings.tracking internally
++        # (envelope_combined.py:2622) and derives the tracking_missing_frames /
++        # tracking_pct_missing / tracking_flagged columns from it. Required, not
++        # defaulted, so a caller cannot silently omit a value-affecting input.
++        tracking=settings.tracking,
++    )
++
++
++def _resolve_frozen_slices(
++    settings,
++    roots,
++    wide_block: str,
++    *,
++    measure_cols,
++    fps_fallback: float,
++    distance_limits,
++    non_reactive_threshold,
++    low_max_threshold_px: float,
++    use_per_trial_baseline: bool,
++    thawed=(),
++    thaw_all: bool = False,
++) -> dict:
++    """Return {dataset: FrozenSlice} for every root frozen for DATA with a
++    trustworthy cache.
++
++    A dataset is omitted when it is not frozen, is thawed, has no cache, or its
++    fingerprint drifted. Omission IS the auto-rebuild: build_wide_csv then walks
++    the root normally.
++    """
++    from fbpipe import freeze as _freeze
++
++    out: dict = {}
++    for root in roots:
++        dataset = Path(str(root)).name
++        if not dataset:
++            continue
++        freeze_data, _ = _freeze.freeze_flags(
++            settings, dataset, thawed=thawed, thaw_all=thaw_all
++        )
++        if not freeze_data:
++            continue
++        fingerprint = _freeze_fingerprint(
++            settings,
++            dataset,
++            measure_cols=measure_cols,
++            fps_fallback=fps_fallback,
++            distance_limits=distance_limits,
++            non_reactive_threshold=non_reactive_threshold,
++            low_max_threshold_px=low_max_threshold_px,
++            use_per_trial_baseline=use_per_trial_baseline,
++        )
++        slice_ = _freeze.load_slice(settings.cache_dir, wide_block, dataset, fingerprint)
++        if slice_ is None:
++            print(
++                f"[FREEZE] {dataset} is frozen but its {wide_block} cache is "
++                f"missing or stale -- rebuilding it once, then re-caching."
++            )
++            continue
++        out[dataset] = slice_
++    return out
++
++
++def _write_freeze_cache(
++    settings,
++    wide_block: str,
++    output_csv: str,
++    extra_export_paths,
++    *,
++    fingerprint_for,
++) -> None:
++    """Cache each dataset's slice of a freshly written wide CSV.
++
++    Runs after EVERY live derivation, frozen or not, so that freezing a dataset
++    later finds a cache already waiting rather than needing a priming run.
++
++    Reads the main output plus every extra trial export, so a slice holds ALL
++    trial types -- the splice routes them back the same way live rows are.
++    """
++    from fbpipe import freeze as _freeze
++
++    frames = []
++    for path in [output_csv, *(extra_export_paths or [])]:
++        p = Path(str(path))
++        if not p.is_file():
++            continue
++        try:
++            frames.append(pd.read_csv(p))
++        except Exception as exc:
++            print(f"[FREEZE] Skipping cache read of {p}: {exc}")
++    if not frames:
++        return
++    allrows = pd.concat(frames, ignore_index=True)
++    if "dataset" not in allrows.columns:
++        return
++    for dataset, group in allrows.groupby(allrows["dataset"].astype(str)):
++        try:
++            _freeze.save_slice(
++                settings.cache_dir,
++                wide_block,
++                dataset,
++                group.reset_index(drop=True),
++                fingerprint_for(dataset),
++            )
++        except Exception as exc:  # a cache write must never fail the run
++            print(f"[FREEZE] Could not cache {dataset}/{wide_block}: {exc}")
++
++
+ def _should_skip_with_manifest(
+     settings: Settings,
+     category: str,
+     key: str,
+     expected: Dict[str, Any],
+     *,
+     force_flag: bool,
+     dataset_root: Optional[Path] = None
+ ) -> bool:
+     """
+@@ -1124,32 +1259,60 @@ def _run_combined(
+                     )
+                 export_path = _ensure_path(export_csv, "trial_type_exports.output_csv")
+                 trial_key = str(trial_type).strip().lower()
+                 extra_exports[trial_key] = str(export_path)
+                 matrix_dir = entry.get("matrix_out_dir")
+                 if matrix_dir:
+                     matrix_path = _ensure_path(
+                         matrix_dir, "trial_type_exports.matrix_out_dir"
+                     )
+                     extra_matrix_dirs[trial_key] = str(matrix_path)
++        _block = "wide"
++        _fp_kw = dict(
++            measure_cols=wide_measure_cols,
++            fps_fallback=wide_fps_fallback,
++            distance_limits=limits,
++            non_reactive_threshold=non_reactive_threshold,
++            # build_wide_csv is not passed low_max_threshold_px at this call
++            # site, so it uses the default. The fingerprint must record the
++            # same value or every run reports drift.
++            low_max_threshold_px=LOW_MAX_FLAG_THRESHOLD_PX,
++            use_per_trial_baseline=use_per_trial_baseline,
++        )
++        _frozen = _resolve_frozen_slices(
++            settings,
++            roots,
++            _block,
++            thawed=getattr(settings, "_thawed", ()),
++            thaw_all=getattr(settings, "_thaw_all", False),
++            **_fp_kw,
++        )
+         print(f"[analysis] combined.wide → {output_csv}")
+         build_wide_csv(
+             roots,
+             str(output_csv),
+             measure_cols=wide_measure_cols,
+             fps_fallback=wide_fps_fallback,
+             exclude_roots=wide_exclude_cfg,
+             distance_limits=limits,
+             trial_type_filter=trial_type_filter,
+             extra_trial_exports=extra_exports or None,
+             non_reactive_threshold=non_reactive_threshold,
+             use_per_trial_baseline=use_per_trial_baseline,
++            frozen_slices=_frozen or None,
++        )
++        _write_freeze_cache(
++            settings,
++            _block,
++            str(output_csv),
++            list(extra_exports.values()),
++            fingerprint_for=lambda ds: _freeze_fingerprint(settings, ds, **_fp_kw),
+         )
+ 
+         for trial_key, matrix_dir in extra_matrix_dirs.items():
+             export_csv = extra_exports.get(trial_key)
+             if not export_csv:
+                 continue
+             print(
+                 "[analysis] combined.wide.trial_type_matrix[{}] → {}".format(
+                     trial_key, matrix_dir
+                 )
+@@ -1246,32 +1409,60 @@ def _run_combined(
+                     )
+                     trial_key = str(trial_type).strip().lower()
+                     extra_exports[trial_key] = str(export_path)
+                     matrix_dir = entry.get("matrix_out_dir")
+                     if matrix_dir:
+                         matrix_path = _ensure_path(
+                             matrix_dir, "trial_type_exports.matrix_out_dir"
+                         )
+                         extra_matrix_dirs[trial_key] = str(matrix_path)
+ 
++            _block = str(label)
++            _fp_kw = dict(
++                measure_cols=base_measure_cols,
++                fps_fallback=base_fps_fallback,
++                distance_limits=limits,
++                non_reactive_threshold=non_reactive_threshold,
++                # build_wide_csv is not passed low_max_threshold_px at this call
++                # site, so it uses the default. The fingerprint must record the
++                # same value or every run reports drift.
++                low_max_threshold_px=LOW_MAX_FLAG_THRESHOLD_PX,
++                use_per_trial_baseline=base_use_per_trial_baseline,
++            )
++            _frozen = _resolve_frozen_slices(
++                settings,
++                roots,
++                _block,
++                thawed=getattr(settings, "_thawed", ()),
++                thaw_all=getattr(settings, "_thaw_all", False),
++                **_fp_kw,
++            )
+             print(f"[analysis] {label}.wide → {output_csv}")
+             build_wide_csv(
+                 roots,
+                 str(output_csv),
+                 measure_cols=base_measure_cols,
+                 fps_fallback=base_fps_fallback,
+                 exclude_roots=base_exclude_cfg,
+                 distance_limits=limits,
+                 trial_type_filter=trial_type_filter,
+                 extra_trial_exports=extra_exports or None,
+                 non_reactive_threshold=non_reactive_threshold,
+                 use_per_trial_baseline=base_use_per_trial_baseline,
++                frozen_slices=_frozen or None,
++            )
++            _write_freeze_cache(
++                settings,
++                _block,
++                str(output_csv),
++                list(extra_exports.values()),
++                fingerprint_for=lambda ds: _freeze_fingerprint(settings, ds, **_fp_kw),
+             )
+ 
+             for trial_key, matrix_dir in extra_matrix_dirs.items():
+                 export_csv = extra_exports.get(trial_key)
+                 if not export_csv:
+                     continue
+                 print(
+                     "[analysis] {}.wide.trial_type_matrix[{}] → {}".format(
+                         label, trial_key, matrix_dir
+                     )
+@@ -1392,32 +1583,60 @@ def _run_combined(
+             pair_combined_dir = out_dir / "combined"
+             pair_combined_dir.mkdir(parents=True, exist_ok=True)
+             pair_matrix_dir = out_dir / "matrix"
+             pair_wide_csv = pair_combined_dir / "all_envelope_rows_wide.csv"
+ 
+             extra_exports = {
+                 "training": str(pair_combined_dir / "all_envelope_rows_wide_training.csv")
+             }
+             extra_matrix_dirs = {"training": str(pair_matrix_dir / "training")}
+ 
++            _block = "pair_groups"
++            _fp_kw = dict(
++                measure_cols=wide_measure_cols,
++                fps_fallback=wide_fps_fallback,
++                distance_limits=limits,
++                non_reactive_threshold=non_reactive_threshold,
++                # build_wide_csv is not passed low_max_threshold_px at this call
++                # site, so it uses the default. The fingerprint must record the
++                # same value or every run reports drift.
++                low_max_threshold_px=LOW_MAX_FLAG_THRESHOLD_PX,
++                use_per_trial_baseline=use_per_trial_baseline,
++            )
++            _frozen = _resolve_frozen_slices(
++                settings,
++                [str(path) for path in resolved_roots],
++                _block,
++                thawed=getattr(settings, "_thawed", ()),
++                thaw_all=getattr(settings, "_thaw_all", False),
++                **_fp_kw,
++            )
+             print(f"[analysis] combined.pair_groups[{pair_name}].wide → {pair_wide_csv}")
+             build_wide_csv(
+                 [str(path) for path in resolved_roots],
+                 str(pair_wide_csv),
+                 measure_cols=wide_measure_cols,
+                 fps_fallback=wide_fps_fallback,
+                 exclude_roots=wide_exclude_cfg,
+                 distance_limits=limits,
+                 trial_type_filter=trial_type_filter,
+                 extra_trial_exports=extra_exports,
+                 non_reactive_threshold=non_reactive_threshold,
+                 use_per_trial_baseline=use_per_trial_baseline,
++                frozen_slices=_frozen or None,
++            )
++            _write_freeze_cache(
++                settings,
++                _block,
++                str(pair_wide_csv),
++                list(extra_exports.values()),
++                fingerprint_for=lambda ds: _freeze_fingerprint(settings, ds, **_fp_kw),
+             )
+ 
+             print(f"[analysis] combined.pair_groups[{pair_name}].matrix → {pair_matrix_dir}")
+             wide_to_matrix(str(pair_wide_csv), str(pair_matrix_dir))
+             for trial_key, matrix_dir in extra_matrix_dirs.items():
+                 export_csv = extra_exports.get(trial_key)
+                 if not export_csv:
+                     continue
+                 wide_to_matrix(export_csv, matrix_dir)
+ 
+diff --git a/tests/test_freeze_pipeline.py b/tests/test_freeze_pipeline.py
+new file mode 100644
+index 0000000..5218810
+--- /dev/null
++++ b/tests/test_freeze_pipeline.py
+@@ -0,0 +1,162 @@
++"""Freeze resolution + cache writing in run_workflows."""
++
++import numpy as np
++import pandas as pd
++import pytest
++
++import scripts.pipeline.run_workflows as rw
++from fbpipe import freeze
++from fbpipe.config import DatasetOverride
++
++
++class _Tracking:
++    """Stub of fbpipe.config.TrackingConfig -- build_fingerprint duck-types it."""
++
++    apply_missing_frame_check = True
++    max_missing_frames_per_trial = 5000
++    max_missing_frames_pct_per_trial = 50.0
++
++
++class _Settings:
++    def __init__(self, tmp_path, overrides, datasets):
++        self.cache_dir = str(tmp_path / "cache")
++        self.dataset_overrides = overrides
++        self.datasets = tuple(datasets)
++        self.protocol = "v2"
++        self.tracking = _Tracking()
++
++
++def _rows(dataset, tl=5):
++    rec = {"dataset": dataset, "fly": "f1", "trial_type": "testing", "trace_len": tl}
++    for i in range(tl):
++        rec[f"dir_val_{i}"] = float(i)
++    return pd.DataFrame([rec])
++
++
++def _fp_kw():
++    return dict(
++        measure_cols=["envelope_of_rms"],
++        fps_fallback=40.0,
++        distance_limits=None,
++        non_reactive_threshold=12.5,
++        low_max_threshold_px=5.0,
++        use_per_trial_baseline=False,
++    )
++
++
++def test_frozen_dataset_with_cache_resolves(tmp_path):
++    s = _Settings(tmp_path, {"DS": DatasetOverride(freeze_data=True)}, ["DS"])
++    fp = freeze.build_fingerprint(
++        protocol="v2", override=s.dataset_overrides["DS"], tracking=s.tracking,
++        **_fp_kw()
++    )
++    freeze.save_slice(s.cache_dir, "combined_base", "DS", _rows("DS"), fp)
++
++    got = rw._resolve_frozen_slices(
++        s, [str(tmp_path / "DS")], "combined_base", thawed=(), thaw_all=False, **_fp_kw()
++    )
++    assert "DS" in got
++    assert got["DS"].own_max_len == 5
++
++
++def test_unfrozen_dataset_is_not_resolved_even_with_a_cache(tmp_path):
++    """A cache exists but the dataset is not frozen -- it must be derived live."""
++    s = _Settings(tmp_path, {"DS": DatasetOverride(freeze_data=False)}, ["DS"])
++    fp = freeze.build_fingerprint(
++        protocol="v2", override=s.dataset_overrides["DS"], tracking=s.tracking,
++        **_fp_kw()
++    )
++    freeze.save_slice(s.cache_dir, "combined_base", "DS", _rows("DS"), fp)
++
++    got = rw._resolve_frozen_slices(
++        s, [str(tmp_path / "DS")], "combined_base", thawed=(), thaw_all=False, **_fp_kw()
++    )
++    assert got == {}
++
++
++def test_frozen_but_cache_miss_auto_rebuilds(tmp_path):
++    """No cache -> absent from frozen_slices -> root gets walked. That IS the
++    auto-rebuild."""
++    s = _Settings(tmp_path, {"DS": DatasetOverride(freeze_data=True)}, ["DS"])
++    got = rw._resolve_frozen_slices(
++        s, [str(tmp_path / "DS")], "combined_base", thawed=(), thaw_all=False, **_fp_kw()
++    )
++    assert got == {}
++
++
++def test_frozen_but_config_drift_auto_rebuilds(tmp_path):
++    s = _Settings(tmp_path, {"DS": DatasetOverride(freeze_data=True)}, ["DS"])
++    fp = freeze.build_fingerprint(
++        protocol="v2", override=s.dataset_overrides["DS"], tracking=s.tracking,
++        **_fp_kw()
++    )
++    freeze.save_slice(s.cache_dir, "combined_base", "DS", _rows("DS"), fp)
++
++    kw = _fp_kw()
++    kw["non_reactive_threshold"] = 10.0  # drift
++    got = rw._resolve_frozen_slices(
++        s, [str(tmp_path / "DS")], "combined_base", thawed=(), thaw_all=False, **kw
++    )
++    assert got == {}
++
++
++def test_thaw_ignores_freeze(tmp_path):
++    s = _Settings(tmp_path, {"DS": DatasetOverride(freeze_data=True)}, ["DS"])
++    fp = freeze.build_fingerprint(
++        protocol="v2", override=s.dataset_overrides["DS"], tracking=s.tracking,
++        **_fp_kw()
++    )
++    freeze.save_slice(s.cache_dir, "combined_base", "DS", _rows("DS"), fp)
++
++    got = rw._resolve_frozen_slices(
++        s, [str(tmp_path / "DS")], "combined_base", thawed=["DS"], thaw_all=False, **_fp_kw()
++    )
++    assert got == {}
++
++
++def test_write_freeze_cache_stores_each_dataset_slice(tmp_path):
++    s = _Settings(tmp_path, {}, ["A", "B"])
++    out = tmp_path / "wide.csv"
++    pd.concat([_rows("A", 4), _rows("B", 6)], ignore_index=True).to_csv(out, index=False)
++
++    rw._write_freeze_cache(
++        s, "combined_base", str(out), [],
++        fingerprint_for=lambda ds: freeze.build_fingerprint(
++            protocol="v2", override=DatasetOverride(), tracking=s.tracking,
++            **_fp_kw()
++        ),
++    )
++    fp = freeze.build_fingerprint(
++        protocol="v2", override=DatasetOverride(), tracking=s.tracking, **_fp_kw()
++    )
++    a = freeze.load_slice(s.cache_dir, "combined_base", "A", fp)
++    b = freeze.load_slice(s.cache_dir, "combined_base", "B", fp)
++    assert a is not None and b is not None
++    assert a.own_max_len == 4
++    assert b.own_max_len == 6
++    assert set(a.rows["dataset"]) == {"A"}   # slices must not bleed into each other
++    assert set(b.rows["dataset"]) == {"B"}
++
++
++def test_write_freeze_cache_includes_extra_trial_exports(tmp_path):
++    """A slice must hold ALL trial types, or freezing loses the training rows."""
++    s = _Settings(tmp_path, {}, ["A"])
++    main = tmp_path / "wide.csv"
++    train = tmp_path / "wide_training.csv"
++    _rows("A", 4).to_csv(main, index=False)
++    tr = _rows("A", 4)
++    tr["trial_type"] = "training"
++    tr.to_csv(train, index=False)
++
++    rw._write_freeze_cache(
++        s, "combined_base", str(main), [str(train)],
++        fingerprint_for=lambda ds: freeze.build_fingerprint(
++            protocol="v2", override=DatasetOverride(), tracking=s.tracking,
++            **_fp_kw()
++        ),
++    )
++    fp = freeze.build_fingerprint(
++        protocol="v2", override=DatasetOverride(), tracking=s.tracking, **_fp_kw()
++    )
++    got = freeze.load_slice(s.cache_dir, "combined_base", "A", fp)
++    assert set(got.rows["trial_type"].str.lower()) == {"testing", "training"}

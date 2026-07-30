@@ -252,6 +252,7 @@ import numpy as np
 
 from scripts.analysis.per_gate_rejection_figure import (
     SUBJECT,
+    Offsets,
     load_subject_offsets,
     subject_parquet_path,
     subject_video_path,
@@ -1014,10 +1015,17 @@ def test_jump_ring_is_centred_on_the_last_ACCEPTED_point() -> None:
     info = draw_jump_panel(ax, s)
     assert info["ring_radius"] == s.max_jump_px
 
-    xs = [ln.get_xdata() for ln in ax.lines if len(ln.get_xdata()) > 1]
-    assert xs, "the panel draws a trajectory"
-    accepted_x = max(x for seq in xs for x in np.atleast_1d(seq))
-    assert info["ring_centre"][0] <= accepted_x
+    # The DRAWN circle must use the same value, or the test proves nothing about
+    # the picture. Panel D works in px data coordinates for exactly this reason.
+    circles = [p for p in ax.patches if isinstance(p, plt.Circle)]
+    assert len(circles) == 1
+    assert circles[0].get_radius() == pytest.approx(s.max_jump_px)
+    assert circles[0].center == pytest.approx(info["ring_centre"])
+
+    # The ring must sit on the LAST ACCEPTED point, never on the rejected one.
+    # Asserting the exact coordinates is what makes this test able to fail.
+    assert info["ring_centre"] == pytest.approx((130.0, 114.0))
+    assert info["ring_centre"] != pytest.approx((250.0, 112.0))
     plt.close(fig)
 
 
@@ -1052,7 +1060,7 @@ def test_cap_panel_keeps_the_highest_confidence_detections() -> None:
     fig, ax = plt.subplots()
     draw_cap_panel(ax, n_flies=2)
     drawn = {t.get_text() for t in ax.texts}
-    assert "cap = 2 flies" in drawn
+    assert "2-fly cap" in drawn
     kept = [ln for ln in ax.lines if ln.get_marker() == "o"
             and ln.get_markerfacecolor() not in ("none", "None")]
     dropped = [ln for ln in ax.lines if ln.get_marker() in {"x", "X"}]
@@ -1126,7 +1134,7 @@ def draw_cap_panel(ax, n_flies: int) -> None:
                 color=ACCEPTED if keep else REJECTED,
                 fontsize=10, ha="center", va="top")
 
-    _panel_title(ax, f"cap = {n_flies} flies")
+    _panel_title(ax, f"{n_flies}-fly cap")
     ax.set_xlim(0, 1)
     ax.set_ylim(0, 1)
     ax.set_xticks([])
@@ -1157,26 +1165,31 @@ def draw_release_panel(ax, settings: GateSettings) -> None:
 def draw_jump_panel(ax, settings: GateSettings) -> dict:
     """Panel D: the displacement gate, measured from the last ACCEPTED position.
 
-    Returns the ring geometry so the tests can assert it is centred on the last
-    accepted point rather than on the rejected one.
+    Drawn in PIXEL data coordinates so the ring radius on screen is literally
+    ``settings.max_jump_px``. Returns the ring geometry so the tests can assert
+    both that the drawn circle uses the gate value and that it is centred on the
+    last accepted point rather than on the rejected one.
     """
-    accepted_x = [0.10, 0.24, 0.38, 0.52]
-    accepted_y = [0.55, 0.58, 0.54, 0.57]
+    accepted_x = [40.0, 70.0, 100.0, 130.0]
+    accepted_y = [110.0, 118.0, 106.0, 114.0]
     ax.plot(accepted_x, accepted_y, color=ACCEPTED, lw=1.8, marker="o", ms=9,
             mew=1.6, mec="white")
 
     last_x, last_y = accepted_x[-1], accepted_y[-1]
-    ax.plot([last_x, 0.90], [last_y, 0.56], color=REJECTED, lw=1.8, ls=(0, (4, 3)))
-    ax.plot([0.90], [0.56], marker="X", ms=13, mfc="none", mec=REJECTED, mew=2.5)
+    rej_x, rej_y = 250.0, 112.0  # 120 px away -- outside the 80 px gate
+    ax.plot([last_x, rej_x], [last_y, rej_y], color=REJECTED, lw=1.8,
+            ls=(0, (4, 3)))
+    ax.plot([rej_x], [rej_y], marker="X", ms=13, mfc="none", mec=REJECTED,
+            mew=2.5)
 
-    ax.add_patch(plt.Circle((last_x, last_y), 0.20, fill=False, color=INK,
-                            lw=1.2, ls=(0, (2, 2))))
-    ax.text(last_x, last_y - 0.26, str(int(settings.max_jump_px)), color=INK,
-            fontsize=11, ha="center", va="top")
+    ax.add_patch(plt.Circle((last_x, last_y), settings.max_jump_px, fill=False,
+                            color=INK, lw=1.2, ls=(0, (2, 2))))
+    ax.text(last_x, last_y - settings.max_jump_px - 6, str(int(settings.max_jump_px)),
+            color=INK, fontsize=11, ha="center", va="top")
 
     _panel_title(ax, "jump gate")
-    ax.set_xlim(0, 1)
-    ax.set_ylim(0, 1)
+    ax.set_xlim(0, 320)
+    ax.set_ylim(0, 210)
     ax.set_xticks([])
     ax.set_yticks([])
     ax.set_aspect(1.0)

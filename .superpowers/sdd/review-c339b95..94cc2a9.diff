@@ -1,0 +1,291 @@
+# Review package: c339b95..94cc2a9
+
+## Commits
+94cc2a9 feat(envelope_combined): resolve the angle anchor per rig
+
+## Files changed
+ scripts/analysis/envelope_combined.py | 31 ++++++++----
+ tests/test_rig3_anchor_angles.py      | 88 +++++++++++++++++++++++++++++++++++
+ 2 files changed, 109 insertions(+), 10 deletions(-)
+
+## Diff
+diff --git a/scripts/analysis/envelope_combined.py b/scripts/analysis/envelope_combined.py
+index 63fca36..3ec5bd9 100644
+--- a/scripts/analysis/envelope_combined.py
++++ b/scripts/analysis/envelope_combined.py
+@@ -50,20 +50,21 @@ from fbpipe.config import (
+     load_raw_config,
+     load_settings,
+     resolve_config_path,
+ )
+ from fbpipe.utils.trial_metadata import (
+     TrialMetadata,
+     find_sidecar_by_label,
+     load_trial_metadata,
+ )
+ from fbpipe.utils.fly_type import UNKNOWN_FLY_TYPE, fly_type_for_dir
++from fbpipe.utils.rig_anchor import resolve_anchor
+ from fbpipe.utils.tables import (
+     read_table,
+     write_table,
+     resolve_existing,
+     read_schema_columns,
+ )
+ from fbpipe.odor_constants import (
+     ODOR_CANON,
+     DISPLAY_LABEL,
+     TESTING_DATASET_ALIAS,
+@@ -1483,21 +1484,23 @@ def _normalise_key(value: str) -> str:
+ 
+ def _resolve_column_alias(df: pd.DataFrame, *aliases: str) -> str | None:
+     lookup = {_normalise_key(col): col for col in df.columns}
+     for alias in aliases:
+         column = lookup.get(_normalise_key(alias))
+         if column:
+             return column
+     return None
+ 
+ 
+-def _compute_angle_deg(df: pd.DataFrame) -> pd.Series:
++def _compute_angle_deg(
++    df: pd.DataFrame, anchor: tuple[float, float] | None = None
++) -> pd.Series:
+     x2_col = _resolve_column_alias(
+         df,
+         f"x_class{EYE_CLASS}",
+         f"x_class_{EYE_CLASS}",
+         f"class{EYE_CLASS}_x",
+         "x_class2",
+         "x_class_2",
+         "class2_x",
+     )
+     y2_col = _resolve_column_alias(
+@@ -1536,22 +1539,23 @@ def _compute_angle_deg(df: pd.DataFrame) -> pd.Series:
+         "class6_y",
+     )
+     if not all((x2_col, y2_col, x_prob_col, y_prob_col)):
+         raise ValueError("Missing eye/proboscis coordinate columns for angle computation.")
+ 
+     p2x = pd.to_numeric(df[x2_col], errors="coerce").astype(float)
+     p2y = pd.to_numeric(df[y2_col], errors="coerce").astype(float)
+     p3x = pd.to_numeric(df[x_prob_col], errors="coerce").astype(float)
+     p3y = pd.to_numeric(df[y_prob_col], errors="coerce").astype(float)
+ 
+-    ux = ANCHOR_X - p2x
+-    uy = ANCHOR_Y - p2y
++    ax, ay = (ANCHOR_X, ANCHOR_Y) if anchor is None else anchor
++    ux = ax - p2x
++    uy = ay - p2y
+     vx = p3x - p2x
+     vy = p3y - p2y
+ 
+     dot = ux * vx + uy * vy
+     cross = ux * vy - uy * vx
+     n1 = np.hypot(ux, uy)
+     n2 = np.hypot(vx, vy)
+     valid = (n1 > 0) & (n2 > 0) & np.isfinite(dot) & np.isfinite(cross)
+ 
+     angles = np.full(len(df), np.nan, dtype=float)
+@@ -1578,26 +1582,28 @@ def _trial_csv_candidates(fly_dir: Path, suffix_globs: Iterable[str] | str) -> l
+             if real in seen:
+                 continue
+             if real.stem in seen_stems:
+                 continue  # same logical trial already taken (parquet wins)
+             seen.add(real)
+             seen_stems.add(real.stem)
+             candidates.append(path)
+     return sorted(candidates)
+ 
+ 
+-def _find_reference_angle(csv_paths: Sequence[Path]) -> float:
++def _find_reference_angle(
++    csv_paths: Sequence[Path], anchor: tuple[float, float] | None = None
++) -> float:
+     best: tuple[int, float, float] | None = None
+     for path in csv_paths:
+         try:
+             df = read_table(path)
+-            angles = _compute_angle_deg(df).to_numpy(dtype=float)
++            angles = _compute_angle_deg(df, anchor).to_numpy(dtype=float)
+         except Exception:
+             continue
+ 
+         dist_col = _pick_column(df, DIST_COLS)
+         if not dist_col:
+             continue
+         dist = pd.to_numeric(df[dist_col], errors="coerce").to_numpy(dtype=float)
+         if dist.size == 0:
+             continue
+ 
+@@ -1619,29 +1625,33 @@ def _find_reference_angle(csv_paths: Sequence[Path]) -> float:
+                 candidate = (1, float(absdist[idx]), float(angle_val))
+ 
+         if candidate is None:
+             continue
+         if best is None or candidate < best:
+             best = candidate
+ 
+     return float("nan") if best is None else best[2]
+ 
+ 
+-def _fly_max_centered(csv_paths: Sequence[Path], reference_angle: float) -> float:
++def _fly_max_centered(
++    csv_paths: Sequence[Path],
++    reference_angle: float,
++    anchor: tuple[float, float] | None = None,
++) -> float:
+     if not np.isfinite(reference_angle):
+         return float("nan")
+ 
+     max_abs = 0.0
+     for path in csv_paths:
+         try:
+             df = read_table(path)
+-            angles = _compute_angle_deg(df).to_numpy(dtype=float)
++            angles = _compute_angle_deg(df, anchor).to_numpy(dtype=float)
+         except Exception:
+             continue
+ 
+         centered = angles - reference_angle
+         if centered.size == 0:
+             continue
+ 
+         with np.errstate(invalid="ignore"):
+             abs_centered = np.abs(centered)
+ 
+@@ -1665,37 +1675,38 @@ def _series_matches(existing: pd.Series | None, values: np.ndarray) -> bool:
+     if arr_existing.shape != arr_values.shape:
+         return False
+     return np.allclose(arr_existing, arr_values, equal_nan=True)
+ 
+ 
+ def _ensure_angle_percentages(fly_dir: Path, suffix_globs: Iterable[str] | str) -> None:
+     csv_paths = _trial_csv_candidates(fly_dir, suffix_globs)
+     if not csv_paths:
+         return
+ 
+-    reference = _find_reference_angle(csv_paths)
+-    fly_max = _fly_max_centered(csv_paths, reference)
++    anchor = resolve_anchor(fly_dir)
++    reference = _find_reference_angle(csv_paths, anchor)
++    fly_max = _fly_max_centered(csv_paths, reference, anchor)
+ 
+     if not np.isfinite(reference):
+         reference = 0.0
+     valid_scale = np.isfinite(fly_max) and fly_max > 0
+     if not valid_scale:
+         print(
+             f"[WARN] {fly_dir.name}: unable to derive centered angle scale; "
+             "percentages will default to 0."
+         )
+ 
+     updates = 0
+     for path in csv_paths:
+         try:
+             df = read_table(path)
+-            angles = _compute_angle_deg(df)
++            angles = _compute_angle_deg(df, anchor)
+         except Exception:
+             continue
+ 
+         angle_vals = angles.to_numpy(dtype=float)
+         centered_deg = angle_vals - reference
+         existing_pct_series = df.get("angle_centered_pct")
+         if not valid_scale:
+             centered_pct = (
+                 pd.to_numeric(existing_pct_series, errors="coerce").to_numpy(dtype=float)
+                 if existing_pct_series is not None
+diff --git a/tests/test_rig3_anchor_angles.py b/tests/test_rig3_anchor_angles.py
+new file mode 100644
+index 0000000..2f01d54
+--- /dev/null
++++ b/tests/test_rig3_anchor_angles.py
+@@ -0,0 +1,88 @@
++"""The mirrored rig_3 anchor must invert the measured angle.
++
++Flipping the anchor from the right edge to the left edge is equivalent to
++``angle -> 180 - angle`` for a fly on the mid-line, which is what restores the
++correct sign of the extension->angle relationship for rig_3.
++"""
++from __future__ import annotations
++
++import numpy as np
++import pandas as pd
++import pytest
++
++from scripts.analysis.envelope_combined import _compute_angle_deg
++from fbpipe.utils.rig_anchor import DEFAULT_ANCHOR, MIRRORED_ANCHOR
++
++
++def _frame():
++    """One fly on the mid-line (y=540) with the proboscis extended right."""
++    return pd.DataFrame(
++        {
++            "x_class0": [500.0],
++            "y_class0": [540.0],
++            "x_class1": [550.0],
++            "y_class1": [540.0],
++        }
++    )
++
++
++def test_default_anchor_matches_module_constant_behaviour():
++    df = _frame()
++    assert np.allclose(
++        _compute_angle_deg(df).to_numpy(dtype=float),
++        _compute_angle_deg(df, DEFAULT_ANCHOR).to_numpy(dtype=float),
++        equal_nan=True,
++    )
++
++
++def test_mirrored_anchor_is_supplement_of_default():
++    df = _frame()
++    right = _compute_angle_deg(df, DEFAULT_ANCHOR).to_numpy(dtype=float)
++    left = _compute_angle_deg(df, MIRRORED_ANCHOR).to_numpy(dtype=float)
++    assert np.allclose(left, 180.0 - right, atol=1e-9)
++
++
++def test_extension_toward_anchor_reads_as_zero_degrees():
++    """Proboscis pointing at the anchor is 0 deg; away from it is 180 deg."""
++    df = _frame()
++    assert _compute_angle_deg(df, DEFAULT_ANCHOR).iloc[0] == pytest.approx(0.0, abs=1e-9)
++    assert _compute_angle_deg(df, MIRRORED_ANCHOR).iloc[0] == pytest.approx(180.0, abs=1e-9)
++
++
++def test_reference_and_measurement_share_one_anchor(monkeypatch, tmp_path):
++    """The baseline and the measurement must be computed with the same anchor.
++
++    A mismatch is silently wrong rather than an error, so pin it with a test.
++    """
++    from scripts.analysis import envelope_combined as ec
++
++    seen: list[tuple[float, float] | None] = []
++    real = ec._compute_angle_deg
++
++    def spy(df, anchor=None):
++        seen.append(anchor)
++        return real(df, anchor)
++
++    monkeypatch.setattr(ec, "_compute_angle_deg", spy)
++
++    fly_dir = tmp_path / "july_17_batch_2_rig_3"
++    fly_dir.mkdir()
++    df = pd.DataFrame(
++        {
++            "frame": [0, 1],
++            "x_class0": [500.0, 500.0],
++            "y_class0": [540.0, 540.0],
++            "x_class1": [550.0, 560.0],
++            "y_class1": [540.0, 540.0],
++            "distance_percentage_0_1": [10.0, 20.0],
++        }
++    )
++    df.to_parquet(fly_dir / "updated_t1_fly1_distances.parquet")
++
++    monkeypatch.setattr(ec, "_trial_csv_candidates",
++                        lambda d, s: [fly_dir / "updated_t1_fly1_distances.parquet"])
++
++    ec._ensure_angle_percentages(fly_dir, "*.parquet")
++
++    assert seen, "_compute_angle_deg was never called"
++    assert set(seen) == {MIRRORED_ANCHOR}, f"anchors disagreed: {set(seen)}"

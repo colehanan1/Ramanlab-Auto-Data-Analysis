@@ -1,0 +1,63 @@
+# Review package: 21b6dc6..4aae4d0
+
+## Commits
+4aae4d0 feat(export): add --batch and --dynamic args to TensorRT export script
+
+## Files changed
+ scripts/convert/export_tensorrt.py | 11 ++++++++++-
+ 1 file changed, 10 insertions(+), 1 deletion(-)
+
+## Diff
+diff --git a/scripts/convert/export_tensorrt.py b/scripts/convert/export_tensorrt.py
+index 788a1a5..81e8967 100755
+--- a/scripts/convert/export_tensorrt.py
++++ b/scripts/convert/export_tensorrt.py
+@@ -26,20 +26,24 @@ for path in (str(REPO_ROOT), str(SRC_ROOT)):
+ from fbpipe.config import load_settings
+ 
+ def main():
+     parser = argparse.ArgumentParser(description="Export YOLO model to TensorRT engine.")
+     parser.add_argument(
+         "--config",
+         default=str(Path("config") / "config.yaml"),
+         help="Path to pipeline configuration YAML.",
+     )
+     parser.add_argument("--model-path", default=None, help="Override the YOLO model path.")
++    parser.add_argument("--batch", type=int, default=32,
++                        help="Max batch size for the engine's dynamic profile (default 32).")
++    parser.add_argument("--dynamic", action=argparse.BooleanOptionalAction, default=True,
++                        help="Build a dynamic-batch engine (accepts 1..--batch frames). Use --no-dynamic for a static batch-1 engine.")
+     args = parser.parse_args()
+ 
+     model_path_value = args.model_path or load_settings(args.config).model_path
+     if not model_path_value:
+         log.error("Model path not configured. Provide --model-path or set model_path in the config.")
+         return
+ 
+     model_path = Path(model_path_value).expanduser()
+     if not model_path.exists():
+         log.error(f"Model not found: {model_path}")
+@@ -52,17 +56,22 @@ def main():
+         if response.lower() != 'y':
+             log.info("Export cancelled")
+             return
+ 
+     log.info(f"Loading PyTorch model: {model_path}")
+     model = YOLO(str(model_path))
+ 
+     log.info("Exporting to TensorRT engine (this may take 5-15 minutes)...")
+     log.info("Using FP16 precision for RTX 3090 Tensor Cores")
+ 
+-    model.export(format="engine", half=True, device="cuda:0")
++    model.export(format="engine", half=True, device="cuda:0",
++                 dynamic=args.dynamic, batch=args.batch)
+ 
+     log.info(f"✓ TensorRT engine created: {engine_path}")
+     log.info("YOLO inference will now use this optimized engine automatically")
++    if args.dynamic:
++        log.info(
++            "Dynamic engine built (max batch %d). To enable batching set yolo.engine_supports_batch: true "
++            "(or ENGINE_SUPPORTS_BATCH=true) and INFERENCE_BATCH_SIZE<=%d.", args.batch, args.batch)
+ 
+ if __name__ == "__main__":
+     main()

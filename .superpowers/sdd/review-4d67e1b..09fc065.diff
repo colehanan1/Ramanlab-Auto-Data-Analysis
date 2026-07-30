@@ -1,0 +1,171 @@
+# Review package: 4d67e1b..09fc065
+
+## Commits
+09fc065 fix(test_score_matrix): replace vacuous cmap test with falsifiable one
+2424426 feat(score_summary): add CVD-validated per-fly score palette
+
+## Files changed
+ scripts/analysis/score_summary.py | 38 ++++++++++++++++++++-
+ tests/test_score_matrix.py        | 69 +++++++++++++++++++++++++++++++++++++++
+ 2 files changed, 106 insertions(+), 1 deletion(-)
+
+## Diff
+diff --git a/scripts/analysis/score_summary.py b/scripts/analysis/score_summary.py
+index 28dd3ee..932f2bf 100644
+--- a/scripts/analysis/score_summary.py
++++ b/scripts/analysis/score_summary.py
+@@ -14,21 +14,21 @@ from __future__ import annotations
+ 
+ import argparse
+ import re
+ import sys
+ from pathlib import Path
+ from typing import Sequence
+ 
+ import matplotlib.pyplot as plt
+ import numpy as np
+ import pandas as pd
+-from matplotlib.colors import TwoSlopeNorm
++from matplotlib.colors import BoundaryNorm, ListedColormap, TwoSlopeNorm
+ from scipy.stats import mannwhitneyu
+ 
+ REPO_ROOT = Path(__file__).resolve().parents[2]
+ if str(REPO_ROOT) not in sys.path:
+     sys.path.insert(0, str(REPO_ROOT))
+ 
+ from scripts.analysis.envelope_visuals import (
+     DISPLAY_LABEL,
+     ODOR_ORDER,
+     _canon_dataset,
+@@ -73,20 +73,56 @@ _STATIC_PAIRS = {
+     "Benz-Training-24-2": "Benz-Control-24-2",
+     "Benz-Training-24-02": "Benz-Control-24-02",
+     "ACV-Training": "ACV-Control",
+     "3OCT-Training": "3OCT-Control",
+     "3OCT-Training-24-2": "3OCT-Control-24-2",
+     "Cit-Training": "Cit-Control",
+     "Lin-Training": "Lin-Control",
+ }
+ 
+ 
++# --- Per-fly score matrix palette -------------------------------------------
++# Diverging at the reaction boundary (score >= 2 is a reaction, see
++# fbpipe.config.binary_threshold), NOT at zero. Purple = no reaction,
++# green = reaction.
++#
++# Red->green was rejected: it collapses to worst-pair CVD dE 4.1 (protanopia),
++# i.e. a protanope cannot tell -1 from 5. This ramp measures dE 19.5.
++# The no-reaction arm is deliberately pale: score 0 is ~71% of cells, so an
++# even-stepped arm would make the modal "nothing happened" a wall of colour
++# that the signal has to fight.
++SCORE_MIN = -1
++SCORE_MAX = 5
++SCORES = list(range(SCORE_MIN, SCORE_MAX + 1))
++SCORE_COLORS = [
++    "#762a83",  # -1  strong purple  (rare, notable)
++    "#e2d4e8",  #  0  pale lavender  (modal, recedes)
++    "#f2ebf5",  #  1  palest lavender
++    # ---- reaction boundary (score >= 2) ----
++    "#a6dba0",  #  2  light green
++    "#5aae61",  #  3
++    "#1b7837",  #  4
++    "#00441b",  #  5  dark green
++]
++MISSING_COLOR = "0.70"        # matches reaction_matrix's cmap.set_bad(color="0.7")
++REACTION_BOUNDARY_Y = 1.5
++
++
++def _score_cmap() -> tuple[ListedColormap, BoundaryNorm]:
++    """Fixed score->colour map. Never rank-based: a 3 is the same green in
++    every dataset, whether or not that dataset happens to contain a 1."""
++    cmap = ListedColormap(SCORE_COLORS)
++    cmap.set_bad(color=MISSING_COLOR)
++    bounds = [s - 0.5 for s in SCORES] + [SCORE_MAX + 0.5]
++    return cmap, BoundaryNorm(bounds, cmap.N)
++
++
+ def _auto_pairs(datasets: list[str]) -> dict[str, str]:
+     pairs = dict(_STATIC_PAIRS)
+     pat = re.compile(r"^(.+)-Training(.*)$", re.IGNORECASE)
+     ds_set = set(datasets)
+     for ds in datasets:
+         if ds in pairs:
+             continue
+         m = pat.match(ds)
+         if m:
+             ctrl = f"{m.group(1)}-Control{m.group(2)}"
+diff --git a/tests/test_score_matrix.py b/tests/test_score_matrix.py
+new file mode 100644
+index 0000000..147d915
+--- /dev/null
++++ b/tests/test_score_matrix.py
+@@ -0,0 +1,69 @@
++import importlib.util
++import sys
++from pathlib import Path
++
++import matplotlib
++import numpy as np
++import pandas as pd
++import pytest
++
++matplotlib.use("Agg")
++
++PROJECT_ROOT = Path(__file__).resolve().parents[1]
++for candidate in (PROJECT_ROOT, PROJECT_ROOT / "scripts", PROJECT_ROOT / "src"):
++    path_str = str(candidate)
++    if path_str not in sys.path:
++        sys.path.insert(0, path_str)
++
++MODULE_PATH = PROJECT_ROOT / "scripts" / "analysis" / "score_summary.py"
++spec = importlib.util.spec_from_file_location("score_summary_matrix", MODULE_PATH)
++module = importlib.util.module_from_spec(spec)
++sys.modules[spec.name] = module
++spec.loader.exec_module(module)
++
++
++def test_score_palette_has_one_colour_per_score():
++    assert module.SCORES == [-1, 0, 1, 2, 3, 4, 5]
++    assert len(module.SCORE_COLORS) == len(module.SCORES)
++
++
++def test_score_palette_hexes_are_the_cvd_validated_set():
++    # These exact values were validated at worst-pair CVD dE 19.5.
++    # Changing them requires re-running the dataviz validator.
++    assert module.SCORE_COLORS == [
++        "#762a83", "#e2d4e8", "#f2ebf5",
++        "#a6dba0", "#5aae61", "#1b7837", "#00441b",
++    ]
++
++
++def test_score_cmap_maps_each_score_to_its_own_colour():
++    cmap, norm = module._score_cmap()
++    seen = [cmap(norm(s)) for s in module.SCORES]
++    assert len(set(seen)) == len(module.SCORES), "scores collapsed to same colour"
++
++
++def test_each_score_maps_to_its_own_designated_hex():
++    """Fixed map: score S wears SCORE_COLORS[S - SCORE_MIN], always.
++
++    Falsifiable — breaks on wrong bounds math, reordered colours, or a bad hex.
++    (The deeper "not rank-based" guarantee is structural: _score_cmap() takes no
++    data, so it cannot depend on which scores a dataset happens to contain. The
++    end-to-end guard for that lives in the render tests, where data does flow.)
++    """
++    from matplotlib.colors import to_rgba
++    cmap, norm = module._score_cmap()
++    for score, expected_hex in zip(module.SCORES, module.SCORE_COLORS):
++        assert cmap(norm(score)) == to_rgba(expected_hex), (
++            f"score {score} should be {expected_hex}"
++        )
++
++
++def test_score_cmap_missing_is_grey_and_distinct_from_every_score_colour():
++    cmap, norm = module._score_cmap()
++    bad = cmap.get_bad()
++    score_colours = {cmap(norm(s)) for s in module.SCORES}
++    assert tuple(bad) not in score_colours
++
++
++def test_reaction_boundary_sits_between_1_and_2():
++    assert module.REACTION_BOUNDARY_Y == 1.5
