@@ -34,6 +34,42 @@ for _p in (str(REPO_ROOT), str(SRC_ROOT)):
 
 from fbpipe.config import load_raw_config  # noqa: E402
 
+import matplotlib
+
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt  # noqa: E402
+from matplotlib.patheffects import withStroke  # noqa: E402
+
+# Validated all-pairs (light mode): worst CVD dE 13.0, normal-vision 16.3, all
+# >= 3:1. A green/red accept/reject pair was tested first and FAILED at deutan
+# dE 4.1 -- the same failure that ruled out the red/green score palette.
+ACCEPTED = "#2a78d6"   # blue
+REJECTED = "#eb6834"   # orange
+EYE = "#4a3aa7"        # violet
+INK = "#0b0b0b"
+MUTED = "#898781"
+SURFACE = "#fcfcfb"
+
+plt.rcParams.update(
+    {
+        "font.family": "sans-serif",
+        "font.sans-serif": ["Arial", "DejaVu Sans"],
+        "text.color": INK,
+        "figure.facecolor": SURFACE,
+        "savefig.facecolor": SURFACE,
+        "savefig.dpi": 300,
+        "pdf.fonttype": 42,       # editable text in Illustrator / Inkscape
+        "ps.fonttype": 42,
+        "svg.fonttype": "none",   # keep <text> as text, not paths, in the SVG
+    }
+)
+
+# Every string the hero panel is allowed to draw. The test asserts this set
+# exactly, which is what keeps the slide from accreting prose.
+HERO_TEXTS = frozenset(
+    {"dorsal", "ventral", "ACCEPTANCE BOUNDARY", "146 px", "220 px", "160", "40"}
+)
+
 CONFIG_PATH = REPO_ROOT / "config" / "config_new.yaml"
 OUT_DIR = REPO_ROOT / "figures"
 
@@ -310,3 +346,71 @@ def load_frame_crop(
 
     pale = inverted + (255.0 - inverted) * float(ghost)
     return np.repeat(np.clip(pale, 0, 255).astype(np.uint8)[:, :, None], 3, axis=2)
+
+
+def _halo(width: float = 3.0):
+    """White relief so a mark stays legible over the ghosted frame."""
+    return [withStroke(linewidth=width, foreground="white")]
+
+
+def draw_hero(ax, offsets: Offsets, settings: GateSettings, image: np.ndarray | None) -> None:
+    """Panel A: the acceptance boundary drawn over a real frame, in eye-centred px."""
+    ex, ey = offsets.eye_xy
+    x0, y0, x1, y1 = CROP
+
+    if image is not None:
+        ax.imshow(image, extent=(x0 - ex, x1 - ex, y1 - ey, y0 - ey),
+                  interpolation="bilinear", zorder=0)
+
+    # accepted cloud -- all real detections
+    ax.scatter(offsets.dx, offsets.dy, s=9, c=ACCEPTED, alpha=0.10,
+               linewidths=0, zorder=2)
+
+    # the acceptance boundary, traced by the production function
+    pts = gate_boundary_offsets(settings, n=360)
+    ring = np.vstack([pts, pts[:1]])
+    ax.plot(ring[:, 0], ring[:, 1], color=INK, lw=2.5, zorder=4,
+            path_effects=_halo(5.0))
+
+    # frozen eye anchor
+    ax.plot([0], [0], marker="P", ms=11, color=EYE, mew=0, zorder=6,
+            path_effects=_halo())
+
+    # peak PER -- the accepted detection nearest the boundary
+    r = np.hypot(offsets.dx, offsets.dy)
+    pk = int(np.argmax(r))
+    pdx, pdy = float(offsets.dx[pk]), float(offsets.dy[pk])
+    ax.plot([0, pdx], [0, pdy], color=ACCEPTED, lw=1.6, zorder=5)
+    ax.plot([pdx], [pdy], marker="o", ms=11, color=ACCEPTED, mew=2.0,
+            mec="white", zorder=7)
+    ax.text(pdx + 12, pdy, "146 px", color=ACCEPTED, fontsize=12,
+            fontweight="bold", va="center", ha="left", path_effects=_halo())
+
+    # constructed rejection -- verified against the real gate in the tests
+    rdx, rdy = REJECTED_OFFSET
+    ax.plot([0, rdx], [0, rdy], color=REJECTED, lw=1.6, ls=(0, (4, 3)), zorder=5)
+    ax.plot([rdx], [rdy], marker="X", ms=15, mfc="none", mec=REJECTED, mew=3.0,
+            zorder=7, path_effects=_halo())
+    ax.text(rdx, rdy + 16, "220 px", color=REJECTED, fontsize=12,
+            fontweight="bold", va="top", ha="center", path_effects=_halo())
+
+    # gate values, on the boundary itself
+    lat, dorsal = settings.max_px, settings.dorsal_px
+    ax.text(lat + 6, 0, str(int(lat)), color=INK, fontsize=12, va="center",
+            ha="left", path_effects=_halo())
+    ax.text(0, lat + 6, str(int(lat)), color=INK, fontsize=12, va="top",
+            ha="center", path_effects=_halo())
+    ax.text(0, -dorsal - 6, str(int(dorsal)), color=INK, fontsize=12,
+            va="bottom", ha="center", path_effects=_halo())
+
+    ax.text(0, -dorsal - 34, "dorsal", color=MUTED, fontsize=11, va="bottom",
+            ha="center", style="italic")
+    ax.text(0, lat + 34, "ventral", color=MUTED, fontsize=11, va="top",
+            ha="center", style="italic")
+    ax.text(0.02, 0.02, "ACCEPTANCE BOUNDARY", transform=ax.transAxes,
+            color=INK, fontsize=13, fontweight="bold", va="bottom", ha="left")
+
+    ax.set_xlim(x0 - ex, x1 - ex)
+    ax.set_ylim(y1 - ey, y0 - ey)   # image convention: +dy is ventral, downward
+    ax.set_aspect(1.0)
+    ax.axis("off")

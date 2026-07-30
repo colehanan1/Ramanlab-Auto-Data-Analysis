@@ -354,3 +354,93 @@ def test_ghost_blend_zero_returns_the_unghosted_frame() -> None:
     ghosted = load_frame_crop(subject_video_path(), SUBJECT.peak_frame)
     assert GHOST_BLEND > 0
     assert ghosted.mean() > raw.mean()
+
+
+import matplotlib
+
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt  # noqa: E402
+
+from scripts.analysis.per_gate_rejection_figure import (  # noqa: E402
+    ACCEPTED,
+    EYE,
+    HERO_TEXTS,
+    REJECTED,
+    draw_hero,
+)
+
+
+def test_palette_is_the_validated_one() -> None:
+    """Validated all-pairs, light mode: worst CVD dE 13.0, normal-vision 16.3.
+    Green/red was tested first and FAILED at deutan dE 4.1 -- never reinstate it.
+    """
+    assert ACCEPTED == "#2a78d6"
+    assert REJECTED == "#eb6834"
+    assert EYE == "#4a3aa7"
+    for hexcode in (ACCEPTED, REJECTED, EYE):
+        assert hexcode.lower() not in {"#0ca30c", "#d03b3b", "#008300", "#e34948"}
+
+
+def test_hero_contains_no_sentences() -> None:
+    """The figure carries panel titles, two direction words, gate values and
+    short mark labels -- never prose. Longest permitted label is 3 words."""
+    for text in HERO_TEXTS:
+        assert len(text.split()) <= 3, f"too wordy for a slide: {text!r}"
+    assert "dorsal" in HERO_TEXTS
+    assert "ventral" in HERO_TEXTS
+
+
+def _hero_axes(image=None):
+    s = load_gate_settings()
+    off = Offsets(
+        dx=np.array([5.0, 10.0, 28.9]),
+        dy=np.array([95.0, 110.0, 142.8]),
+        frames=np.array([0, 1, 1102]),
+        eye_xy=SUBJECT.eye_xy,
+    )
+    fig, ax = plt.subplots()
+    draw_hero(ax, off, s, image)
+    return fig, ax
+
+
+def test_hero_draws_exactly_the_expected_text() -> None:
+    fig, ax = _hero_axes()
+    drawn = {t.get_text() for t in ax.texts if t.get_text()}
+    assert drawn == set(HERO_TEXTS)
+    plt.close(fig)
+
+
+def test_hero_labels_the_acceptance_boundary_and_both_marks() -> None:
+    fig, ax = _hero_axes()
+    drawn = {t.get_text() for t in ax.texts}
+    assert any("ACCEPTANCE" in t.upper() for t in drawn)
+    assert "146 px" in drawn, "the accepted peak PER is direct-labelled"
+    assert "220 px" in drawn, "the rejected example is direct-labelled"
+    plt.close(fig)
+
+
+def test_hero_gate_numbers_come_from_settings() -> None:
+    """Change the config, and the numbers on the boundary change with it."""
+    fig, ax = _hero_axes()
+    drawn = {t.get_text() for t in ax.texts}
+    s = load_gate_settings()
+    assert str(int(s.max_px)) in drawn
+    assert str(int(s.dorsal_px)) in drawn
+    plt.close(fig)
+
+
+def test_hero_rejected_marker_is_hollow() -> None:
+    """Rejection is encoded by SHAPE first; colour is secondary, so nothing
+    depends on hue alone."""
+    fig, ax = _hero_axes()
+    marks = [ln for ln in ax.lines if ln.get_marker() in {"x", "X"}]
+    assert marks, "the rejected example must be an X marker"
+    assert any(m.get_markerfacecolor() in ("none", "None") for m in marks)
+    plt.close(fig)
+
+
+def test_hero_axis_is_equal_aspect() -> None:
+    """Pixels are square; an unequal aspect would misrepresent the gate shape."""
+    fig, ax = _hero_axes()
+    assert ax.get_aspect() == 1.0
+    plt.close(fig)
