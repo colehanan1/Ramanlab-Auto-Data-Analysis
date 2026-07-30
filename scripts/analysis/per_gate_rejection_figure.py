@@ -83,6 +83,7 @@ class GateSettings:
     max_jump_px: float
     norm_min_px: float
     norm_max_px: float
+    three_fly_max_px: float
 
     @property
     def dorsal_px(self) -> float:
@@ -100,12 +101,23 @@ def load_gate_settings(config_path: Path | str = CONFIG_PATH) -> GateSettings:
     try:
         pf = raw["proboscis_filter"]
         dl = raw["distance_limits"]
+        # max_px (proboscis_filter.max_eye_prob_distance_px) and three_fly_max_px
+        # (distance_limits.three_fly_max_eye_prob_distance_px) are two DISTINCT
+        # config keys that happen to share the value 160.0 in config_new.yaml.
+        # They gate different things: max_px is the per-pairing anisotropic
+        # spatial gate (yolo_infer/distance_sanity), while three_fly_max_px is
+        # the >=3-fly release rule read by
+        # yolo_infer._max_valid_eye_prob_distance_px. Other configs in this
+        # repo set three_fly_max_eye_prob_distance_px to 180.0 while
+        # max_eye_prob_distance_px stays elsewhere -- conflating the two would
+        # make the release panel print a number the pipeline does not use.
         return GateSettings(
             max_px=float(pf["max_eye_prob_distance_px"]),
             up_divisor=float(pf["up_divisor"]),
             max_jump_px=float(pf["max_jump_px"]),
             norm_min_px=float(dl["class2_min"]),
             norm_max_px=float(dl["class2_max"]),
+            three_fly_max_px=float(dl["three_fly_max_eye_prob_distance_px"]),
         )
     except KeyError as exc:
         raise KeyError(
@@ -473,7 +485,7 @@ def draw_release_panel(ax, settings: GateSettings) -> None:
     ax.plot([0.85, 0.56], [0.55, 0.55], color=REJECTED, lw=1.8, ls=(0, (4, 3)))
     ax.plot([0.55], [0.55], marker="X", ms=13, mfc="none", mec=REJECTED, mew=2.5)
 
-    ax.text(0.70, 0.30, str(int(settings.max_px)), color=REJECTED, fontsize=11,
+    ax.text(0.70, 0.30, str(int(settings.three_fly_max_px)), color=REJECTED, fontsize=11,
             ha="center", va="top")
     _panel_title(ax, "≥3 flies")
     ax.set_xlim(0, 1)

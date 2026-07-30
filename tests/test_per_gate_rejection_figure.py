@@ -19,7 +19,7 @@ from scripts.analysis.per_gate_rejection_figure import (
 
 
 def test_gate_settings_match_config_new() -> None:
-    """The five gate values the figure reports come from config_new.yaml."""
+    """The gate values the figure reports come from config_new.yaml."""
     s = load_gate_settings()
     assert s.max_px == 160.0
     assert s.up_divisor == 4.0
@@ -27,6 +27,7 @@ def test_gate_settings_match_config_new() -> None:
     assert s.max_jump_px == 80.0
     assert s.norm_min_px == 10.0
     assert s.norm_max_px == 160.0
+    assert s.three_fly_max_px == 160.0
 
 
 def test_config_path_points_at_config_new() -> None:
@@ -45,7 +46,8 @@ def test_gate_settings_are_not_hardcoded(tmp_path: Path) -> None:
         "  max_jump_px: 55.0\n"
         "distance_limits:\n"
         "  class2_min: 5.0\n"
-        "  class2_max: 99.0\n",
+        "  class2_max: 99.0\n"
+        "  three_fly_max_eye_prob_distance_px: 77.0\n",
         encoding="utf-8",
     )
     s = load_gate_settings(alt)
@@ -55,6 +57,9 @@ def test_gate_settings_are_not_hardcoded(tmp_path: Path) -> None:
     assert s.max_jump_px == 55.0
     assert s.norm_min_px == 5.0
     assert s.norm_max_px == 99.0
+    # deliberately DIFFERENT from max_px (99.0) so a load_gate_settings that
+    # conflated the two distinct config keys would fail this assertion.
+    assert s.three_fly_max_px == 77.0
 
 
 def test_gate_settings_rejects_missing_keys(tmp_path: Path) -> None:
@@ -63,6 +68,25 @@ def test_gate_settings_rejects_missing_keys(tmp_path: Path) -> None:
     empty.write_text("{}\n", encoding="utf-8")
     with pytest.raises(KeyError):
         load_gate_settings(empty)
+
+
+def test_gate_settings_rejects_missing_three_fly_key(tmp_path: Path) -> None:
+    """distance_limits present but missing three_fly_max_eye_prob_distance_px
+    must fail loudly too -- it is read exactly like the other gate values, not
+    silently defaulted from max_eye_prob_distance_px."""
+    partial = tmp_path / "partial.yaml"
+    partial.write_text(
+        "proboscis_filter:\n"
+        "  max_eye_prob_distance_px: 99.0\n"
+        "  up_divisor: 3.0\n"
+        "  max_jump_px: 55.0\n"
+        "distance_limits:\n"
+        "  class2_min: 5.0\n"
+        "  class2_max: 99.0\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(KeyError):
+        load_gate_settings(partial)
 
 
 import numpy as np
@@ -365,6 +389,7 @@ from scripts.analysis.per_gate_rejection_figure import (  # noqa: E402
     ACCEPTED,
     EYE,
     HERO_TEXTS,
+    INK,
     REJECTED,
     draw_hero,
 )
@@ -434,7 +459,7 @@ def test_hero_gate_numbers_come_from_settings() -> None:
     """
     synthetic = GateSettings(
         max_px=100.0, up_divisor=5.0, max_jump_px=80.0,
-        norm_min_px=10.0, norm_max_px=100.0,
+        norm_min_px=10.0, norm_max_px=100.0, three_fly_max_px=45.0,
     )
     assert synthetic.dorsal_px == 20.0
 
@@ -488,11 +513,13 @@ def test_hero_labels_are_pinned_to_the_underlying_data() -> None:
 
 def test_hero_rejected_marker_is_hollow() -> None:
     """Rejection is encoded by SHAPE first; colour is secondary, so nothing
-    depends on hue alone."""
+    depends on hue alone. Uses all(), not any(): if there are several X
+    markers, a solid-filled one hiding among hollow ones must fail this test,
+    not slip through because at least one marker happened to be hollow."""
     fig, ax = _hero_axes()
     marks = [ln for ln in ax.lines if ln.get_marker() in {"x", "X"}]
     assert marks, "the rejected example must be an X marker"
-    assert any(m.get_markerfacecolor() in ("none", "None") for m in marks)
+    assert all(m.get_markerfacecolor() in ("none", "None") for m in marks)
     plt.close(fig)
 
 
@@ -500,6 +527,98 @@ def test_hero_axis_is_equal_aspect() -> None:
     """Pixels are square; an unequal aspect would misrepresent the gate shape."""
     fig, ax = _hero_axes()
     assert ax.get_aspect() == 1.0
+    plt.close(fig)
+
+
+def test_hero_accepted_cloud_matches_the_offsets() -> None:
+    """The hero scatter is the figure's ONLY measured evidence. Replacing its
+    data with fabricated points must be detectable: the scatter collection's
+    offsets must equal Offsets.dx/dy exactly, in both count and coordinates."""
+    off = Offsets(
+        dx=np.array([5.0, 10.0, 28.9]),
+        dy=np.array([95.0, 110.0, 142.8]),
+        frames=np.array([0, 1, 1102]),
+        eye_xy=SUBJECT.eye_xy,
+    )
+    s = load_gate_settings()
+    fig, ax = plt.subplots()
+    draw_hero(ax, off, s, None)
+
+    assert len(ax.collections) == 1, "expected exactly one scatter collection"
+    drawn = ax.collections[0].get_offsets()
+    assert drawn.shape == (len(off.dx), 2)
+    np.testing.assert_allclose(np.asarray(drawn)[:, 0], off.dx)
+    np.testing.assert_allclose(np.asarray(drawn)[:, 1], off.dy)
+    plt.close(fig)
+
+
+def test_hero_peak_marker_sits_at_the_true_argmax() -> None:
+    """pdx, pdy in draw_hero must come from argmax(hypot(dx, dy)), not from
+    this subject's hardcoded golden values (28.9, 142.8). These synthetic
+    offsets put the true peak at neither the last point nor near the golden
+    values, so a hardcoded implementation draws the marker in the wrong
+    place."""
+    dx = np.array([5.0, -70.0, 15.0, 8.0])
+    dy = np.array([40.0, 95.0, 200.0, 20.0])
+    off = Offsets(dx=dx, dy=dy, frames=np.arange(4), eye_xy=SUBJECT.eye_xy)
+    s = load_gate_settings()
+    fig, ax = plt.subplots()
+    draw_hero(ax, off, s, None)
+
+    accepted_rgba = matplotlib.colors.to_rgba(ACCEPTED)
+    peak_dots = [
+        ln for ln in ax.lines
+        if ln.get_marker() == "o"
+        and matplotlib.colors.to_rgba(ln.get_markerfacecolor()) == accepted_rgba
+    ]
+    assert len(peak_dots) == 1, "expected exactly one peak-PER dot"
+    px, py = peak_dots[0].get_xdata()[0], peak_dots[0].get_ydata()[0]
+    assert (px, py) == pytest.approx((15.0, 200.0)), (
+        "peak marker must sit at argmax(r), not at a hardcoded coordinate"
+    )
+    plt.close(fig)
+
+
+def test_hero_draws_the_boundary_polyline_and_eye_anchor() -> None:
+    """Drawing the acceptance boundary or the eye anchor as empty arrays
+    (nothing rendered) currently passes every other test. This asserts the
+    boundary ring's vertex count and extremes match the gate (160 lateral,
+    160 ventral, -40 dorsal), and that a 'P' eye-anchor marker sits at
+    (0, 0)."""
+    off = Offsets(
+        dx=np.array([5.0, 10.0, 28.9]),
+        dy=np.array([95.0, 110.0, 142.8]),
+        frames=np.array([0, 1, 1102]),
+        eye_xy=SUBJECT.eye_xy,
+    )
+    s = load_gate_settings()
+    fig, ax = plt.subplots()
+    draw_hero(ax, off, s, None)
+
+    ink_rgba = matplotlib.colors.to_rgba(INK)
+    boundary = [
+        ln for ln in ax.lines
+        if ln.get_marker() in ("", "None", None)
+        and matplotlib.colors.to_rgba(ln.get_color()) == ink_rgba
+        and ln.get_linewidth() == pytest.approx(2.5)
+    ]
+    assert len(boundary) == 1, "expected exactly one boundary polyline"
+    bx, by = boundary[0].get_xdata(), boundary[0].get_ydata()
+    assert len(bx) == 361, "360 traced points plus the closing vertex"
+    assert bx.max() == pytest.approx(160.0, abs=0.5)
+    assert bx.min() == pytest.approx(-160.0, abs=0.5)
+    assert by.max() == pytest.approx(160.0, abs=0.5), "ventral (dy > 0) is generous"
+    assert by.min() == pytest.approx(-40.0, abs=0.5), "dorsal (dy < 0) is tightened"
+
+    eye_rgba = matplotlib.colors.to_rgba(EYE)
+    eye_marks = [
+        ln for ln in ax.lines
+        if ln.get_marker() == "P"
+        and matplotlib.colors.to_rgba(ln.get_color()) == eye_rgba
+    ]
+    assert len(eye_marks) == 1, "expected exactly one eye-anchor marker"
+    ex, ey = eye_marks[0].get_xdata()[0], eye_marks[0].get_ydata()[0]
+    assert (ex, ey) == pytest.approx((0.0, 0.0))
     plt.close(fig)
 
 
@@ -584,7 +703,7 @@ def test_jump_ring_radius_tracks_settings_not_a_hardcoded_80() -> None:
     object with a different value and require the drawn circle to follow it --
     this is what makes "not hardcoded" an actual, falsifiable claim."""
     s = GateSettings(max_px=160.0, up_divisor=4.0, max_jump_px=55.0,
-                      norm_min_px=10.0, norm_max_px=160.0)
+                      norm_min_px=10.0, norm_max_px=160.0, three_fly_max_px=99.0)
     fig, ax = plt.subplots()
     info = draw_jump_panel(ax, s)
     assert info["ring_radius"] == 55.0
@@ -617,7 +736,7 @@ def test_norm_panel_band_edges_track_settings_not_hardcoded_10_and_160() -> None
     Feed settings with different band edges and require the drawn numbers,
     and the returned band, to follow them."""
     s = GateSettings(max_px=160.0, up_divisor=4.0, max_jump_px=80.0,
-                      norm_min_px=25.0, norm_max_px=90.0)
+                      norm_min_px=25.0, norm_max_px=90.0, three_fly_max_px=99.0)
     off = Offsets(
         dx=np.array([0.0, 0.0]), dy=np.array([94.4, 145.8]),
         frames=np.array([0, 1]), eye_xy=SUBJECT.eye_xy,
@@ -631,44 +750,132 @@ def test_norm_panel_band_edges_track_settings_not_hardcoded_10_and_160() -> None
     plt.close(fig)
 
 
+def test_norm_panel_shaded_band_matches_the_gate_not_the_full_axis() -> None:
+    """Widening the axhspan to the full axis (xmin=0, xmax=1) passes every
+    other norm-panel test, since only the tick lines/labels were asserted.
+    This inspects the Rectangle patch axhspan adds and converts its
+    axes-fraction x-extent back to data coordinates via the axes' final
+    xlim, then checks it lands on the settings band -- not on [0, axis_max]."""
+    s = load_gate_settings()
+    off = Offsets(
+        dx=np.array([0.0, 0.0]), dy=np.array([94.4, 145.8]),
+        frames=np.array([0, 1]), eye_xy=SUBJECT.eye_xy,
+    )
+    fig, ax = plt.subplots()
+    draw_norm_panel(ax, off, s)
+
+    rects = [p for p in ax.patches if isinstance(p, plt.Rectangle)]
+    assert len(rects) == 1, "expected exactly one shaded band patch"
+    patch = rects[0]
+
+    xlim0, xlim1 = ax.get_xlim()
+    lo_frac = patch.get_x()
+    hi_frac = lo_frac + patch.get_width()
+    lo_data = xlim0 + lo_frac * (xlim1 - xlim0)
+    hi_data = xlim0 + hi_frac * (xlim1 - xlim0)
+
+    assert lo_data == pytest.approx(s.norm_min_px, abs=0.5)
+    assert hi_data == pytest.approx(s.norm_max_px, abs=0.5)
+    # and provably NOT the full axis
+    assert lo_frac > 0.001
+    assert hi_frac < 0.999
+    plt.close(fig)
+
+
+def test_norm_panel_spread_bar_matches_the_offsets_p1_p99() -> None:
+    """Panel E is the one panel excluded from SCHEMATIC_PANELS because it
+    plots this fly's REAL radius spread. Replacing that spread bar's x-data
+    with a hardcoded constant like [0.0, 200.0], or the max dot with a
+    hardcoded 175.0, passed every prior test -- none of them inspected this
+    panel's actual line data. Uses offsets whose p1/p99/max are irregular
+    floats no plausible hardcoded literal would match."""
+    s = load_gate_settings()
+    dx = np.zeros(20)
+    dy = np.array([
+        11.3, 108.4, 76.2, 43.9, 62.7, 91.5, 34.1, 121.8, 55.6, 68.0,
+        99.9, 27.4, 84.3, 116.7, 47.2, 73.6, 59.8, 102.1, 38.5, 128.9,
+    ])
+    off = Offsets(dx=dx, dy=dy, frames=np.arange(20), eye_xy=SUBJECT.eye_xy)
+    r = np.hypot(dx, dy)
+    expected_lo, expected_hi = np.percentile(r, 1), np.percentile(r, 99)
+    expected_max = r.max()
+
+    fig, ax = plt.subplots()
+    draw_norm_panel(ax, off, s)
+
+    accepted_rgba = matplotlib.colors.to_rgba(ACCEPTED)
+    spread_bars = [
+        ln for ln in ax.lines
+        if matplotlib.colors.to_rgba(ln.get_color()) == accepted_rgba
+        and ln.get_linewidth() == pytest.approx(4.0)
+    ]
+    assert len(spread_bars) == 1, "expected exactly one spread bar"
+    xdata = np.asarray(spread_bars[0].get_xdata())
+    assert xdata == pytest.approx([expected_lo, expected_hi])
+
+    max_dots = [
+        ln for ln in ax.lines
+        if ln.get_marker() == "o"
+        and matplotlib.colors.to_rgba(ln.get_color()) == accepted_rgba
+    ]
+    assert len(max_dots) == 1, "expected exactly one max-displacement dot"
+    assert max_dots[0].get_xdata()[0] == pytest.approx(expected_max)
+    plt.close(fig)
+
+
 def test_release_panel_shows_the_three_fly_limit() -> None:
+    """The >=3-fly release panel must print settings.three_fly_max_px -- the
+    value yolo_infer._max_valid_eye_prob_distance_px actually reads
+    (distance_limits.three_fly_max_eye_prob_distance_px) -- NOT settings.max_px
+    (proboscis_filter.max_eye_prob_distance_px), which gates a different rule.
+    Both happen to be 160.0 in config_new.yaml today, so this alone cannot
+    prove the panel reads the right key; see the synthetic-settings test below
+    for that."""
     s = load_gate_settings()
     fig, ax = plt.subplots()
     draw_release_panel(ax, s)
     drawn = {t.get_text() for t in ax.texts}
-    assert str(int(s.max_px)) in drawn
+    assert str(int(s.three_fly_max_px)) in drawn
     marks = [ln for ln in ax.lines if ln.get_marker() in {"x", "X"}]
     assert marks, "the released binding terminates in an X"
     plt.close(fig)
 
 
-def test_release_panel_limit_tracks_settings_not_a_hardcoded_160() -> None:
-    """Same coincidence as the jump ring and the norm band: config_new.yaml's
-    max_eye_prob_distance_px happens to BE 160, so a literal "160" written
-    into draw_release_panel would pass the test above undetected. Feed a
-    different max_px and require the drawn label to follow it."""
-    s = GateSettings(max_px=140.0, up_divisor=4.0, max_jump_px=80.0,
-                      norm_min_px=10.0, norm_max_px=160.0)
+def test_release_panel_limit_tracks_three_fly_max_px_not_max_px() -> None:
+    """config_new.yaml's max_eye_prob_distance_px (max_px, the spatial gate)
+    and three_fly_max_eye_prob_distance_px (three_fly_max_px, the >=3-fly
+    release rule) happen to BOTH be 160.0 today -- the exact coincidence that
+    let the panel cite the wrong config key (max_px) for seven prior fix
+    rounds. Feed them DIFFERENT values here: if draw_release_panel ever reads
+    settings.max_px instead of settings.three_fly_max_px again, "160" (from
+    max_px) would appear instead of "140" (from three_fly_max_px), and this
+    test would catch it -- a test where the two fields are equal cannot."""
+    s = GateSettings(max_px=160.0, up_divisor=4.0, max_jump_px=80.0,
+                      norm_min_px=10.0, norm_max_px=160.0, three_fly_max_px=140.0)
     fig, ax = plt.subplots()
     draw_release_panel(ax, s)
     drawn = {t.get_text() for t in ax.texts}
-    assert "140" in drawn
-    assert "160" not in drawn
+    assert "140" in drawn, "must draw three_fly_max_px, not max_px"
+    assert "160" not in drawn, "must NOT draw max_px -- that is the wrong config key"
     plt.close(fig)
 
 
-def test_cap_panel_keeps_the_highest_confidence_detections() -> None:
-    """Two flies resolved -> the two highest-confidence proboscis detections are
-    kept and the rest dropped."""
+@pytest.mark.parametrize("n_flies", [1, 2, 3])
+def test_cap_panel_keeps_the_highest_confidence_detections(n_flies: int) -> None:
+    """n_flies resolved -> the n_flies highest-confidence proboscis detections
+    are kept (filled circles) and the rest dropped (hollow X). Parametrised
+    over n_flies: a hardcoded ``i < 2`` with a literal "2-fly cap" title would
+    pass a single n_flies=2 case but fail here for 1 and 3, since neither the
+    kept/dropped counts nor the title would track n_flies."""
     fig, ax = plt.subplots()
-    draw_cap_panel(ax, n_flies=2)
+    draw_cap_panel(ax, n_flies=n_flies)
     drawn = {t.get_text() for t in ax.texts}
-    assert "2-fly cap" in drawn
+    assert f"{n_flies}-fly cap" in drawn
     kept = [ln for ln in ax.lines if ln.get_marker() == "o"
             and ln.get_markerfacecolor() not in ("none", "None")]
     dropped = [ln for ln in ax.lines if ln.get_marker() in {"x", "X"}]
-    assert len(kept) == 2
-    assert len(dropped) == 2
+    assert len(kept) == n_flies
+    assert len(dropped) == 4 - n_flies
     plt.close(fig)
 
 
@@ -760,3 +967,16 @@ def test_svg_keeps_text_editable(tmp_path: Path) -> None:
     svg = next(p for p in paths if p.suffix == ".svg").read_text(encoding="utf-8")
     assert "<text" in svg, "text was converted to paths -- not editable"
     assert "ACCEPTANCE BOUNDARY" in svg
+
+
+def test_pdf_and_ps_fonttype_keep_text_editable() -> None:
+    """fonttype 42 (TrueType) embeds real, editable glyph outlines in PDF/PS
+    output; fonttype 3 (Type 3 bitmap) does not -- labels become uneditable
+    in Illustrator/Inkscape. Only SVG editability was previously guarded, so
+    flipping pdf.fonttype 42->3 passed every other test in this file."""
+    assert plt.rcParams["pdf.fonttype"] == 42, (
+        "42 keeps PDF text editable in Illustrator/Inkscape; 3 does not"
+    )
+    assert plt.rcParams["ps.fonttype"] == 42, (
+        "42 keeps PS/EPS text editable in Illustrator/Inkscape; 3 does not"
+    )
