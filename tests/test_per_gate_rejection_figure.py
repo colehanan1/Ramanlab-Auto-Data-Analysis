@@ -70,6 +70,7 @@ import numpy as np
 from scripts.analysis.per_gate_rejection_figure import (
     SUBJECT,
     Offsets,
+    _resolve_frame_numbers,
     load_subject_offsets,
     subject_parquet_path,
     subject_video_path,
@@ -156,3 +157,53 @@ def test_subject_offsets_frames_match_parquet_frame_column() -> None:
 
     off = load_subject_offsets()
     np.testing.assert_array_equal(off.frames, expected_frames)
+
+
+def test_resolve_frame_numbers_prefers_frame_column_over_row_position() -> None:
+    """Synthetic dataframe with non-contiguous frame numbers, so frame number
+    and row position genuinely diverge. Under the OLD row-position
+    implementation (``np.flatnonzero(ok)``) this would return [0, 2, 3], not
+    [100, 105, 106] -- so this test fails on the old code, unlike checking
+    against the real (contiguous) parquet where both implementations agree."""
+    import pandas as pd
+
+    df = pd.DataFrame({"frame": [100, 101, 105, 106, 110]})
+    ok = np.array([True, False, True, True, False])
+    result = _resolve_frame_numbers(df, ok)
+    np.testing.assert_array_equal(result, np.array([100, 105, 106]))
+
+
+def test_resolve_frame_numbers_falls_back_without_frame_column() -> None:
+    """No frame/frame_number/frame_idx column at all -> row position."""
+    import pandas as pd
+
+    df = pd.DataFrame({"x_class0": [1, 2, 3, 4, 5]})
+    ok = np.array([True, False, True, True, False])
+    result = _resolve_frame_numbers(df, ok)
+    np.testing.assert_array_equal(result, np.array([0, 2, 3]))
+
+
+def test_resolve_frame_numbers_accepts_alias_columns() -> None:
+    """"frame_number" and "frame_idx" are accepted aliases for "frame"."""
+    import pandas as pd
+
+    df = pd.DataFrame({"frame_number": [50, 51, 52]})
+    ok = np.array([True, True, False])
+    result = _resolve_frame_numbers(df, ok)
+    np.testing.assert_array_equal(result, np.array([50, 51]))
+
+    df2 = pd.DataFrame({"frame_idx": [7, 8, 9]})
+    ok2 = np.array([False, True, True])
+    result2 = _resolve_frame_numbers(df2, ok2)
+    np.testing.assert_array_equal(result2, np.array([8, 9]))
+
+
+def test_resolve_frame_numbers_degrades_to_row_position_on_nan() -> None:
+    """A frame column with an unparsable/NaN value must not raise -- it
+    degrades to row position rather than crashing on ``.astype(int)``."""
+    import pandas as pd
+
+    df = pd.DataFrame({"frame": [100, 101, np.nan, 106, 110]})
+    ok = np.array([True, False, True, True, False])
+    result = _resolve_frame_numbers(df, ok)
+    np.testing.assert_array_equal(result, np.array([0, 2, 3]))
