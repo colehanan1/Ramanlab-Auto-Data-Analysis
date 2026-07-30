@@ -67,7 +67,7 @@ plt.rcParams.update(
 # Every string the hero panel is allowed to draw. The test asserts this set
 # exactly, which is what keeps the slide from accreting prose.
 HERO_TEXTS = frozenset(
-    {"dorsal", "ventral", "ACCEPTANCE BOUNDARY", "146 px", "220 px", "160", "40"}
+    {"dorsal", "ventral", "ACCEPTANCE BOUNDARY", "146 px", "221 px", "160", "40"}
 )
 
 CONFIG_PATH = REPO_ROOT / "config" / "config_new.yaml"
@@ -391,7 +391,7 @@ def draw_hero(ax, offsets: Offsets, settings: GateSettings, image: np.ndarray | 
     ax.plot([0, rdx], [0, rdy], color=REJECTED, lw=1.6, ls=(0, (4, 3)), zorder=5)
     ax.plot([rdx], [rdy], marker="X", ms=15, mfc="none", mec=REJECTED, mew=3.0,
             zorder=7, path_effects=_halo())
-    ax.text(rdx, rdy + 16, "220 px", color=REJECTED, fontsize=12,
+    ax.text(rdx, rdy + 16, "221 px", color=REJECTED, fontsize=12,
             fontweight="bold", va="top", ha="center", path_effects=_halo())
 
     # gate values, on the boundary itself
@@ -404,9 +404,9 @@ def draw_hero(ax, offsets: Offsets, settings: GateSettings, image: np.ndarray | 
             va="bottom", ha="center", path_effects=_halo())
 
     ax.text(0, -dorsal - 34, "dorsal", color=MUTED, fontsize=11, va="bottom",
-            ha="center", style="italic")
+            ha="center", style="italic", path_effects=_halo(3.0))
     ax.text(0, lat + 34, "ventral", color=MUTED, fontsize=11, va="top",
-            ha="center", style="italic")
+            ha="center", style="italic", path_effects=_halo(3.0))
     ax.text(0.02, 0.02, "ACCEPTANCE BOUNDARY", transform=ax.transAxes,
             color=INK, fontsize=13, fontweight="bold", va="bottom", ha="left")
 
@@ -543,3 +543,79 @@ def draw_norm_panel(ax, offsets: Offsets, settings: GateSettings) -> dict:
     for spine in ax.spines.values():
         spine.set_visible(False)
     return {"band": (lo, hi)}
+
+
+import argparse  # noqa: E402
+from typing import Sequence  # noqa: E402
+
+FIGSIZE = (13.33, 7.5)  # 16:9 defense slide
+
+CAPTION = (
+    "Blue marks are measured from this fly; orange X marks are constructed "
+    "rejections. Gate values are read from config/config_new.yaml. Panels with a "
+    "dashed border are schematic. The video frame is contrast-stretched and shown "
+    "inverted."
+)
+
+
+def make_figure(offsets: Offsets, settings: GateSettings,
+                image: np.ndarray | None) -> plt.Figure:
+    """Hero panel at left, four gate panels stacked at right."""
+    fig = plt.figure(figsize=FIGSIZE)
+    gs = fig.add_gridspec(
+        4, 2, width_ratios=[0.62, 0.38], hspace=0.45, wspace=0.06,
+        left=0.02, right=0.98, top=0.94, bottom=0.08,
+    )
+
+    draw_hero(fig.add_subplot(gs[:, 0]), offsets, settings, image)
+    draw_cap_panel(fig.add_subplot(gs[0, 1]), n_flies=2)
+    draw_release_panel(fig.add_subplot(gs[1, 1]), settings)
+    draw_jump_panel(fig.add_subplot(gs[2, 1]), settings)
+    draw_norm_panel(fig.add_subplot(gs[3, 1]), offsets, settings)
+
+    fig.text(0.02, 0.015, CAPTION, fontsize=8, color=MUTED, va="bottom", ha="left")
+    return fig
+
+
+def save_figure(fig: plt.Figure, outdir: Path = OUT_DIR,
+                stem: str = "per_gate_rejection") -> tuple[Path, ...]:
+    outdir.mkdir(parents=True, exist_ok=True)
+    paths = []
+    for suffix in (".png", ".pdf", ".svg"):
+        path = outdir / f"{stem}{suffix}"
+        fig.savefig(path, bbox_inches="tight", pad_inches=0.04)
+        paths.append(path)
+        print(f"wrote {path}")
+    plt.close(fig)
+    return tuple(paths)
+
+
+def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--config", type=Path, default=CONFIG_PATH)
+    parser.add_argument("--outdir", type=Path, default=OUT_DIR)
+    parser.add_argument("--stem", default="per_gate_rejection")
+    parser.add_argument("--no-frame", action="store_true",
+                        help="skip the video frame (useful without secured storage)")
+    return parser.parse_args(argv)
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    args = _parse_args(argv)
+    settings = load_gate_settings(args.config)
+    offsets = load_subject_offsets()
+
+    image = None
+    if not args.no_frame:
+        video = subject_video_path()
+        if video.exists():
+            image = load_frame_crop(video, SUBJECT.peak_frame)
+        else:
+            print(f"[warn] video not found, drawing without it: {video}")
+
+    save_figure(make_figure(offsets, settings, image), args.outdir, args.stem)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

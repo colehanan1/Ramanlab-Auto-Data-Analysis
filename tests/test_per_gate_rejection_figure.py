@@ -260,7 +260,7 @@ def test_constructed_rejection_is_genuinely_rejected() -> None:
     assert not survives[0], "the constructed bad detection must be blanked by the gate"
 
     r = float(np.hypot(dx, dy))
-    assert r == pytest.approx(220.5, abs=0.2), "label reads '220 px'"
+    assert r == pytest.approx(220.5, abs=0.2), "label reads '221 px'"
 
 
 @requires_data
@@ -415,7 +415,7 @@ def test_hero_labels_the_acceptance_boundary_and_both_marks() -> None:
     drawn = {t.get_text() for t in ax.texts}
     assert any("ACCEPTANCE" in t.upper() for t in drawn)
     assert "146 px" in drawn, "the accepted peak PER is direct-labelled"
-    assert "220 px" in drawn, "the rejected example is direct-labelled"
+    assert "221 px" in drawn, "the rejected example is direct-labelled"
     plt.close(fig)
 
 
@@ -465,23 +465,21 @@ def test_hero_gate_numbers_come_from_settings() -> None:
 
 @requires_data
 def test_hero_labels_are_pinned_to_the_underlying_data() -> None:
-    """"146 px" and "220 px" are literal strings in draw_hero -- HERO_TEXTS is
+    """"146 px" and "221 px" are literal strings in draw_hero -- HERO_TEXTS is
     asserted as an exact set, so they cannot be computed dynamically inside
     draw_hero without changing that set. These assertions are what keep the
     literals honest: if the real data or the constructed rejection ever
     drifts, this fails loudly instead of the slide quietly lying.
 
-    The two labels use different rounding conventions on purpose, and the
-    assertions follow the label they pin rather than a uniform rule:
-    the rejection's true radius is 220.51 px, and "220 px" is that value
-    TRUNCATED (matching the module's own "r = 220.5 px" comment next to
-    REJECTED_OFFSET) -- round() would give 221 and wrongly fail here. The
-    peak PER's true radius is ~145.75 px, and "146 px" is that value
-    ROUNDED per the brief's ambiguity ruling -- int() would give 145 and
-    wrongly fail here.
+    Both labels use the same rounding convention: round(). The rejection's
+    true radius is 220.51 px, which rounds to 221, not 220 -- an earlier
+    version of this test pinned the truncated ("220 px") value while the
+    companion peak-PER assertion below already used round(), an
+    inconsistency a reviewer flagged. The peak PER's true radius is
+    ~145.75 px, which rounds to 146.
     """
     rdx, rdy = REJECTED_OFFSET
-    assert int(np.hypot(rdx, rdy)) == 220, "label reads '220 px' (truncated)"
+    assert round(float(np.hypot(rdx, rdy))) == 221, "label reads '221 px' (rounded)"
 
     off = load_subject_offsets()
     r = np.hypot(off.dx, off.dy)
@@ -690,3 +688,66 @@ def test_every_side_panel_title_is_short() -> None:
         for t in ax.texts:
             assert len(t.get_text().split()) <= 3, f"too wordy: {t.get_text()!r}"
         plt.close(fig)
+
+
+from scripts.analysis.per_gate_rejection_figure import (
+    CAPTION,
+    FIGSIZE,
+    make_figure,
+    save_figure,
+)
+
+
+def test_default_canvas_is_a_16_by_9_slide() -> None:
+    assert FIGSIZE == (13.33, 7.5)
+    assert abs(FIGSIZE[0] / FIGSIZE[1] - 16 / 9) < 0.01
+
+
+def test_caption_declares_what_is_measured_and_what_is_constructed() -> None:
+    """The one honesty sentence. It belongs in the caption, not in the figure."""
+    assert "constructed" in CAPTION.lower()
+    assert "measured" in CAPTION.lower()
+    assert "config_new.yaml" in CAPTION
+    assert "inverted" in CAPTION.lower(), (
+        "load_frame_crop grayscales, contrast-stretches, then INVERTS the frame -- "
+        "the caption must declare that or the slide misrepresents the video"
+    )
+
+
+def test_figure_has_five_panels() -> None:
+    s = load_gate_settings()
+    off = Offsets(
+        dx=np.array([5.0, 28.9]), dy=np.array([95.0, 142.8]),
+        frames=np.array([0, 1102]), eye_xy=SUBJECT.eye_xy,
+    )
+    fig = make_figure(off, s, image=None)
+    assert len(fig.axes) == 5, "one hero + four gate panels"
+    plt.close(fig)
+
+
+def test_save_writes_png_pdf_and_svg(tmp_path: Path) -> None:
+    s = load_gate_settings()
+    off = Offsets(
+        dx=np.array([5.0, 28.9]), dy=np.array([95.0, 142.8]),
+        frames=np.array([0, 1102]), eye_xy=SUBJECT.eye_xy,
+    )
+    fig = make_figure(off, s, image=None)
+    paths = save_figure(fig, outdir=tmp_path)
+
+    assert {p.suffix for p in paths} == {".png", ".pdf", ".svg"}
+    for p in paths:
+        assert p.exists() and p.stat().st_size > 0
+
+
+def test_svg_keeps_text_editable(tmp_path: Path) -> None:
+    """svg.fonttype='none' -- so the labels stay editable in Illustrator."""
+    s = load_gate_settings()
+    off = Offsets(
+        dx=np.array([5.0, 28.9]), dy=np.array([95.0, 142.8]),
+        frames=np.array([0, 1102]), eye_xy=SUBJECT.eye_xy,
+    )
+    fig = make_figure(off, s, image=None)
+    paths = save_figure(fig, outdir=tmp_path)
+    svg = next(p for p in paths if p.suffix == ".svg").read_text(encoding="utf-8")
+    assert "<text" in svg, "text was converted to paths -- not editable"
+    assert "ACCEPTANCE BOUNDARY" in svg
