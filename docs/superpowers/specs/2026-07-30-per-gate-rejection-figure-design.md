@@ -91,11 +91,26 @@ Hero panel at left (~62% of width), four small gate panels stacked at right.
 Crop `x ∈ [645, 1045], y ∈ [63, 383]` of frame 1102, centred so the full gate plus
 margin is visible. Verified to fit inside the 1080×1080 frame.
 
-**Frame treatment:** grayscale, then blended 60% toward white. This is a contrast
-requirement, not a style choice. The palette validator WARNs at every mid-gray
-surface tested — orange falls to 1.61:1 against `#b8b8b6` — so a raw photographic
-background would void the palette's contrast guarantees. Ghosting restores a
-controlled light surface while keeping the fly legible.
+**Frame treatment:** grayscale, contrast-stretch (1st–99.5th percentile), invert,
+then blend 40% toward white. This is a contrast requirement, not a style choice, and
+the recipe is dictated by the footage.
+
+The raw crop is near-black IR video — mean 17, min 5, max 79. The originally
+specified treatment (grayscale then blend 60% toward white) was implemented and
+rendered, and it compressed the entire image into 14 grey levels, 5.5% of full
+scale: a blank pale rectangle with no visible fly. It passed every threshold it was
+given, because those thresholds measured paleness and never measured whether any
+structure survived.
+
+The stretch restores dynamic range; the inversion puts the fly dark-on-pale, which is
+the correct polarity for coloured overlay marks on a light surface. Final result:
+mean 199.3, range 153 levels, with head, eye and extended proboscis clearly visible.
+The palette validator WARNs at every mid-gray surface tested — orange falls to 1.61:1
+against `#b8b8b6` — so the pale background is what preserves the overlay palette's
+contrast guarantees.
+
+Because the displayed image is inverted relative to the raw recording, the caption
+must say so.
 
 **Boundary:** traced by calling `anisotropic_boundary_offsets(max_px, up_divisor, n=360)`
 from `src/fbpipe/utils/distance_sanity.py:78`. This is the production drawing
@@ -168,6 +183,7 @@ rule nor the displacement gate is exercised by its data. Those three panels get 
 hairline dashed border, and the caption states once:
 
 > Blue marks are measured from this fly; orange ✗ marks are constructed rejections.
+> The video frame is contrast-stretched and shown inverted.
 
 The hero panel's accepted cloud and panel E are real measured data. Only the single
 ✗ in the hero panel is constructed.
