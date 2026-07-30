@@ -50,6 +50,15 @@ INK = "#0b0b0b"
 MUTED = "#898781"
 SURFACE = "#fcfcfb"
 
+# INK is near-black, for text and lines on the figure's white/pale surfaces
+# (the side panels, the caption). The hero panel is the one exception: its
+# background is now a dark video frame (see load_frame_crop), so anything
+# drawn in INK would vanish into it. HERO_INK is that panel's own ink --
+# near-white -- used ONLY inside draw_hero, for the boundary line, gate
+# number labels, direction labels and title. It does not replace INK
+# anywhere else in the figure.
+HERO_INK = "#ffffff"
+
 plt.rcParams.update(
     {
         "font.family": "sans-serif",
@@ -67,7 +76,7 @@ plt.rcParams.update(
 # Every string the hero panel is allowed to draw. The test asserts this set
 # exactly, which is what keeps the slide from accreting prose.
 HERO_TEXTS = frozenset(
-    {"dorsal", "ventral", "ACCEPTANCE BOUNDARY", "146 px", "221 px", "160", "40"}
+    {"dorsal", "ventral", "ACCEPTANCE BOUNDARY", "128 px", "221 px", "160", "40"}
 )
 
 CONFIG_PATH = REPO_ROOT / "config" / "config_new.yaml"
@@ -149,9 +158,14 @@ VIDEO_ROOT = Path("/securedstorage/DATAsec/cole/Data-secured-New")
 class Subject:
     """The one fly the hero panel zooms in on.
 
-    Chosen from a scan of 2029 fly-trials that still have their source video: it
-    is the closest-to-boundary *odor testing* trial in the set, and the only
-    near-edge candidate with a perfect detection record (3605/3605).
+    Chosen from a scan of fly-trials that still have their source video: an
+    *odor testing* trial with a perfect detection record (3605/3605 frames,
+    across 3 flies) whose PER is diagonal -- extending down AND laterally
+    (dx to +98.7 px, dy to +84.5 px) -- rather than the narrow, near-vertical
+    excursion a purely-ventral fly would show. That diagonal shape is what
+    the hero panel's boundary trace is meant to illustrate: the gate is
+    anisotropic (generous laterally/ventrally, tight dorsally), not a simple
+    vertical corridor.
     """
 
     dataset: str
@@ -164,13 +178,13 @@ class Subject:
 
 
 SUBJECT = Subject(
-    dataset="3Oct-Control-24-0.1",
-    trial_rel="july_26_batch_1/july_26_batch_1_testing_1",
-    slot="fly1",
-    odor="3-Octonol",
-    eye_xy=(845.0, 183.0),
-    peak_frame=1102,
-    video_name="output_july_26_batch_1_testing_1_3-Octonol_20260726_161155.mp4",
+    dataset="3Oct-Training-24-0.1",
+    trial_rel="july_24_batch_2_rig_3/july_24_batch_2_testing_3",
+    slot="fly3",
+    odor="EthylButyrate",
+    eye_xy=(604.0, 830.0),
+    peak_frame=1233,
+    video_name="output_july_24_batch_2_testing_3_EthylButyrate_20260724_170758.mp4",
 )
 
 
@@ -296,45 +310,41 @@ def offsets_survive_geometry_gate(dx, dy, settings: GateSettings) -> np.ndarray:
     return pd.to_numeric(cleaned["x_class1"], errors="coerce").notna().to_numpy()
 
 
-# Crop window around the frozen eye at (845, 183): the full gate (160 px lateral
+# Crop window around the frozen eye at (604, 830): the full gate (160 px lateral
 # and ventral, 40 px dorsal) plus margin, and room for the constructed rejection
-# at eye + (185, 120). Verified to sit inside the 1080x1080 frame.
-CROP: tuple[int, int, int, int] = (645, 63, 1045, 383)
+# at eye + (185, 120) = (789, 950). 405 x 260 px. Verified to sit inside the
+# 1080x1080 frame.
+CROP: tuple[int, int, int, int] = (414, 740, 819, 1000)
 
-# Blend fraction toward white, applied AFTER the contrast stretch and
-# inversion below. Not stylistic: the palette validator WARNs at every
-# mid-gray surface tested (orange falls to 1.61:1 on #b8b8b6), so a raw
-# photographic background would void the contrast guarantees.
-#
-# This footage is near-black IR video (raw crop mean 17.0, min 5, max 79):
-# a naive "blend toward white" (gray + (255-gray)*ghost) at any ghost strong
-# enough to pale the surface also flattens that whole narrow raw range into a
-# handful of grey levels -- at ghost=0.80 the naive approach produced mean
-# 206.8 but a range of only 14 (205..219): a blank pale rectangle with no
-# visible fly. So the pipeline contrast-stretches by percentile first (to use
-# the full 0-255 range) and INVERTS (the footage is dark-background/
-# bright-fly; inverting puts the fly dark-on-pale, which is the correct
-# polarity for a light surface the coloured overlay marks need). GHOST_BLEND
-# is then a much gentler final blend on top of that already-pale surface.
-# Verified at 0.40: mean 199.3, min 102, max 255, range 153.
-GHOST_BLEND = 0.40
+# Gamma applied AFTER the percentile contrast-stretch below, to lift
+# mid-tones without blowing out the fly's brightest points. The footage is a
+# BRIGHT fly on a near-black background -- genuinely sharp -- so the fix is
+# to keep that natural polarity, not fight it. An earlier treatment
+# contrast-stretched, then INVERTED (fly dark-on-pale) and blended 40% toward
+# white to satisfy the overlay palette's light-surface contrast guarantees;
+# that produced a washed-out gray blur (mean 209.7, range 130.1) because
+# inversion plus a white blend crushes a bright subject into the same
+# mid-gray as its background. Gamma < 1 on the un-inverted, stretched frame
+# keeps the fly bright and the background dark while still lifting shadow
+# detail. Measured on the new subject: mean 89.1, p1 0.0, p99 225.9, range
+# 225.9 -- a genuinely dark surface with a genuinely bright, sharp fly on it.
+FRAME_GAMMA = 0.75
 
 
 def load_frame_crop(
     video_path: Path,
     frame_index: int,
     crop: tuple[int, int, int, int] = CROP,
-    ghost: float = GHOST_BLEND,
+    gamma: float = FRAME_GAMMA,
 ) -> np.ndarray:
-    """Pull one frame, crop it, grayscale it, contrast-stretch, invert, and
-    ghost it toward white.
+    """Pull one frame, crop it, grayscale it, contrast-stretch, and apply gamma.
 
-    The stretch and inversion are what keep the fly visible: this footage is
-    near-black IR video occupying a narrow raw range, so a naive blend toward
-    white would flatten it to a handful of grey levels before it reads as
-    pale enough for the overlay palette. Stretching first uses the full 0-255
-    range, and inverting puts the (naturally bright) fly down as a dark shape
-    on a light surface -- the polarity the coloured overlay marks need.
+    No inversion, no blend toward white: this footage is a bright fly on a
+    near-black background, and that is its natural, sharp polarity. The
+    percentile stretch uses the full 0-255 range; gamma < 1 then lifts
+    mid-tones so the fly's fainter edges stay visible without flattening its
+    brightest points. draw_hero uses light-on-dark ink (HERO_INK) to read
+    against this now-dark surface.
 
     Returns an RGB uint8 array so matplotlib can draw it directly.
     """
@@ -354,15 +364,22 @@ def load_frame_crop(
 
     lo, hi = np.percentile(gray, 1), np.percentile(gray, 99.5)
     stretched = np.clip((gray - lo) / max(hi - lo, 1e-6), 0, 1) * 255.0
-    inverted = 255.0 - stretched
+    gamma_corrected = 255.0 * np.power(stretched / 255.0, float(gamma))
 
-    pale = inverted + (255.0 - inverted) * float(ghost)
-    return np.repeat(np.clip(pale, 0, 255).astype(np.uint8)[:, :, None], 3, axis=2)
+    out = np.clip(gamma_corrected, 0, 255).astype(np.uint8)
+    return np.repeat(out[:, :, None], 3, axis=2)
 
 
-def _halo(width: float = 3.0):
-    """White relief so a mark stays legible over the ghosted frame."""
-    return [withStroke(linewidth=width, foreground="white")]
+def _halo(width: float = 3.0, foreground: str = "black"):
+    """Relief stroke so a mark stays legible over the hero frame.
+
+    The hero background is now a bright fly on a near-black surface (see
+    load_frame_crop), so a BLACK halo -- not the white halo the rest of this
+    module might suggest -- is what separates a mark from the fly's bright
+    body. Only draw_hero uses this function; the side panels sit on the
+    plain white SURFACE and need no halo at all.
+    """
+    return [withStroke(linewidth=width, foreground=foreground)]
 
 
 def draw_hero(ax, offsets: Offsets, settings: GateSettings, image: np.ndarray | None) -> None:
@@ -372,21 +389,26 @@ def draw_hero(ax, offsets: Offsets, settings: GateSettings, image: np.ndarray | 
 
     if image is not None:
         ax.imshow(image, extent=(x0 - ex, x1 - ex, y1 - ey, y0 - ey),
-                  interpolation="bilinear", zorder=0)
+                  interpolation="nearest", zorder=0)
 
     # accepted cloud -- all real detections. This is the figure's only
-    # measured evidence, and it has to read as a narrow ventral column (the
-    # anatomical argument for the gate's shape), not an incidental smudge.
+    # measured evidence, and it has to read as a diagonal excursion (down AND
+    # laterally -- the anatomical argument for the gate's anisotropic shape),
+    # not an incidental smudge.
     ax.scatter(offsets.dx, offsets.dy, s=12, c=ACCEPTED, alpha=0.22,
                linewidths=0, zorder=2)
 
-    # the acceptance boundary, traced by the production function
+    # the acceptance boundary, traced by the production function. White on
+    # the now-dark frame, with a black halo for relief against the bright fly.
     pts = gate_boundary_offsets(settings, n=360)
     ring = np.vstack([pts, pts[:1]])
-    ax.plot(ring[:, 0], ring[:, 1], color=INK, lw=2.5, zorder=4,
+    ax.plot(ring[:, 0], ring[:, 1], color=HERO_INK, lw=2.5, zorder=4,
             path_effects=_halo(5.0))
 
-    # frozen eye anchor
+    # frozen eye anchor. Violet against a near-black surface measures only
+    # 2.27:1 on its own, but the eye sits on the bright fly head, and the
+    # black halo below is the relief that keeps it legible there -- it is
+    # the required contrast fix, not decoration.
     ax.plot([0], [0], marker="P", ms=11, color=EYE, mew=0, zorder=6,
             path_effects=_halo())
 
@@ -397,7 +419,7 @@ def draw_hero(ax, offsets: Offsets, settings: GateSettings, image: np.ndarray | 
     ax.plot([0, pdx], [0, pdy], color=ACCEPTED, lw=1.6, zorder=5)
     ax.plot([pdx], [pdy], marker="o", ms=11, color=ACCEPTED, mew=2.0,
             mec="white", zorder=7)
-    ax.text(pdx + 12, pdy, "146 px", color=ACCEPTED, fontsize=12,
+    ax.text(pdx + 12, pdy, "128 px", color=ACCEPTED, fontsize=12,
             fontweight="bold", va="center", ha="left", path_effects=_halo())
 
     # constructed rejection -- verified against the real gate in the tests
@@ -408,21 +430,26 @@ def draw_hero(ax, offsets: Offsets, settings: GateSettings, image: np.ndarray | 
     ax.text(rdx, rdy + 16, "221 px", color=REJECTED, fontsize=12,
             fontweight="bold", va="top", ha="center", path_effects=_halo())
 
-    # gate values, on the boundary itself
+    # gate values, on the boundary itself -- white text, black halo
     lat, dorsal = settings.max_px, settings.dorsal_px
-    ax.text(lat + 6, 0, str(int(lat)), color=INK, fontsize=12, va="center",
+    ax.text(lat + 6, 0, str(int(lat)), color=HERO_INK, fontsize=12, va="center",
             ha="left", path_effects=_halo())
-    ax.text(0, lat + 20, str(int(lat)), color=INK, fontsize=12, va="top",
+    ax.text(0, lat + 20, str(int(lat)), color=HERO_INK, fontsize=12, va="top",
             ha="center", path_effects=_halo())
-    ax.text(0, -dorsal - 6, str(int(dorsal)), color=INK, fontsize=12,
+    ax.text(0, -dorsal - 6, str(int(dorsal)), color=HERO_INK, fontsize=12,
             va="bottom", ha="center", path_effects=_halo())
 
-    ax.text(0, -dorsal - 34, "dorsal", color=MUTED, fontsize=11, va="bottom",
+    ax.text(0, -dorsal - 34, "dorsal", color=HERO_INK, fontsize=11, va="bottom",
             ha="center", style="italic", path_effects=_halo(3.0))
-    ax.text(0, lat + 34, "ventral", color=MUTED, fontsize=11, va="top",
+    ax.text(0, lat + 34, "ventral", color=HERO_INK, fontsize=11, va="top",
             ha="center", style="italic", path_effects=_halo(3.0))
+    # No halo: SVG text with a path-effect stroke renders as glyph paths, not
+    # <text>, even with svg.fonttype='none' (see test_svg_keeps_text_editable).
+    # This title sits in the panel's bottom-left corner over the dark
+    # background, where plain HERO_INK already reads clearly without relief.
     ax.text(0.02, 0.02, "ACCEPTANCE BOUNDARY", transform=ax.transAxes,
-            color=INK, fontsize=13, fontweight="bold", va="bottom", ha="left")
+            color=HERO_INK, fontsize=13, fontweight="bold", va="bottom",
+            ha="left")
 
     ax.set_xlim(x0 - ex, x1 - ex)
     ax.set_ylim(y1 - ey, y0 - ey)   # image convention: +dy is ventral, downward
@@ -430,10 +457,14 @@ def draw_hero(ax, offsets: Offsets, settings: GateSettings, image: np.ndarray | 
     ax.axis("off")
 
 
-# Panels whose marks are illustrations rather than this fly's measurements. The
-# subject has 2 flies (so the >=3-fly release never fires) and a max real
-# displacement of 5.7 px (so the 80 px gate is never approached). These get a
-# dashed border, and the caption says so once.
+# Panels whose marks are illustrations rather than this fly's measurements.
+# The trial has 3 flies (so the >=3-fly release rule is live for it), but this
+# script only loads ONE fly's eye/proboscis offsets -- it never models the
+# other flies' pairings -- so panel C's specific eye positions and distances
+# are invented, independent of the fly count. Panel D is schematic on its own
+# merits: this fly's real max frame-to-frame displacement is 14.9 px, so the
+# 80 px jump gate is never approached. These get a dashed border, and the
+# caption says so once.
 SCHEMATIC_PANELS = frozenset({"cap", "release", "jump"})
 
 
@@ -571,8 +602,9 @@ FIGSIZE = (13.33, 7.5)  # 16:9 defense slide
 CAPTION = (
     "Blue marks are measured from this fly; orange X marks are constructed "
     "rejections. Gate values are read from config/config_new.yaml. Panels with a "
-    "dashed border are schematic. The video frame is contrast-stretched and shown "
-    "inverted."
+    "dashed border are schematic. The video frame is contrast-enhanced "
+    "(percentile-stretched and gamma-corrected) and shown at its natural, "
+    "not inverted, polarity."
 )
 
 
@@ -586,7 +618,7 @@ def make_figure(offsets: Offsets, settings: GateSettings,
     )
 
     draw_hero(fig.add_subplot(gs[:, 0]), offsets, settings, image)
-    draw_cap_panel(fig.add_subplot(gs[0, 1]), n_flies=2)
+    draw_cap_panel(fig.add_subplot(gs[0, 1]), n_flies=3)
     draw_release_panel(fig.add_subplot(gs[1, 1]), settings)
     draw_jump_panel(fig.add_subplot(gs[2, 1]), settings)
     draw_norm_panel(fig.add_subplot(gs[3, 1]), offsets, settings)

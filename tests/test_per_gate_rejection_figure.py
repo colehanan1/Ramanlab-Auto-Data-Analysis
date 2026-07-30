@@ -108,12 +108,12 @@ requires_data = pytest.mark.skipif(
 
 def test_subject_identity() -> None:
     """The subject is pinned so the figure caption cannot drift from the data."""
-    assert SUBJECT.dataset == "3Oct-Control-24-0.1"
-    assert SUBJECT.trial_rel == "july_26_batch_1/july_26_batch_1_testing_1"
-    assert SUBJECT.slot == "fly1"
-    assert SUBJECT.odor == "3-Octonol"
-    assert SUBJECT.eye_xy == (845.0, 183.0)
-    assert SUBJECT.peak_frame == 1102
+    assert SUBJECT.dataset == "3Oct-Training-24-0.1"
+    assert SUBJECT.trial_rel == "july_24_batch_2_rig_3/july_24_batch_2_testing_3"
+    assert SUBJECT.slot == "fly3"
+    assert SUBJECT.odor == "EthylButyrate"
+    assert SUBJECT.eye_xy == (604.0, 830.0)
+    assert SUBJECT.peak_frame == 1233
 
 
 @requires_data
@@ -125,25 +125,35 @@ def test_subject_offsets_match_spec() -> None:
     assert len(off.dx) == len(off.dy) == len(off.frames)
 
     ex, ey = off.eye_xy
-    assert round(ex) == 845 and round(ey) == 183
+    assert round(ex) == 604 and round(ey) == 830
 
     r = np.hypot(off.dx, off.dy)
-    assert r.max() == pytest.approx(145.8, abs=0.1)
+    assert r.max() == pytest.approx(127.9, abs=0.1)
 
     peak_i = int(np.argmax(r))
     assert off.frames[peak_i] == SUBJECT.peak_frame
-    assert off.dx[peak_i] == pytest.approx(28.9, abs=0.1)
-    assert off.dy[peak_i] == pytest.approx(142.8, abs=0.1)
+    assert off.dx[peak_i] == pytest.approx(96.1, abs=0.1)
+    assert off.dy[peak_i] == pytest.approx(84.5, abs=0.1)
 
 
 @requires_data
-def test_subject_per_is_ventral() -> None:
-    """The figure's argument: PER is a near-vertical ventral excursion, so the
-    gate is generous ventrally and tight dorsally."""
+def test_subject_per_is_diagonal_never_dorsal() -> None:
+    """The figure's argument for THIS fly: PER is a diagonal excursion --
+    down AND laterally, not a narrow vertical column -- yet still never
+    dorsal, which is why the gate is generous laterally/ventrally and tight
+    dorsally regardless of a fly's particular angle of approach.
+
+    Unlike a purely-ventral fly, dx here ranges widely (1.3 to 98.7 px), so
+    "never dorsal" is asserted on dy alone, not on a narrow abs(dx) bound."""
     off = load_subject_offsets()
     assert off.dy.min() > 0, "this fly never goes dorsal"
-    assert np.abs(off.dx).max() < 40.0
-    assert off.dy.max() > 140.0
+    assert off.dx.max() > 90.0, "excursion is substantially lateral, not vertical"
+    assert off.dy.max() > 80.0, "excursion is also substantially ventral"
+    # diagonal, not axis-aligned: near the peak, dx and dy are comparable
+    # magnitude rather than one dwarfing the other.
+    r = np.hypot(off.dx, off.dy)
+    peak_i = int(np.argmax(r))
+    assert off.dx[peak_i] > 0.5 * off.dy[peak_i], "peak PER is diagonal, not near-vertical"
 
 
 def test_subject_video_path_is_the_raw_recording() -> None:
@@ -298,18 +308,21 @@ def test_every_plotted_accepted_point_survives_the_gate() -> None:
 
 
 @requires_data
-def test_peak_per_is_near_the_boundary_but_inside() -> None:
-    """The whole point of this fly: it rides the edge without crossing it."""
+def test_peak_per_reads_well_inside_the_boundary() -> None:
+    """This fly's peak PER sits comfortably inside the boundary (gate norm
+    ~0.64, not near 1.0): its diagonal excursion is accommodated by the
+    anisotropic gate without needing to hug the edge -- unlike the
+    near-boundary framing of an earlier candidate subject."""
     s = load_gate_settings()
     off = load_subject_offsets()
     norms = gate_norm(off.dx, off.dy, s)
-    assert 0.80 < norms.max() < 1.0
-    assert norms.max() == pytest.approx(0.830, abs=0.005)
+    assert 0.0 < norms.max() < 1.0, "accepted points must be inside the gate"
+    assert norms.max() == pytest.approx(0.6392, abs=0.005)
 
 
 from scripts.analysis.per_gate_rejection_figure import (
     CROP,
-    GHOST_BLEND,
+    FRAME_GAMMA,
     load_frame_crop,
 )
 
@@ -352,32 +365,43 @@ def test_frame_crop_is_grayscale() -> None:
 
 
 @requires_video
-def test_frame_crop_surface_is_light() -> None:
-    """The background the coloured overlay marks sit on must be genuinely
-    light -- the palette validator WARNs at every mid-gray surface tested
-    (orange falls to 1.61:1 on #b8b8b6), so a dim surface would void the
-    overlay palette's contrast guarantees."""
+def test_frame_crop_background_is_dark() -> None:
+    """The frame keeps its natural polarity: a bright fly on a near-black
+    background. Most of the crop IS background, so a low percentile must
+    read genuinely dark -- draw_hero's white ink (HERO_INK) depends on this
+    for contrast, the mirror image of the old light-surface guarantee."""
     img = load_frame_crop(subject_video_path(), SUBJECT.peak_frame)
-    assert np.percentile(img, 90) > 230
+    assert np.percentile(img, 20) < 50
+
+
+@requires_video
+def test_frame_crop_fly_is_bright() -> None:
+    """The fly itself must read as genuinely bright, not merely 'less dark'
+    -- the whole point of dropping the inversion/ghost treatment that
+    produced a washed-out mean-gray blur."""
+    img = load_frame_crop(subject_video_path(), SUBJECT.peak_frame)
+    assert np.percentile(img, 90) > 190
 
 
 @requires_video
 def test_frame_crop_fly_is_still_visible() -> None:
     """The hero panel's entire purpose is that the audience sees a real fly.
-    The naive blend-toward-white approach (no contrast stretch, no invert)
-    produced a range of 14 here -- a blank rectangle that passed every other
-    assertion. This checks that real structure survives ghosting."""
+    A flattened, low-contrast treatment would produce a small range here --
+    this checks that real structure survives the stretch and gamma."""
     img = load_frame_crop(subject_video_path(), SUBJECT.peak_frame)
     assert np.percentile(img, 99) - np.percentile(img, 1) > 100
 
 
 @requires_video
-def test_ghost_blend_zero_returns_the_unghosted_frame() -> None:
-    """Sanity check that the ghosting parameter actually does the work."""
-    raw = load_frame_crop(subject_video_path(), SUBJECT.peak_frame, ghost=0.0)
-    ghosted = load_frame_crop(subject_video_path(), SUBJECT.peak_frame)
-    assert GHOST_BLEND > 0
-    assert ghosted.mean() > raw.mean()
+def test_gamma_lifts_shadow_detail_relative_to_a_raw_stretch() -> None:
+    """Sanity check that the gamma parameter actually does the work: gamma
+    < 1 (the default) must brighten the percentile-stretched frame relative
+    to gamma=1.0 (no correction), since x**g >= x for x in [0, 1] when
+    g < 1."""
+    raw_stretch = load_frame_crop(subject_video_path(), SUBJECT.peak_frame, gamma=1.0)
+    gamma_corrected = load_frame_crop(subject_video_path(), SUBJECT.peak_frame)
+    assert FRAME_GAMMA < 1.0
+    assert gamma_corrected.mean() > raw_stretch.mean()
 
 
 import matplotlib
@@ -388,6 +412,7 @@ import matplotlib.pyplot as plt  # noqa: E402
 from scripts.analysis.per_gate_rejection_figure import (  # noqa: E402
     ACCEPTED,
     EYE,
+    HERO_INK,
     HERO_TEXTS,
     INK,
     REJECTED,
@@ -418,9 +443,9 @@ def test_hero_contains_no_sentences() -> None:
 def _hero_axes(image=None):
     s = load_gate_settings()
     off = Offsets(
-        dx=np.array([5.0, 10.0, 28.9]),
-        dy=np.array([95.0, 110.0, 142.8]),
-        frames=np.array([0, 1, 1102]),
+        dx=np.array([5.0, 10.0, 96.1]),
+        dy=np.array([95.0, 110.0, 84.5]),
+        frames=np.array([0, 1, 1233]),
         eye_xy=SUBJECT.eye_xy,
     )
     fig, ax = plt.subplots()
@@ -439,7 +464,7 @@ def test_hero_labels_the_acceptance_boundary_and_both_marks() -> None:
     fig, ax = _hero_axes()
     drawn = {t.get_text() for t in ax.texts}
     assert any("ACCEPTANCE" in t.upper() for t in drawn)
-    assert "146 px" in drawn, "the accepted peak PER is direct-labelled"
+    assert "128 px" in drawn, "the accepted peak PER is direct-labelled"
     assert "221 px" in drawn, "the rejected example is direct-labelled"
     plt.close(fig)
 
@@ -466,9 +491,9 @@ def test_hero_gate_numbers_come_from_settings() -> None:
     fig, ax = _hero_axes()
     fig2, ax2 = plt.subplots()
     off = Offsets(
-        dx=np.array([5.0, 10.0, 28.9]),
-        dy=np.array([95.0, 110.0, 142.8]),
-        frames=np.array([0, 1, 1102]),
+        dx=np.array([5.0, 10.0, 96.1]),
+        dy=np.array([95.0, 110.0, 84.5]),
+        frames=np.array([0, 1, 1233]),
         eye_xy=SUBJECT.eye_xy,
     )
     draw_hero(ax2, off, synthetic, None)
@@ -490,7 +515,7 @@ def test_hero_gate_numbers_come_from_settings() -> None:
 
 @requires_data
 def test_hero_labels_are_pinned_to_the_underlying_data() -> None:
-    """"146 px" and "221 px" are literal strings in draw_hero -- HERO_TEXTS is
+    """"128 px" and "221 px" are literal strings in draw_hero -- HERO_TEXTS is
     asserted as an exact set, so they cannot be computed dynamically inside
     draw_hero without changing that set. These assertions are what keep the
     literals honest: if the real data or the constructed rejection ever
@@ -501,14 +526,14 @@ def test_hero_labels_are_pinned_to_the_underlying_data() -> None:
     version of this test pinned the truncated ("220 px") value while the
     companion peak-PER assertion below already used round(), an
     inconsistency a reviewer flagged. The peak PER's true radius is
-    ~145.75 px, which rounds to 146.
+    ~127.92 px, which rounds to 128.
     """
     rdx, rdy = REJECTED_OFFSET
     assert round(float(np.hypot(rdx, rdy))) == 221, "label reads '221 px' (rounded)"
 
     off = load_subject_offsets()
     r = np.hypot(off.dx, off.dy)
-    assert round(float(r.max())) == 146, "label reads '146 px' (rounded)"
+    assert round(float(r.max())) == 128, "label reads '128 px' (rounded)"
 
 
 def test_hero_rejected_marker_is_hollow() -> None:
@@ -535,9 +560,9 @@ def test_hero_accepted_cloud_matches_the_offsets() -> None:
     data with fabricated points must be detectable: the scatter collection's
     offsets must equal Offsets.dx/dy exactly, in both count and coordinates."""
     off = Offsets(
-        dx=np.array([5.0, 10.0, 28.9]),
-        dy=np.array([95.0, 110.0, 142.8]),
-        frames=np.array([0, 1, 1102]),
+        dx=np.array([5.0, 10.0, 96.1]),
+        dy=np.array([95.0, 110.0, 84.5]),
+        frames=np.array([0, 1, 1233]),
         eye_xy=SUBJECT.eye_xy,
     )
     s = load_gate_settings()
@@ -554,7 +579,7 @@ def test_hero_accepted_cloud_matches_the_offsets() -> None:
 
 def test_hero_peak_marker_sits_at_the_true_argmax() -> None:
     """pdx, pdy in draw_hero must come from argmax(hypot(dx, dy)), not from
-    this subject's hardcoded golden values (28.9, 142.8). These synthetic
+    this subject's hardcoded golden values (96.1, 84.5). These synthetic
     offsets put the true peak at neither the last point nor near the golden
     values, so a hardcoded implementation draws the marker in the wrong
     place."""
@@ -586,23 +611,32 @@ def test_hero_draws_the_boundary_polyline_and_eye_anchor() -> None:
     160 ventral, -40 dorsal), and that a 'P' eye-anchor marker sits at
     (0, 0)."""
     off = Offsets(
-        dx=np.array([5.0, 10.0, 28.9]),
-        dy=np.array([95.0, 110.0, 142.8]),
-        frames=np.array([0, 1, 1102]),
+        dx=np.array([5.0, 10.0, 96.1]),
+        dy=np.array([95.0, 110.0, 84.5]),
+        frames=np.array([0, 1, 1233]),
         eye_xy=SUBJECT.eye_xy,
     )
     s = load_gate_settings()
     fig, ax = plt.subplots()
     draw_hero(ax, off, s, None)
 
+    # HERO_INK (white), not the figure-wide INK (near-black): the hero
+    # background is now a dark video frame, so the boundary must be drawn in
+    # the panel's own light-on-dark ink to stay legible.
+    hero_ink_rgba = matplotlib.colors.to_rgba(HERO_INK)
     ink_rgba = matplotlib.colors.to_rgba(INK)
     boundary = [
         ln for ln in ax.lines
         if ln.get_marker() in ("", "None", None)
-        and matplotlib.colors.to_rgba(ln.get_color()) == ink_rgba
+        and matplotlib.colors.to_rgba(ln.get_color()) == hero_ink_rgba
         and ln.get_linewidth() == pytest.approx(2.5)
     ]
     assert len(boundary) == 1, "expected exactly one boundary polyline"
+    assert not [
+        ln for ln in ax.lines
+        if ln.get_marker() in ("", "None", None)
+        and matplotlib.colors.to_rgba(ln.get_color()) == ink_rgba
+    ], "the boundary must not use the figure-wide (near-black) INK on the dark hero panel"
     bx, by = boundary[0].get_xdata(), boundary[0].get_ydata()
     assert len(bx) == 361, "360 traced points plus the closing vertex"
     assert bx.max() == pytest.approx(160.0, abs=0.5)
@@ -619,6 +653,37 @@ def test_hero_draws_the_boundary_polyline_and_eye_anchor() -> None:
     assert len(eye_marks) == 1, "expected exactly one eye-anchor marker"
     ex, ey = eye_marks[0].get_xdata()[0], eye_marks[0].get_ydata()[0]
     assert (ex, ey) == pytest.approx((0.0, 0.0))
+    plt.close(fig)
+
+
+def test_hero_marks_use_a_black_halo_not_white() -> None:
+    """The hero background is now a bright fly on a dark surface, so relief
+    strokes must be BLACK (to separate a mark from the bright fly), not the
+    white halo that made sense on the old pale/ghosted background. Every
+    text and line artist in draw_hero that carries a path effect must use a
+    black -- not white -- stroke."""
+    off = Offsets(
+        dx=np.array([5.0, 10.0, 96.1]),
+        dy=np.array([95.0, 110.0, 84.5]),
+        frames=np.array([0, 1, 1233]),
+        eye_xy=SUBJECT.eye_xy,
+    )
+    s = load_gate_settings()
+    fig, ax = plt.subplots()
+    draw_hero(ax, off, s, None)
+
+    black_rgba = matplotlib.colors.to_rgba("black")
+    white_rgba = matplotlib.colors.to_rgba("white")
+
+    haloed_artists = [a for a in (*ax.lines, *ax.texts) if a.get_path_effects()]
+    assert haloed_artists, "expected at least one haloed artist in draw_hero"
+    for artist in haloed_artists:
+        for effect in artist.get_path_effects():
+            foreground = effect._gc.get("foreground")
+            assert matplotlib.colors.to_rgba(foreground) == black_rgba, (
+                f"{artist!r} carries a non-black halo: {foreground!r}"
+            )
+            assert matplotlib.colors.to_rgba(foreground) != white_rgba
     plt.close(fig)
 
 
@@ -915,9 +980,14 @@ def test_caption_declares_what_is_measured_and_what_is_constructed() -> None:
     assert "constructed" in CAPTION.lower()
     assert "measured" in CAPTION.lower()
     assert "config_new.yaml" in CAPTION
-    assert "inverted" in CAPTION.lower(), (
-        "load_frame_crop grayscales, contrast-stretches, then INVERTS the frame -- "
-        "the caption must declare that or the slide misrepresents the video"
+    assert "not inverted" in CAPTION.lower(), (
+        "load_frame_crop no longer inverts the frame -- the fly stays bright "
+        "on a dark background -- and the caption must say so, not still claim "
+        "the old inverted polarity"
+    )
+    assert "contrast" in CAPTION.lower() and "gamma" in CAPTION.lower(), (
+        "load_frame_crop grayscales, percentile-stretches, then applies gamma -- "
+        "the caption must describe that treatment"
     )
 
 
@@ -933,19 +1003,46 @@ def test_caption_is_pure_ascii() -> None:
 def test_figure_has_five_panels() -> None:
     s = load_gate_settings()
     off = Offsets(
-        dx=np.array([5.0, 28.9]), dy=np.array([95.0, 142.8]),
-        frames=np.array([0, 1102]), eye_xy=SUBJECT.eye_xy,
+        dx=np.array([5.0, 96.1]), dy=np.array([95.0, 84.5]),
+        frames=np.array([0, 1233]), eye_xy=SUBJECT.eye_xy,
     )
     fig = make_figure(off, s, image=None)
     assert len(fig.axes) == 5, "one hero + four gate panels"
     plt.close(fig)
 
 
+def test_make_figure_pins_the_cap_panel_to_three_flies() -> None:
+    """The trial has 3 flies (verified property of the new subject), so
+    make_figure must call draw_cap_panel(n_flies=3) -- title "3-fly cap",
+    3 kept (filled circles) and 1 dropped (hollow X). A make_figure that
+    still hardcoded n_flies=2 would pass test_figure_has_five_panels
+    identically, since that test only counts axes; this inspects the cap
+    panel's own title and marks."""
+    s = load_gate_settings()
+    off = Offsets(
+        dx=np.array([5.0, 96.1]), dy=np.array([95.0, 84.5]),
+        frames=np.array([0, 1233]), eye_xy=SUBJECT.eye_xy,
+    )
+    fig = make_figure(off, s, image=None)
+
+    cap_ax = fig.axes[1]
+    drawn = {t.get_text() for t in cap_ax.texts}
+    assert "3-fly cap" in drawn
+    assert "2-fly cap" not in drawn
+
+    kept = [ln for ln in cap_ax.lines if ln.get_marker() == "o"
+            and ln.get_markerfacecolor() not in ("none", "None")]
+    dropped = [ln for ln in cap_ax.lines if ln.get_marker() in {"x", "X"}]
+    assert len(kept) == 3
+    assert len(dropped) == 1
+    plt.close(fig)
+
+
 def test_save_writes_png_pdf_and_svg(tmp_path: Path) -> None:
     s = load_gate_settings()
     off = Offsets(
-        dx=np.array([5.0, 28.9]), dy=np.array([95.0, 142.8]),
-        frames=np.array([0, 1102]), eye_xy=SUBJECT.eye_xy,
+        dx=np.array([5.0, 96.1]), dy=np.array([95.0, 84.5]),
+        frames=np.array([0, 1233]), eye_xy=SUBJECT.eye_xy,
     )
     fig = make_figure(off, s, image=None)
     paths = save_figure(fig, outdir=tmp_path)
@@ -959,8 +1056,8 @@ def test_svg_keeps_text_editable(tmp_path: Path) -> None:
     """svg.fonttype='none' -- so the labels stay editable in Illustrator."""
     s = load_gate_settings()
     off = Offsets(
-        dx=np.array([5.0, 28.9]), dy=np.array([95.0, 142.8]),
-        frames=np.array([0, 1102]), eye_xy=SUBJECT.eye_xy,
+        dx=np.array([5.0, 96.1]), dy=np.array([95.0, 84.5]),
+        frames=np.array([0, 1233]), eye_xy=SUBJECT.eye_xy,
     )
     fig = make_figure(off, s, image=None)
     paths = save_figure(fig, outdir=tmp_path)
