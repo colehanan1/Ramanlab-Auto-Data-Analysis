@@ -85,6 +85,11 @@ from fbpipe.utils.columns import (  # noqa: E402
     find_eye_xy_columns,
     find_proboscis_xy_columns,
 )
+from fbpipe.utils.distance_sanity import (  # noqa: E402
+    anisotropic_boundary_offsets,
+    anisotropic_semi_axes,
+    sanitize_eye_prob_geometry_dataframe,
+)
 from fbpipe.utils.tables import read_table  # noqa: E402
 
 DATA_ROOT = Path("/home/ramanlab/Documents/cole/Data/flys_New")
@@ -193,3 +198,50 @@ def load_subject_offsets(subject: Subject = SUBJECT) -> Offsets:
         frames=_resolve_frame_numbers(df, ok),
         eye_xy=(float(np.nanmedian(ex)), float(np.nanmedian(ey))),
     )
+
+
+# The constructed bad detection, as an offset from the eye. Lateral-ventral
+# quadrant, well outside the gate: r = 220.5 px, gate norm 1.90. Task 3's tests
+# push this through the real production gate to prove it is genuinely rejected.
+REJECTED_OFFSET: tuple[float, float] = (185.0, 120.0)
+
+
+def gate_boundary_offsets(settings: GateSettings, n: int = 360) -> np.ndarray:
+    """Trace the acceptance boundary as (n, 2) dx/dy offsets from the eye.
+
+    Delegates to the production drawing function so the figure cannot drift from
+    the implementation.
+    """
+    pts = anisotropic_boundary_offsets(settings.max_px, settings.up_divisor, n)
+    return np.asarray(pts, dtype=float)
+
+
+def gate_norm(dx, dy, settings: GateSettings) -> np.ndarray:
+    """Gate-normalised radius. 1.0 is exactly on the boundary; > 1.0 is rejected."""
+    dx = np.asarray(dx, dtype=float)
+    dy = np.asarray(dy, dtype=float)
+    a, b = anisotropic_semi_axes(dx, dy, settings.max_px, settings.up_divisor)
+    return (dx / a) ** 2 + (dy / b) ** 2
+
+
+def offsets_survive_geometry_gate(dx, dy, settings: GateSettings) -> np.ndarray:
+    """Run offsets through the REAL production geometry gate.
+
+    Returns a boolean mask: True where the point survives, False where the
+    pipeline would blank it. Used to guarantee the figure's rejected example is
+    a rejection the model actually makes.
+    """
+    dx = np.asarray(dx, dtype=float)
+    dy = np.asarray(dy, dtype=float)
+    frame = pd.DataFrame(
+        {
+            "x_class0": np.zeros_like(dx),
+            "y_class0": np.zeros_like(dy),
+            "x_class1": dx,
+            "y_class1": dy,
+        }
+    )
+    cleaned, _ = sanitize_eye_prob_geometry_dataframe(
+        frame, settings.max_px, settings.up_divisor
+    )
+    return pd.to_numeric(cleaned["x_class1"], errors="coerce").notna().to_numpy()

@@ -207,3 +207,77 @@ def test_resolve_frame_numbers_degrades_to_row_position_on_nan() -> None:
     ok = np.array([True, False, True, True, False])
     result = _resolve_frame_numbers(df, ok)
     np.testing.assert_array_equal(result, np.array([0, 2, 3]))
+
+
+from scripts.analysis.per_gate_rejection_figure import (
+    REJECTED_OFFSET,
+    gate_boundary_offsets,
+    gate_norm,
+    offsets_survive_geometry_gate,
+)
+
+
+def test_boundary_extremes_match_the_gate() -> None:
+    """160 px lateral, 160 px ventral, 40 px dorsal -- traced by the production
+    function, not re-derived here."""
+    s = load_gate_settings()
+    pts = gate_boundary_offsets(s, n=720)
+    dx, dy = pts[:, 0], pts[:, 1]
+
+    assert dx.max() == pytest.approx(160.0, abs=0.5)
+    assert dx.min() == pytest.approx(-160.0, abs=0.5)
+    assert dy.max() == pytest.approx(160.0, abs=0.5), "ventral (dy > 0) is generous"
+    assert dy.min() == pytest.approx(-40.0, abs=0.5), "dorsal (dy < 0) is tightened"
+
+
+def test_boundary_comes_from_the_production_function(monkeypatch) -> None:
+    """If someone re-implements the ellipse maths locally, this fails."""
+    import scripts.analysis.per_gate_rejection_figure as mod
+
+    called = {}
+
+    def spy(max_px, up_divisor, n=72):
+        called["args"] = (max_px, up_divisor, n)
+        return [(0.0, 0.0)]
+
+    monkeypatch.setattr(mod, "anisotropic_boundary_offsets", spy)
+    gate_boundary_offsets(load_gate_settings(), n=123)
+    assert called["args"] == (160.0, 4.0, 123)
+
+
+def test_constructed_rejection_is_genuinely_rejected() -> None:
+    """The invented X mark must be a rejection the real model would make.
+
+    This is what keeps the figure honest: the point is fed through the actual
+    production gate, not merely drawn outside a line we chose.
+    """
+    s = load_gate_settings()
+    dx, dy = REJECTED_OFFSET
+
+    assert gate_norm(np.array([dx]), np.array([dy]), s)[0] > 1.0
+
+    survives = offsets_survive_geometry_gate(np.array([dx]), np.array([dy]), s)
+    assert not survives[0], "the constructed bad detection must be blanked by the gate"
+
+    r = float(np.hypot(dx, dy))
+    assert r == pytest.approx(220.5, abs=0.2), "label reads '220 px'"
+
+
+@requires_data
+def test_every_plotted_accepted_point_survives_the_gate() -> None:
+    """The blue cloud must contain nothing the gate would have removed."""
+    s = load_gate_settings()
+    off = load_subject_offsets()
+    survives = offsets_survive_geometry_gate(off.dx, off.dy, s)
+    assert survives.all()
+    assert gate_norm(off.dx, off.dy, s).max() < 1.0
+
+
+@requires_data
+def test_peak_per_is_near_the_boundary_but_inside() -> None:
+    """The whole point of this fly: it rides the edge without crossing it."""
+    s = load_gate_settings()
+    off = load_subject_offsets()
+    norms = gate_norm(off.dx, off.dy, s)
+    assert 0.80 < norms.max() < 1.0
+    assert norms.max() == pytest.approx(0.830, abs=0.005)
