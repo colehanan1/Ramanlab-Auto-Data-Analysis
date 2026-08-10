@@ -104,5 +104,11 @@ def test_remap_is_scoped_to_the_3oct_cohorts(restore_protocol_and_remap) -> None
     _register_config_remap()
     ev.set_protocol("v2")
     assert ev._display_odor("EB-Training-24-1", "testing_1_3-Octonol") == "3-Octanol (1%)"
+    # The Hex-24-0.01 cohorts run the same rig plumbing and so carry the *same*
+    # 0.1% 3-octanol label (see test_hex_24_001_odor_remap.py) — they only differ
+    # on the trained odor's own concentration.
+    assert ev._display_odor("Hex-Training-24-0.01", "testing_1_3-Octonol") == (
+        "3-Octanol (0.1%)"
+    )
     # A dataset with no remap at all still renders the bare canonical name.
-    assert ev._display_odor("Hex-Training-24-0.01", "testing_1_3-Octonol") == "3-Octanol"
+    assert ev._display_odor("Hex-Control-24-0.005", "testing_1_3-Octonol") == "3-Octanol"

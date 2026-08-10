@@ -3,16 +3,22 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import numpy as np
-import pandas as pd
-import pytest
+import matplotlib
+
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt  # noqa: E402
+import numpy as np  # noqa: E402
+import pandas as pd  # noqa: E402
+import pytest  # noqa: E402
 
 from scripts.analysis.remake_reaction_matrix_split import (
     DEFAULT_EXCLUDE,
     build_matrix,
     load_binary_reactions,
+    plot_reaction_rate_bars,
     rate_stats,
     remake,
+    render_bars_figure,
 )
 
 REAL_CSV = Path(
@@ -136,3 +142,29 @@ def test_real_air_training_rates_match_published_figure() -> None:
     percentages = [round(rate * 100) for rate in stats["rate"]]
     assert percentages == [25, 8, 17, 8, 8, 17, 67, 8, 25]
     assert set(stats["num_trials"]) == {12}
+
+
+def test_bars_figure_axis_labels() -> None:
+    """The split bar figure names the y-axis and carries no x-axis label."""
+    stats = rate_stats(_synthetic(), trained_label="AIR", exclude=DEFAULT_EXCLUDE)
+
+    fig = render_bars_figure(stats)
+    try:
+        ax = fig.axes[0]
+        assert ax.get_ylabel() == "Average PER Response %"
+        assert ax.get_xlabel() == ""
+    finally:
+        plt.close(fig)
+
+
+def test_shared_bar_helper_keeps_its_own_defaults() -> None:
+    """Other figures that call the helper are unaffected by the split-figure labels."""
+    stats = rate_stats(_synthetic(), trained_label="AIR", exclude=DEFAULT_EXCLUDE)
+
+    fig, ax = plt.subplots()
+    try:
+        plot_reaction_rate_bars(ax, stats, title="Reaction Rates by Odor")
+        assert ax.get_ylabel() == "PER %"
+        assert ax.get_xlabel() == "Presented Odor"
+    finally:
+        plt.close(fig)

@@ -182,7 +182,13 @@ def render_bars_figure(stats: pd.DataFrame) -> plt.Figure:
     n_bars = len(stats)
     fig_w = max(10.0, 0.70 * n_bars + 6.0)
     fig, ax = plt.subplots(figsize=(fig_w, 4.4))
-    plot_reaction_rate_bars(ax, stats, title="Reaction Rates by Odor")
+    plot_reaction_rate_bars(
+        ax,
+        stats,
+        title="Reaction Rates by Odor",
+        ylabel="Average PER Response %",
+        xlabel=None,
+    )
     return fig
 
 

@@ -33,3 +33,22 @@ def _isolate_protocol():
         yield
     finally:
         _ev.set_protocol(saved)
+
+
+@pytest.fixture(autouse=True)
+def _isolate_dataset_odor_remap():
+    """Snapshot/restore the global per-dataset odor remap around each test.
+
+    Same hazard as the protocol above: ``_DATASET_ODOR_REMAP`` is module-global,
+    and any test that loads a real config (a figure driver whose ``--config``
+    defaults to ``config_new.yaml``, say) installs that config's remap for the
+    rest of the session. A later test then sees ``Linalool`` renamed to
+    ``Isoamyl Acetate`` and fails for a reason that has nothing to do with it —
+    and only when run after the polluter, never on its own.
+    """
+    saved = {ds: dict(m) for ds, m in _ev._DATASET_ODOR_REMAP.items()}
+    try:
+        yield
+    finally:
+        _ev._DATASET_ODOR_REMAP.clear()
+        _ev._DATASET_ODOR_REMAP.update(saved)

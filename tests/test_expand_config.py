@@ -226,6 +226,71 @@ def test_odor_label_values():
     assert start_steps[0]["odor_label"] == "Hexanol"
     print("PASS: test_odor_label_values")
 
+# ── manual (non-optogenetic) sessions ────────────────────────────────────────
+# manual=True keeps the full Training protocol (odor delivered, Training mode,
+# same timings) but suppresses the conditioning light exactly like control mode
+# does: no light in cycles 1-2. The cycle 3 light-only probe still fires — it
+# is the light-response probe and is meaningless without light.
+
+def test_manual_training_has_no_conditioning_light():
+    result = expand_config(_make_v2("OFM_B"), manual=True)
+    c1 = result["cycles"][0]
+    for s in c1["steps"]:
+        assert "light_schedule" not in s, (
+            f"manual training step '{s.get('name')}' must not fire the light"
+        )
+    print("PASS: test_manual_training_has_no_conditioning_light")
+
+def test_manual_training_still_delivers_odor():
+    result = expand_config(_make_v2("OFM_B"), manual=True)
+    c1 = result["cycles"][0]
+    odor_steps = [
+        s for s in c1["steps"]
+        if any(a.get("device") == "ofm" and a.get("state") == "on"
+               for a in s.get("actions", []))
+    ]
+    assert len(odor_steps) == 1
+    assert odor_steps[0]["actions"][0]["pin"] == "OFM_B"
+    print("PASS: test_manual_training_still_delivers_odor")
+
+def test_manual_is_not_control():
+    """manual suppresses the light but the session is still a Training run."""
+    result = expand_config(_make_v2("OFM_B"), manual=True)
+    assert result["control"] is False
+    print("PASS: test_manual_is_not_control")
+
+def test_manual_keeps_light_only_probe():
+    result = expand_config(_make_v2("OFM_B"), manual=True)
+    c3 = result["cycles"][2]
+    light_steps = [s for s in c3["steps"] if "light_schedule" in s]
+    assert len(light_steps) == 1
+    assert "Light Only" in light_steps[0]["name"]
+    print("PASS: test_manual_keeps_light_only_probe")
+
+def test_manual_defaults_off():
+    """Omitting manual must reproduce the opto expansion exactly."""
+    import random as _random
+    _random.seed(7)
+    with_default = expand_config(_make_v2("OFM_B"))
+    _random.seed(7)
+    explicit_off = expand_config(_make_v2("OFM_B"), manual=False)
+    assert with_default == explicit_off
+    c1 = with_default["cycles"][0]
+    assert any("light_schedule" in s for s in c1["steps"]), (
+        "opto training must still fire the light"
+    )
+    print("PASS: test_manual_defaults_off")
+
+def test_manual_and_control_together():
+    """--manual --control: still no light in cycles 1-2, probe intact."""
+    result = expand_config(_make_v2("OFM_B"), control=True, manual=True)
+    for c in result["cycles"]:
+        if c["cycle"] in (1, 2):
+            for s in c["steps"]:
+                assert "light_schedule" not in s
+    assert result["control"] is True
+    print("PASS: test_manual_and_control_together")
+
 if __name__ == "__main__":
     test_passthrough()
     test_3_cycles()

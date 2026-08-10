@@ -251,32 +251,40 @@ def plot_frame_montage(video_path: Path, result: dict, roi: Optional[tuple[int, 
 # High-level per-trial check with caching
 # ---------------------------------------------------------------------------
 
-def find_trial_video(trial_dir: Path) -> Optional[Path]:
-    """Resolve the best available video for a trial.
+def find_trial_video_candidates(trial_dir: Path) -> list[Path]:
+    """All existing videos for a trial, in preference order.
 
     Preference order: the YOLO-annotated video inside the trial folder, then
     (if ``move_videos`` already relocated it) the ``videos_with_rms`` staging
-    copy, then the raw sibling video in the batch folder.
+    copy, then the raw sibling video in the batch folder. Callers should fall
+    through the list when a candidate turns out to be undecodable (e.g. a
+    header-only stub left behind by a failed yolo_infer run).
     """
     trial_dir = Path(trial_dir)
+    candidates: list[Path] = []
     annotated = trial_dir / f"{trial_dir.name}_distance_annotated.mp4"
     if annotated.exists():
-        return annotated
+        candidates.append(annotated)
 
     batch = trial_dir.parent
-    m = None
     import re
     m = re.search(r"(training|testing)_(\d+)$", trial_dir.name, re.IGNORECASE)
     if m:
         phase = m.group(1).lower()
         staged = batch / "videos_with_rms" / phase / annotated.name
         if staged.exists():
-            return staged
+            candidates.append(staged)
 
-    candidates = sorted(batch.glob(f"output_{trial_dir.name}_*.mp4"))
-    if candidates:
-        return max(candidates, key=lambda p: p.stat().st_mtime)
-    return None
+    raw = sorted(batch.glob(f"output_{trial_dir.name}_*.mp4"))
+    if raw:
+        candidates.append(max(raw, key=lambda p: p.stat().st_mtime))
+    return candidates
+
+
+def find_trial_video(trial_dir: Path) -> Optional[Path]:
+    """Resolve the best available video for a trial (first candidate)."""
+    candidates = find_trial_video_candidates(trial_dir)
+    return candidates[0] if candidates else None
 
 
 def _cache_path(trial_dir: Path) -> Path:
@@ -298,11 +306,13 @@ def check_trial_light_stimulus(
     """Run (or load cached) light-stimulus check for one trial.
 
     Returns a flat dict suitable for a CSV row. ``status`` is one of
-    ``"checked"`` (produced a pass/fail verdict) or ``"no_video"`` (video
-    could not be resolved — recorded but not flagged as a failure).
+    ``"checked"`` (produced a pass/fail verdict), ``"no_video"`` (video could
+    not be resolved) or ``"unreadable_video"`` (every candidate video exists
+    but none could be decoded) — the latter two are recorded but not flagged
+    as light failures.
     """
     trial_dir = Path(trial_dir)
-    video_path = find_trial_video(trial_dir)
+    candidates = find_trial_video_candidates(trial_dir)
     base_row = {
         **(extra_columns or {}),
         "trial_dir": str(trial_dir),
@@ -310,28 +320,48 @@ def check_trial_light_stimulus(
         "expected_on_s": expected_on[0],
         "expected_off_s": expected_on[1],
     }
-    if video_path is None:
+    if not candidates:
         return {**base_row, "status": "no_video", "video_path": None, "passed": None, "from_cache": False}
 
-    video_mtime = video_path.stat().st_mtime
+    def _key(path: Path) -> dict:
+        return {
+            "video_path": str(path),
+            "video_mtime": path.stat().st_mtime,
+            "expected_on": list(expected_on),
+            "stride": stride,
+        }
+
     cache_path = _cache_path(trial_dir)
-    cache_key = {
-        "video_path": str(video_path),
-        "video_mtime": video_mtime,
-        "expected_on": list(expected_on),
-        "stride": stride,
-    }
     if not force and cache_path.exists():
         try:
             cached = json.loads(cache_path.read_text(encoding="utf-8"))
-            if cached.get("_cache_key") == cache_key:
+            if any(cached.get("_cache_key") == _key(c) for c in candidates):
                 row = dict(cached["row"])
                 row["from_cache"] = True
                 return row
         except (json.JSONDecodeError, OSError, KeyError):
             pass
 
-    samples = sample_video(video_path, roi=roi, stride=stride)
+    samples, video_path = None, None
+    for candidate in candidates:
+        try:
+            decoded = sample_video(candidate, roi=roi, stride=stride)
+        except (FileNotFoundError, ValueError):
+            continue
+        if decoded:
+            samples, video_path = decoded, candidate
+            break
+    if samples is None:
+        LOGGER.warning("No decodable video among %d candidate(s) for %s", len(candidates), trial_dir)
+        return {
+            **base_row,
+            "status": "unreadable_video",
+            "video_path": str(candidates[0]),
+            "passed": None,
+            "from_cache": False,
+        }
+
+    cache_key = _key(video_path)
     result = check_expected_window(samples, expected_on, min_fraction_on=min_fraction_on)
 
     row = {
@@ -421,6 +451,7 @@ __all__ = [
     "plot_transitions",
     "plot_frame_montage",
     "find_trial_video",
+    "find_trial_video_candidates",
     "check_trial_light_stimulus",
     "update_light_check_csv",
 ]

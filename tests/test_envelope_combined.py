@@ -597,6 +597,109 @@ def test_generate_envelope_plots_filters_to_requested_fly(tmp_path):
     assert not other_png.exists()
 
 
+def _exclude_odor_wide_csv(path: Path) -> None:
+    """Ten testing trials for one Hex-Control fly (trial 6 == Benzaldehyde)."""
+
+    n = 10
+    pd.DataFrame(
+        {
+            "dataset": ["Hex-Control-24-0.1"] * n,
+            "fly": ["october_02_fly_1"] * n,
+            "fly_number": ["1"] * n,
+            "trial_type": ["testing"] * n,
+            "trial_label": [f"testing_{i}" for i in range(1, n + 1)],
+            "fps": [40.0] * n,
+            "global_min": [1.0] * n,
+            "global_max": [20.0] * n,
+            "trimmed_global_min": [1.0] * n,
+            "trimmed_global_max": [20.0] * n,
+            "trace_len": [4] * n,
+            "dir_val_0": [0.0] * n,
+            "dir_val_1": [8.0] * n,
+            "dir_val_2": [16.0] * n,
+            "dir_val_3": [4.0] * n,
+        }
+    ).to_csv(path, index=False)
+
+
+def _panel_counts_for_exclude_odors(tmp_path, monkeypatch, exclude_odors):
+    """Render one fly and report (n_panels, panel_titles) for the figure."""
+
+    import matplotlib.axes
+    import matplotlib.pyplot as plt
+
+    wide_csv = tmp_path / "wide_testing.csv"
+    _exclude_odor_wide_csv(wide_csv)
+    matrix_dir = tmp_path / "matrix"
+    ec.wide_to_matrix(str(wide_csv), str(matrix_dir))
+
+    nrows_seen: list[int] = []
+    real_subplots = plt.subplots
+
+    def _spy_subplots(nrows=1, *args, **kwargs):
+        nrows_seen.append(int(nrows))
+        return real_subplots(nrows, *args, **kwargs)
+
+    titles: list[str] = []
+    real_text = matplotlib.axes.Axes.text
+
+    def _spy_text(self, x, y, s, *args, **kwargs):
+        titles.append(str(s))
+        return real_text(self, x, y, s, *args, **kwargs)
+
+    monkeypatch.setattr(ev.plt, "subplots", _spy_subplots)
+    monkeypatch.setattr(matplotlib.axes.Axes, "text", _spy_text)
+
+    ev.generate_envelope_plots(
+        ev.EnvelopePlotConfig(
+            matrix_npy=matrix_dir / "envelope_matrix_float16.npy",
+            codes_json=matrix_dir / "code_maps.json",
+            out_dir=tmp_path / f"plots_{len(tuple(exclude_odors))}",
+            latency_sec=0.0,
+            odor_latency_s=0.0,
+            trial_type="testing",
+            overwrite=True,
+            exclude_odors=exclude_odors,
+        )
+    )
+    assert nrows_seen, "no figure was rendered"
+    return nrows_seen[0], titles
+
+
+def test_generate_envelope_plots_renders_every_odor_by_default(tmp_path, monkeypatch):
+    """Baseline: with no exclusions all ten testing trials get a panel."""
+
+    n_panels, titles = _panel_counts_for_exclude_odors(tmp_path, monkeypatch, ())
+
+    assert n_panels == 10
+    assert any("Benzaldehyde" in t for t in titles)
+
+
+def test_generate_envelope_plots_drops_excluded_odors(tmp_path, monkeypatch):
+    """exclude_odors removes that odor's panel and leaves the rest untouched."""
+
+    n_panels, titles = _panel_counts_for_exclude_odors(
+        tmp_path, monkeypatch, ("Benzaldehyde",)
+    )
+
+    assert n_panels == 9
+    assert not any("Benzaldehyde" in t for t in titles)
+    # The other odors survive.
+    assert any("Citral" in t for t in titles)
+    assert any("Linalool" in t for t in titles)
+
+
+def test_generate_envelope_plots_exclude_odors_is_case_insensitive(tmp_path, monkeypatch):
+    """Matching ignores case and surrounding whitespace."""
+
+    n_panels, titles = _panel_counts_for_exclude_odors(
+        tmp_path, monkeypatch, ("  benzALDEHYDE ",)
+    )
+
+    assert n_panels == 9
+    assert not any("Benzaldehyde" in t for t in titles)
+
+
 def test_training_light_line_uses_measured_trial_light_on_s(tmp_path, monkeypatch):
     """The green light line is drawn at the measured trial_light_on_s, not the
     hardcoded per-trial schedule."""

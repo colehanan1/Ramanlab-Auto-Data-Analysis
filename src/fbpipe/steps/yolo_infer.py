@@ -373,6 +373,26 @@ def _run_chunked_inference(cap, max_frame, target_wh, writer, timestamps, fps, a
     return rows
 
 
+def _discard_empty_trial_outputs(out_dir: Path, out_mp4: Path, video_name: str) -> None:
+    """Remove the outputs of a zero-frame inference run so the trial is retried.
+
+    A source video that opens but decodes no frames (corrupt bitstream) would
+    otherwise leave a header-only annotated mp4 and an empty table behind, and
+    the ``out_dir.exists()`` skip-guard would treat the trial as processed on
+    every future run. The directory is only removed when nothing else is in it.
+    """
+    log.error(
+        "%s decoded 0 frames (corrupt video?); discarding empty outputs so the "
+        "trial is retried on the next run", video_name,
+    )
+    print(f"[YOLO] {video_name}: decoded 0 frames (corrupt video?); leaving trial unprocessed")
+    out_mp4.unlink(missing_ok=True)
+    try:
+        out_dir.rmdir()
+    except OSError:
+        pass  # other files present — keep them
+
+
 def _export_per_fly_csvs(
     df: pd.DataFrame,
     out_dir: Path,
@@ -714,6 +734,10 @@ def main(cfg: Settings):
                     cfg, batched_predict_fn, single_trackers, None,
                     eye_mgr, cls8_tracker, pairer, active_max_flies, B)
                 cap.release(); writer.release()
+
+                if not rows:
+                    _discard_empty_trial_outputs(out_dir, out_mp4, video_path.name)
+                    continue
 
                 if out_mp4.exists():
                     final_size = out_mp4.stat().st_size / (1024**2)

@@ -18,6 +18,8 @@ TARGET_FLY_NUMBER = "1"
 MATRIX_NPY = Path("/home/ramanlab/Documents/cole/Data/CSVs-ALL-Opto-Flys/matrix/raw/envelope_matrix_float16.npy")
 CODES_JSON = Path("/home/ramanlab/Documents/cole/Data/CSVs-ALL-Opto-Flys/matrix/raw/code_maps.json")
 DEFAULT_OUT_DIR = Path("/tmp/grant-raw-testing-october_02_fly_1")
+# Benzaldehyde is dropped from the grant figure at the user's request.
+EXCLUDE_ODORS = ("Benzaldehyde",)
 
 STYLE = {
     "style_scale": 2.0,
@@ -67,6 +69,7 @@ def build_config(out_dir: Path, *, overwrite: bool) -> EnvelopePlotConfig:
         trial_type="testing",
         fly_filter=TARGET_FLY,
         fly_number_filter=TARGET_FLY_NUMBER,
+        exclude_odors=EXCLUDE_ODORS,
         overwrite=overwrite,
         **STYLE,
     )

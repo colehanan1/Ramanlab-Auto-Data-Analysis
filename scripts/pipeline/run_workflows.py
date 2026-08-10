@@ -2146,7 +2146,7 @@ def _run_reactions(settings: Settings, config_path: Path | None = None) -> None:
             print("[analysis] score_summary →", " ".join(score_cmd))
             subprocess.run(score_cmd, check=True, env=env)
 
-            # --- RandomPanel per-odorant concentration comparison (Fisher) ---
+            # --- RandomPanel per-odorant concentration comparison (KW/Holm) ---
             # Skips itself cleanly when the CSV isn't a RandomPanel run holding
             # all three concentrations (10 / 1 / 0.1).
             conc_script = REPO_ROOT / "scripts" / "analysis" / "randompanel_conc_comparison.py"

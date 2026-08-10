@@ -66,11 +66,30 @@ from scripts.analysis.envelope_combined import (  # noqa: E402
     _display_odor,
     _trial_num,
 )
+from scripts.analysis.mean_trace_score import (  # noqa: E402
+    annotate_mean_scores,
+    model_settings_from_config,
+    score_group_means,
+)
+from scripts.analysis.odor_bar_palette import (  # noqa: E402
+    CTRL_COLOR,
+    TRAIN_COLOR,
+    odor_color,
+)
 
 LOGGER = logging.getLogger("dataset_means_specific_flies")
 
 DPI = 300
 MAX_TIME_S = 90.0
+
+# The trained-vs-control figures share the bar figures' palette so an odor
+# reads the same in both panels: odor colour for the trained cohort, grey for
+# control (``score_bars_*``). The band keeps the bars' control grey; the line
+# is darker so it stays visible against both the band and the shaded odor
+# window.
+Y_LABEL = "Average PER%"
+CTRL_BAND_COLOR = CTRL_COLOR
+CTRL_LINE_COLOR = "#7f7f7f"
 
 # First-presentation trial number per odor. Multi-presentation odors are
 # explicit per user request; single-presentation odors fall back to "the only
@@ -113,6 +132,15 @@ def _adjust_lightness(color: str, factor: float) -> tuple[float, float, float]:
     h, l, s = colorsys.rgb_to_hls(r, g, b)
     l = max(0.0, min(1.0, l * factor))
     return colorsys.hls_to_rgb(h, l, s)
+
+
+def _trace_odor_color(odor: str) -> str:
+    """Palette colour for an odor trace, matching the bar figures exactly.
+
+    Odors with no palette entry (Benzaldehyde, AIR) take the same dark blue the
+    bars give an unpalettised trained odor.
+    """
+    return odor_color(odor) or TRAIN_COLOR
 
 
 def _load_yaml(path: Path) -> dict:
@@ -164,6 +192,66 @@ def _filter_to_flies(
     return wide_df[mask]
 
 
+def _flagged_dataset_name(dataset_name: str) -> str:
+    """Name of the ``-flagged`` sibling the pipeline parks excluded flies in."""
+    return f"{dataset_name}-flagged"
+
+
+def _select_dataset_rows(
+    wide_df: pd.DataFrame,
+    dataset_name: str,
+    *,
+    flies: set[tuple[str, int]],
+    include_flagged: bool = False,
+) -> pd.DataFrame:
+    """Testing rows for ``flies`` within ``dataset_name``.
+
+    ``include_flagged`` also accepts rows from the ``-flagged`` sibling. Flies
+    get re-assigned there as the pipeline re-runs, which silently shrinks a
+    cohort that was pinned by a binary-reactions CSV months earlier — the
+    OctNov Hex-Control cohort lost 11 of 15 flies that way. The explicit fly
+    list still bounds the result, so nothing new is pulled in.
+    """
+    datasets = {dataset_name}
+    if include_flagged:
+        datasets.add(_flagged_dataset_name(dataset_name))
+    ds_df = wide_df[wide_df["dataset"].isin(datasets)].copy()
+    ds_df = ds_df[ds_df["trial_type"] == "testing"]
+    return _filter_to_flies(ds_df, flies)
+
+
+def _missing_flies(
+    ds_df: pd.DataFrame, flies: set[tuple[str, int]]
+) -> list[tuple[str, int]]:
+    """Cohort members with no rows in ``ds_df``, sorted."""
+    if ds_df.empty:
+        return sorted(flies)
+    present = {
+        (str(fly).strip(), int(num))
+        for fly, num in zip(ds_df["fly"], ds_df["fly_number"])
+    }
+    return sorted(flies - present)
+
+
+def _warn_missing_flies(
+    dataset_name: str, ds_df: pd.DataFrame, flies: set[tuple[str, int]]
+) -> None:
+    """Log a warning naming cohort flies that contributed no rows."""
+    missing = _missing_flies(ds_df, flies)
+    if not missing:
+        return
+    LOGGER.warning(
+        "%s: %d of %d cohort flies have no rows in the wide table — the figure "
+        "n will not match the binary-reactions cohort. Missing: %s. "
+        "(Re-run with --include-flagged if they moved to %s.)",
+        dataset_name,
+        len(missing),
+        len(flies),
+        ", ".join(f"{fly}#{num}" for fly, num in missing),
+        _flagged_dataset_name(dataset_name),
+    )
+
+
 def _baseline_correct(trace: np.ndarray, baseline_frames: int) -> np.ndarray:
     # Single source of truth: fbpipe.analysis.traces.baseline_correct
     return baseline_correct(trace, baseline_frames)
@@ -195,15 +283,18 @@ def _collect_per_fly_first_presentation(
     *,
     baseline_frames: int,
     dir_cols: list[str],
-) -> tuple[
-    dict[str, dict[str, np.ndarray]],
-    dict[tuple[str, int], dict[str, list[int]]],
-]:
+    return_rows: bool = False,
+) -> tuple:
     """Return per-fly first-presentation traces per odor.
 
     Output[0] is keyed by odor -> {fly_id: trace}; Output[1] is the
     odor-trials-by-fly map used to resolve fallback first-presentation trial
     numbers for single-presentation odors.
+
+    With ``return_rows=True`` a third element is appended: odor -> list of
+    source row labels, so the exact rows behind each mean can be recovered
+    (used to score the mean trace with the ordinal model). The two-value form
+    is kept as the default so existing callers are unaffected.
     """
     odor_trials_by_fly: dict[tuple[str, int], dict[str, list[int]]] = defaultdict(
         lambda: defaultdict(list)
@@ -212,7 +303,7 @@ def _collect_per_fly_first_presentation(
         tuple[str, int], dict[str, dict[int, np.ndarray]]
     ] = defaultdict(lambda: defaultdict(dict))
 
-    for _, row in ds_df.iterrows():
+    for _row_index, row in ds_df.iterrows():
         trial_label = str(row["trial_label"])
         odor = _display_odor(dataset_canon, trial_label)
         if odor == trial_label:  # unmapped
@@ -230,7 +321,7 @@ def _collect_per_fly_first_presentation(
         odor_trials_by_fly[fly_key][odor].append(trial_n)
         # If a fly has the same odor on the same trial multiple times (it
         # shouldn't), keep the first.
-        fly_traces_by_trial[fly_key][odor].setdefault(trial_n, trace)
+        fly_traces_by_trial[fly_key][odor].setdefault(trial_n, (trace, _row_index))
 
     # Resolve which trial number to use per odor
     all_odors = set()
@@ -238,27 +329,34 @@ def _collect_per_fly_first_presentation(
         all_odors.update(fly_map.keys())
 
     per_odor_per_fly: dict[str, dict[str, np.ndarray]] = {}
+    rows_by_odor: dict[str, list] = {}
     for odor in sorted(all_odors):
         target_trial = _odor_first_presentation_trial(odor, odor_trials_by_fly)
         if target_trial is None:
             continue
         per_fly: dict[str, np.ndarray] = {}
+        rows_for_odor: list = []
         for fly_key, odor_map in fly_traces_by_trial.items():
             trace_map = odor_map.get(odor, {})
-            trace = trace_map.get(target_trial)
-            if trace is None:
+            entry = trace_map.get(target_trial)
+            if entry is None:
                 # Fly didn't have this exact trial — skip
                 continue
+            trace, row_index = entry
             fly_id = f"{fly_key[0]}_fly{fly_key[1]}"
             per_fly[fly_id] = trace
+            rows_for_odor.append(row_index)
         if per_fly:
             per_odor_per_fly[odor] = per_fly
+            rows_by_odor[odor] = rows_for_odor
             LOGGER.info(
                 "  %s -> first-presentation trial=%d, n_flies=%d",
                 odor,
                 target_trial,
                 len(per_fly),
             )
+    if return_rows:
+        return per_odor_per_fly, odor_trials_by_fly, rows_by_odor
     return per_odor_per_fly, odor_trials_by_fly
 
 
@@ -454,10 +552,14 @@ def _plot_training_vs_control_for_odor(
     odor_on_s: float,
     odor_off_s: float,
     ylim: tuple[float, float] | None,
+    color_key: str | None = None,
 ) -> plt.Figure:
-    base_color = ODOR_COLOURS.get(odor, "#444444")
-    dark = _adjust_lightness(base_color, 0.55)
-    light = _adjust_lightness(base_color, 1.45)
+    # ``color_key`` lets a caller whose label carries extra text (a remapped
+    # concentration, a presentation number) still hit the palette; the title
+    # keeps the full label. Defaults to ``odor``, so existing callers are
+    # unaffected.
+    dark = _trace_odor_color(color_key or odor)
+    light = CTRL_BAND_COLOR
 
     fig, ax = plt.subplots(figsize=(8, 5))
     max_frames = int(MAX_TIME_S * fps)
@@ -478,7 +580,7 @@ def _plot_training_vs_control_for_odor(
     ax.plot(
         time_ctrl,
         ctrl_mean,
-        color=light,
+        color=CTRL_LINE_COLOR,
         linewidth=2.2,
         label=f"Control (n={len(ctrl_per_fly)})",
     )
@@ -506,7 +608,7 @@ def _plot_training_vs_control_for_odor(
     if ylim is not None:
         ax.set_ylim(*ylim)
     ax.set_xlabel("Time (s)")
-    ax.set_ylabel("Max Distance x Angle % (Baseline mean subtracted)")
+    ax.set_ylabel(Y_LABEL)
     ax.set_title(f"{odor} - Trained vs Control", fontsize=12)
     ax.legend(loc="upper right", fontsize=10, framealpha=0.9)
     ax.spines["top"].set_visible(False)
@@ -585,9 +687,9 @@ def _plot_pair_single_role(
 
     fig, ax = plt.subplots(figsize=(8.5, 5.2))
     for requested, per_fly in resolved:
-        base_color = ODOR_COLOURS.get(requested, "#444444")
-        # Pull the line a touch darker so it stays readable on the SEM band.
-        line_color = _adjust_lightness(base_color, 0.65 if role == "trained" else 0.95)
+        # One colour per odor, shared with the bar figures and with the
+        # trained-vs-control traces; the role lives in the title, not the hue.
+        line_color = _trace_odor_color(requested)
         mean, sem = _mean_sem_trace(per_fly, max_frames)
         time = np.arange(len(mean)) / fps
         ax.fill_between(
@@ -608,7 +710,7 @@ def _plot_pair_single_role(
     if ylim is not None:
         ax.set_ylim(*ylim)
     ax.set_xlabel("Time (s)")
-    ax.set_ylabel("Max Distance x Angle % (Baseline mean subtracted)")
+    ax.set_ylabel(Y_LABEL)
     role_title = "Trained" if role == "trained" else "Control"
     ax.set_title(f"{pair[0]} vs {pair[1]} — {role_title} flies", fontsize=12)
     ax.legend(loc="upper right", fontsize=10, framealpha=0.92)
@@ -647,8 +749,7 @@ def _plot_odors_single_role(
 
     fig, ax = plt.subplots(figsize=(8.5, 5.2))
     for requested, per_fly in resolved:
-        base_color = ODOR_COLOURS.get(requested, "#444444")
-        line_color = _adjust_lightness(base_color, 0.65 if role == "trained" else 0.95)
+        line_color = _trace_odor_color(requested)
         mean, sem = _mean_sem_trace(per_fly, max_frames)
         time = np.arange(len(mean)) / fps
         ax.fill_between(
@@ -669,7 +770,7 @@ def _plot_odors_single_role(
     if ylim is not None:
         ax.set_ylim(*ylim)
     ax.set_xlabel("Time (s)")
-    ax.set_ylabel("Max Distance x Angle % (Baseline mean subtracted)")
+    ax.set_ylabel(Y_LABEL)
     role_title = "Trained" if role == "trained" else "Control"
     odors_title = ", ".join(o for o, _ in resolved)
     ax.set_title(f"{odors_title} — {role_title} flies", fontsize=12)
@@ -700,6 +801,7 @@ def prepare_dataset(
     odor_on_s: float,
     odor_off_s: float,
     overwrite: bool,
+    include_flagged: bool = False,
 ) -> dict | None:
     """Collect per-odor per-fly traces + emit the overlay plot.
 
@@ -711,10 +813,11 @@ def prepare_dataset(
     flies = _load_specific_flies(binary_csv)
     LOGGER.info("Specific flies: %d", len(flies))
 
-    ds_df = wide_df[wide_df["dataset"] == dataset_name].copy()
-    ds_df = ds_df[ds_df["trial_type"] == "testing"]
-    ds_df = _filter_to_flies(ds_df, flies)
+    ds_df = _select_dataset_rows(
+        wide_df, dataset_name, flies=flies, include_flagged=include_flagged
+    )
     LOGGER.info("Rows after dataset + fly filter: %d", len(ds_df))
+    _warn_missing_flies(dataset_name, ds_df, flies)
     if ds_df.empty:
         LOGGER.warning("No rows left for %s — skipping.", dataset_name)
         return None
@@ -769,11 +872,14 @@ def prepare_dataset(
         [c for c in ds_df.columns if c.startswith("dir_val_")],
         key=lambda c: int(c.split("_")[-1]),
     )
-    per_odor_per_fly, odor_trials_by_fly = _collect_per_fly_first_presentation(
-        ds_df,
-        dataset_canon,
-        baseline_frames=baseline_frames,
-        dir_cols=dir_cols,
+    per_odor_per_fly, odor_trials_by_fly, rows_by_odor = (
+        _collect_per_fly_first_presentation(
+            ds_df,
+            dataset_canon,
+            baseline_frames=baseline_frames,
+            dir_cols=dir_cols,
+            return_rows=True,
+        )
     )
 
     return {
@@ -782,6 +888,8 @@ def prepare_dataset(
         "outdir": outdir,
         "per_odor_per_fly": per_odor_per_fly,
         "odor_trials_by_fly": odor_trials_by_fly,
+        "rows_by_odor": rows_by_odor,
+        "ds_df": ds_df,
         "n_selected_flies": len(flies),
     }
 
@@ -888,6 +996,29 @@ def build_parser(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         action="store_false",
         help="Skip figures that already exist",
     )
+    parser.add_argument(
+        "--include-flagged",
+        action="store_true",
+        help=(
+            "Also read rows from <dataset>-flagged for flies named in the "
+            "binary-reactions CSV. Needed when a pinned cohort's flies were "
+            "re-assigned to the flagged dataset by a later pipeline run."
+        ),
+    )
+    parser.add_argument(
+        "--score-mean-trace",
+        action="store_true",
+        help="Score each cohort's mean trace with the ordinal PER model and "
+             "print it on the trained-vs-control figures.",
+    )
+    parser.add_argument(
+        "--model-path",
+        type=str,
+        default="",
+        help="Ordinal model JSON; defaults to the config's "
+             "reaction_prediction.model_path.",
+    )
+    parser.add_argument("--binary-threshold", type=int, default=None)
     parser.add_argument("--verbose", action="store_true")
     return parser.parse_args(argv)
 
@@ -943,6 +1074,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             odor_on_s=odor_on_s,
             odor_off_s=odor_off_s,
             overwrite=args.overwrite,
+            include_flagged=args.include_flagged,
         )
         if prepared is not None:
             prepared_all[ds] = prepared
@@ -1027,6 +1159,29 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             set(train_prep["per_odor_per_fly"].keys())
             & set(ctrl_prep["per_odor_per_fly"].keys())
         )
+        mean_scores: dict[str, dict[str, float]] = {}
+        if args.score_mean_trace:
+            model_path = Path(args.model_path) if args.model_path else None
+            threshold = args.binary_threshold
+            if model_path is None:
+                model_path, cfg_threshold = model_settings_from_config(cfg_path)
+                if threshold is None:
+                    threshold = cfg_threshold
+            groups: dict[str, pd.DataFrame] = {}
+            for arm, prep in (("Trained", train_prep), ("Control", ctrl_prep)):
+                source = prep["ds_df"]
+                for odor, idx in prep.get("rows_by_odor", {}).items():
+                    if odor in common_odors:
+                        groups[f"{arm}|{odor}"] = source.loc[idx]
+            LOGGER.info(
+                "Scoring %d cohort-mean traces with %s", len(groups), model_path
+            )
+            mean_scores = score_group_means(
+                groups,
+                model_path=model_path,
+                binary_threshold=int(threshold if threshold is not None else 2),
+            )
+
         comparison_meta: dict[str, dict] = {}
         for odor in common_odors:
             out_png = cmp_dir / f"{_safe_odor_filename(odor)}_training_vs_control.png"
@@ -1042,13 +1197,22 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
                 odor_off_s=odor_off_s,
                 ylim=mean_ylim,
             )
-            fig.savefig(out_png, dpi=DPI, bbox_inches="tight")
-            plt.close(fig)
-            LOGGER.info("Saved %s", out_png)
-            comparison_meta[odor] = {
+            entry = {
                 "n_training_flies": len(train_prep["per_odor_per_fly"][odor]),
                 "n_control_flies": len(ctrl_prep["per_odor_per_fly"][odor]),
             }
+            trained_score = mean_scores.get(f"Trained|{odor}")
+            ctrl_score = mean_scores.get(f"Control|{odor}")
+            if trained_score is not None and ctrl_score is not None:
+                annotate_mean_scores(fig.axes[0], trained_score, ctrl_score)
+                entry["mean_trace_score_training"] = trained_score["score"]
+                entry["mean_trace_score_control"] = ctrl_score["score"]
+                entry["mean_trace_reacted_training"] = trained_score["prediction"]
+                entry["mean_trace_reacted_control"] = ctrl_score["prediction"]
+            fig.savefig(out_png, dpi=DPI, bbox_inches="tight")
+            plt.close(fig)
+            LOGGER.info("Saved %s", out_png)
+            comparison_meta[odor] = entry
         with open(cmp_dir / "training_vs_control.json", "w", encoding="utf-8") as fh:
             json.dump(
                 {

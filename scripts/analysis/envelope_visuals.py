@@ -1315,6 +1315,8 @@ def plot_reaction_rate_bars(
     stats_df: pd.DataFrame,
     *,
     title: str,
+    ylabel: str = "PER %",
+    xlabel: str | None = "Presented Odor",
 ) -> None:
     """Plot a reaction-rate bar chart into the provided axis."""
 
@@ -1352,8 +1354,9 @@ def plot_reaction_rate_bars(
             tick.set_color("tab:blue")
             tick.set_weight("bold")
     ax.set_ylim(0.0, 110.0)
-    ax.set_ylabel("PER %")
-    ax.set_xlabel("Presented Odor")
+    ax.set_ylabel(ylabel)
+    if xlabel:
+        ax.set_xlabel(xlabel)
     ax.set_title(title, fontsize=12, weight="bold")
     ax.grid(axis="y", linestyle="--", linewidth=0.6, alpha=0.35)
     ax.margins(x=0.02)
@@ -1962,6 +1965,11 @@ class EnvelopePlotConfig:
     overwrite: bool = False
     fly_filter: str | None = None
     fly_number_filter: str | None = None
+    # Display-odor names whose panels are dropped from the per-fly
+    # trials-by-odor figure (e.g. ("Benzaldehyde",)). Matching is on the
+    # resolved panel label, case- and whitespace-insensitive. Empty default
+    # keeps every existing caller's figures byte-for-byte identical.
+    exclude_odors: Sequence[str] = ()
     style_scale: float = 1.0
     trace_linewidth_scale: float = 1.0
     panel_title_scale: float = 1.0
@@ -2256,6 +2264,12 @@ def generate_envelope_plots(cfg: EnvelopePlotConfig) -> None:
             if _ft:
                 genotypes_per_dataset.setdefault(_ds, set()).add(_ft)
 
+    excluded_odors = {
+        str(name).strip().casefold()
+        for name in (cfg.exclude_odors or ())
+        if str(name).strip()
+    }
+
     flies_rendered = 0
     for (fly, fly_number), fly_df in df.groupby(["fly", "fly_number"], sort=False):
         if max_flies is not None and flies_rendered >= max_flies:
@@ -2346,6 +2360,9 @@ def generate_envelope_plots(cfg: EnvelopePlotConfig) -> None:
                 # Show the rig-side trial label (e.g. "training_17") instead of
                 # the dataset name so panels remain distinguishable.
                 odor_name = str(trial_label)
+
+            if excluded_odors and str(odor_name).strip().casefold() in excluded_odors:
+                continue
 
             is_trained = _is_trained_odor(dataset_canon, odor_name)
             # Prefer per-trial values from the rig sidecar (carried through as

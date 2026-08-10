@@ -90,6 +90,9 @@ def _process_fly_dir(fly_dir: Path, cfg: Settings) -> list[dict]:
                   f"(window={window_source}, on={row['fraction_on_in_window']*100:.1f}% of expected)")
         elif row["status"] == "no_video":
             print(f"[LIGHT] {trial_dir.name}: no video found, skipping")
+        elif row["status"] == "unreadable_video":
+            print(f"[LIGHT] {trial_dir.name}: video exists but cannot be decoded "
+                  f"({row['video_path']}), skipping")
     return rows
 
 
