@@ -26,9 +26,11 @@ from typing import Tuple
 import pandas as pd
 
 from ..config import Settings, get_main_directories
+from ..utils.frozen_folders import iter_live_batch_dirs
 from ..utils.distance_sanity import sanitize_proboscis_dataframe
 from ..utils.fly_files import iter_fly_distance_csvs
 from ..utils.parallel import parallel_map
+from ..utils.rig_gates import apply_rig_gate_overrides
 from ..utils.tables import read_table, write_table
 
 log = logging.getLogger("fbpipe.reject_proboscis")
@@ -44,6 +46,7 @@ def _process_fly_dir(fly_dir: Path, cfg: Settings) -> Tuple[int, int, int]:
     Returns ``(files_modified, geometry_points_removed, velocity_points_removed)``
     so :func:`main` can report an aggregate summary across workers.
     """
+    cfg = apply_rig_gate_overrides(cfg, fly_dir)
     pf = cfg.proboscis_filter
     max_dist = float(pf.max_eye_prob_distance_px)
     max_jump = float(pf.max_jump_px)
@@ -106,7 +109,9 @@ def main(cfg: Settings) -> None:
             log.info("[PROB-FILTER] main_directories entry does not exist: %s", root)
             continue
 
-        fly_dirs = [p for p in root.iterdir() if p.is_dir()]
+        # Frozen experiment folders are skipped: no re-derivation, and their
+        # existing per-trial CSVs stay put so build_wide_csv still emits them.
+        fly_dirs = iter_live_batch_dirs(cfg, root)
         results = parallel_map(
             partial(_process_fly_dir, cfg=cfg),
             fly_dirs,

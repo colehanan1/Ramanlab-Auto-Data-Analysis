@@ -122,16 +122,18 @@ def test_light_only_trials_are_untouched(restore_protocol_and_remap) -> None:
 def test_remap_is_scoped_to_the_24_001_cohorts(restore_protocol_and_remap) -> None:
     """The 0.01% hexanol label must not leak into the other hexanol cohorts.
 
-    Hex-Training-24-0.1 runs a different panel entirely (its Citral channel
-    delivered sour dough yeast), so a leak here would be badly wrong, not just
-    mislabelled by a decimal place.
+    Hex-Training-24-0.1 delivers hexanol at 0.1%, a decimal place away, so a
+    leak is silent and wrong rather than obviously wrong. (Its Citral channel
+    delivered sour dough yeast in the may/june block; that block is frozen out
+    and the dataset now carries the august panel -- see
+    test_pubfig_pipeline_wiring.)
     """
     _register_config_remap()
     ev.set_protocol("v2")
-    assert ev._display_odor("Hex-Training-24-0.1", "testing_2_citral") == (
-        "Sour Dough Yeast (25%)"
+    assert ev._display_odor("Hex-Training-24-0.1", "testing_2_citral") == "Citral (1%)"
+    assert ev._display_odor("Hex-Training-24-0.1", "testing_1_hexanol") == (
+        "Hexanol (0.1%)"
     )
-    assert ev._display_odor("Hex-Training-24-0.1", "testing_1_hexanol") == "Hexanol"
     # A dataset with no remap at all still renders the bare canonical name.
     assert ev._display_odor("Hex-Control-24-0.005", "testing_2_citral") == "Citral"
 

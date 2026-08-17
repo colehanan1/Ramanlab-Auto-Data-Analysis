@@ -58,8 +58,10 @@ from scripts.analysis.envelope_visuals import (
     NoTargetTrialsError,
     generate_envelope_plots,
     generate_reaction_matrices,
+    load_light_check_fractions,
     set_dataset_light_windows,
     set_dataset_odor_remap,
+    set_light_check_fractions,
     set_model_scores,
     set_protocol,
 )
@@ -451,7 +453,68 @@ def _freeze_fingerprint(
         # tracking_pct_missing / tracking_flagged columns from it. Required, not
         # defaulted, so a caller cannot silently omit a value-affecting input.
         tracking=settings.tracking,
+        # Folder freeze decides which rows are marked frozen, so a slice cached
+        # under one policy must not be served under another.
+        freeze_folders_before=getattr(settings, "freeze_folders_before", None),
     )
+
+
+def _pipeline_expectation(settings, dataset_root: Path) -> dict[str, Any]:
+    """Cache key for one dataset's pipeline (YOLO + per-trial) stage.
+
+    The scalars gate row VALUES; the freeze entries gate which folders are
+    walked at all. Both belong here: the manifest half of the cache only sees
+    raw table bytes, and a freeze/thaw moves no bytes -- the ``output_*.csv``
+    files of a frozen folder sit on disk and land in the manifest exactly as a
+    live folder's do. Without this, un-retiring a folder read as "no file
+    changes" and the dataset was skipped whole, so YOLO never saw it.
+
+    Mirrors ``freeze.build_fingerprint``'s encoding of the same two inputs
+    (which already guards the wide-CSV slice cache), including the sort: list
+    ORDER never changes which folders are frozen, so it must not read as drift.
+    Resolved through ``folder_freeze_rules`` so the per-run ``--thaw`` /
+    ``--thaw-all`` escape hatches invalidate the cache too -- a cache hit would
+    otherwise silently neuter them.
+    """
+    from fbpipe.utils.frozen_folders import folder_freeze_rules
+
+    cutoff, rules = folder_freeze_rules(
+        settings,
+        dataset_root.name,
+        thawed=getattr(settings, "_thawed", ()),
+        thaw_all=getattr(settings, "_thaw_all", False),
+    )
+    return {
+        "non_reactive_span_px": settings.non_reactive_span_px,
+        "class2_min": settings.class2_min,
+        "class2_max": settings.class2_max,
+        "freeze_folders": sorted(
+            f"{rule.pattern}@{rule.before}" for rule in rules
+        ),
+        "freeze_folders_before": None if cutoff is None else str(cutoff),
+    }
+
+
+def _resolve_frozen_folders(settings, roots) -> dict[str, set[str]]:
+    """``{dataset: {frozen experiment folder, ...}}`` across *roots*.
+
+    Datasets with nothing frozen are OMITTED rather than mapped to an empty set,
+    so a caller's ``if frozen_folders:`` guard stays honest and the log line
+    cannot claim a folder freeze that did not happen.
+    """
+    from fbpipe.utils.frozen_folders import frozen_folders_for_root
+
+    thawed = getattr(settings, "_thawed", ())
+    thaw_all = getattr(settings, "_thaw_all", False)
+    out: dict[str, set[str]] = {}
+    for root in roots:
+        root_path = Path(root)
+        names = frozen_folders_for_root(
+            settings, root_path, thawed=thawed, thaw_all=thaw_all
+        )
+        if names:
+            out[root_path.name] = names
+    return out
 
 
 def _resolve_frozen_slices(
@@ -879,6 +942,37 @@ def _load_model_scores_for_envelopes(settings: Settings) -> None:
     )
 
 
+def _load_light_checks_for_envelopes() -> None:
+    """Populate envelope_visuals._LIGHT_CHECKS from the light-stimulus QC CSV.
+
+    Called once at the start of the analysis phase — after the
+    ``check_light_stimulus`` pipeline step has upserted this run's trials —
+    so every trial subplot on the Raw-Testing/Raw-Training trace figures can
+    confirm the LED physically fired for its commanded window (">= 95% ==
+    full" per the display rule). The registry is module-global, so the
+    deferred post-reactions re-render sees the same data. Missing CSV means
+    the step has never run; annotations are simply skipped.
+    """
+    from fbpipe.steps.check_light_stimulus import DEFAULT_CSV_PATH
+
+    csv_path = Path(os.getenv("LIGHT_CHECK_CSV", str(DEFAULT_CSV_PATH)))
+    fractions = load_light_check_fractions(csv_path)
+    set_light_check_fractions(fractions)
+    if fractions:
+        LOGGER.info(
+            "[analysis] envelope_visuals: loaded %d per-trial light-check results "
+            "for annotation (%s).",
+            len(fractions),
+            csv_path,
+        )
+    else:
+        LOGGER.info(
+            "[analysis] envelope_visuals: no light-check results found (%s); "
+            "light-check annotations will be skipped.",
+            csv_path,
+        )
+
+
 def _rerender_envelope_block_with_scores(
     envelopes_cfg: Mapping[str, Any] | Sequence[Mapping[str, Any]],
     label: str,
@@ -1218,6 +1312,19 @@ def _run_combined(
                 # frozen root" skip (envelope_combined.py:2676).
                 print(f"[FROZEN] combined.combine → skipping recompute for {config.root}")
             else:
+                # Per-FOLDER freeze inside a still-live dataset: leave each
+                # retired batch's derived CSVs as they are (the dataset-level
+                # skip above is the all-or-nothing version of the same idea).
+                from fbpipe.utils.frozen_folders import frozen_folders_for_root
+
+                _skip = frozen_folders_for_root(
+                    settings,
+                    config.root,
+                    thawed=getattr(settings, "_thawed", ()),
+                    thaw_all=getattr(settings, "_thaw_all", False),
+                )
+                if _skip:
+                    config = dc_replace(config, skip_folders=frozenset(_skip))
                 print(f"[analysis] combined.combine → {config.root}")
                 combine_distance_angle(config)
             combine_roots[config.root.name.lower()] = config.root
@@ -1373,6 +1480,7 @@ def _run_combined(
             non_reactive_threshold=non_reactive_threshold,
             use_per_trial_baseline=use_per_trial_baseline,
             frozen_slices=_frozen or None,
+            frozen_folders=_resolve_frozen_folders(settings, roots) or None,
         )
         _write_freeze_cache(
             settings,
@@ -1527,6 +1635,7 @@ def _run_combined(
                 non_reactive_threshold=non_reactive_threshold,
                 use_per_trial_baseline=base_use_per_trial_baseline,
                 frozen_slices=_frozen or None,
+                frozen_folders=_resolve_frozen_folders(settings, roots) or None,
             )
             _write_freeze_cache(
                 settings,
@@ -1705,6 +1814,9 @@ def _run_combined(
                 non_reactive_threshold=non_reactive_threshold,
                 use_per_trial_baseline=use_per_trial_baseline,
                 frozen_slices=_frozen or None,
+                # resolved_roots, matching the roots this call actually builds
+                # from -- `roots` is a different list in this branch.
+                frozen_folders=_resolve_frozen_folders(settings, resolved_roots) or None,
             )
             _write_freeze_cache(
                 settings,
@@ -1898,6 +2010,70 @@ def _run_secure_cleanup(
             )
 
 
+#: Filename prefix per metric. Two metrics sharing one stem would have the
+#: second silently overwrite the first, so the prefix is part of the stem.
+_PUBFIG_STEM_PREFIX = {
+    "mean-score": "pubfig_mean_score_train_vs_ctrl_",
+    "percent-responding": "pubfig_pct_responding_train_vs_ctrl_",
+}
+
+
+def _pubfig_commands(
+    settings: Settings,
+    *,
+    python_exec: str,
+    csv_path: Path,
+    config_path: Path | None,
+) -> list[list[str]]:
+    """One ``pubfig_score_train_vs_control.py`` command per cohort x metric.
+
+    Built as a pure function for the same reason as ``_thaw_cli_args``: the
+    caller (``_run_reactions``) needs a model, a predictions CSV and an output
+    tree before it will run, so the command shape is not otherwise testable.
+
+    Returns ``[]`` when nothing is configured -- an unconfigured pipeline must
+    not start rendering figures.
+    """
+    pub = getattr(settings.reaction_prediction, "publication_figures", None)
+    if pub is None or not pub.cohorts:
+        return []
+
+    script = REPO_ROOT / "scripts" / "analysis" / "pubfig_score_train_vs_control.py"
+    flagged_csv = str(getattr(settings, "flagged_flies_csv", "") or "")
+    commands: list[list[str]] = []
+    for cohort in pub.cohorts:
+        for metric in cohort.metrics:
+            stem = _PUBFIG_STEM_PREFIX[metric] + (
+                cohort.out_stem or cohort.train_dataset
+            )
+            cmd = [
+                str(Path(python_exec).expanduser()),
+                str(script),
+                "dataset",
+                "--train-dataset", cohort.train_dataset,
+                "--predictions-csv", str(csv_path),
+                "--metric", metric,
+                "--out-stem", stem,
+            ]
+            if pub.figures_dir:
+                cmd.extend(["--figures-dir", pub.figures_dir])
+            if cohort.fly_months:
+                # Only when non-empty: the driver reads "" as "keep nothing".
+                cmd.extend(["--fly-months", ",".join(cohort.fly_months)])
+            if flagged_csv:
+                cmd.extend(["--flagged-flies-csv", flagged_csv])
+            if cohort.genotype:
+                cmd.extend(["--genotype", cohort.genotype])
+            for odor, label in getattr(cohort, "odor_remap", ()) or ():
+                cmd.extend(["--odor-remap", f"{odor}={label}"])
+            if cohort.label:
+                cmd.extend(["--cohort-label", cohort.label])
+            if config_path is not None:
+                cmd.extend(["--config", str(config_path)])
+            commands.append(cmd)
+    return commands
+
+
 def _thaw_cli_args(settings: Settings) -> list[str]:
     """CLI args forwarding this run's --thaw / --thaw-all selection.
 
@@ -2082,6 +2258,16 @@ def _run_reactions(settings: Settings, config_path: Path | None = None) -> None:
 
         print("[analysis] reactions.matrix →", " ".join(cmd))
         subprocess.run(cmd, check=True, env=env)
+
+        # --- Publication figures, one per configured cohort x metric ---
+        for pub_cmd in _pubfig_commands(
+            settings,
+            python_exec=python_exec,
+            csv_path=csv_path.resolve(),
+            config_path=config_path,
+        ):
+            print("[analysis] publication_figures →", " ".join(pub_cmd))
+            subprocess.run(pub_cmd, check=True, env=env)
 
         # --- Training vs Control comparison plots ---
         train_vs_ctrl_script = REPO_ROOT / "scripts" / "analysis" / "reaction_matrix_training_vs_control.py"
@@ -2268,6 +2454,16 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Ignore every dataset freeze this run.",
     )
+    parser.add_argument(
+        "--include-frozen",
+        action="store_true",
+        help=(
+            "Score rows from frozen experiment folders too, so "
+            "model_predictions.csv is rebuilt as a complete record. The wide "
+            "CSV always holds every row; this only affects the derived "
+            "predictions and the figures drawn from them."
+        ),
+    )
     return parser
 
 
@@ -2429,17 +2625,16 @@ def main(argv: Sequence[str] | None = None) -> None:
         if dataset_roots:
             remaining_steps = [step.name for step in ORDERED_STEPS if step.name != "yolo"]
 
-            pipeline_expectation = {
-                "non_reactive_span_px": settings.non_reactive_span_px,
-                "class2_min": settings.class2_min,
-                "class2_max": settings.class2_max,
-            }
-
             yolo_targets: list[str] = []
             pipeline_targets: list[tuple[str, dict[str, Any]]] = []
 
             for root in pipeline_dataset_roots:
                 resolved = str(Path(root).expanduser())
+                # Per-root, not hoisted: freeze rules are scoped to one dataset,
+                # so a shared expectation would carry the wrong dataset's rules.
+                pipeline_expectation = _pipeline_expectation(
+                    settings, Path(resolved)
+                )
                 skip_pipeline = _should_skip_with_manifest(
                     settings,
                     category="pipeline",
@@ -2486,12 +2681,24 @@ def main(argv: Sequence[str] | None = None) -> None:
     # `_resolve_frozen_slices` calls see it.
     settings._thawed = tuple(args.thaw or ())
     settings._thaw_all = bool(args.thaw_all)
+    # Read by predict_reactions to decide whether frozen folders are scored.
+    # --thaw-all implies it: "ignore every freeze this run" would be a lie if
+    # the retired flies still sat out the predictions.
+    settings.include_frozen = bool(args.include_frozen or args.thaw_all)
+    if settings.include_frozen:
+        print("[FREEZE] Frozen experiment folders WILL be scored this run.")
     if settings._thaw_all:
         print("[FREEZE] --thaw-all: every dataset freeze ignored this run.")
     elif settings._thawed:
         print(f"[FREEZE] Thawed this run: {', '.join(settings._thawed)}")
 
     analysis_cfg = data.get("analysis") or {}
+
+    # The check_light_stimulus pipeline step (above) has upserted this run's
+    # trials into the QC CSV; load it now so every envelope-trace render —
+    # first pass and deferred re-render alike — annotates each light trial
+    # with its physical light-on confirmation.
+    _load_light_checks_for_envelopes()
 
     # When reactions is configured to produce a predictions CSV, defer every
     # envelope-trace render until after reactions writes scores. Each render
@@ -2698,6 +2905,48 @@ def main(argv: Sequence[str] | None = None) -> None:
         payload = dict(dm_expected, version=STATE_VERSION)
         _write_state(settings, "dataset_means", "analysis", payload)
 
+    # -- per-odor trained-vs-control mean traces, one set per dataset pair --
+    mt_expected = _dataset_mean_traces_expected(
+        analysis_cfg, settings, config_path=config_path
+    )
+    skip_mt = _should_skip(
+        settings, "dataset_mean_traces", "analysis", mt_expected,
+        force_flag=settings.force.dataset_mean_traces,
+    )
+    if skip_mt:
+        print(
+            "[analysis] dataset_mean_traces cached → skipping. "
+            "Set force.dataset_mean_traces=true to recompute."
+        )
+    else:
+        _run_dataset_mean_traces(analysis_cfg, settings, config_path=config_path)
+        payload = dict(mt_expected, version=STATE_VERSION)
+        _write_state(settings, "dataset_mean_traces", "analysis", payload)
+
+    # -- naive vs trained vs control; needs the predictions reactions wrote --
+    if scores_csv.exists():
+        nvt_expected = _naive_vs_trained_expected(
+            analysis_cfg, settings, config_path=config_path
+        )
+        skip_nvt = _should_skip(
+            settings, "naive_vs_trained", "analysis", nvt_expected,
+            force_flag=settings.force.naive_vs_trained,
+        )
+        if skip_nvt:
+            print(
+                "[analysis] naive_vs_trained cached → skipping. "
+                "Set force.naive_vs_trained=true to recompute."
+            )
+        else:
+            _run_naive_vs_trained(analysis_cfg, settings, config_path=config_path)
+            payload = dict(nvt_expected, version=STATE_VERSION)
+            _write_state(settings, "naive_vs_trained", "analysis", payload)
+    else:
+        LOGGER.info(
+            "[analysis] naive_vs_trained skipped; no predictions CSV at %s",
+            scores_csv,
+        )
+
     # All figures are now rendered (combined, envelope_visuals, deferred
     # model-annotated re-renders, dataset_means). NOW copy local experiment data
     # to secured storage (and optionally delete local) — deferred to here so the
@@ -2714,6 +2963,358 @@ def main(argv: Sequence[str] | None = None) -> None:
     LOGGER.info("✓ Batch copy complete!")
     LOGGER.info("=" * 70 + "\n")
     _run_data_secured_sync(data)
+
+
+# Output folders are named for the cohort itself ("EB-24-1"). The hand-run sets
+# under Results/Figures carry a "_mean_traces_new" tail; set `dir_suffix` in the
+# config to reproduce that naming.
+_MEAN_TRACE_DIR_SUFFIX = ""
+
+
+def _mean_trace_cohorts(datasets: Sequence[str]) -> list[tuple[str, str, str]]:
+    """``(train_dataset, control_dataset, stem)`` for every two-armed dataset.
+
+    A trained-vs-control mean trace needs both arms, and the config already
+    names them by convention (``EB-Training-24-1`` / ``EB-Control-24-1``), so
+    the pipeline can pair them itself instead of carrying a second hand-kept
+    list. ``stem`` drops the arm token -- ``EB-24-1`` -- which is the name the
+    published figure sets already use.
+
+    A dataset whose partner is absent is skipped: half a pair cannot draw the
+    figure. Config order is kept and duplicates collapse.
+    """
+    names = {str(d).strip() for d in datasets}
+    pairs: list[tuple[str, str, str]] = []
+    seen: set[str] = set()
+    for raw in datasets:
+        train = str(raw).strip()
+        if "-Training-" not in train or train in seen:
+            continue
+        control = train.replace("-Training-", "-Control-", 1)
+        if control not in names:
+            continue
+        seen.add(train)
+        pairs.append((train, control, train.replace("-Training-", "-", 1)))
+    return pairs
+
+
+def _as_genotype_list(value: Any) -> list[str]:
+    """Normalise a config `genotype:` entry (absent / one name / a list)."""
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [value.strip()] if value.strip() else []
+    return [str(v).strip() for v in value if str(v).strip()]
+
+
+def _dataset_mean_traces_commands(
+    analysis_cfg: Mapping[str, Any] | None,
+    settings: Any,
+    *,
+    python_exec: str,
+    config_path: Path | None,
+) -> list[list[str]]:
+    """One ``dataset_mean_traces_tvc.py`` command per trained/control pair.
+
+    Built as a pure function for the same reason as ``_pubfig_commands``: the
+    caller needs a wide envelope table and a whole figure tree before it will
+    run, so the command shape is not otherwise testable.
+
+    Returns ``[]`` when nothing is configured -- an unconfigured pipeline must
+    not start rendering figures.
+    """
+    cfg = (analysis_cfg or {}).get("dataset_mean_traces") or {}
+    if not cfg or not bool(cfg.get("enabled", True)):
+        return []
+
+    wide_csv = str(cfg.get("wide_csv", "") or "")
+    out_root = str(cfg.get("out_root", "") or "")
+    if not wide_csv or not out_root:
+        print(
+            "[analysis] dataset_mean_traces skipped; both wide_csv and out_root "
+            "are required."
+        )
+        return []
+
+    script = REPO_ROOT / "scripts" / "analysis" / "dataset_mean_traces_tvc.py"
+    suffix = str(cfg.get("dir_suffix", _MEAN_TRACE_DIR_SUFFIX))
+    flagged_csv = str(
+        cfg.get("flagged_csv") or getattr(settings, "flagged_flies_csv", "") or ""
+    )
+    # One genotype per figure -- fbpipe.utils.fly_type exists so that different
+    # genotypes are never averaged together, and the wide table pools them.
+    block_genotypes = _as_genotype_list(cfg.get("genotype"))
+    fps = float(cfg.get("fps", getattr(settings, "fps_default", 40.0)))
+    odor_on_s = float(cfg.get("odor_on_s", getattr(settings, "odor_on_s", 30.0)))
+    odor_off_s = float(cfg.get("odor_off_s", getattr(settings, "odor_off_s", 60.0)))
+
+    # Explicit cohorts win: they are the escape hatch for pairs the naming
+    # convention cannot express (a batch slice, a differently-named control).
+    # Concentration series first: a dataset served by one has no control arm,
+    # so it must not also be auto-paired below (the pairing would fail every
+    # run against an empty control).
+    conc_commands: list[list[str]] = []
+    conc_datasets: set[str] = set()
+    conc_script = REPO_ROOT / "scripts" / "analysis" / "randompanel_conc_traces.py"
+    for raw in cfg.get("conc_series") or ():
+        if not isinstance(raw, Mapping):
+            continue
+        members = raw.get("datasets") or {}
+        if not isinstance(members, Mapping) or not members:
+            print(
+                "[analysis] dataset_mean_traces: conc_series needs a "
+                f"`datasets: {{name: conc}}` mapping, got {raw!r}; skipping."
+            )
+            continue
+        out_dir = str(raw.get("out_dir", "") or "conc_series")
+        out_path = Path(out_dir)
+        if not out_path.is_absolute():
+            out_path = Path(out_root) / out_dir
+        cmd = [
+            str(Path(python_exec).expanduser()),
+            str(conc_script),
+            "--wide-csv", wide_csv,
+            "--out-dir", str(out_path),
+            "--fps", str(fps),
+            "--odor-on-s", str(odor_on_s),
+            "--odor-off-s", str(odor_off_s),
+            "--protocol", str(getattr(settings, "protocol", "v2")),
+        ]
+        for name, conc in members.items():
+            cmd.extend(["--dataset", f"{str(name).strip()}={float(conc):g}"])
+            conc_datasets.add(str(name).strip())
+        for genotype in (_as_genotype_list(raw.get("genotype")) or block_genotypes):
+            cmd.extend(["--genotype", genotype])
+        if flagged_csv:
+            cmd.extend(["--flagged-flies-csv", flagged_csv])
+        if config_path is not None:
+            cmd.extend(["--config", str(config_path)])
+        conc_commands.append(cmd)
+
+    raw_cohorts = cfg.get("cohorts")
+    if raw_cohorts:
+        entries: list[tuple[str, str, str, int | None]] = []
+        for raw in raw_cohorts:
+            if not isinstance(raw, Mapping):
+                continue
+            train = str(raw.get("train_dataset", "") or "").strip()
+            control = str(raw.get("control_dataset", "") or "").strip()
+            if not train or not control:
+                print(
+                    "[analysis] dataset_mean_traces: cohort needs both "
+                    f"train_dataset and control_dataset, got {raw!r}; skipping."
+                )
+                continue
+            stem = train.replace("-Training-", "-", 1)
+            out_dir = str(raw.get("out_dir", "") or f"{stem}{suffix}")
+            batch = raw.get("batch")
+            entries.append(
+                (train, control, out_dir, None if batch is None else int(batch))
+            )
+    else:
+        entries = [
+            (train, control, f"{stem}{suffix}", None)
+            for train, control, stem in _mean_trace_cohorts(
+                getattr(settings, "datasets", ()) or ()
+            )
+            if train not in conc_datasets and control not in conc_datasets
+        ]
+
+    commands: list[list[str]] = []
+    for train, control, out_dir, batch in entries:
+        out_path = Path(out_dir)
+        if not out_path.is_absolute():
+            out_path = Path(out_root) / out_dir
+        cmd = [
+            str(Path(python_exec).expanduser()),
+            str(script),
+            "--wide-csv", wide_csv,
+            "--train-dataset", train,
+            "--control-dataset", control,
+            "--out-dir", str(out_path),
+            "--fps", str(fps),
+            "--odor-on-s", str(odor_on_s),
+            "--odor-off-s", str(odor_off_s),
+            "--protocol", str(getattr(settings, "protocol", "v2")),
+        ]
+        if flagged_csv:
+            cmd.extend(["--flagged-flies-csv", flagged_csv])
+        if batch is not None:
+            cmd.extend(["--batch", str(batch)])
+        for genotype in block_genotypes:
+            cmd.extend(["--genotype", genotype])
+        if bool(cfg.get("score_mean_trace", False)):
+            cmd.append("--score-mean-trace")
+        if config_path is not None:
+            # Carries dataset_overrides.odor_remap, so ACV reads
+            # "Isoamyl Acetate (1%)" exactly as in the reaction matrices.
+            cmd.extend(["--config", str(config_path)])
+        commands.append(cmd)
+    return commands + conc_commands
+
+
+def _naive_vs_trained_command(
+    analysis_cfg: Mapping[str, Any] | None,
+    settings: Any,
+    *,
+    python_exec: str,
+    config_path: Path | None,
+) -> list[str] | None:
+    """The ``pubfig_naive_vs_trained.py --sweep`` command, or None.
+
+    Pure for the same reason as ``_pubfig_commands``: the caller needs a
+    predictions CSV on disk before it will run. Returns None when the block is
+    absent or there is no CSV to score -- an unconfigured pipeline must not
+    start rendering figures.
+    """
+    cfg = (analysis_cfg or {}).get("naive_vs_trained") or {}
+    if not cfg or not bool(cfg.get("enabled", True)):
+        return None
+
+    out_dir = str(cfg.get("out_dir", "") or "")
+    if not out_dir:
+        print("[analysis] naive_vs_trained skipped; out_dir is required.")
+        return None
+
+    predictions_csv = str(
+        cfg.get("predictions_csv")
+        or getattr(getattr(settings, "reaction_prediction", None), "output_csv", "")
+        or ""
+    )
+    if not predictions_csv:
+        print(
+            "[analysis] naive_vs_trained skipped; no reaction_prediction.output_csv."
+        )
+        return None
+
+    script = REPO_ROOT / "scripts" / "analysis" / "pubfig_naive_vs_trained.py"
+    cmd = [
+        str(Path(python_exec).expanduser()),
+        str(script),
+        "--sweep",
+        "--figures-dir", out_dir,
+        "--predictions-csv", predictions_csv,
+    ]
+    genotype = str(cfg.get("genotype", "") or "")
+    if genotype:
+        cmd.extend(["--genotype", genotype])
+    correction = str(cfg.get("correction", "") or "")
+    if correction:
+        cmd.extend(["--correction", correction])
+    cmd.append("--footnote" if bool(cfg.get("footnote", False)) else "--no-footnote")
+    cmd.append("--trend-p" if bool(cfg.get("trend_p", True)) else "--no-trend-p")
+    if config_path is not None:
+        # Carries dataset_overrides.odor_remap: the concentration tags on the
+        # labels are what pick each odor's naive panel.
+        cmd.extend(["--config", str(config_path)])
+    return cmd
+
+
+def _naive_vs_trained_expected(
+    analysis_cfg: Mapping[str, Any] | None,
+    settings: Any,
+    *,
+    config_path: Path | None,
+) -> dict[str, Any]:
+    """Cache key: the predictions CSV's mtime plus the exact command."""
+    cmd = _naive_vs_trained_command(
+        analysis_cfg, settings, python_exec=sys.executable, config_path=config_path
+    )
+    predictions = (
+        _resolve_path(cmd[cmd.index("--predictions-csv") + 1]) if cmd else None
+    )
+    return {
+        "predictions_mtime": _file_mtime_key(predictions),
+        "command": " ".join(cmd) if cmd else "",
+    }
+
+
+def _run_naive_vs_trained(
+    analysis_cfg: Mapping[str, Any] | None,
+    settings: Any,
+    *,
+    config_path: Path | None,
+) -> None:
+    """Naive vs trained vs control, every cohort x odor x presentation."""
+    python_exec = getattr(
+        getattr(settings, "reaction_prediction", None), "python", ""
+    ) or sys.executable
+    cmd = _naive_vs_trained_command(
+        analysis_cfg, settings, python_exec=python_exec, config_path=config_path
+    )
+    if cmd is None:
+        LOGGER.info("[analysis] naive_vs_trained not configured; skipping.")
+        return
+
+    env = os.environ.copy()
+    env["MPLBACKEND"] = "Agg"
+    extra_path = str(REPO_ROOT / "src")
+    env["PYTHONPATH"] = os.pathsep.join(
+        filter(None, [extra_path, env.get("PYTHONPATH")])
+    )
+    LOGGER.info("[analysis] naive_vs_trained → %s", " ".join(cmd))
+    result = subprocess.run(cmd, env=env, capture_output=False)
+    if result.returncode != 0:
+        LOGGER.warning(
+            "[analysis] naive_vs_trained exited with code %d", result.returncode
+        )
+    else:
+        LOGGER.info("[analysis] naive_vs_trained complete.")
+
+
+def _dataset_mean_traces_expected(
+    analysis_cfg: Mapping[str, Any] | None,
+    settings: Any,
+    *,
+    config_path: Path | None,
+) -> dict[str, Any]:
+    """Cache key: the wide table's mtime plus the exact commands to run."""
+    cfg = (analysis_cfg or {}).get("dataset_mean_traces") or {}
+    commands = _dataset_mean_traces_commands(
+        analysis_cfg, settings, python_exec=sys.executable, config_path=config_path
+    )
+    return {
+        "wide_csv_mtime": _file_mtime_key(_resolve_path(cfg.get("wide_csv"))),
+        "commands": [" ".join(cmd) for cmd in commands],
+    }
+
+
+def _run_dataset_mean_traces(
+    analysis_cfg: Mapping[str, Any] | None,
+    settings: Any,
+    *,
+    config_path: Path | None,
+) -> None:
+    """Per-odor trained-vs-control mean traces, one figure set per dataset."""
+    python_exec = getattr(
+        getattr(settings, "reaction_prediction", None), "python", ""
+    ) or sys.executable
+    commands = _dataset_mean_traces_commands(
+        analysis_cfg, settings, python_exec=python_exec, config_path=config_path
+    )
+    if not commands:
+        LOGGER.info("[analysis] dataset_mean_traces not configured; skipping.")
+        return
+
+    env = os.environ.copy()
+    env["MPLBACKEND"] = "Agg"
+    extra_path = str(REPO_ROOT / "src")
+    env["PYTHONPATH"] = os.pathsep.join(
+        filter(None, [extra_path, env.get("PYTHONPATH")])
+    )
+
+    for cmd in commands:
+        LOGGER.info("[analysis] dataset_mean_traces → %s", " ".join(cmd))
+        result = subprocess.run(cmd, env=env, capture_output=False)
+        if result.returncode != 0:
+            # One cohort with no usable traces (an arm that never ran testing,
+            # a fully flagged batch) must not take the rest of the run down.
+            LOGGER.warning(
+                "[analysis] dataset_mean_traces for %s exited with code %d",
+                cmd[cmd.index("--out-dir") + 1],
+                result.returncode,
+            )
+    LOGGER.info("[analysis] dataset_mean_traces complete.")
 
 
 def _run_dataset_means(config_path: Path, *, no_overwrite: bool = False) -> None:

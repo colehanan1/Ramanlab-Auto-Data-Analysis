@@ -46,6 +46,16 @@ try:
 except Exception:  # pragma: no cover - style is cosmetic only
     pass
 
+# Shared per-trial light-stimulus check registry (populated by the pipeline
+# driver, or by main() below for standalone runs). Keys join on
+# (dataset, fly/batch folder, phase, trial number) — all available here.
+from scripts.analysis.envelope_visuals import (  # noqa: E402
+    _light_check_annotation,
+    _lookup_light_check,
+    load_light_check_fractions,
+    set_light_check_fractions,
+)
+
 # ── defaults ────────────────────────────────────────────────────────────────
 DEFAULT_CSV = Path(
     "/home/ramanlab/Documents/cole/Data/CSVs-New-Opto-Flys/"
@@ -272,6 +282,29 @@ def plot_folder(
         title += f"   (light on @ {light_on:.0f} s)"
         ax.set_title(title, loc="left", fontsize=11, weight="bold", pad=2)
 
+        # Light-stimulus check (right of the title band): the video-verified
+        # fraction of the commanded window the LED was actually on for this
+        # batch's recording (>= 95% displays as "full"). Pulse-duty trailers
+        # are excluded: the stride-sampled QC cannot measure a pulsing LED, so
+        # its fraction there reflects duty cycle/aliasing, not a malfunction.
+        light_fraction = None
+        if "pulse" not in str(cond or "").lower():
+            light_fraction = _lookup_light_check(str(dataset), str(folder), str(trial_label))
+        if light_fraction is not None:
+            check_text, check_color = _light_check_annotation(light_fraction)
+            ax.text(
+                1.0,
+                1.0,
+                check_text,
+                transform=ax.transAxes,
+                ha="right",
+                va="bottom",
+                fontsize=11,
+                weight="bold",
+                color=check_color,
+                clip_on=False,
+            )
+
     axes[-1].set_xlabel("Time (s)", fontsize=11)
 
     # ── legend ──
@@ -345,6 +378,22 @@ def build_summary(df: pd.DataFrame, dir_val_cols: list[str]) -> pd.DataFrame:
 
 # ── main ──────────────────────────────────────────────────────────────────────
 
+def _read_wide_for_light(csv_path) -> pd.DataFrame:
+    """The wide table minus its frozen experiment folders.
+
+    These figures are per-fly, so a retired folder would otherwise still get its
+    own light-trace figure rendered into the results tree.
+    """
+    from fbpipe.utils.frozen_folders import drop_frozen
+
+    df = pd.read_csv(csv_path)
+    before = len(df)
+    df = drop_frozen(df)
+    if len(df) != before:
+        print(f"[FROZEN] Excluding {before - len(df)} row(s) from frozen folders")
+    return df
+
+
 def generate(csv_path, out_dir, datasets=None) -> dict:
     """Render per-fly light-only PER traces, sorted into per-dataset subfolders.
 
@@ -360,7 +409,7 @@ def generate(csv_path, out_dir, datasets=None) -> dict:
     csv_path = Path(csv_path)
     out_dir = Path(out_dir)
     print(f"Reading {csv_path} ...")
-    df = pd.read_csv(csv_path)
+    df = _read_wide_for_light(csv_path)
 
     if datasets:
         wanted = list(datasets)
@@ -415,11 +464,22 @@ def parse_args(argv=None):
         "--datasets", nargs="*", default=None,
         help="Datasets to render. Default: auto-detect all datasets with light trials.",
     )
+    p.add_argument(
+        "--light-check-csv",
+        default=str(_REPO / "logs" / "light_stimulus_flags.csv"),
+        help=(
+            "Light-stimulus QC CSV from the check_light_stimulus step; each "
+            "light trial gets a per-panel confirmation note (>= 95%% of the "
+            "commanded window on == 'full'). Pass an empty string to disable."
+        ),
+    )
     return p.parse_args(argv)
 
 
 def main(argv=None) -> int:
     args = parse_args(argv)
+    if str(args.light_check_csv).strip():
+        set_light_check_fractions(load_light_check_fractions(args.light_check_csv))
     generate(args.csv, args.outdir, datasets=args.datasets)
     return 0
 

@@ -2104,6 +2104,11 @@ def _compute_trial_metrics(
 @dataclass(slots=True)
 class CombineConfig:
     root: Path
+    # Experiment folder names to leave alone (frozen). Their existing
+    # angle_distance_rms_envelope/ output stays exactly as last derived, which
+    # is what keeps their rows stable in the wide CSV. Resolved by the caller
+    # via fbpipe.utils.frozen_folders.
+    skip_folders: frozenset[str] = frozenset()
     fps_default: float = 40.0
     window_sec: float = 0.25
     odor_on_s: float = 30.0
@@ -2158,8 +2163,13 @@ def combine_distance_angle(cfg: CombineConfig) -> None:
         odor_off_effective = odor_off_cmd
     dataset_canon = _canon_dataset(cfg.root.name)
 
+    skip_folders = frozenset(str(n) for n in (cfg.skip_folders or ()))
     for fly_dir in sorted(p for p in cfg.root.iterdir() if p.is_dir()):
         fly_name = fly_dir.name
+        if fly_name in skip_folders:
+            # Frozen: leave the existing derived CSVs exactly as they are.
+            print(f"[FROZEN] combine → skipping recompute for {fly_name}")
+            continue
         print(f"\n[DEBUG] Processing fly: {fly_name} ({fly_dir})")
         _ensure_angle_percentages(fly_dir, cfg.angle_suffixes)
         angle_entries = _locate_trials(fly_dir, cfg.angle_suffixes, ANGLE_COLS)
@@ -2623,6 +2633,7 @@ def build_wide_csv(
     low_max_threshold_px: float = LOW_MAX_FLAG_THRESHOLD_PX,
     use_per_trial_baseline: bool = False,
     frozen_slices: Mapping[str, tuple[pd.DataFrame, int]] | None = None,
+    frozen_folders: Mapping[str, Iterable[str]] | None = None,
 ) -> None:
     print(
         f"[DEBUG] build_wide_csv → roots={list(roots)} output={output_csv} measure_cols={list(measure_cols)}"
@@ -2634,6 +2645,23 @@ def build_wide_csv(
     # walked. Keyed by the `dataset` column value == root basename (:2668).
     # Values are (rows, own_max_len). This function stays config-free -- the
     # caller decides what is frozen and loads the slices.
+    # Folder-level freeze: {dataset: {batch folder name, ...}}. Resolved by the
+    # caller (fbpipe.utils.frozen_folders) so this function stays free of config
+    # policy, exactly like frozen_slices. Frozen folders are still WALKED and
+    # still emit rows -- the `frozen` column is what keeps them out of figures.
+    frozen_dirs: dict[str, set[str]] = {
+        str(k): {str(n) for n in (v or ())}
+        for k, v in (frozen_folders or {}).items()
+    }
+    if frozen_dirs:
+        _n = sum(len(v) for v in frozen_dirs.values())
+        print(
+            f"[FROZEN] {_n} experiment folder(s) marked frozen (rows kept, figures skip them): "
+            + "; ".join(
+                f"{ds}={len(names)}" for ds, names in sorted(frozen_dirs.items()) if names
+            )
+        )
+
     frozen: dict[str, tuple[pd.DataFrame, int]] = {
         str(k): v for k, v in (frozen_slices or {}).items()
     }
@@ -2869,6 +2897,13 @@ def build_wide_csv(
             "trial_light_on_s",
         ]
     meta_suffix = ["trial_type", "trial_label", "fps"]
+    # Folder-level freeze marker. Appended LAST in the metadata block rather
+    # than beside `fly` (where it reads more naturally) so it cannot shift the
+    # position of any existing column -- meta_prefix carries the positional
+    # code_maps contract (column_order[2] == "fly_number"). Legacy omits it to
+    # reproduce the v1 wide schema byte-for-byte.
+    if not _is_legacy():
+        meta_suffix = meta_suffix + ["frozen"]
     metadata = meta_prefix + stat_columns + meta_suffix
     value_cols = [f"dir_val_{idx}" for idx in range(max_len)]
     header_df = pd.DataFrame(columns=metadata + list(AUC_COLUMNS) + value_cols)
@@ -3275,6 +3310,13 @@ def build_wide_csv(
             # v2 emits the genotype cell right after fly_number; legacy omits it
             # so the row width matches the legacy meta_prefix schema above.
             _fly_type_cells = [] if _is_legacy() else [fly_type]
+            # v2 emits the folder-freeze marker as the last metadata cell;
+            # legacy omits it so the row width matches the legacy schema above.
+            _frozen_cells = (
+                []
+                if _is_legacy()
+                else [fly in frozen_dirs.get(dataset, ())]
+            )
             row = [
                 dataset,
                 fly,
@@ -3303,6 +3345,7 @@ def build_wide_csv(
                 result["trial_type"],
                 result["label"],
                 float(result["fps"]),
+                *_frozen_cells,
                 result["metrics"]["AUC-Before"],
                 result["metrics"]["AUC-During"],
                 result["metrics"]["AUC-After"],
@@ -3336,6 +3379,13 @@ def build_wide_csv(
     for _ds in sorted(frozen):
         _rows, _ = frozen[_ds]
         aligned = _rows.reindex(columns=target_cols)
+        # A slice cached before the `frozen` column existed reindexes to NaN.
+        # NaN is not False, so without this every data-frozen dataset would read
+        # as ambiguous the first time this ships. A DATA-frozen dataset is never
+        # FOLDER-frozen (frozen_folders.folder_freeze_rules returns nothing for
+        # it), so False is not a guess -- it is the only correct value.
+        if "frozen" in aligned.columns:
+            aligned["frozen"] = aligned["frozen"].fillna(False).astype(bool)
         trial_keys = aligned["trial_type"].astype(str).str.strip().str.lower()
         if trial_type_allow is not None:
             # Mirror the live-path gate at :2703-2704: a filtered-out trial

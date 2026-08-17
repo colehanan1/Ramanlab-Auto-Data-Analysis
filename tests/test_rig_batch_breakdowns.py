@@ -146,6 +146,100 @@ def test_build_comparisons_skips_groups_missing_from_one_arm() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Batch overrides / starvation-time labels
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture()
+def _clean_batch_state():
+    """Overrides and labels are module state; leaking them would silently
+    regroup every other test's flies."""
+    from scripts.analysis import rig_batch_breakdowns as mod
+
+    yield
+    mod.set_batch_overrides({})
+    mod.set_batch_labels({})
+
+
+def test_batch_of_honours_overrides(_clean_batch_state) -> None:
+    """august_09_batch_2_rig_2/3 were starved on the batch-1 schedule; the
+    folder token says batch 2, so an explicit override must win."""
+    from scripts.analysis.rig_batch_breakdowns import set_batch_overrides
+
+    set_batch_overrides({
+        "august_09_batch_2_rig_2": 1,
+        "august_09_batch_2_rig_3": 1,
+    })
+    assert batch_of("august_09_batch_2_rig_2") == 1
+    assert batch_of("august_09_batch_2_rig_3") == 1
+    # Non-overridden flies still read the folder token.
+    assert batch_of("august_09_batch_1_rig_2") == 1
+    assert batch_of("july_13_batch_2") == 2
+
+
+def test_batch_override_does_not_touch_the_rig(_clean_batch_state) -> None:
+    from scripts.analysis.rig_batch_breakdowns import set_batch_overrides
+
+    set_batch_overrides({"august_09_batch_2_rig_3": 1})
+    assert rig_of("august_09_batch_2_rig_3") == 3
+
+
+def test_select_group_moves_overridden_fly_between_batches(_clean_batch_state) -> None:
+    from scripts.analysis.rig_batch_breakdowns import set_batch_overrides
+
+    set_batch_overrides({"july_20_batch_2": 1})
+    df = _cohort_frame()
+    batch1 = select_group(df, Group("Batch 1", TRAIN, "batch", 1))
+    batch2 = select_group(df, Group("Batch 2", TRAIN, "batch", 2))
+    assert "july_20_batch_2" in set(batch1["fly"])
+    assert "july_20_batch_2" not in set(batch2["fly"])
+
+
+def test_build_comparisons_uses_batch_labels(_clean_batch_state) -> None:
+    """Labels rename the displayed group (titles/legends) only — tags, and
+    therefore the output filenames, keep the batch numbers."""
+    from scripts.analysis.rig_batch_breakdowns import set_batch_labels
+
+    set_batch_labels({1: "Starved 24±3 h", 2: "Starved 27±3 h"})
+    by_tag = {c.tag: c for c in build_comparisons(_cohort_frame(), TRAIN, CTRL)}
+
+    tvc = by_tag["tvc_batch_1"]
+    assert tvc.title_suffix == "Starved 24±3 h: Training vs Control"
+    assert (tvc.a.label, tvc.b.label) == ("Training", "Control")
+
+    across = by_tag["train_batch_1_vs_batch_2"]
+    assert across.title_suffix == "Training: Starved 24±3 h vs Starved 27±3 h"
+    assert (across.a.label, across.b.label) == ("Starved 24±3 h", "Starved 27±3 h")
+
+    # Rig comparisons keep their plain names.
+    assert by_tag["tvc_rig_1"].title_suffix == "Rig 1: Training vs Control"
+
+
+def test_parse_batch_overrides() -> None:
+    from scripts.analysis.rig_batch_breakdowns import _parse_batch_overrides
+
+    assert _parse_batch_overrides(
+        ["august_09_batch_2_rig_2=1", "august_09_batch_2_rig_3=1"]
+    ) == {"august_09_batch_2_rig_2": 1, "august_09_batch_2_rig_3": 1}
+    assert _parse_batch_overrides([]) == {}
+    with pytest.raises(ValueError):
+        _parse_batch_overrides(["missing_the_number"])
+    with pytest.raises(ValueError):
+        _parse_batch_overrides(["fly=not_a_number"])
+
+
+def test_parse_batch_labels() -> None:
+    from scripts.analysis.rig_batch_breakdowns import _parse_batch_labels
+
+    assert _parse_batch_labels(["1=Starved 24±3 h", "2=Starved 27±3 h"]) == {
+        1: "Starved 24±3 h",
+        2: "Starved 27±3 h",
+    }
+    with pytest.raises(ValueError):
+        _parse_batch_labels(["one=label"])
+
+
+# ---------------------------------------------------------------------------
 # Group selection
 # ---------------------------------------------------------------------------
 
@@ -168,6 +262,214 @@ def test_select_group_whole_dataset_when_kind_is_none() -> None:
     sub = select_group(df, Group(label="Training", dataset=TRAIN, kind=None, value=None))
     assert set(sub["dataset_canon"]) == {TRAIN}
     assert len(sub) == 6
+
+
+# ---------------------------------------------------------------------------
+# Combined-rig comparisons
+# ---------------------------------------------------------------------------
+
+
+def test_select_group_accepts_multiple_rig_values() -> None:
+    """A tuple value pools the levels — rigs 1 and 2 become one group."""
+    df = _cohort_frame()
+    sub = select_group(df, Group("Rig 1+2", TRAIN, "rig", (1, 2)))
+    assert set(sub["fly"]) == {
+        "july_20_batch_1",
+        "july_20_batch_2",
+        "july_20_batch_1_rig_2",
+        "july_21_batch_2_rig_2",
+    }
+    assert set(sub["dataset_canon"]) == {TRAIN}
+
+
+def test_parse_rig_compares() -> None:
+    from scripts.analysis.rig_batch_breakdowns import _parse_rig_compares
+
+    assert _parse_rig_compares(["train:1,2:3"]) == [("train", (1, 2), (3,))]
+    assert _parse_rig_compares(["ctrl:1:2,3"]) == [("ctrl", (1,), (2, 3))]
+    assert _parse_rig_compares([]) == []
+    with pytest.raises(ValueError):
+        _parse_rig_compares(["training:1,2:3"])   # arm must be train|ctrl
+    with pytest.raises(ValueError):
+        _parse_rig_compares(["train:1,2"])        # both sides required
+    with pytest.raises(ValueError):
+        _parse_rig_compares(["train:one:3"])
+
+
+def test_rig_compare_comparison_shape() -> None:
+    from scripts.analysis.rig_batch_breakdowns import _rig_compare_comparison
+
+    comp = _rig_compare_comparison("train", (1, 2), (3,), TRAIN, CTRL)
+    assert comp.tag == "train_rig_1_2_vs_rig_3"
+    assert comp.title_suffix == "Training: Rig 1+2 vs Rig 3"
+    assert (comp.a.label, comp.a.dataset, comp.a.kind, comp.a.value) == (
+        "Rig 1+2", TRAIN, "rig", (1, 2)
+    )
+    assert (comp.b.label, comp.b.dataset, comp.b.kind, comp.b.value) == (
+        "Rig 3", TRAIN, "rig", (3,)
+    )
+
+
+def test_main_rig_compare_with_only_writes_just_that_comparison(tmp_path: Path) -> None:
+    """--only lets a new comparison be added to a published folder without
+    regenerating (and possibly changing) every other figure in it."""
+    from scripts.analysis.rig_batch_breakdowns import main
+
+    csv_path = tmp_path / "model_predictions.csv"
+    _write_predictions_csv(csv_path)
+    out_dir = tmp_path / "figs"
+    main(
+        [
+            "--csv-path", str(csv_path),
+            "--out-dir", str(out_dir),
+            "--train-dataset", "3Oct-Training-24-0.1",
+            "--control-dataset", "3Oct-Control-24-0.1",
+            "--rig-compare", "train:1:2",
+            "--only", "train_rig_1_vs_rig_2",
+        ]
+    )
+
+    names = {p.name for p in out_dir.iterdir()}
+    stub = "30_latency_2.150s"
+    assert names == {
+        f"reaction_matrix_train_rig_1_vs_rig_2_{stub}.png",
+        f"reaction_matrix_pair_train_rig_1_vs_rig_2_{stub}.png",
+        f"reaction_matrix_train_rig_1_vs_rig_2_{stub}.json",
+        "mean_score_train_rig_1_vs_rig_2.png",
+        "mean_score_pair_train_rig_1_vs_rig_2.png",
+        "mean_score_train_rig_1_vs_rig_2.json",
+    }
+
+
+def test_main_rig_compare_pools_the_combined_side(tmp_path: Path) -> None:
+    from scripts.analysis.rig_batch_breakdowns import main
+
+    csv_path = tmp_path / "model_predictions.csv"
+    _write_predictions_csv(csv_path)
+    out_dir = tmp_path / "figs"
+    main(
+        [
+            "--csv-path", str(csv_path),
+            "--out-dir", str(out_dir),
+            "--train-dataset", "3Oct-Training-24-0.1",
+            "--control-dataset", "3Oct-Control-24-0.1",
+            "--rig-compare", "train:1,2:2",
+            "--only", "train_rig_1_2_vs_rig_2",
+        ]
+    )
+    sidecar = json.loads(
+        (out_dir / "mean_score_train_rig_1_2_vs_rig_2.json").read_text()
+    )
+    assert sidecar["title_suffix"] == "Training: Rig 1+2 vs Rig 2"
+    # rigs 1+2 = all four folders x 2 fly_numbers; rig 2 alone = 2 folders x 2
+    assert sidecar["group_a"]["n_flies"] == 8
+    assert sidecar["group_b"]["n_flies"] == 4
+
+
+def test_parse_tvc_rigs() -> None:
+    from scripts.analysis.rig_batch_breakdowns import _parse_tvc_rigs
+
+    assert _parse_tvc_rigs(["1,2"]) == [(1, 2)]
+    assert _parse_tvc_rigs(["3"]) == [(3,)]
+    assert _parse_tvc_rigs([]) == []
+    with pytest.raises(ValueError):
+        _parse_tvc_rigs(["one,two"])
+    with pytest.raises(ValueError):
+        _parse_tvc_rigs([""])
+
+
+def test_tvc_rig_comparison_shape() -> None:
+    from scripts.analysis.rig_batch_breakdowns import _tvc_rig_comparison
+
+    comp = _tvc_rig_comparison((1, 2), TRAIN, CTRL)
+    assert comp.tag == "tvc_rig_1_2"
+    assert comp.title_suffix == "Rig 1+2: Training vs Control"
+    assert (comp.a.label, comp.a.dataset, comp.a.kind, comp.a.value) == (
+        "Training", TRAIN, "rig", (1, 2)
+    )
+    assert (comp.b.label, comp.b.dataset, comp.b.kind, comp.b.value) == (
+        "Control", CTRL, "rig", (1, 2)
+    )
+
+
+def test_main_tvc_rig_pools_both_arms(tmp_path: Path) -> None:
+    from scripts.analysis.rig_batch_breakdowns import main
+
+    csv_path = tmp_path / "model_predictions.csv"
+    _write_predictions_csv(csv_path)
+    out_dir = tmp_path / "figs"
+    main(
+        [
+            "--csv-path", str(csv_path),
+            "--out-dir", str(out_dir),
+            "--train-dataset", "3Oct-Training-24-0.1",
+            "--control-dataset", "3Oct-Control-24-0.1",
+            "--tvc-rig", "1,2",
+            "--only", "tvc_rig_1_2",
+        ]
+    )
+    names = {p.name for p in out_dir.iterdir()}
+    assert "mean_score_tvc_rig_1_2.json" in names
+    assert len(names) == 6   # exactly the one comparison's file family
+
+    sidecar = json.loads((out_dir / "mean_score_tvc_rig_1_2.json").read_text())
+    assert sidecar["title_suffix"] == "Rig 1+2: Training vs Control"
+    # rigs 1+2 = all four folders x 2 fly_numbers, on each arm
+    assert sidecar["group_a"]["n_flies"] == 8
+    assert sidecar["group_b"]["n_flies"] == 8
+
+
+def test_main_restrict_batch_drops_other_batches(tmp_path: Path, _clean_batch_state) -> None:
+    """--restrict-batch narrows BOTH arms to one starvation group before any
+    comparison is built: batch-2 flies vanish, so no cross-batch figures and
+    the rig figures count only batch-1 flies."""
+    from scripts.analysis.rig_batch_breakdowns import main
+
+    csv_path = tmp_path / "model_predictions.csv"
+    _write_predictions_csv(csv_path)
+    out_dir = tmp_path / "figs"
+    main(
+        [
+            "--csv-path", str(csv_path),
+            "--out-dir", str(out_dir),
+            "--train-dataset", "3Oct-Training-24-0.1",
+            "--control-dataset", "3Oct-Control-24-0.1",
+            "--restrict-batch", "1",
+        ]
+    )
+
+    names = {p.name for p in out_dir.iterdir()}
+    assert "mean_score_tvc_batch_1.json" in names
+    assert "mean_score_tvc_batch_2.json" not in names
+    assert "mean_score_train_batch_1_vs_batch_2.json" not in names
+
+    # each rig level now holds exactly one batch-1 folder x two fly_numbers
+    sidecar = json.loads((out_dir / "mean_score_tvc_rig_1.json").read_text())
+    assert sidecar["group_a"]["n_flies"] == 2
+    assert sidecar["group_b"]["n_flies"] == 2
+
+
+def test_main_restrict_batch_honours_overrides(tmp_path: Path, _clean_batch_state) -> None:
+    """A fly overridden into batch 1 must survive --restrict-batch 1."""
+    from scripts.analysis.rig_batch_breakdowns import main
+
+    csv_path = tmp_path / "model_predictions.csv"
+    _write_predictions_csv(csv_path)
+    out_dir = tmp_path / "figs"
+    main(
+        [
+            "--csv-path", str(csv_path),
+            "--out-dir", str(out_dir),
+            "--train-dataset", "3Oct-Training-24-0.1",
+            "--control-dataset", "3Oct-Control-24-0.1",
+            "--restrict-batch", "1",
+            "--batch-override", "july_20_batch_2=1",
+        ]
+    )
+    sidecar = json.loads((out_dir / "mean_score_tvc_rig_1.json").read_text())
+    # rig 1 = july_20_batch_1 + the overridden july_20_batch_2, x2 fly_numbers
+    assert sidecar["group_a"]["n_flies"] == 4
+    assert sidecar["group_b"]["n_flies"] == 4
 
 
 # ---------------------------------------------------------------------------
@@ -338,6 +640,115 @@ def test_sidecar_schema_matches_the_published_figures(tmp_path: Path) -> None:
     assert set(score) >= {"tag", "title_suffix", "group_a", "group_b",
                           "odor_columns", "mannwhitney_p"}
     assert set(score["mannwhitney_p"]) == set(score["odor_columns"])
+
+
+def test_main_applies_batch_overrides_and_labels(tmp_path: Path, _clean_batch_state) -> None:
+    """With every batch-2 folder overridden into batch 1 there is nothing left
+    to compare across batches, and the tvc_batch_1 sidecar counts all flies
+    under the starvation-time label."""
+    from scripts.analysis.rig_batch_breakdowns import main
+
+    csv_path = tmp_path / "model_predictions.csv"
+    _write_predictions_csv(csv_path)
+    out_dir = tmp_path / "figs"
+    main(
+        [
+            "--csv-path", str(csv_path),
+            "--out-dir", str(out_dir),
+            "--train-dataset", "3Oct-Training-24-0.1",
+            "--control-dataset", "3Oct-Control-24-0.1",
+            "--batch-override", "july_20_batch_2=1",
+            "--batch-override", "july_20_batch_2_rig_2=1",
+            "--batch-label", "1=Starved 24±3 h",
+        ]
+    )
+
+    names = {p.name for p in out_dir.iterdir()}
+    assert "mean_score_tvc_batch_1.json" in names
+    assert "mean_score_tvc_batch_2.json" not in names
+    assert "mean_score_train_batch_1_vs_batch_2.json" not in names
+
+    sidecar = json.loads((out_dir / "mean_score_tvc_batch_1.json").read_text())
+    assert sidecar["title_suffix"] == "Starved 24±3 h: Training vs Control"
+    # all 4 folders x 2 fly_numbers now count as batch 1
+    assert sidecar["group_a"]["n_flies"] == 8
+    assert sidecar["group_b"]["n_flies"] == 8
+
+
+def _write_mixed_cohort_csv(path: Path) -> None:
+    """Predictions CSV with two fly types and two recording months."""
+    rng = np.random.default_rng(1)
+    rows = []
+    flies = [
+        ("april_16_batch_1", "GR5a-GCaMP8"),
+        ("april_20_batch_2_rig_2", "GR5a-Old"),
+        ("august_05_batch_1_rig_2", "GR5a-Old"),
+        ("august_06_batch_2_rig_3", "GR5a-Old"),
+    ]
+    for dataset in ("3Oct-Training-24-0.1", "3Oct-Control-24-0.1"):
+        for fly, fly_type in flies:
+            for n in (1, 2):
+                for i, odor in enumerate(ODORS, start=1):
+                    score = float(rng.integers(-1, 6))
+                    rows.append(
+                        {
+                            "dataset": dataset,
+                            "fly": fly,
+                            "fly_number": n,
+                            "trial_label": f"testing_{i}_{odor}",
+                            "prediction": int(score >= 2),
+                            "score": score,
+                            "trial_type": "testing",
+                            "fly_type": fly_type,
+                            "_non_reactive": False,
+                        }
+                    )
+    pd.DataFrame(rows).to_csv(path, index=False)
+
+
+def test_main_fly_type_filter_keeps_only_that_type(tmp_path: Path) -> None:
+    from scripts.analysis.rig_batch_breakdowns import main
+
+    csv_path = tmp_path / "model_predictions.csv"
+    _write_mixed_cohort_csv(csv_path)
+    out_dir = tmp_path / "figs"
+    main(
+        [
+            "--csv-path", str(csv_path),
+            "--out-dir", str(out_dir),
+            "--train-dataset", "3Oct-Training-24-0.1",
+            "--control-dataset", "3Oct-Control-24-0.1",
+            "--fly-type", "gr5a-old",   # case-insensitive
+            "--only", "tvc_rig_2",
+        ]
+    )
+    sidecar = json.loads((out_dir / "mean_score_tvc_rig_2.json").read_text())
+    # rig 2 folders: april_20 (GR5a-Old, kept) + august_05 (kept); the GCaMP8
+    # fly is rig 1 anyway — the count proves only Old flies remain: 2 x 2.
+    assert sidecar["group_a"]["n_flies"] == 4
+    assert sidecar["group_b"]["n_flies"] == 4
+
+
+def test_main_fly_prefix_filter_keeps_only_matching_months(tmp_path: Path) -> None:
+    from scripts.analysis.rig_batch_breakdowns import main
+
+    csv_path = tmp_path / "model_predictions.csv"
+    _write_mixed_cohort_csv(csv_path)
+    out_dir = tmp_path / "figs"
+    main(
+        [
+            "--csv-path", str(csv_path),
+            "--out-dir", str(out_dir),
+            "--train-dataset", "3Oct-Training-24-0.1",
+            "--control-dataset", "3Oct-Control-24-0.1",
+            "--fly-prefix", "august",
+            "--only", "tvc_rig_2",
+        ]
+    )
+    sidecar = json.loads((out_dir / "mean_score_tvc_rig_2.json").read_text())
+    # only august_05 is rig 2 once april flies are dropped
+    assert sidecar["group_a"]["n_flies"] == 2
+    assert sidecar["group_b"]["n_flies"] == 2
 
 
 def test_trained_odor_is_numbered_across_both_panels(tmp_path: Path) -> None:

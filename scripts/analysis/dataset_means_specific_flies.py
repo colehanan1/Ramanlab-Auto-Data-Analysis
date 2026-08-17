@@ -553,11 +553,15 @@ def _plot_training_vs_control_for_odor(
     odor_off_s: float,
     ylim: tuple[float, float] | None,
     color_key: str | None = None,
+    train_label: str = "Trained",
+    ctrl_label: str = "Control",
+    title: str | None = None,
 ) -> plt.Figure:
     # ``color_key`` lets a caller whose label carries extra text (a remapped
     # concentration, a presentation number) still hit the palette; the title
-    # keeps the full label. Defaults to ``odor``, so existing callers are
-    # unaffected.
+    # keeps the full label. ``train_label``/``ctrl_label``/``title`` let a
+    # caller draw two groups that are not literally trained-vs-control (e.g. a
+    # rig split within one arm). Defaults keep existing callers unaffected.
     dark = _trace_odor_color(color_key or odor)
     light = CTRL_BAND_COLOR
 
@@ -582,7 +586,7 @@ def _plot_training_vs_control_for_odor(
         ctrl_mean,
         color=CTRL_LINE_COLOR,
         linewidth=2.2,
-        label=f"Control (n={len(ctrl_per_fly)})",
+        label=f"{ctrl_label} (n={len(ctrl_per_fly)})",
     )
     ax.fill_between(
         time_train,
@@ -597,7 +601,7 @@ def _plot_training_vs_control_for_odor(
         train_mean,
         color=dark,
         linewidth=2.2,
-        label=f"Trained (n={len(train_per_fly)})",
+        label=f"{train_label} (n={len(train_per_fly)})",
     )
 
     ax.axvline(odor_on_s, color="black", linestyle="--", linewidth=0.8)
@@ -609,7 +613,8 @@ def _plot_training_vs_control_for_odor(
         ax.set_ylim(*ylim)
     ax.set_xlabel("Time (s)")
     ax.set_ylabel(Y_LABEL)
-    ax.set_title(f"{odor} - Trained vs Control", fontsize=12)
+    ax.set_title(title if title is not None else f"{odor} - Trained vs Control",
+                 fontsize=12)
     ax.legend(loc="upper right", fontsize=10, framealpha=0.9)
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)

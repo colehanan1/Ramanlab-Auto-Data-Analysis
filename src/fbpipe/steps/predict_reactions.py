@@ -72,6 +72,28 @@ def _fly_keys(df: pd.DataFrame) -> pd.Series:
     return pd.Series(list(zip(dataset, fly, fly_number)), index=df.index, dtype=object)
 
 
+def _drop_frozen_rows(
+    df: pd.DataFrame, *, include_frozen: bool = False
+) -> tuple[pd.DataFrame, int]:
+    """Drop rows from frozen experiment folders; return ``(kept, n_dropped)``.
+
+    ``model_predictions.csv`` is the hub for the score, matrix and publication
+    figures, so cutting the retired flies HERE is what keeps all of them clean
+    without touching each script. The wide CSV upstream still holds every row —
+    this artifact is regenerable, and ``include_frozen`` rebuilds it complete.
+    """
+    from ..utils.frozen_folders import drop_frozen
+
+    kept = drop_frozen(df, include_frozen=include_frozen)
+    n_dropped = len(df) - len(kept)
+    if n_dropped:
+        print(
+            f"[FROZEN] Excluding {n_dropped} row(s) from frozen experiment folders "
+            f"before scoring; they stay in the wide CSV."
+        )
+    return kept, n_dropped
+
+
 def _drop_flagged_flies(
     df: pd.DataFrame,
     *,
@@ -229,6 +251,14 @@ def main(cfg: Settings) -> None:
         raise FileNotFoundError(f"Model file not found: {model_path}")
 
     df = read_table(data_csv)
+    # --figures-only reuses whatever wide table is on disk; one built before
+    # folder freeze existed marks nothing and silently under-filters.
+    from ..utils.frozen_folders import warn_if_unmarked
+
+    warn_if_unmarked(df, cfg, source=str(data_csv))
+    df, _n_frozen = _drop_frozen_rows(
+        df, include_frozen=bool(getattr(cfg, "include_frozen", False))
+    )
     df = _filter_trial_types(df, allowed=("testing",))
     if df.empty:
         print(

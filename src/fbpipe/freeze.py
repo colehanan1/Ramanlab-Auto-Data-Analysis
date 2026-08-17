@@ -76,6 +76,7 @@ def build_fingerprint(
     trial_type_filter: Optional[str | bytes | Iterable[str]],
     override: Any,
     tracking: Any,
+    freeze_folders_before: Any = None,
 ) -> dict:
     """Everything that determines a dataset's rows OTHER than its raw data.
 
@@ -136,7 +137,21 @@ def build_fingerprint(
             "light_start_s": getattr(override, "light_start_s", None),
             "light_duration_s": getattr(override, "light_duration_s", None),
             "odor_remap": dict(getattr(override, "odor_remap", {}) or {}),
+            # Folder freeze changes which rows carry frozen=True, so a slice
+            # cached under one folder policy must not be served under another --
+            # that would leave one CSV mixing two freeze policies, the same
+            # failure mode trial_type_filter guards against above. Sorted so
+            # list order (which never changes the outcome) cannot cause drift.
+            "freeze_folders": sorted(
+                f"{getattr(f, 'pattern', f)}@{getattr(f, 'before', None)}"
+                for f in (getattr(override, "freeze_folders", ()) or ())
+            ),
         },
+        # The global date cutoff, for the same reason. Stringified so a
+        # datetime.date survives the JSON round-trip load_slice compares over.
+        "freeze_folders_before": (
+            None if freeze_folders_before is None else str(freeze_folders_before)
+        ),
         # build_wide_csv reads settings.tracking internally (envelope_combined.py:2622)
         # and derives the tracking_missing_frames / tracking_pct_missing /
         # tracking_flagged columns from it (:3050, :3067-3068, :3111). Omitting it

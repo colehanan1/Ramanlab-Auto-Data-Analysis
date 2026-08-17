@@ -136,6 +136,122 @@ def _lookup_model_score(
 
 
 # ---------------------------------------------------------------------------
+# Per-trial light-stimulus check annotations
+# ---------------------------------------------------------------------------
+# Pipeline driver populates this from the ``check_light_stimulus`` QC CSV
+# (``logs/light_stimulus_flags.csv``). Keys are (dataset, batch_dir_name,
+# phase, trial_number) — the batch dir name equals the wide table's ``fly``
+# column, and phase/number come from the rig-side trial dir name, which is
+# also the leading token of every ``trial_label`` (so RandomPanel's
+# ``trial_type`` override doesn't break the join). Values are
+# ``fraction_on_in_window``: the fraction of the sensor-commanded light window
+# during which the LED was physically detected on. A key exists only for
+# trials where light was commanded, so presence alone means "light was sent".
+_LIGHT_CHECKS: dict[tuple[str, str, str, int], float] = {}
+
+# Display rule requested for the trace figures: >= 95% of the commanded window
+# counts as the light having worked in full; anything lower shows the measured
+# percentage. (The QC step's own pass/fail threshold is independent.)
+LIGHT_CHECK_FULL_FRACTION = 0.95
+# Icon + label + number carry the meaning; color is redundant reinforcement,
+# picked dark enough to read on the white figure surface.
+LIGHT_CHECK_PASS_COLOR = "#006300"
+LIGHT_CHECK_WARN_COLOR = "#d03b3b"
+
+_LIGHT_TRIAL_LABEL_RE = re.compile(r"^(training|testing)_(\d+)", re.IGNORECASE)
+
+
+def set_light_check_fractions(
+    fractions: dict[tuple[str, str, str, int], float]
+) -> None:
+    """Register light-check fractions keyed by (dataset, fly, phase, trial_num).
+
+    Like ``set_model_scores``, the QC CSV carries dataset FOLDER names while
+    the trace plots look up by canonical name ("3Oct-…" -> "3OCT-…"), so the
+    canonical spelling is registered as an alias; an explicit key always wins.
+    """
+    _LIGHT_CHECKS.clear()
+    _LIGHT_CHECKS.update(fractions)
+    for (dataset, fly, phase, trial_num), fraction in fractions.items():
+        canon_key = (_canon_dataset(str(dataset)), str(fly), str(phase), int(trial_num))
+        if canon_key not in fractions:
+            _LIGHT_CHECKS.setdefault(canon_key, fraction)
+
+
+def load_light_check_fractions(
+    csv_path: Path | str,
+) -> dict[tuple[str, str, str, int], float]:
+    """Read the ``check_light_stimulus`` QC CSV into an annotation mapping.
+
+    Only ``status == "checked"`` rows with a finite ``fraction_on_in_window``
+    are kept (``no_video``/``unreadable_video`` rows carry no verdict). The
+    ``batch`` column holds the batch directory PATH; its basename is what the
+    wide table stores in ``fly``.
+    """
+    path = Path(csv_path).expanduser()
+    if not path.exists():
+        return {}
+    try:
+        df = pd.read_csv(
+            path,
+            usecols=[
+                "dataset",
+                "batch",
+                "trial_type",
+                "trial_index",
+                "status",
+                "fraction_on_in_window",
+            ],
+        )
+    except Exception as exc:  # noqa: BLE001 — defensive load, annotation is optional
+        logger.warning("Failed to read light-check CSV %s: %s", path, exc)
+        return {}
+
+    fractions: dict[tuple[str, str, str, int], float] = {}
+    for row in df.itertuples(index=False):
+        if str(row.status).strip().lower() != "checked":
+            continue
+        try:
+            fraction = float(row.fraction_on_in_window)
+            trial_num = int(row.trial_index)
+        except (TypeError, ValueError):
+            continue
+        if not math.isfinite(fraction):
+            continue
+        key = (
+            str(row.dataset),
+            Path(str(row.batch)).name,
+            str(row.trial_type).strip().lower(),
+            trial_num,
+        )
+        fractions[key] = fraction
+    return fractions
+
+
+def _lookup_light_check(
+    dataset_canon: str, fly: str, trial_label: str
+) -> float | None:
+    """Return the light-check fraction for a trial subplot, or None if unchecked."""
+    match = _LIGHT_TRIAL_LABEL_RE.match(str(trial_label).strip())
+    if match is None:
+        return None
+    key = (str(dataset_canon), str(fly), match.group(1).lower(), int(match.group(2)))
+    return _LIGHT_CHECKS.get(key)
+
+
+def _light_check_annotation(fraction: float) -> tuple[str, str]:
+    """Map a light-check fraction to its (text, color) panel annotation.
+
+    The percentage is floored so a fraction just under the threshold can never
+    display as "95%" next to the warn color.
+    """
+    if fraction >= LIGHT_CHECK_FULL_FRACTION:
+        return r"$\checkmark$ Light: full", LIGHT_CHECK_PASS_COLOR
+    pct = math.floor(max(float(fraction), 0.0) * 100.0)
+    return f"! Light: {pct:d}%", LIGHT_CHECK_WARN_COLOR
+
+
+# ---------------------------------------------------------------------------
 # Per-dataset odor-label remap
 # ---------------------------------------------------------------------------
 # Pipeline driver populates this from DatasetOverride.odor_remap. Keys are
@@ -1092,6 +1208,13 @@ def _load_wide_table(wide_path: Path) -> tuple[pd.DataFrame, list[str]]:
     prefers a ``.parquet`` sibling and falls back to ``.csv``.
     """
     df = read_table(Path(wide_path))
+    # Frozen experiment folders stay in the wide table but never reach a figure.
+    from fbpipe.utils.frozen_folders import drop_frozen
+
+    before = len(df)
+    df = drop_frozen(df)
+    if len(df) != before:
+        print(f"[FROZEN] {before - len(df)} row(s) from frozen folders excluded from figures")
     env_cols = sorted(
         (str(col) for col in df.columns if str(col).startswith("dir_val_")),
         key=lambda col: int(col.split("_")[-1]),
@@ -2632,6 +2755,30 @@ def generate_envelope_plots(cfg: EnvelopePlotConfig) -> None:
                     clip_on=False,
                 )
 
+            # Light-stimulus check (title-band center): confirms the LED was
+            # physically on for the sensor-commanded window on trials where
+            # light was sent. Control datasets follow the light-line policy
+            # above and never show it (light-only datasets are not controls).
+            light_fraction = None
+            if ds_light_window is not None or not _is_control_dataset(dataset_canon):
+                light_fraction = _lookup_light_check(
+                    str(dataset_canon), str(fly), str(trial_label)
+                )
+            if light_fraction is not None:
+                light_text, light_color = _light_check_annotation(light_fraction)
+                ax.text(
+                    0.5,
+                    panel_title_y,
+                    light_text,
+                    transform=panel_title_transform,
+                    ha="center",
+                    va=panel_title_va,
+                    fontsize=panel_title_font,
+                    weight="bold",
+                    color=light_color,
+                    clip_on=False,
+                )
+
             odor_on_label_trial_num = (
                 int(cfg.odor_on_label_trial_num)
                 if cfg.odor_on_label_trial_num is not None
@@ -3011,6 +3158,17 @@ def _parse_envelopes_args(subparser: argparse.ArgumentParser) -> None:
         help="Optional vertical padding passed to tight_layout between stacked subplots.",
     )
     subparser.add_argument("--overwrite", action="store_true", help="Rebuild plots even if the target files exist.")
+    subparser.add_argument(
+        "--light-check-csv",
+        default=None,
+        help=(
+            "Light-stimulus QC CSV from the check_light_stimulus step "
+            "(default: logs/light_stimulus_flags.csv in the repo). Each trial "
+            "with a checked light window gets a per-panel confirmation note "
+            "(>= 95%% of the commanded window on == 'full'). Pass an empty "
+            "string to disable."
+        ),
+    )
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -3054,6 +3212,13 @@ def main(argv: Sequence[str] | None = None) -> None:
         return
 
     if args.command == "envelopes":
+        light_check_csv = args.light_check_csv
+        if light_check_csv is None:
+            light_check_csv = str(
+                Path(__file__).resolve().parents[2] / "logs" / "light_stimulus_flags.csv"
+            )
+        if str(light_check_csv).strip():
+            set_light_check_fractions(load_light_check_fractions(light_check_csv))
         cfg = EnvelopePlotConfig(
             matrix_npy=args.matrix_npy,
             codes_json=args.codes_json,

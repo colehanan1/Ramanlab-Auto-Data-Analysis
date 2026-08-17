@@ -60,7 +60,7 @@ from scripts.analysis.dataset_means_specific_flies import (  # noqa: E402
     _safe_odor_filename,
     _shared_ylim_from_means,
 )
-from scripts.analysis.rig_batch_breakdowns import batch_of  # noqa: E402
+from scripts.analysis.rig_batch_breakdowns import batch_of, rig_of  # noqa: E402
 from scripts.analysis.mean_trace_score import (  # noqa: E402
     annotate_mean_scores,
     model_settings_from_config,
@@ -217,6 +217,25 @@ def _prepare(
     return per_odor, rows_by_key, ds_df
 
 
+def _parse_rig_split(spec: str) -> tuple[tuple[int, ...], tuple[int, ...]]:
+    """Parse ``RIGS:RIGS`` (e.g. ``1,2:3``) into two pooled rig tuples."""
+    parts = str(spec).split(":")
+    if len(parts) != 2:
+        raise ValueError(f"--rig-split expects RIGS:RIGS, got {spec!r}")
+    try:
+        rigs_a = tuple(int(v) for v in parts[0].split(",") if v != "")
+        rigs_b = tuple(int(v) for v in parts[1].split(",") if v != "")
+    except ValueError:
+        raise ValueError(f"--rig-split rigs must be integers, got {spec!r}") from None
+    if not rigs_a or not rigs_b:
+        raise ValueError(f"--rig-split expects rigs on both sides, got {spec!r}")
+    return rigs_a, rigs_b
+
+
+def _rig_label(rigs: tuple[int, ...]) -> str:
+    return "Rig " + "+".join(str(r) for r in rigs)
+
+
 def _apply_config_remap(config_path: str) -> None:
     from fbpipe.config import load_settings
 
@@ -231,6 +250,66 @@ def _apply_config_remap(config_path: str) -> None:
     if remap:
         set_dataset_odor_remap(remap)
         LOGGER.info("Loaded odor_remap for %d datasets from %s", len(remap), config_path)
+
+
+def filter_by_genotype(
+    wide_df: pd.DataFrame, genotypes: Sequence[str]
+) -> pd.DataFrame:
+    """Keep only flies of the named genotypes (``fly_type``, case-insensitive).
+
+    ``fbpipe.utils.fly_type`` canonicalises the rig's free-text "Fly Type:" so
+    that different genotypes are never plotted together, but the wide table
+    pools them: ``RandomPanel-Training-24-10`` holds GR5a-GCaMP8 flies as well
+    as GR5a-Old ones. An empty selection is a no-op.
+
+    Both failure modes exit rather than return an empty/unfiltered frame: a
+    figure that silently pooled genotypes, or silently dropped every fly, is
+    worse than no figure.
+    """
+    wanted = [str(g).strip() for g in genotypes if str(g).strip()]
+    if not wanted:
+        return wide_df
+    if "fly_type" not in wide_df.columns:
+        raise SystemExit(
+            "--genotype needs a `fly_type` column; this wide table has none "
+            "(rebuild it, or drop the filter)."
+        )
+    folded = {g.casefold() for g in wanted}
+    keep = wide_df["fly_type"].astype(str).str.strip().str.casefold().isin(folded)
+    if not keep.any():
+        available = sorted(set(wide_df["fly_type"].astype(str).str.strip()))
+        raise SystemExit(
+            f"No rows for genotype(s) {wanted}; available: {available}"
+        )
+    LOGGER.info(
+        "Genotype filter %s: keeping %d of %d rows",
+        wanted, int(keep.sum()), len(wide_df),
+    )
+    return wide_df.loc[keep].copy()
+
+
+def prune_stale_figures(
+    out_dir: Path, written: Sequence[Path], *, pattern: str
+) -> list[Path]:
+    """Delete this driver's earlier figures that the current run did not write.
+
+    A re-label or a withdrawn cohort renames or removes figures; leaving the
+    old files beside the new ones publishes a folder where half the panel
+    describes a configuration the dataset no longer claims. Only files matching
+    this driver's own ``pattern`` are considered.
+    """
+    out_dir = Path(out_dir)
+    if not out_dir.is_dir():
+        return []
+    keep = {Path(p).name for p in written}
+    removed = [
+        path for path in sorted(out_dir.glob(pattern))
+        if path.is_file() and path.name not in keep
+    ]
+    for path in removed:
+        path.unlink()
+        LOGGER.info("Pruned stale %s", path)
+    return removed
 
 
 def build_parser(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
@@ -252,6 +331,19 @@ def build_parser(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     p.add_argument("--batch", type=int, default=None,
                    help="Restrict both arms to one starvation batch "
                         "(the batch_N token in the fly folder name).")
+    p.add_argument("--rig-split", type=str, default="", metavar="RIGS:RIGS",
+                   help="Compare two pooled rig groups within ONE arm instead "
+                        "of training vs control, e.g. 1,2:3 for rigs 1+2 "
+                        "combined vs rig 3. Pick the arm with --split-arm.")
+    p.add_argument("--split-arm", default="train", choices=["train", "ctrl"],
+                   help="Which arm --rig-split divides (default: train).")
+    p.add_argument("--odor", action="append", default=[], metavar="LABEL",
+                   help="Only draw these odor-presentation labels (repeatable, "
+                        'case-insensitive), e.g. "3-Octanol (0.1%%) 1".')
+    p.add_argument("--genotype", action="append", default=[], metavar="FLY_TYPE",
+                   help="Keep only flies of this canonical fly_type "
+                        "(repeatable), e.g. GR5a-Old. Genotypes are never "
+                        "pooled into one mean unless you ask for several.")
     p.add_argument("--protocol", default="v2", choices=["v2", "legacy"])
     p.add_argument("--overwrite", action="store_true", default=True)
     p.add_argument("--score-mean-trace", action="store_true", default=False,
@@ -299,6 +391,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     wide_df = read_wide_table(args.wide_csv)
     LOGGER.info("Loaded %d rows from %s", len(wide_df), args.wide_csv)
     wide_df = _normalise_fly_columns(wide_df)
+    wide_df = filter_by_genotype(wide_df, args.genotype)
 
     if args.flagged_flies_csv:
         flagged = compute_non_reactive_flags(
@@ -323,19 +416,48 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         if wide_df.empty:
             raise RuntimeError(f"No flies in batch {args.batch}")
 
-    LOGGER.info("=== %s", args.train_dataset)
-    train, train_rows, train_df = _prepare(
-        wide_df, args.train_dataset, fps=args.fps, odor_on_s=args.odor_on_s
-    )
-    LOGGER.info("=== %s", args.control_dataset)
-    control, ctrl_rows, ctrl_df = _prepare(
-        wide_df, args.control_dataset, fps=args.fps, odor_on_s=args.odor_on_s
-    )
-    if not train or not control:
-        raise RuntimeError(
-            "No usable traces for "
-            f"{args.train_dataset if not train else args.control_dataset}"
+    if args.rig_split:
+        rigs_a, rigs_b = _parse_rig_split(args.rig_split)
+        arm_ds = (
+            args.train_dataset if args.split_arm == "train" else args.control_dataset
         )
+        label_a, label_b = _rig_label(rigs_a), _rig_label(rigs_b)
+        tag = (
+            f"{args.split_arm}_rig_{'_'.join(map(str, rigs_a))}"
+            f"_vs_rig_{'_'.join(map(str, rigs_b))}"
+        )
+        rig_series = wide_df["fly"].map(rig_of)
+        LOGGER.info("=== %s [%s]", arm_ds, label_a)
+        train, train_rows, train_df = _prepare(
+            wide_df.loc[rig_series.isin(rigs_a)], arm_ds,
+            fps=args.fps, odor_on_s=args.odor_on_s,
+        )
+        LOGGER.info("=== %s [%s]", arm_ds, label_b)
+        control, ctrl_rows, ctrl_df = _prepare(
+            wide_df.loc[rig_series.isin(rigs_b)], arm_ds,
+            fps=args.fps, odor_on_s=args.odor_on_s,
+        )
+        if not train or not control:
+            raise RuntimeError(
+                f"No usable traces for {arm_ds} "
+                f"{label_a if not train else label_b}"
+            )
+    else:
+        label_a, label_b = "Trained", "Control"
+        tag = "training_vs_control"
+        LOGGER.info("=== %s", args.train_dataset)
+        train, train_rows, train_df = _prepare(
+            wide_df, args.train_dataset, fps=args.fps, odor_on_s=args.odor_on_s
+        )
+        LOGGER.info("=== %s", args.control_dataset)
+        control, ctrl_rows, ctrl_df = _prepare(
+            wide_df, args.control_dataset, fps=args.fps, odor_on_s=args.odor_on_s
+        )
+        if not train or not control:
+            raise RuntimeError(
+                "No usable traces for "
+                f"{args.train_dataset if not train else args.control_dataset}"
+            )
 
     # --- optional: score each cohort mean trace with the ordinal model -------
     mean_scores: dict[str, dict[str, float]] = {}
@@ -344,7 +466,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         model_path, binary_threshold = model
         groups: dict[str, pd.DataFrame] = {}
         for arm, rows_by_key, source in (
-            ("Trained", train_rows, train_df), ("Control", ctrl_rows, ctrl_df)
+            (label_a, train_rows, train_df), (label_b, ctrl_rows, ctrl_df)
         ):
             for odor, idx in rows_by_key.items():
                 groups[f"{arm}|{odor}"] = source.loc[idx]
@@ -363,14 +485,21 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     args.out_dir.mkdir(parents=True, exist_ok=True)
     per_odor_meta: dict[str, dict[str, int]] = {}
     skipped: list[str] = []
+    written: list[Path] = []
+    wanted_odors = {str(o).casefold() for o in args.odor}
+    matched_odors: set[str] = set()
 
     for odor in sorted(set(train) | set(control), key=_sort_key):
+        if wanted_odors:
+            if odor.casefold() not in wanted_odors:
+                continue
+            matched_odors.add(odor.casefold())
         train_per_fly = train.get(odor, {})
         ctrl_per_fly = control.get(odor, {})
         if not train_per_fly or not ctrl_per_fly:
             LOGGER.warning(
-                "Skipping %s — trained n=%d, control n=%d",
-                odor, len(train_per_fly), len(ctrl_per_fly),
+                "Skipping %s — %s n=%d, %s n=%d",
+                odor, label_a, len(train_per_fly), label_b, len(ctrl_per_fly),
             )
             skipped.append(odor)
             continue
@@ -383,13 +512,26 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             odor_off_s=args.odor_off_s,
             ylim=shared_ylim,
             color_key=base_odor_key(odor),
+            train_label=label_a,
+            ctrl_label=label_b,
+            title=(
+                f"{odor} - "
+                f"{'Training' if args.split_arm == 'train' else 'Control'}: "
+                f"{label_a} vs {label_b}"
+            ) if args.rig_split else None,
         )
-        entry = {
-            "n_training_flies": len(train_per_fly),
-            "n_control_flies": len(ctrl_per_fly),
-        }
-        train_score = mean_scores.get(f"Trained|{odor}")
-        ctrl_score = mean_scores.get(f"Control|{odor}")
+        if args.rig_split:
+            entry = {
+                "n_group_a": len(train_per_fly),
+                "n_group_b": len(ctrl_per_fly),
+            }
+        else:
+            entry = {
+                "n_training_flies": len(train_per_fly),
+                "n_control_flies": len(ctrl_per_fly),
+            }
+        train_score = mean_scores.get(f"{label_a}|{odor}")
+        ctrl_score = mean_scores.get(f"{label_b}|{odor}")
         if train_score is not None and ctrl_score is not None:
             annotate_mean_scores(fig.axes[0], train_score, ctrl_score)
             entry["mean_trace_score_training"] = train_score["score"]
@@ -397,26 +539,50 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             entry["mean_trace_reacted_training"] = train_score["prediction"]
             entry["mean_trace_reacted_control"] = ctrl_score["prediction"]
 
-        out_png = args.out_dir / f"{_safe_odor_filename(odor)}_training_vs_control.png"
+        out_png = args.out_dir / f"{_safe_odor_filename(odor)}_{tag}.png"
+        written.append(out_png)
         if args.overwrite or not out_png.exists():
             fig.savefig(out_png, dpi=DPI, bbox_inches="tight")
             LOGGER.info("Saved %s", out_png)
         plt.close(fig)
         per_odor_meta[odor] = entry
 
+    if wanted_odors and (missing := wanted_odors - matched_odors):
+        raise RuntimeError(
+            f"--odor labels matched nothing: {sorted(missing)}; available: "
+            f"{sorted(set(train) | set(control), key=_sort_key)}"
+        )
+
+    prune_stale_figures(args.out_dir, written, pattern=f"*_{tag}.png")
+
     sidecar = {
-        "training_dataset": args.train_dataset,
-        "control_dataset": args.control_dataset,
         "fps": args.fps,
         "odor_on_s": args.odor_on_s,
         "odor_off_s": args.odor_off_s,
         "shared_mean_ylim": list(shared_ylim),
         "batch": args.batch,
         "flagged_flies_csv": args.flagged_flies_csv,
+        "genotypes": list(args.genotype),
         "per_odor": per_odor_meta,
         "skipped_odors": skipped,
     }
-    sidecar_path = args.out_dir / "training_vs_control.json"
+    if args.rig_split:
+        rigs_a, rigs_b = _parse_rig_split(args.rig_split)
+        sidecar.update({
+            "dataset": (
+                args.train_dataset if args.split_arm == "train"
+                else args.control_dataset
+            ),
+            "split_arm": args.split_arm,
+            "group_a": {"label": label_a, "rigs": list(rigs_a)},
+            "group_b": {"label": label_b, "rigs": list(rigs_b)},
+        })
+    else:
+        sidecar.update({
+            "training_dataset": args.train_dataset,
+            "control_dataset": args.control_dataset,
+        })
+    sidecar_path = args.out_dir / f"{tag}.json"
     sidecar_path.write_text(json.dumps(sidecar, indent=2), encoding="utf-8")
     LOGGER.info("Saved %s", sidecar_path)
 

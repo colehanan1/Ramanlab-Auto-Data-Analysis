@@ -15,6 +15,7 @@ import torch
 import gc  # Add this import
 
 from ..config import Settings, get_main_directories
+from ..utils.frozen_folders import iter_live_batch_dirs
 from ..utils.tables import read_table, write_table, table_path
 from ..utils.timestamps import pick_timestamp_column, pick_frame_column, to_seconds_series
 from ..utils.vision import xyxy_to_cxcywh
@@ -22,6 +23,7 @@ from ..utils.yolo_results import collect_detections
 from ..utils.video_writer import FFmpegFrameWriter
 from ..utils.distance_sanity import anisotropic_boundary_offsets
 from ..utils.rig_anchor import resolve_anchor
+from ..utils.rig_gates import apply_rig_gate_overrides
 from ..utils.track import MultiObjectTracker, SingleClassTracker
 from ..utils.multi_fly import EyeAnchorManager, StablePairing, enforce_zero_iou_and_topk
 from ..utils.columns import (
@@ -591,7 +593,11 @@ def main(cfg: Settings):
             print(f"[YOLO] main_directories entry does not exist: {root}")
             continue
 
-        for fly in sorted((p for p in root.iterdir() if p.is_dir()), key=str):
+        # Frozen experiment folders are skipped entirely: no GPU, no I/O. Their
+        # existing per-trial CSVs stay put so build_wide_csv still emits them.
+        for fly in iter_live_batch_dirs(cfg, root):
+            # Per-batch gate widening (drawn gate polygon + ≥3-fly pairing cap).
+            fly_cfg = apply_rig_gate_overrides(cfg, fly)
             video_files = sorted(
                 (f for f in fly.iterdir() if f.suffix.lower() in (".mp4", ".avi")), key=str
             )
@@ -731,7 +737,7 @@ def main(cfg: Settings):
                 print(f"[YOLO] {video_path.name}: {_path_tag} path, effective batch size {B}{_batch_tag}")
                 rows = _run_chunked_inference(
                     cap, max_frame, (target_w, target_h), writer, timestamps, fps, (AX, AY),
-                    cfg, batched_predict_fn, single_trackers, None,
+                    fly_cfg, batched_predict_fn, single_trackers, None,
                     eye_mgr, cls8_tracker, pairer, active_max_flies, B)
                 cap.release(); writer.release()
 

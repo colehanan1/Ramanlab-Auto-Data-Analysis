@@ -340,6 +340,7 @@ def _draw_significant_brackets(
 def rows_from_score_summary(
     predictions_csv: Path, train_dataset: str, *, config: Path | None = None,
     genotype: str = GENOTYPE, fly_months=None, flagged_flies_csv: str = "",
+    odor_remap=None,
 ) -> pd.DataFrame:
     """Per-dataset rows, recomputed with ``score_summary``'s own pipeline.
 
@@ -352,6 +353,7 @@ def rows_from_score_summary(
     df = _prepare_scores(
         predictions_csv, train_dataset, config=config, genotype=genotype,
         fly_months=fly_months, flagged_flies_csv=flagged_flies_csv,
+        odor_remap=odor_remap,
     )
     summary = ss._compute_training_vs_control_summary(df)
     sub = summary[summary["training_dataset"] == train_dataset].copy()
@@ -375,9 +377,54 @@ def rows_from_score_summary(
     )
 
 
+def parse_odor_remap(pairs) -> dict[str, str]:
+    """``["Apple Cider Vinegar=Isoamyl Acetate (1%)"]`` -> a mapping."""
+    out: dict[str, str] = {}
+    for raw in pairs or ():
+        text = str(raw)
+        if "=" not in text:
+            raise SystemExit(f"--odor-remap wants KEY=VALUE, got {text!r}")
+        key, value = text.split("=", 1)
+        key, value = key.strip(), value.strip()
+        if not key:
+            raise SystemExit(f"--odor-remap has an empty odor name: {text!r}")
+        out[key] = value
+    return out
+
+
+def _install_cohort_odor_remap(train_dataset: str, overrides: dict[str, str]) -> None:
+    """Layer ``overrides`` onto this cohort's two datasets, and only those.
+
+    A dataset can outlive its own rig plumbing: ``Hex-*-24-0.1`` delivered
+    sourdough yeast on the Citral channel in May/June and the newer panel in
+    August, so no single per-dataset ``odor_remap`` describes both. Overriding
+    here keeps the config's dataset-level mapping intact for every other figure
+    over the same dataset.
+
+    Both cohorts are patched because figures pair training and control by
+    display label -- relabelling one side alone would split an odor into two
+    unpaired columns and still render.
+    """
+    if not overrides:
+        return
+    from scripts.analysis.envelope_visuals import (
+        _DATASET_ODOR_REMAP,
+        _canon_dataset,
+        set_dataset_odor_remap,
+    )
+
+    names = {train_dataset, train_dataset.replace("Training", "Control")}
+    keys = {n for name in names for n in (name, _canon_dataset(name))}
+    merged = {ds: dict(m) for ds, m in _DATASET_ODOR_REMAP.items()}
+    for key in keys:
+        merged.setdefault(key, {}).update(overrides)
+    set_dataset_odor_remap(merged)
+
+
 def _prepare_scores(
     predictions_csv: Path, train_dataset: str, *, config: Path | None = None,
     genotype: str = GENOTYPE, fly_months=None, flagged_flies_csv: str = "",
+    odor_remap=None,
 ) -> pd.DataFrame:
     """Load the predictions CSV and apply every cohort filter, in order.
 
@@ -387,6 +434,9 @@ def _prepare_scores(
     from scripts.analysis import score_summary as ss
 
     _apply_config(config)
+    # After the config, so a cohort override wins over the dataset-level map,
+    # and before _load_scores, which is what resolves trial labels to odors.
+    _install_cohort_odor_remap(train_dataset, dict(odor_remap or {}))
     df = ss._load_scores(predictions_csv, threshold=None, flagged_flies_csv="")
     # Judge "this exclusion matched nothing" against every fly the CSV holds,
     # before the genotype and month filters legitimately remove some.
@@ -420,6 +470,7 @@ def _prepare_scores(
 def rows_from_percent_responding(
     predictions_csv: Path, train_dataset: str, *, config: Path | None = None,
     genotype: str = GENOTYPE, fly_months=None, flagged_flies_csv: str = "",
+    odor_remap=None,
 ) -> pd.DataFrame:
     """Per-odor share of flies that extended, training vs control.
 
@@ -438,6 +489,7 @@ def rows_from_percent_responding(
     df = _prepare_scores(
         predictions_csv, train_dataset, config=config, genotype=genotype,
         fly_months=fly_months, flagged_flies_csv=flagged_flies_csv,
+        odor_remap=odor_remap,
     )
     train_canon = _canon_dataset(train_dataset)
     ctrl_canon = ss._auto_pairs(sorted(set(df["dataset_canon"]))).get(train_canon)
@@ -606,6 +658,19 @@ def main(argv: list[str] | None = None) -> None:
     common.add_argument("--train-dataset", required=True)
     common.add_argument("--title", default=None)
     common.add_argument("--out-stem", default=None)
+    common.add_argument(
+        "--odor-remap", action="append", default=[], metavar="ODOR=LABEL",
+        help="relabel one odor for THIS figure only, e.g. "
+             "'Apple Cider Vinegar=Isoamyl Acetate (1%%)'. Repeatable. Wins "
+             "over the config's per-dataset odor_remap and applies to both "
+             "cohorts. Use when one dataset spans two rig configurations.",
+    )
+    common.add_argument(
+        "--cohort-label", default="",
+        help="what the default title is about, in place of the dataset name "
+             "(e.g. 'Hex-24-0.01, August'). Each metric keeps its own wording, "
+             "so one label titles both. Ignored when --title is given.",
+    )
 
     common.add_argument(
         "--metric", choices=sorted(METRICS), default=SCORE_METRIC.key,
@@ -641,15 +706,15 @@ def main(argv: list[str] | None = None) -> None:
             args.predictions_csv, args.train_dataset,
             config=args.config, genotype=args.genotype, fly_months=months or None,
             flagged_flies_csv=args.flagged_flies_csv,
+            odor_remap=parse_odor_remap(args.odor_remap),
         )
         default_stem = (
             f"pubfig_pct_responding_train_vs_ctrl_{args.train_dataset}" if percent
             else f"pubfig_mean_score_train_vs_ctrl_{args.train_dataset}"
         )
         stem = args.out_stem or default_stem
-        title = args.title or (
-            f"{metric.y_label} – {args.train_dataset} (Training vs Control)"
-        )
+        subject = args.cohort_label or args.train_dataset
+        title = args.title or f"{metric.y_label} – {subject} (Training vs Control)"
     else:
         if percent:
             raise SystemExit("--metric percent-responding is only available for 'dataset'")

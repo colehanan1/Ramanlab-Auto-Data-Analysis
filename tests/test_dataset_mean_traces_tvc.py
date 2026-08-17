@@ -322,6 +322,102 @@ def test_without_a_batch_filter_all_flies_contribute(tmp_path: Path) -> None:
     assert meta["per_odor"]["Hexanol (0.1%)"]["n_training_flies"] == 8
 
 
+# ---------------------------------------------------------------------------
+# Rig-split mode
+# ---------------------------------------------------------------------------
+
+
+def _rigged_wide_frame():
+    """Training flies across rigs 1, 2 and 3 (rig 1 is the unsuffixed default)."""
+    return _wide_frame(
+        flies=(
+            "july_20_batch_1",           # rig 1
+            "july_20_batch_1_rig_2",     # rig 2
+            "july_24_batch_1_rig_3",     # rig 3
+        )
+    )
+
+
+def test_parse_rig_split() -> None:
+    from scripts.analysis.dataset_mean_traces_tvc import _parse_rig_split
+
+    assert _parse_rig_split("1,2:3") == ((1, 2), (3,))
+    assert _parse_rig_split("2:3") == ((2,), (3,))
+    with pytest.raises(ValueError):
+        _parse_rig_split("1,2")          # both sides required
+    with pytest.raises(ValueError):
+        _parse_rig_split("one:3")
+
+
+def test_plot_helper_accepts_group_labels() -> None:
+    from scripts.analysis.dataset_means_specific_flies import (
+        _plot_training_vs_control_for_odor,
+    )
+
+    trace = np.zeros(N_FRAMES)
+    fig = _plot_training_vs_control_for_odor(
+        odor="3-Octanol (0.1%) 1",
+        train_per_fly={"a_fly1": trace},
+        ctrl_per_fly={"b_fly1": trace},
+        fps=FPS,
+        odor_on_s=ODOR_ON_S,
+        odor_off_s=2.0,
+        ylim=None,
+        train_label="Rig 1+2",
+        ctrl_label="Rig 3",
+        title="3-Octanol (0.1%) 1 - Training: Rig 1+2 vs Rig 3",
+    )
+    labels = [t.get_text() for t in fig.axes[0].get_legend().get_texts()]
+    assert "Rig 1+2 (n=1)" in labels
+    assert "Rig 3 (n=1)" in labels
+    assert fig.axes[0].get_title() == "3-Octanol (0.1%) 1 - Training: Rig 1+2 vs Rig 3"
+
+
+def test_main_rig_split_first_exposure_only(tmp_path: Path) -> None:
+    """--rig-split with --odor draws one figure: the training arm's rigs 1+2
+    pooled against rig 3, for just the requested presentation."""
+    wide = tmp_path / "wide.parquet"
+    _rigged_wide_frame().to_parquet(wide, index=False)
+    out_dir = tmp_path / "rig_split"
+    main([
+        "--wide-csv", str(wide),
+        "--train-dataset", TRAIN, "--control-dataset", CTRL,
+        "--out-dir", str(out_dir),
+        "--fps", str(FPS), "--odor-on-s", str(ODOR_ON_S), "--odor-off-s", "2.0",
+        "--rig-split", "1,2:3",
+        "--odor", "3-Octanol (0.1%) 1",
+    ])
+
+    names = {p.name for p in out_dir.iterdir()}
+    assert names == {
+        "3-Octanol_0.1%_1_train_rig_1_2_vs_rig_3.png",
+        "train_rig_1_2_vs_rig_3.json",
+    }
+    meta = json.loads((out_dir / "train_rig_1_2_vs_rig_3.json").read_text())
+    assert meta["dataset"] == TRAIN
+    assert meta["group_a"] == {"label": "Rig 1+2", "rigs": [1, 2]}
+    assert meta["group_b"] == {"label": "Rig 3", "rigs": [3]}
+    # rigs 1+2 = two folders x two fly_numbers; rig 3 = one folder x two
+    assert meta["per_odor"]["3-Octanol (0.1%) 1"] == {
+        "n_group_a": 4,
+        "n_group_b": 2,
+    }
+
+
+def test_main_odor_filter_that_matches_nothing_fails_loudly(tmp_path: Path) -> None:
+    wide = tmp_path / "wide.parquet"
+    _rigged_wide_frame().to_parquet(wide, index=False)
+    with pytest.raises(RuntimeError, match="odor"):
+        main([
+            "--wide-csv", str(wide),
+            "--train-dataset", TRAIN, "--control-dataset", CTRL,
+            "--out-dir", str(tmp_path / "nope"),
+            "--fps", str(FPS), "--odor-on-s", str(ODOR_ON_S), "--odor-off-s", "2.0",
+            "--rig-split", "1,2:3",
+            "--odor", "No Such Odor (1%) 9",
+        ])
+
+
 def test_batch_filter_that_matches_nothing_fails_loudly(tmp_path: Path) -> None:
     """An empty cohort must raise, not silently emit figures with n=0."""
     from scripts.analysis.dataset_mean_traces_tvc import main

@@ -21,6 +21,7 @@ from functools import partial
 from pathlib import Path
 
 from ..config import Settings, get_main_directories
+from ..utils.frozen_folders import iter_live_batch_dirs
 from ..utils.light_stimulus import check_trial_light_stimulus, update_light_check_csv
 from ..utils.notify import ntfy_notify
 from ..utils.parallel import parallel_map
@@ -106,7 +107,9 @@ def main(cfg: Settings) -> None:
             print(f"[LIGHT] main_directories entry does not exist: {root}")
             continue
         print(f"[LIGHT] Scanning {root} for light-stimulus trials")
-        fly_dirs = [p for p in root.iterdir() if p.is_dir()]
+        # Frozen experiment folders are skipped: no re-derivation, and their
+        # existing per-trial CSVs stay put so build_wide_csv still emits them.
+        fly_dirs = iter_live_batch_dirs(cfg, root)
         for result in parallel_map(
             partial(_process_fly_dir, cfg=cfg),
             fly_dirs,

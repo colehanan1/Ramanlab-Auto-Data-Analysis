@@ -28,6 +28,7 @@ import numpy as np
 import pandas as pd
 
 from ..config import Settings, get_main_directories
+from ..utils.frozen_folders import iter_live_batch_dirs
 from ..utils.columns import (
     EYE_CLASS,
     PROBOSCIS_CLASS,
@@ -111,7 +112,9 @@ def main(cfg: Settings) -> None:
     total_files = 0
     for root in roots:
         print(f"[NORM-GPU] Processing root directory: {root}")
-        for fly_dir in [p for p in root.iterdir() if p.is_dir()]:
+        # Frozen experiment folders are skipped: no re-derivation, and their
+        # existing per-trial CSVs stay put so build_wide_csv still emits them.
+        for fly_dir in iter_live_batch_dirs(cfg, root):
             print(f"[NORM-GPU] Processing fly directory: {fly_dir.name}")
 
             for csv_path, token, _ in iter_fly_distance_csvs(fly_dir, recursive=True):

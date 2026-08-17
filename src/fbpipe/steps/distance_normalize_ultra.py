@@ -23,6 +23,7 @@ import numpy as np
 import pandas as pd
 
 from ..config import Settings, get_main_directories
+from ..utils.frozen_folders import iter_live_batch_dirs
 from ..utils.columns import (
     EYE_CLASS,
     PROBOSCIS_CLASS,
@@ -38,6 +39,7 @@ from ..utils.distance_sanity import (
 )
 from ..utils.fly_files import iter_fly_distance_csvs
 from ..utils.gpu_batch_optimizer import BatchFileProcessor, estimate_optimal_batch_size
+from ..utils.rig_gates import apply_rig_gate_overrides
 from ..utils.tables import read_table, read_schema_columns, write_table
 
 
@@ -105,7 +107,10 @@ def main(cfg: Settings) -> None:
     total_files = 0
     for root in roots:
         print(f"[NORM-ULTRA] Processing root directory: {root}")
-        for fly_dir in [p for p in root.iterdir() if p.is_dir()]:
+        # Frozen experiment folders are skipped: no re-derivation, and their
+        # existing per-trial CSVs stay put so build_wide_csv still emits them.
+        for fly_dir in iter_live_batch_dirs(cfg, root):
+            fly_cfg = apply_rig_gate_overrides(cfg, fly_dir)
             # Collect all CSV files and their stats for this fly
             batch_files: List[Path] = []
             batch_stats: List[Tuple[float, float, float]] = []
@@ -135,7 +140,7 @@ def main(cfg: Settings) -> None:
 
                 needs_sanitization = csv_requires_three_fly_distance_sanitization(
                     csv_path,
-                    cfg.three_fly_max_eye_prob_distance_px,
+                    fly_cfg.three_fly_max_eye_prob_distance_px,
                 )
 
                 # Quick check for distance column + skip already-normalized files.
@@ -189,7 +194,7 @@ def main(cfg: Settings) -> None:
                 batch_stats,
                 batch_dist_cols,
                 processor,
-                cfg.three_fly_max_eye_prob_distance_px,
+                fly_cfg.three_fly_max_eye_prob_distance_px,
             )
 
             total_files += processed

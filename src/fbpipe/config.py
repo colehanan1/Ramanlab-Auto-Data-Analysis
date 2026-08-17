@@ -1,9 +1,13 @@
 
 from __future__ import annotations
+import datetime as _dt
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Dict, Optional, Tuple
+
+if TYPE_CHECKING:  # imported lazily in _freeze_folders to avoid a cycle
+    from .utils.frozen_folders import FolderRule
 
 import yaml
 from dotenv import load_dotenv
@@ -31,6 +35,73 @@ def _freeze_block(raw: object) -> dict:
         return {}
     fz = raw.get("freeze")
     return fz if isinstance(fz, dict) else {}
+
+
+def _coerce_iso_date(raw: object) -> Optional[_dt.date]:
+    """A ``datetime.date`` from a YAML date, datetime, or ISO string; else None."""
+    if isinstance(raw, _dt.datetime):
+        return raw.date()
+    if isinstance(raw, _dt.date):
+        return raw
+    if isinstance(raw, str):
+        try:
+            return _dt.date.fromisoformat(raw.strip())
+        except ValueError:
+            return None
+    return None
+
+
+def _freeze_folders(raw: object, dataset: str) -> Tuple["FolderRule", ...]:
+    """Folder-freeze rules from a raw override block's ``freeze.folders``.
+
+    Three entry forms::
+
+        - july_14_batch_2_rig_2            # one exact folder
+        - "*_rig_3"                        # fnmatch glob
+        - {match: "*batch_2*", before: 2026-07-27}   # glob + date bound
+
+    A bare string for ``folders:`` itself is REJECTED rather than iterated:
+    ``folders: july_14_batch_2`` would otherwise expand to one entry per
+    character, match no folder, and silently freeze nothing -- the failure mode
+    a typo is most likely to hit. A malformed mapping is rejected for the same
+    reason: a bounded rule that quietly loses its bound would freeze every
+    matching folder, not just the old ones.
+    """
+    from .utils.frozen_folders import FolderRule
+
+    value = _freeze_block(raw).get("folders")
+    if value is None:
+        return ()
+    if isinstance(value, (str, bytes)) or not isinstance(value, (list, tuple)):
+        raise ValueError(
+            f"dataset_overrides.{dataset}.freeze.folders must be a LIST of "
+            f"experiment folder names or globs, got {value!r}. Write it as:\n"
+            f"    freeze:\n      folders:\n        - {value}"
+        )
+
+    rules: list[FolderRule] = []
+    for entry in value:
+        if isinstance(entry, dict):
+            pattern = str(entry.get("match") or "").strip()
+            if not pattern:
+                raise ValueError(
+                    f"dataset_overrides.{dataset}.freeze.folders: a mapping entry "
+                    f"needs a 'match' glob, got {entry!r}. Write it as:\n"
+                    f"    - match: \"*batch_2*\"\n      before: 2026-07-27"
+                )
+            raw_before = entry.get("before")
+            before = _coerce_iso_date(raw_before) if raw_before is not None else None
+            if raw_before is not None and before is None:
+                raise ValueError(
+                    f"dataset_overrides.{dataset}.freeze.folders: 'before' must be "
+                    f"an ISO date (YYYY-MM-DD), got {raw_before!r}."
+                )
+            rules.append(FolderRule(pattern, before))
+            continue
+        text = str(entry).strip()
+        if text:
+            rules.append(FolderRule(text, None))
+    return tuple(rules)
 
 
 _flagged_cache: dict[tuple[str, float], set[tuple[str, str, str]]] = {}
@@ -330,6 +401,38 @@ class ReactionMatrixSettings:
     overwrite: bool = False
 
 
+#: Metric keys ``pubfig_score_train_vs_control.py`` accepts. Kept here so a
+#: typo in the config fails at load time rather than three subprocesses later.
+PUBFIG_METRICS: Tuple[str, ...] = ("mean-score", "percent-responding")
+
+
+@dataclass
+class PublicationFigureCohort:
+    """One publication figure's cohort: a dataset plus the filters that cut it.
+
+    The figure is not per-dataset -- ``Hex-Training-24-0.01`` was collected in
+    two separated blocks and each is its own figure -- so the cohort, not the
+    dataset, is what the pipeline has to be able to name.
+    """
+
+    train_dataset: str = ""
+    label: str = ""       # titles the figure; defaults to train_dataset
+    out_stem: str = ""    # filename stem, minus the per-metric prefix
+    fly_months: Tuple[str, ...] = ()
+    metrics: Tuple[str, ...] = PUBFIG_METRICS
+    genotype: str = ""    # "" leaves the driver's own default in place
+    # Relabels odors for this figure only, overriding the dataset-level
+    # ``odor_remap``. Needed when one dataset spans two rig configurations and
+    # the cohort sits on only one of them -- see Hex-*-24-0.1 below.
+    odor_remap: Tuple[Tuple[str, str], ...] = ()
+
+
+@dataclass
+class PublicationFigureSettings:
+    figures_dir: str = ""
+    cohorts: Tuple[PublicationFigureCohort, ...] = ()
+
+
 @dataclass
 class ReactionPredictionSettings:
     data_csv: str = ""
@@ -342,6 +445,9 @@ class ReactionPredictionSettings:
     model_type: str = "binary"  # "binary" (logistic regression) or "ordinal" (XGBoost -1..5)
     binary_threshold: int = 2   # ordinal score >= this → reaction (only used when model_type="ordinal")
     matrix: ReactionMatrixSettings = field(default_factory=ReactionMatrixSettings)
+    publication_figures: PublicationFigureSettings = field(
+        default_factory=PublicationFigureSettings
+    )
 
 
 @dataclass
@@ -481,6 +587,8 @@ class ForceSettings:
     envelope_visuals: bool = True
     training: bool = True
     dataset_means: bool = True
+    dataset_mean_traces: bool = True
+    naive_vs_trained: bool = True
 
 
 @dataclass
@@ -535,6 +643,35 @@ class DatasetOverride:
     freeze_data: bool = False
     freeze_figures: bool = False
 
+    # Per-dataset folder freeze: rules retiring experiment folders from the
+    # figures while the dataset itself stays live. Each rule is an exact folder
+    # name (``july_14_batch_2_rig_2``), an fnmatch glob (``*_rig_3``), or a glob
+    # bounded by recording date (``{match: "*batch_2*", before: 2026-07-27}``).
+    # Unioned with the top-level ``freeze_folders_before`` cutoff; see
+    # fbpipe.utils.frozen_folders. Never applies to a dataset with
+    # ``freeze_data`` set -- that root is never walked at all.
+    freeze_folders: Tuple["FolderRule", ...] = ()
+
+
+@dataclass(frozen=True)
+class RigGateOverride:
+    """Widen the proboscis distance gates for one rig from a given date.
+
+    Matched per batch directory: ``host`` against the ``Host:`` line of the
+    batch's ``session_metadata.txt`` (case-insensitive) and ``after`` against
+    the recording date (earliest sidecar filename stamp; strictly after).
+    Rigs whose camera zoom puts genuine full extension past the global gates
+    (e.g. Flybehavior2 reaches 251 px where the default gate is 160) get their
+    own bound without loosening every other rig. ``None`` fields leave the
+    corresponding global value untouched.
+    """
+
+    host: str
+    after: _dt.date
+    max_eye_prob_distance_px: Optional[float] = None
+    class2_max: Optional[float] = None
+    three_fly_max_eye_prob_distance_px: Optional[float] = None
+
 
 @dataclass
 class Settings:
@@ -575,6 +712,9 @@ class Settings:
     class2_min: float = 70.0
     class2_max: float = 250.0
     three_fly_max_eye_prob_distance_px: float = 180.0
+    # per-rig/date gate widening, applied per batch dir by
+    # fbpipe.utils.rig_gates.apply_rig_gate_overrides
+    rig_gate_overrides: Tuple[RigGateOverride, ...] = ()
 
     # reaction prediction
     reaction_prediction: ReactionPredictionSettings = field(default_factory=ReactionPredictionSettings)
@@ -605,6 +745,13 @@ class Settings:
     # Per-dataset overrides keyed by the literal dataset name. Empty by default
     # so existing configs are untouched.
     dataset_overrides: Dict[str, DatasetOverride] = field(default_factory=dict)
+
+    # Global folder freeze: every experiment folder RECORDED BEFORE this date is
+    # frozen -- skipped by the heavy per-trial steps and excluded from figures,
+    # while its already-derived rows stay in the wide CSV marked ``frozen``. The
+    # date comes from each batch itself (fbpipe.utils.frozen_folders), never from
+    # the folder name, which carries no year. None = no date rule.
+    freeze_folders_before: Optional[_dt.date] = None
 
 def _get(d: Dict[str, Any], key: str, default: Any):
     return d.get(key, default)
@@ -734,6 +881,37 @@ def load_settings(config_path: str | Path) -> Settings:
     elif threshold_value is not None:
         threshold_value = float(threshold_value)
 
+    pub_cfg = reaction_cfg.get("publication_figures") or {}
+    pub_cohorts = []
+    for raw in pub_cfg.get("cohorts") or []:
+        metrics = tuple(str(m) for m in (raw.get("metrics") or PUBFIG_METRICS))
+        unknown = [m for m in metrics if m not in PUBFIG_METRICS]
+        if unknown:
+            # Loud here, because a mistyped metric would otherwise just mean one
+            # fewer figure in a run that still exits 0.
+            raise ValueError(
+                f"publication_figures: unknown metric(s) {', '.join(unknown)}; "
+                f"expected one of {', '.join(PUBFIG_METRICS)}"
+            )
+        pub_cohorts.append(
+            PublicationFigureCohort(
+                train_dataset=str(raw.get("train_dataset", "")),
+                label=str(raw.get("label", "")),
+                out_stem=str(raw.get("out_stem", "")),
+                fly_months=tuple(str(m) for m in (raw.get("fly_months") or ())),
+                metrics=metrics,
+                genotype=str(raw.get("genotype", "")),
+                odor_remap=tuple(
+                    (str(k), str(v))
+                    for k, v in (raw.get("odor_remap") or {}).items()
+                ),
+            )
+        )
+    publication_figures = PublicationFigureSettings(
+        figures_dir=str(pub_cfg.get("figures_dir", "")),
+        cohorts=tuple(pub_cohorts),
+    )
+
     reaction_prediction = ReactionPredictionSettings(
         data_csv=str(os.getenv("REACTION_DATA_CSV", reaction_cfg.get("data_csv", ""))),
         model_path=str(os.getenv("REACTION_MODEL_PATH", reaction_cfg.get("model_path", ""))),
@@ -744,6 +922,7 @@ def load_settings(config_path: str | Path) -> Settings:
         model_type=str(reaction_cfg.get("model_type", "binary")),
         binary_threshold=int(reaction_cfg.get("binary_threshold", 2)),
         matrix=matrix,
+        publication_figures=publication_figures,
     )
 
     force_cfg_raw = data.get("force") if isinstance(data.get("force"), dict) else {}
@@ -756,6 +935,8 @@ def load_settings(config_path: str | Path) -> Settings:
         envelope_visuals=_as_bool(force_cfg_raw.get("envelope_visuals"), True),
         training=_as_bool(force_cfg_raw.get("training"), True),
         dataset_means=_as_bool(force_cfg_raw.get("dataset_means"), True),
+        dataset_mean_traces=_as_bool(force_cfg_raw.get("dataset_mean_traces"), True),
+        naive_vs_trained=_as_bool(force_cfg_raw.get("naive_vs_trained"), True),
     )
 
     force.pipeline = _as_bool(os.getenv("FORCE_PIPELINE"), force.pipeline)
@@ -772,6 +953,12 @@ def load_settings(config_path: str | Path) -> Settings:
     )
     force.training = _as_bool(os.getenv("FORCE_TRAINING"), force.training)
     force.dataset_means = _as_bool(os.getenv("FORCE_DATASET_MEANS"), force.dataset_means)
+    force.dataset_mean_traces = _as_bool(
+        os.getenv("FORCE_DATASET_MEAN_TRACES"), force.dataset_mean_traces
+    )
+    force.naive_vs_trained = _as_bool(
+        os.getenv("FORCE_NAIVE_VS_TRAINED"), force.naive_vs_trained
+    )
 
     non_reactive_span_px = float(
         os.getenv("NON_REACTIVE_SPAN_PX", _get(data, "non_reactive_span_px", 5.0))
@@ -971,6 +1158,7 @@ def load_settings(config_path: str | Path) -> Settings:
             },
             freeze_data=bool(_freeze_block(block).get("data", False)),
             freeze_figures=bool(_freeze_block(block).get("figures", False)),
+            freeze_folders=_freeze_folders(block, str(ds_name)),
         )
 
     flagged_root = str(
@@ -989,6 +1177,52 @@ def load_settings(config_path: str | Path) -> Settings:
         enabled=_as_bool(os.getenv("PARALLEL_ENABLED", parallel_cfg_raw.get("enabled")), False),
         n_jobs=int(os.getenv("PARALLEL_N_JOBS", parallel_cfg_raw.get("n_jobs", 0))),
     )
+
+    def _coerce_date(raw: object) -> Optional[_dt.date]:
+        if isinstance(raw, _dt.datetime):
+            return raw.date()
+        if isinstance(raw, _dt.date):
+            return raw
+        if isinstance(raw, str):
+            try:
+                return _dt.date.fromisoformat(raw.strip())
+            except ValueError:
+                return None
+        return None
+
+    def _opt_float(block: Dict[str, Any], key: str) -> Optional[float]:
+        return float(block[key]) if block.get(key) is not None else None
+
+    # Global folder-freeze cutoff. A typo must NOT degrade to "no rule": that
+    # would quietly put every retired fly back into the figures, which is the
+    # exact outcome the key exists to prevent.
+    _raw_freeze_before = _get(data, "freeze_folders_before", None)
+    freeze_folders_before = _coerce_date(_raw_freeze_before)
+    if _raw_freeze_before is not None and freeze_folders_before is None:
+        raise ValueError(
+            f"freeze_folders_before must be an ISO date (YYYY-MM-DD), got "
+            f"{_raw_freeze_before!r}."
+        )
+
+    rig_gate_overrides: list[RigGateOverride] = []
+    for block in data.get("rig_gate_overrides") or []:
+        if not isinstance(block, dict):
+            continue
+        host = str(block.get("host") or "").strip()
+        after = _coerce_date(block.get("after"))
+        if not host or after is None:
+            continue
+        rig_gate_overrides.append(
+            RigGateOverride(
+                host=host,
+                after=after,
+                max_eye_prob_distance_px=_opt_float(block, "max_eye_prob_distance_px"),
+                class2_max=_opt_float(block, "class2_max"),
+                three_fly_max_eye_prob_distance_px=_opt_float(
+                    block, "three_fly_max_eye_prob_distance_px"
+                ),
+            )
+        )
 
     return Settings(
         model_path=model_path,
@@ -1033,6 +1267,7 @@ def load_settings(config_path: str | Path) -> Settings:
                 dist_limits.get("three_fly_max_eye_prob_distance_px", 180.0),
             )
         ),
+        rig_gate_overrides=tuple(rig_gate_overrides),
         reaction_prediction=reaction_prediction,
         force=force,
         parallel=parallel,
@@ -1043,4 +1278,5 @@ def load_settings(config_path: str | Path) -> Settings:
         protocol=str(_get(data, "protocol", "legacy")),
         datasets=datasets_tuple,
         dataset_overrides=dataset_overrides,
+        freeze_folders_before=freeze_folders_before,
     )

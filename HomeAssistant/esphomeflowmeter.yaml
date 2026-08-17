@@ -1,0 +1,85 @@
+# Portable odor-line flow wand: ESP32-WROOM-32 + MikroE Air Velocity Click
+# (Renesas FS3000-1005, 0-7.23 m/s). One wand, carried between the three
+# rigs, so every rig is measured by the same sensor.
+#
+# Wiring (Click -> ESP32 dev board):
+#   3V3 -> 3V3   (Click's VCC SEL jumper on 3V3, its factory default)
+#   GND -> GND
+#   SDA -> GPIO 21
+#   SCL -> GPIO 22
+#
+# The Pi-side sweep script polls http://flowmeter.local/sensor/air_velocity
+# (PiCode/odor_flow_fs3000.py --esp-url http://flowmeter.local); the JSON
+# reply's "value" field is air velocity in m/s. The 100 ms update_interval
+# matches the FS3000's ~125 ms response time and the sweep's 10 Hz sampling.
+#
+# Flash from the desktop with the usual secrets.yaml next to this file:
+#   esphome run HomeAssistant/esphomeflowmeter.yaml
+
+esphome:
+  name: flowmeter
+  friendly_name: OdorFlowMeter
+
+esp32:
+  board: esp32dev
+  framework:
+    type: esp-idf
+
+# VERBOSE on the fs3000 component only: it logs the raw 12-bit count per
+# read, which is what distinguishes "still air" (~409) from the sensor's
+# known frozen-output failure (a fixed count that ignores airflow). Global
+# level stays DEBUG so the 10 Hz stream doesn't drown the console.
+logger:
+  level: VERBOSE
+  logs:
+    wifi: INFO
+    wifi_esp32: INFO
+    api: INFO
+    web_server: INFO
+    scheduler: INFO
+
+# reboot_timeout 0: nothing ever connects to the native API on this wand (the
+# Pis poll the web server), and the default would reboot it every 15 min --
+# potentially mid-sweep.
+api:
+  reboot_timeout: 0s
+  encryption:
+    key: "J/LZniybBFg+X2RLNeqqHEYmRBdLKc/vY6c520fyGXk="
+
+ota:
+  - platform: esphome
+    password: "20c5958b25a0d7cc8c87f89083b030b9"
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+
+  ap:
+    ssid: "Flowmeter Fallback Hotspot"
+    password: "5dXL321sch+giD5Q"
+
+captive_portal:
+
+web_server:
+  port: 80
+
+i2c:
+  sda: 21
+  scl: 22
+  scan: true
+  frequency: 400kHz
+
+# Names deliberately snake_case: ESPHome 2026's web server matches the REST
+# URL against the entity NAME (older versions matched the object id derived
+# from it), so name == object id keeps /sensor/air_velocity working on both.
+sensor:
+  - platform: fs3000
+    name: "air_velocity"
+    id: air_velocity
+    model: 1005
+    update_interval: 100ms
+
+  # Helps judge whether a flaky run was just bad wifi at that rig's bench.
+  - platform: wifi_signal
+    name: "wifi_signal"
+    update_interval: 30s

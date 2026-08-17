@@ -15,6 +15,7 @@ import numpy as np
 import pandas as pd
 
 from ..config import Settings, get_main_directories
+from ..utils.frozen_folders import iter_live_batch_dirs
 from ..utils.columns import PROBOSCIS_DISTANCE_PCT_COL
 from ..utils.fly_files import iter_fly_distance_csvs
 from ..utils.parallel import parallel_map
@@ -151,7 +152,9 @@ def main(cfg: Settings) -> None:
 
     for root in roots:
         print(f"[ACCEL] Processing root directory: {root}")
-        fly_dirs = [p for p in root.iterdir() if p.is_dir()]
+        # Frozen experiment folders are skipped: no re-derivation, and their
+        # existing per-trial CSVs stay put so build_wide_csv still emits them.
+        fly_dirs = iter_live_batch_dirs(cfg, root)
         results = parallel_map(
             partial(_process_fly_dir, cfg=cfg),
             fly_dirs,

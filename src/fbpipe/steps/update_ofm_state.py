@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 import pandas as pd
 from ..config import Settings, get_main_directories
+from ..utils.frozen_folders import iter_live_batch_dirs
 from ..utils.tables import read_table, write_table, table_path, resolve_existing, read_schema_columns
 
 _OFM_COL_CANDIDATES = ("ActiveOFM", "Active OFM Pin")
@@ -20,7 +21,9 @@ def main(cfg: Settings):
     force_recompute = bool(getattr(getattr(cfg, "force", None), "pipeline", False))
     roots = get_main_directories(cfg)
     for root in roots:
-        for fly in [p for p in root.iterdir() if p.is_dir()]:
+        # Frozen experiment folders are skipped: no re-derivation, and their
+        # existing per-trial CSVs stay put so build_wide_csv still emits them.
+        for fly in iter_live_batch_dirs(cfg, root):
             rdir = fly / "RMS_calculations"
             if not rdir.is_dir():
                 continue

@@ -110,6 +110,9 @@ combinedv2_pi2.py
 combinedv3_pi1.py
 combinedv3_pi2.py
 esphomeflynursery2.yaml
+# ESPHome local-flash secrets (real wifi creds live here)
+HomeAssistant/secrets.yaml
+HomeAssistant/.esphome/
 
 figures/
 

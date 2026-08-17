@@ -24,7 +24,7 @@ from scripts.analysis.mean_trace_score import (
 
 MODEL_PATH = Path(
     "/home/ramanlab/Documents/cole/VSCode/FlyBehaviorScoring/outputs/"
-    "combined_two_datasets/model_combined_xgb.json"
+    "ordinal_scorer/model_ordinal_xgb.json"
 )
 WIDE_PARQUET = Path(
     "/home/ramanlab/Documents/cole/Data/CSVs-New-Opto-Flys/"

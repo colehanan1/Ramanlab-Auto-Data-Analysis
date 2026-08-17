@@ -8,6 +8,7 @@ from typing import Dict, Tuple
 import pandas as pd
 
 from ..config import Settings, get_main_directories
+from ..utils.frozen_folders import iter_live_batch_dirs
 from ..utils.columns import EYE_CLASS, PROBOSCIS_DISTANCE_COL, find_proboscis_distance_column
 from ..utils.distance_sanity import (
     csv_requires_three_fly_distance_sanitization,
@@ -15,6 +16,7 @@ from ..utils.distance_sanity import (
 )
 from ..utils.fly_files import iter_fly_distance_csvs
 from ..utils.parallel import parallel_map
+from ..utils.rig_gates import apply_rig_gate_overrides
 from ..utils.tables import read_schema_columns, read_table, write_table
 
 
@@ -40,6 +42,7 @@ def _process_fly_dir(fly_dir: Path, cfg: Settings) -> None:
     All cfg-derived values are computed here so workers have no dependency on
     outer-scope variables.
     """
+    cfg = apply_rig_gate_overrides(cfg, fly_dir)
     force_recompute = bool(getattr(getattr(cfg, "force", None), "pipeline", False))
 
     print(f"[DIST] Inspecting fly directory: {fly_dir.name}")
@@ -150,7 +153,9 @@ def main(cfg: Settings) -> None:
     print(f"[DIST] Starting distance stats scan in {len(roots)} directories")
     for root in roots:
         print(f"[DIST] Processing root directory: {root}")
-        fly_dirs = [p for p in root.iterdir() if p.is_dir()]
+        # Frozen experiment folders are skipped: no re-derivation, and their
+        # existing per-trial CSVs stay put so build_wide_csv still emits them.
+        fly_dirs = iter_live_batch_dirs(cfg, root)
         parallel_map(
             partial(_process_fly_dir, cfg=cfg),
             fly_dirs,

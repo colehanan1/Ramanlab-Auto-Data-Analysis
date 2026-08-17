@@ -13,8 +13,8 @@ set -uo pipefail
 
 # ─── config ───────────────────────────────────────────────────────────
 # SSH connection details (HostName, User, IdentityFile, IdentityAgent=none)
-# live in ~/.ssh/config under Host behaviorlocust / Host flybehavior2 — keep
-# those entries in sync if the Pis are re-imaged.
+# live in ~/.ssh/config under Host behaviorlocust / flybehavior2 / flybehavior3
+# — keep those entries in sync if the Pis are re-imaged.
 DEST_BASE="/securedstorage/DATAsec/cole"
 LOG_DIR="$DEST_BASE/_weekly_logs"
 SSH_OPTS=(-o BatchMode=yes -o ConnectTimeout=15)
@@ -23,6 +23,7 @@ SSH_OPTS=(-o BatchMode=yes -o ConnectTimeout=15)
 PI_SOURCES=(
     "behaviorlocust|behaviorlocust|/home/ramanlab/FastStorage/fly_videos"
     "flybehavior2|flybehavior2|/home/ramanlab/Documents/faststorage/Opto"
+    "flybehavior3|flybehavior3|/home/ramanlab/Documents/faststorage/Opto"
 )
 
 # Skip files modified within this many minutes (protects mid-write recordings).

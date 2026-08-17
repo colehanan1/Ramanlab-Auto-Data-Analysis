@@ -129,3 +129,69 @@ def test_deepest_rig_token_wins():
     """A nested path must resolve to the rig closest to the trial."""
     p = "/data/rig_2_archive/july_17_batch_2_rig_3/trial"
     assert resolve_anchor(p) == MIRRORED_ANCHOR
+
+
+# ── host+date mirroring (Flybehavior2 rearranged after 2026-07-25) ────────
+#
+# Flybehavior2 has no rig_N suffix in its batch folder names, so its identity
+# comes from session_metadata.txt's "Host:" line. After 2026-07-25 (strict)
+# the rig was physically rearranged to match Flybehavior3/rig_3's mirrored
+# geometry, so those batches must use MIRRORED_ANCHOR. The rule lives in
+# MIRRORED_HOSTS_AFTER next to MIRRORED_RIGS.
+
+
+def _host_batch(tmp_path, *, host="Flybehavior2", stamp="20260811_163740",
+                name="august_11_batch_4", metadata=True):
+    batch = tmp_path / name
+    batch.mkdir(parents=True, exist_ok=True)
+    if metadata:
+        (batch / "session_metadata.txt").write_text(
+            f"Run Context\n-----------\nHost: {host} | OS: Linux\n", encoding="utf-8"
+        )
+    if stamp:
+        (batch / f"output_{name}_training_2_3-Octonol_{stamp}.csv").write_text(
+            "frame\n", encoding="utf-8"
+        )
+    return batch
+
+
+def test_flybehavior2_post_cutoff_video_is_mirrored(tmp_path):
+    batch = _host_batch(tmp_path)
+    video = batch / "output_august_11_batch_4_training_2_3-Octonol_20260811_163740.mp4"
+    assert resolve_anchor(video) == MIRRORED_ANCHOR
+
+
+def test_flybehavior2_post_cutoff_batch_dir_is_mirrored(tmp_path):
+    batch = _host_batch(tmp_path)
+    assert resolve_anchor(batch) == MIRRORED_ANCHOR
+
+
+def test_flybehavior2_trial_subdir_finds_ancestor_metadata(tmp_path):
+    batch = _host_batch(tmp_path)
+    trial = batch / "august_11_batch_4_training_2"
+    trial.mkdir()
+    assert resolve_anchor(trial) == MIRRORED_ANCHOR
+
+
+def test_flybehavior2_on_or_before_cutoff_stays_default(tmp_path):
+    on_cutoff = _host_batch(tmp_path, stamp="20260725_120000", name="july_25_batch_1")
+    assert resolve_anchor(on_cutoff) == DEFAULT_ANCHOR
+    before = _host_batch(tmp_path, stamp="20260720_120000", name="july_20_batch_1")
+    assert resolve_anchor(before) == DEFAULT_ANCHOR
+
+
+def test_other_host_post_cutoff_stays_default(tmp_path):
+    batch = _host_batch(tmp_path, host="BehaviorLocust")
+    assert resolve_anchor(batch) == DEFAULT_ANCHOR
+
+
+def test_no_metadata_post_cutoff_stays_default(tmp_path):
+    batch = _host_batch(tmp_path, metadata=False)
+    assert resolve_anchor(batch) == DEFAULT_ANCHOR
+
+
+def test_explicit_rig_token_beats_host_rule(tmp_path):
+    # Contradictory in practice (Flybehavior2 batches carry no rig suffix),
+    # but the explicit token is the more specific signal and must win.
+    batch = _host_batch(tmp_path, name="july_26_batch_1_rig_2")
+    assert resolve_anchor(batch) == DEFAULT_ANCHOR

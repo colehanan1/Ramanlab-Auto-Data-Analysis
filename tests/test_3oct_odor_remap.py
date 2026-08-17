@@ -26,7 +26,11 @@ from fbpipe.odor_constants import canon_dataset
 from scripts.analysis import envelope_visuals as ev
 
 CONFIG_PATH = Path(__file__).resolve().parents[1] / "config" / "config_new.yaml"
-DATASETS = ("3Oct-Training-24-0.1", "3Oct-Control-24-0.1")
+DATASETS = (
+    "3Oct-Training-24-0.1",
+    "3Oct-Control-24-0.1",
+    "3Oct-Training-24-0.1-Manual",
+)
 EXPECTED_REMAP = {
     "Apple Cider Vinegar": "Isoamyl Acetate (1%)",
     "3-Octanol": "3-Octanol (0.1%)",

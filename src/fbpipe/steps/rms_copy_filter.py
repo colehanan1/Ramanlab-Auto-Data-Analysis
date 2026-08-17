@@ -6,6 +6,7 @@ from pathlib import Path
 import pandas as pd
 
 from ..config import Settings, get_main_directories
+from ..utils.frozen_folders import iter_live_batch_dirs
 from ..utils.columns import (
     EYE_CLASS,
     find_proboscis_distance_percentage_column,
@@ -94,7 +95,9 @@ def _process_fly_dir(fly_dir: Path, cfg: Settings) -> None:
 def main(cfg: Settings) -> None:
     roots = get_main_directories(cfg)
     for root in roots:
-        fly_dirs = [p for p in root.iterdir() if p.is_dir()]
+        # Frozen experiment folders are skipped: no re-derivation, and their
+        # existing per-trial CSVs stay put so build_wide_csv still emits them.
+        fly_dirs = iter_live_batch_dirs(cfg, root)
         parallel_map(
             partial(_process_fly_dir, cfg=cfg),
             fly_dirs,

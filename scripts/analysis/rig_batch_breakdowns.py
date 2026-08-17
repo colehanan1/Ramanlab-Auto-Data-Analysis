@@ -97,6 +97,28 @@ from scripts.analysis.score_summary import (  # noqa: E402
 _RIG_RE = re.compile(r"_rig_(\d+)", re.IGNORECASE)
 _BATCH_RE = re.compile(r"batch_(\d+)", re.IGNORECASE)
 
+# The batch token in a folder name records which starvation schedule the fly
+# was *meant* to be on; when the actual starvation time disagrees (e.g. the
+# august_09 batch-2 flies were starved on the batch-1 schedule), an explicit
+# override reassigns just that fly. Labels rename the displayed batch group
+# (titles/legends) without touching tags or filenames.
+_BATCH_OVERRIDES: dict[str, int] = {}
+_BATCH_LABELS: dict[int, str] = {}
+
+
+def set_batch_overrides(overrides: dict[str, int]) -> None:
+    _BATCH_OVERRIDES.clear()
+    _BATCH_OVERRIDES.update({str(k): int(v) for k, v in overrides.items()})
+
+
+def set_batch_labels(labels: dict[int, str]) -> None:
+    _BATCH_LABELS.clear()
+    _BATCH_LABELS.update({int(k): str(v) for k, v in labels.items()})
+
+
+def batch_label(value: int) -> str:
+    return _BATCH_LABELS.get(int(value), f"Batch {value}")
+
 TRAIN_COLOR_TRAINED = "#1a3a6b"
 TRAIN_COLOR_OTHER = "#7bafd4"
 CTRL_COLOR_TRAINED = "#808080"
@@ -116,18 +138,25 @@ def rig_of(fly: str) -> int:
 
 def batch_of(fly: str) -> int | None:
     """Starvation batch for a fly folder name, or None when it carries none."""
-    m = _BATCH_RE.search(str(fly))
+    key = str(fly)
+    if key in _BATCH_OVERRIDES:
+        return _BATCH_OVERRIDES[key]
+    m = _BATCH_RE.search(key)
     return int(m.group(1)) if m else None
 
 
 @dataclass(frozen=True)
 class Group:
-    """One side of a comparison: a dataset, optionally narrowed to one rig/batch."""
+    """One side of a comparison: a dataset, optionally narrowed by rig/batch.
+
+    ``value`` is a single level, or a tuple of levels to pool (rigs 1+2 as one
+    group).
+    """
 
     label: str
     dataset: str
     kind: str | None      # "rig" | "batch" | None (whole dataset)
-    value: int | None
+    value: int | tuple[int, ...] | None
 
 
 @dataclass(frozen=True)
@@ -148,7 +177,10 @@ def select_group(df: pd.DataFrame, group: Group) -> pd.DataFrame:
     sub = df[df["dataset_canon"] == group.dataset]
     if group.kind is None:
         return sub.copy()
-    return sub[_factor_series(sub, group.kind) == group.value].copy()
+    factor = _factor_series(sub, group.kind)
+    if isinstance(group.value, tuple):
+        return sub[factor.isin(group.value)].copy()
+    return sub[factor == group.value].copy()
 
 
 def _values_present(df: pd.DataFrame, dataset: str, kind: str) -> list[int]:
@@ -168,15 +200,19 @@ def build_comparisons(
     """
     comparisons: list[Comparison] = []
 
+    def level_label(kind: str, v: int) -> str:
+        if kind == "batch":
+            return batch_label(v)
+        return f"{kind.capitalize()} {v}"
+
     for kind in ("rig", "batch"):
-        noun = kind.capitalize()
         train_vals = _values_present(df, train_canon, kind)
         ctrl_vals = _values_present(df, ctrl_canon, kind)
         for v in sorted(set(train_vals) & set(ctrl_vals)):
             comparisons.append(
                 Comparison(
                     tag=f"tvc_{kind}_{v}",
-                    title_suffix=f"{noun} {v}: Training vs Control",
+                    title_suffix=f"{level_label(kind, v)}: Training vs Control",
                     a=Group(f"Training", train_canon, kind, v),
                     b=Group(f"Control", ctrl_canon, kind, v),
                 )
@@ -187,7 +223,6 @@ def build_comparisons(
         ("ctrl", ctrl_canon, "Control"),
     ):
         for kind in ("rig", "batch"):
-            noun = kind.capitalize()
             vals = _values_present(df, dataset, kind)
             if len(vals) < 2:
                 continue
@@ -196,9 +231,12 @@ def build_comparisons(
                 comparisons.append(
                     Comparison(
                         tag=f"{arm}_{kind}_{base}_vs_{kind}_{v}",
-                        title_suffix=f"{arm_label}: {noun} {base} vs {noun} {v}",
-                        a=Group(f"{noun} {base}", dataset, kind, base),
-                        b=Group(f"{noun} {v}", dataset, kind, v),
+                        title_suffix=(
+                            f"{arm_label}: {level_label(kind, base)}"
+                            f" vs {level_label(kind, v)}"
+                        ),
+                        a=Group(level_label(kind, base), dataset, kind, base),
+                        b=Group(level_label(kind, v), dataset, kind, v),
                     )
                 )
 
@@ -673,6 +711,112 @@ def _apply_config_remap(config_path: str) -> None:
 # ---------------------------------------------------------------------------
 
 
+def _parse_batch_overrides(pairs: Sequence[str]) -> dict[str, int]:
+    out: dict[str, int] = {}
+    for pair in pairs:
+        fly, sep, batch = str(pair).partition("=")
+        if not sep or not fly:
+            raise ValueError(f"--batch-override expects FLY=N, got {pair!r}")
+        try:
+            out[fly] = int(batch)
+        except ValueError:
+            raise ValueError(
+                f"--batch-override batch must be an integer, got {pair!r}"
+            ) from None
+    return out
+
+
+def _parse_batch_labels(pairs: Sequence[str]) -> dict[int, str]:
+    out: dict[int, str] = {}
+    for pair in pairs:
+        batch, sep, label = str(pair).partition("=")
+        if not sep or not label:
+            raise ValueError(f"--batch-label expects N=LABEL, got {pair!r}")
+        try:
+            out[int(batch)] = label
+        except ValueError:
+            raise ValueError(
+                f"--batch-label batch must be an integer, got {pair!r}"
+            ) from None
+    return out
+
+
+def _parse_rig_compares(
+    specs: Sequence[str],
+) -> list[tuple[str, tuple[int, ...], tuple[int, ...]]]:
+    """Parse ``ARM:RIGS_A:RIGS_B`` specs, e.g. ``train:1,2:3``."""
+    out: list[tuple[str, tuple[int, ...], tuple[int, ...]]] = []
+    for spec in specs:
+        parts = str(spec).split(":")
+        if len(parts) != 3:
+            raise ValueError(f"--rig-compare expects ARM:RIGS:RIGS, got {spec!r}")
+        arm, side_a, side_b = parts
+        if arm not in ("train", "ctrl"):
+            raise ValueError(f"--rig-compare arm must be train|ctrl, got {spec!r}")
+        try:
+            rigs_a = tuple(int(v) for v in side_a.split(",") if v != "")
+            rigs_b = tuple(int(v) for v in side_b.split(",") if v != "")
+        except ValueError:
+            raise ValueError(
+                f"--rig-compare rigs must be integers, got {spec!r}"
+            ) from None
+        if not rigs_a or not rigs_b:
+            raise ValueError(f"--rig-compare expects rigs on both sides, got {spec!r}")
+        out.append((arm, rigs_a, rigs_b))
+    return out
+
+
+def _rig_compare_comparison(
+    arm: str,
+    rigs_a: tuple[int, ...],
+    rigs_b: tuple[int, ...],
+    train_canon: str,
+    ctrl_canon: str,
+) -> Comparison:
+    dataset = train_canon if arm == "train" else ctrl_canon
+    arm_label = "Training" if arm == "train" else "Control"
+
+    def label(rigs: tuple[int, ...]) -> str:
+        return "Rig " + "+".join(str(r) for r in rigs)
+
+    def tag_part(rigs: tuple[int, ...]) -> str:
+        return "_".join(str(r) for r in rigs)
+
+    return Comparison(
+        tag=f"{arm}_rig_{tag_part(rigs_a)}_vs_rig_{tag_part(rigs_b)}",
+        title_suffix=f"{arm_label}: {label(rigs_a)} vs {label(rigs_b)}",
+        a=Group(label(rigs_a), dataset, "rig", rigs_a),
+        b=Group(label(rigs_b), dataset, "rig", rigs_b),
+    )
+
+
+def _parse_tvc_rigs(specs: Sequence[str]) -> list[tuple[int, ...]]:
+    """Parse ``--tvc-rig`` comma-separated rig lists, e.g. ``1,2``."""
+    out: list[tuple[int, ...]] = []
+    for spec in specs:
+        try:
+            rigs = tuple(int(v) for v in str(spec).split(",") if v != "")
+        except ValueError:
+            raise ValueError(f"--tvc-rig rigs must be integers, got {spec!r}") from None
+        if not rigs:
+            raise ValueError(f"--tvc-rig expects at least one rig, got {spec!r}")
+        out.append(rigs)
+    return out
+
+
+def _tvc_rig_comparison(
+    rigs: tuple[int, ...], train_canon: str, ctrl_canon: str
+) -> Comparison:
+    label = "Rig " + "+".join(str(r) for r in rigs)
+    tag_part = "_".join(str(r) for r in rigs)
+    return Comparison(
+        tag=f"tvc_rig_{tag_part}",
+        title_suffix=f"{label}: Training vs Control",
+        a=Group("Training", train_canon, "rig", rigs),
+        b=Group("Control", ctrl_canon, "rig", rigs),
+    )
+
+
 def main(argv: Sequence[str] | None = None) -> None:
     p = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
@@ -689,9 +833,47 @@ def main(argv: Sequence[str] | None = None) -> None:
     p.add_argument("--latency-sec", type=float, default=2.15)
     p.add_argument("--after-window-sec", type=float, default=30.0)
     p.add_argument("--protocol", default="v2", choices=["v2", "legacy"])
+    p.add_argument("--batch-override", action="append", default=[],
+                   metavar="FLY=N",
+                   help="Reassign one fly folder to batch N (repeatable), for "
+                        "flies whose folder token disagrees with the actual "
+                        "starvation schedule.")
+    p.add_argument("--batch-label", action="append", default=[],
+                   metavar="N=LABEL",
+                   help='Display label for batch group N, e.g. '
+                        '"1=Starved 24±3 h". Tags/filenames keep batch numbers.')
+    p.add_argument("--rig-compare", action="append", default=[],
+                   metavar="ARM:RIGS:RIGS",
+                   help="Extra within-arm rig comparison, pooling comma-"
+                        "separated rigs per side (repeatable). E.g. "
+                        "train:1,2:3 compares rigs 1+2 combined vs rig 3 "
+                        "on the training arm.")
+    p.add_argument("--tvc-rig", action="append", default=[], metavar="RIGS",
+                   help="Extra training-vs-control comparison restricted to "
+                        "these comma-separated rigs pooled (repeatable). E.g. "
+                        "1,2 compares the arms over rigs 1+2 combined.")
+    p.add_argument("--only", action="append", default=[], metavar="TAG",
+                   help="Render only comparisons with these tags (repeatable) "
+                        "— for adding a figure to a published folder without "
+                        "regenerating the rest.")
+    p.add_argument("--restrict-batch", type=int, default=None, metavar="N",
+                   help="Narrow both arms to flies of batch N (after "
+                        "--batch-override) before building any comparison — "
+                        "for a figure set over one starvation group only.")
+    p.add_argument("--fly-type", default="", metavar="TYPE",
+                   help="Keep only flies whose fly_type matches TYPE "
+                        "(case-insensitive), e.g. GR5a-Old.")
+    p.add_argument("--fly-prefix", default="", metavar="PREFIX",
+                   help="Keep only fly folders starting with PREFIX "
+                        "(case-insensitive), e.g. august for one month.")
     args = p.parse_args(argv)
 
     set_protocol(args.protocol)
+    overrides = _parse_batch_overrides(args.batch_override)
+    set_batch_overrides(overrides)
+    set_batch_labels(_parse_batch_labels(args.batch_label))
+    if overrides:
+        print(f"[INFO] Batch overrides: {overrides}")
     if args.config:
         _apply_config_remap(args.config)
 
@@ -704,6 +886,46 @@ def main(argv: Sequence[str] | None = None) -> None:
     scores = load_score_frame(
         args.csv_path, flagged_flies_csv=args.flagged_flies_csv
     )
+
+    if args.fly_type:
+        wanted_type = args.fly_type.strip().casefold()
+        for name, frame in (("reactions", reactions), ("scores", scores)):
+            if "fly_type" not in frame.columns:
+                raise ValueError(
+                    f"--fly-type given but the {name} frame has no fly_type column"
+                )
+        n_before = _fly_count(reactions)
+        type_mask = reactions["fly_type"].astype(str).str.strip().str.casefold()
+        reactions = reactions[type_mask == wanted_type].copy()
+        score_mask = scores["fly_type"].astype(str).str.strip().str.casefold()
+        scores = scores[score_mask == wanted_type].copy()
+        print(
+            f"[INFO] Restricted to fly_type {args.fly_type!r}: "
+            f"{_fly_count(reactions)} of {n_before} flies kept"
+        )
+
+    if args.fly_prefix:
+        prefix = args.fly_prefix.strip().casefold()
+        n_before = _fly_count(reactions)
+        reactions = reactions[
+            reactions["fly"].str.casefold().str.startswith(prefix)
+        ].copy()
+        scores = scores[scores["fly"].str.casefold().str.startswith(prefix)].copy()
+        print(
+            f"[INFO] Restricted to fly prefix {args.fly_prefix!r}: "
+            f"{_fly_count(reactions)} of {n_before} flies kept"
+        )
+
+    if args.restrict_batch is not None:
+        n_before = _fly_count(reactions)
+        reactions = reactions[
+            reactions["fly"].map(batch_of) == args.restrict_batch
+        ].copy()
+        scores = scores[scores["fly"].map(batch_of) == args.restrict_batch].copy()
+        print(
+            f"[INFO] Restricted to batch {args.restrict_batch}: "
+            f"{_fly_count(reactions)} of {n_before} flies kept"
+        )
 
     for canon in (train_canon, ctrl_canon):
         if canon not in set(reactions["dataset_canon"]):
@@ -723,6 +945,21 @@ def main(argv: Sequence[str] | None = None) -> None:
         raise RuntimeError(f"No odor columns resolved for {train_canon}")
 
     comparisons = build_comparisons(reactions, train_canon, ctrl_canon)
+    for arm, rigs_a, rigs_b in _parse_rig_compares(args.rig_compare):
+        comparisons.append(
+            _rig_compare_comparison(arm, rigs_a, rigs_b, train_canon, ctrl_canon)
+        )
+    for rigs in _parse_tvc_rigs(args.tvc_rig):
+        comparisons.append(_tvc_rig_comparison(rigs, train_canon, ctrl_canon))
+    if args.only:
+        wanted = set(args.only)
+        unknown = wanted.difference(c.tag for c in comparisons)
+        if unknown:
+            raise ValueError(
+                f"--only tags not among the comparisons: {sorted(unknown)}; "
+                f"available: {[c.tag for c in comparisons]}"
+            )
+        comparisons = [c for c in comparisons if c.tag in wanted]
     print(f"[INFO] {len(comparisons)} comparisons: {[c.tag for c in comparisons]}")
     args.out_dir.mkdir(parents=True, exist_ok=True)
 
