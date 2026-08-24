@@ -5,7 +5,8 @@ its two corrections: the OFM_A ("ACV") channel actually delivered isoamyl
 acetate, and every odor should carry its concentration in the figure label.
 3-Octanol is the trained odor here and was delivered at 0.1% (dataset naming is
 3Oct-{Training|Control}-{starvation_hours}-{3Oct_conc}), so it reads
-"3-Octanol (0.1%)" rather than the EB cohort's "3-Octanol (1%)".
+"3-Octanol (0.1%)". Every cohort that shares this plumbing delivers 3-octanol
+at 0.1%, EB-24-1 included -- that cohort said "(1%)" until 2026-08-17.
 
 These datasets are also the only ones in the config whose *name*
 ("3Oct-Training-24-0.1") differs from the canonical dataset name the analysis
@@ -104,15 +105,45 @@ def test_light_only_trials_are_untouched(restore_protocol_and_remap) -> None:
 
 
 def test_remap_is_scoped_to_the_3oct_cohorts(restore_protocol_and_remap) -> None:
-    """The 0.1% 3-Octanol label must not leak into the EB cohorts (1% there)."""
+    """A remap reaches only the datasets that declare it.
+
+    The cohorts sharing this rig plumbing all deliver 3-octanol at 0.1% and so
+    all read the same label -- EB-24-1 included, corrected 2026-08-17. The
+    scoping that matters is that a dataset with NO remap keeps the bare name.
+    """
     _register_config_remap()
     ev.set_protocol("v2")
-    assert ev._display_odor("EB-Training-24-1", "testing_1_3-Octonol") == "3-Octanol (1%)"
-    # The Hex-24-0.01 cohorts run the same rig plumbing and so carry the *same*
-    # 0.1% 3-octanol label (see test_hex_24_001_odor_remap.py) — they only differ
-    # on the trained odor's own concentration.
+    assert ev._display_odor("EB-Training-24-1", "testing_1_3-Octonol") == (
+        "3-Octanol (0.1%)"
+    )
     assert ev._display_odor("Hex-Training-24-0.01", "testing_1_3-Octonol") == (
         "3-Octanol (0.1%)"
     )
     # A dataset with no remap at all still renders the bare canonical name.
     assert ev._display_odor("Hex-Control-24-0.005", "testing_1_3-Octonol") == "3-Octanol"
+
+
+def test_every_cohort_agrees_3_octanol_is_delivered_at_0_1_percent():
+    """EB-24-1 labelled it "3-Octanol (1%)" until 2026-08-17.
+
+    The tag is not cosmetic: it picks the odor's naive panel in
+    ``pubfig_naive_vs_trained``, so a wrong concentration silently compared
+    these flies against RandomPanel-24-1 instead of RandomPanel-24-0.1.
+    """
+    import sys
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1]
+    if str(root) not in sys.path:
+        sys.path.insert(0, str(root))
+    from fbpipe.config import load_settings
+
+    settings = load_settings(root / "config" / "config_new.yaml")
+    labels = {
+        dataset: dict(override.odor_remap)["3-Octanol"]
+        for dataset, override in settings.dataset_overrides.items()
+        if "3-Octanol" in dict(getattr(override, "odor_remap", {}) or {})
+    }
+    assert labels, "no cohort tags 3-octanol at all"
+    wrong = {ds: label for ds, label in labels.items() if label != "3-Octanol (0.1%)"}
+    assert not wrong, wrong
