@@ -753,6 +753,14 @@ class Settings:
     # the folder name, which carries no year. None = no date rule.
     freeze_folders_before: Optional[_dt.date] = None
 
+    # Global COHORT freeze: every experiment folder whose flies were BORN ON OR
+    # AFTER this date is frozen, leaving "born strictly before" live. The
+    # complement of ``freeze_folders_before`` above, and on a different date
+    # entirely -- birth date and recording date are days apart by a gap that
+    # varies per batch, so a recording cutoff cannot express a cohort. Read from
+    # each batch's own ``Born (approx):`` metadata line. None = no cohort rule.
+    freeze_folders_born_on_or_after: Optional[_dt.date] = None
+
 def _get(d: Dict[str, Any], key: str, default: Any):
     return d.get(key, default)
 
@@ -1204,6 +1212,16 @@ def load_settings(config_path: str | Path) -> Settings:
             f"{_raw_freeze_before!r}."
         )
 
+    # Global cohort cutoff, same strictness for the same reason: a typo here
+    # would quietly put the excluded cohort back into every figure.
+    _raw_born_cutoff = _get(data, "freeze_folders_born_on_or_after", None)
+    freeze_folders_born_on_or_after = _coerce_date(_raw_born_cutoff)
+    if _raw_born_cutoff is not None and freeze_folders_born_on_or_after is None:
+        raise ValueError(
+            f"freeze_folders_born_on_or_after must be an ISO date (YYYY-MM-DD), "
+            f"got {_raw_born_cutoff!r}."
+        )
+
     rig_gate_overrides: list[RigGateOverride] = []
     for block in data.get("rig_gate_overrides") or []:
         if not isinstance(block, dict):
@@ -1279,4 +1297,5 @@ def load_settings(config_path: str | Path) -> Settings:
         datasets=datasets_tuple,
         dataset_overrides=dataset_overrides,
         freeze_folders_before=freeze_folders_before,
+        freeze_folders_born_on_or_after=freeze_folders_born_on_or_after,
     )

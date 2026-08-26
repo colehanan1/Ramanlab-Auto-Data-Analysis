@@ -74,9 +74,11 @@ def build_fingerprint(
     low_max_threshold_px: float,
     use_per_trial_baseline: bool,
     trial_type_filter: Optional[str | bytes | Iterable[str]],
+    threshold_rule: Any,
     override: Any,
     tracking: Any,
     freeze_folders_before: Any = None,
+    freeze_folders_born_on_or_after: Any = None,
 ) -> dict:
     """Everything that determines a dataset's rows OTHER than its raw data.
 
@@ -129,6 +131,11 @@ def build_fingerprint(
         "use_per_trial_baseline": bool(use_per_trial_baseline),
         # Gates which trials become rows at all -- see the comment above.
         "trial_type_filter": trial_type_norm,
+        # theta determines the AUC-* columns, so a slice cached under one rule
+        # must not be served under another -- that would put two thresholds in
+        # one CSV with nothing to distinguish them. Stringified because the
+        # fingerprint is JSON-serialised.
+        "threshold_rule": None if threshold_rule is None else str(threshold_rule),
         "override": {
             "trial_type_override": getattr(override, "trial_type_override", None),
             "odor_on_s": getattr(override, "odor_on_s", None),
@@ -151,6 +158,13 @@ def build_fingerprint(
         # datetime.date survives the JSON round-trip load_slice compares over.
         "freeze_folders_before": (
             None if freeze_folders_before is None else str(freeze_folders_before)
+        ),
+        # The cohort cutoff, for the same reason: it decides which rows carry
+        # frozen=True just as surely as the recording cutoff does.
+        "freeze_folders_born_on_or_after": (
+            None
+            if freeze_folders_born_on_or_after is None
+            else str(freeze_folders_born_on_or_after)
         ),
         # build_wide_csv reads settings.tracking internally (envelope_combined.py:2622)
         # and derives the tracking_missing_frames / tracking_pct_missing /

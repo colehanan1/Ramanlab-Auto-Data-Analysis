@@ -7,6 +7,7 @@ import pytest
 import scripts.analysis.envelope_combined as ec
 import scripts.analysis.envelope_visuals as ev
 from fbpipe import freeze
+from fbpipe.analysis.threshold import ThresholdRule
 from fbpipe.config import DatasetOverride
 
 
@@ -55,6 +56,8 @@ def test_freeze_then_rerun_is_byte_identical(tmp_path):
         low_max_threshold_px=ec.LOW_MAX_FLAG_THRESHOLD_PX,
         use_per_trial_baseline=False,
         trial_type_filter=None,
+        # theta drives the AUC-* columns, so it is part of the cache key.
+        threshold_rule=ThresholdRule(),
         override=DatasetOverride(),
         tracking=_Tracking(),
     )
@@ -104,6 +107,7 @@ def test_deleting_the_cache_is_safe(tmp_path):
         distance_limits=None, non_reactive_threshold=None,
         low_max_threshold_px=ec.LOW_MAX_FLAG_THRESHOLD_PX,
         use_per_trial_baseline=False, trial_type_filter=None,
+        threshold_rule=ThresholdRule(),
         override=DatasetOverride(),
         tracking=_Tracking(),
     )

@@ -32,6 +32,7 @@ from ..config import RigGateOverride, Settings
 __all__ = [
     "RigGateOverride",
     "apply_rig_gate_overrides",
+    "read_batch_born_date",
     "read_batch_date",
     "read_batch_host",
 ]
@@ -43,6 +44,12 @@ _SIDECAR_STAMP_RE = re.compile(r"_(20\d{2})(\d{2})(\d{2})_\d{6}\.[A-Za-z0-9]+$")
 _META_DATE_RES = (
     re.compile(r"^First training trial start \(local\):\s*(\d{4})-(\d{2})-(\d{2})", re.MULTILINE),
     re.compile(r"^Intake Logged \(UTC\):\s*(\d{4})-(\d{2})-(\d{2})", re.MULTILINE),
+)
+# The subject's approximate eclosion date, from the Subject block. Labeled-line
+# only for the same reason as above: starvation, retinal-vial and odor-vial
+# dates share this file and some of them PRECEDE the Born line.
+_BORN_DATE_RE = re.compile(
+    r"^Born\s*\(approx\):\s*(\d{4})-(\d{2})-(\d{2})", re.MULTILINE
 )
 
 
@@ -63,6 +70,29 @@ def read_batch_host(batch_dir: Path) -> Optional[str]:
         return None
     m = _HOST_RE.search(text)
     return m.group(1) if m else None
+
+
+def read_batch_born_date(batch_dir: Path) -> Optional[date]:
+    """The approximate birth date of a batch's flies, or None.
+
+    Reads the ``Born (approx): YYYY-MM-DD`` line of the batch's
+    ``session_metadata.txt``. Distinct from :func:`read_batch_date`, which is
+    the RECORDING date: the two are days apart by a gap that varies per batch,
+    so neither substitutes for the other when the question is about the cohort.
+
+    None when the file, the line, or a valid date is missing -- callers treat
+    that as "unknown" and keep the batch, never as "outside the cohort".
+    """
+    text = _read_metadata(batch_dir)
+    if text is None:
+        return None
+    m = _BORN_DATE_RE.search(text)
+    if m is None:
+        return None
+    try:
+        return date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+    except ValueError:
+        return None
 
 
 def read_batch_date(batch_dir: Path) -> Optional[date]:

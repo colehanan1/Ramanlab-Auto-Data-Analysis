@@ -6,6 +6,7 @@ import numpy as np
 import pandas as pd
 
 from fbpipe import freeze
+from fbpipe.analysis.threshold import ThresholdRule
 from fbpipe.config import DatasetOverride
 
 
@@ -42,6 +43,8 @@ def _fp(**kw):
         low_max_threshold_px=5.0,
         use_per_trial_baseline=False,
         trial_type_filter=None,
+        # theta drives the AUC-* columns, so it is part of the cache key.
+        threshold_rule=ThresholdRule(),
         override=DatasetOverride(),
         tracking=_tracking(),
     )

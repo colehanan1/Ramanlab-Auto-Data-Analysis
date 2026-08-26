@@ -4,6 +4,7 @@ import pandas as pd
 
 import scripts.pipeline.run_workflows as rw
 from fbpipe import freeze
+from fbpipe.analysis.threshold import ThresholdRule
 from fbpipe.config import DatasetOverride
 
 
@@ -49,6 +50,10 @@ def _fp_kw():
         low_max_threshold_px=5.0,
         use_per_trial_baseline=False,
         trial_type_filter=None,
+        # theta drives the AUC-* columns, so it is part of the cache key. Passed
+        # explicitly here for the same reason the production code requires it:
+        # a slice cached under one threshold must never be served under another.
+        threshold_rule=ThresholdRule(),
     )
 
 

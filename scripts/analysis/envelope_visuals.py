@@ -1030,35 +1030,21 @@ def non_reactive_mask(df: pd.DataFrame) -> pd.Series:
     return mask.fillna(False)
 
 
-def _baseline_theta(window: np.ndarray, std_mult: float) -> float:
-    """Threshold = resting median + k * one-sided (upper) robust spread.
+# --------------------------------------------------------------------------- #
+# Response threshold. The implementation lives in fbpipe.analysis.threshold so
+# that the trace figures, the AUC columns in envelope_combined and the scoring
+# filters cannot drift apart again -- they used to, with symmetric vs one-sided
+# MAD and k=3 vs k=2. These names are kept as thin aliases because callers and
+# tests across scripts/ already import them.
+# --------------------------------------------------------------------------- #
 
-    Only deviations *above* the baseline median feed the dispersion, so downward
-    dips below the resting position (the opposite of a proboscis extension) do not
-    raise the threshold. ``sigma`` is 0 when there are no upward samples, leaving
-    theta at the resting median.
-    """
-    baseline = float(np.nanmedian(window))
-    dev = window - baseline
-    up = dev[np.isfinite(dev) & (dev > 0.0)]
-    mad_up = float(np.nanmedian(up)) if up.size else 0.0
-    sigma = 1.4826 * mad_up
-    return float(baseline + std_mult * sigma)
-
-
-def _compute_theta(
-    env: np.ndarray, fps: float, baseline_until_s: float, std_mult: float
-) -> float:
-    """Compute the response threshold using only the pre-command baseline."""
-
-    if env.size == 0 or fps <= 0:
-        return math.nan
-
-    before_end = min(int(round(baseline_until_s * fps)), env.size)
-    if before_end <= 0:
-        return math.nan
-
-    return _baseline_theta(env[:before_end], std_mult)
+from fbpipe.analysis.threshold import (  # noqa: E402
+    ThresholdRule,
+    baseline_theta as _baseline_theta,
+    compute_theta as _compute_theta,
+    rolling_baseline as _rolling_baseline,
+    upper_sigma as _upper_sigma,
+)
 
 
 def filter_and_validate_trial_type(
@@ -1241,6 +1227,9 @@ class MatrixPlotConfig:
     during_sec: float = 30.0
     after_window_sec: float = 30.0
     threshold_std_mult: float = 3.0
+    #: See ``ThresholdCfg.threshold_min_delta`` / ``threshold_anchor_s``.
+    threshold_min_delta: float = 0.0
+    threshold_anchor_s: float | None = None
     min_samples_over: int = 20
     row_gap: float = 0.6
     height_per_gap_in: float = 3.0
@@ -1285,7 +1274,18 @@ def _score_trial(env: np.ndarray, fps: float, cfg: MatrixPlotConfig) -> tuple[in
     if before.size == 0:
         return (0, 0)
 
-    theta = _baseline_theta(before, cfg.threshold_std_mult)
+    theta = (
+        _baseline_theta(before, cfg.threshold_std_mult, cfg.threshold_min_delta)
+        if cfg.threshold_anchor_s is None
+        else _compute_theta(
+            env,
+            fps,
+            before.size / max(fps, 1e-9),
+            cfg.threshold_std_mult,
+            min_delta=cfg.threshold_min_delta,
+            anchor_s=cfg.threshold_anchor_s,
+        )
+    )
     during_hit = int(np.sum(during > theta) >= cfg.min_samples_over) if during.size else 0
     after_hit = int(np.sum(after > theta) >= cfg.min_samples_over) if after.size else 0
     return during_hit, after_hit
@@ -2082,6 +2082,15 @@ class EnvelopePlotConfig:
     odor_latency_s: float = 0.0
     after_show_sec: float = 30.0
     threshold_std_mult: float = 3.0
+    #: Absolute floor, in envelope units (0-100 % extension), on how far above the
+    #: baseline theta may sit. Guards the flat-baseline case where sigma collapses
+    #: and a few units of drift read as a full response. 0.0 disables.
+    threshold_min_delta: float = 0.0
+    #: When set, theta is anchored on the median of the last N seconds before odor
+    #: onset rather than the whole baseline, with the noise scale taken as a low
+    #: percentile of rolling sigma. Guards bursts and steps inside the baseline.
+    #: None reproduces the shipped whole-window estimate.
+    threshold_anchor_s: float | None = None
     trial_type: str = "testing"
     light_annotation_mode: str = "none"
     max_flies: int | None = None
@@ -2449,7 +2458,14 @@ def generate_envelope_plots(cfg: EnvelopePlotConfig) -> None:
             if env.size == 0:
                 continue
 
-            theta = _compute_theta(env, fps, odor_on_cmd, cfg.threshold_std_mult)
+            theta = _compute_theta(
+                env,
+                fps,
+                odor_on_cmd,
+                cfg.threshold_std_mult,
+                min_delta=cfg.threshold_min_delta,
+                anchor_s=cfg.threshold_anchor_s,
+            )
             dataset_canon = dataset_lookup[idx]
             trial_label = trial_lookup[idx]
             odor_name = _display_odor(dataset_canon, trial_label)
@@ -2958,6 +2974,29 @@ def _parse_matrices_args(subparser: argparse.ArgumentParser) -> None:
         default=3.0,
         help="Threshold multiplier applied to baseline MAD (scaled to sigma).",
     )
+    subparser.add_argument(
+        "--threshold-min-delta",
+        type=float,
+        default=0.0,
+        help=(
+            "Absolute floor (0-100 %% extension units) on how far above the baseline "
+            "theta may sit, in units of that fly's own full extension range. Guards "
+            "the flat-baseline case where the MAD collapses and a few units of drift "
+            "score as a full response. Calibrated optimum 5 (95 %% CI [4, 9]) against "
+            "blinded_video_scores.csv. 0 disables."
+        ),
+    )
+    subparser.add_argument(
+        "--threshold-anchor-s",
+        type=float,
+        default=None,
+        help=(
+            "Anchor theta on the median of the last N seconds before odor onset "
+            "instead of the whole baseline, with the noise scale taken as a low "
+            "percentile of rolling sigma. Guards bursts and held steps inside the "
+            "baseline. Omit for the shipped whole-window estimate."
+        ),
+    )
     subparser.add_argument("--min-samples-over", type=int, default=20, help="Minimum samples over threshold to count a hit.")
     subparser.add_argument("--row-gap", type=float, default=0.6, help="Vertical gap between matrix and bar charts.")
     subparser.add_argument("--height-per-gap-in", type=float, default=3.0, help="Figure height added per 1.0 of row gap (inches).")
@@ -2996,6 +3035,29 @@ def _parse_envelopes_args(subparser: argparse.ArgumentParser) -> None:
         type=float,
         default=3.0,
         help="Threshold multiplier applied to baseline MAD (scaled to sigma).",
+    )
+    subparser.add_argument(
+        "--threshold-min-delta",
+        type=float,
+        default=0.0,
+        help=(
+            "Absolute floor (0-100 %% extension units) on how far above the baseline "
+            "theta may sit, in units of that fly's own full extension range. Guards "
+            "the flat-baseline case where the MAD collapses and a few units of drift "
+            "score as a full response. Calibrated optimum 5 (95 %% CI [4, 9]) against "
+            "blinded_video_scores.csv. 0 disables."
+        ),
+    )
+    subparser.add_argument(
+        "--threshold-anchor-s",
+        type=float,
+        default=None,
+        help=(
+            "Anchor theta on the median of the last N seconds before odor onset "
+            "instead of the whole baseline, with the noise scale taken as a low "
+            "percentile of rolling sigma. Guards bursts and held steps inside the "
+            "baseline. Omit for the shipped whole-window estimate."
+        ),
     )
     subparser.add_argument(
         "--trial-type",
@@ -3200,6 +3262,8 @@ def main(argv: Sequence[str] | None = None) -> None:
             during_sec=args.during_sec,
             after_window_sec=args.after_window_sec,
             threshold_std_mult=args.threshold_std_mult,
+            threshold_min_delta=args.threshold_min_delta,
+            threshold_anchor_s=args.threshold_anchor_s,
             min_samples_over=args.min_samples_over,
             row_gap=args.row_gap,
             height_per_gap_in=args.height_per_gap_in,
@@ -3230,6 +3294,8 @@ def main(argv: Sequence[str] | None = None) -> None:
             odor_latency_s=args.odor_latency_s,
             after_show_sec=args.after_show_sec,
             threshold_std_mult=args.threshold_std_mult,
+            threshold_min_delta=args.threshold_min_delta,
+            threshold_anchor_s=args.threshold_anchor_s,
             trial_type=args.trial_type,
             light_annotation_mode=args.light_annotation_mode,
             max_flies=args.max_flies,

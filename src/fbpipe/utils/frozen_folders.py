@@ -5,12 +5,19 @@ its own rig plumbing: ``Hex-Training-24-0.1``'s may/june batches ran a different
 odor panel than its august ones. Folder freeze retires the old batches without
 retiring the dataset.
 
-Two sources, unioned:
+Three sources, unioned:
 
 * ``freeze_folders_before: 2026-06-26`` (top level) — freeze every batch
   recorded strictly BEFORE that date. The date comes from the batch itself via
   :func:`fbpipe.utils.rig_gates.read_batch_date` (sidecar filename stamp, then
   labeled metadata lines) — never from the folder name, which carries no year.
+* ``freeze_folders_born_on_or_after: 2026-08-11`` (top level) — freeze every
+  batch whose flies were BORN on or after that date, i.e. keep the cohort born
+  strictly before it. Read from the batch's ``Born (approx):`` metadata line via
+  :func:`fbpipe.utils.rig_gates.read_batch_born_date`. This is a different date
+  from the one above and points the other way: birth and recording are days
+  apart by a gap that varies per batch, so a recording cutoff cannot express a
+  cohort question and the two rules are not interchangeable.
 * ``dataset_overrides.<ds>.freeze.folders:`` — :class:`FolderRule` entries
   scoped to that one dataset. Each is an exact folder name, an fnmatch glob
   (``*_rig_3``), or a glob bounded by recording date
@@ -25,7 +32,8 @@ Two deliberate asymmetries:
 * **A data-frozen dataset is never folder-frozen.** ``freeze.data`` means its
   root is never walked and its rows splice in whole from the cache; folder
   freezing one of its batches would silently delete rows from that slice.
-* **An undated batch stays live**, with a printed warning. The date rule can
+* **An undated batch stays live**, with a printed warning — whether the
+  missing date is the recording date or the birth date. Both date rules can
   only ever be reached by a positive match, so a failed lookup keeps data
   rather than dropping it. Same fail-open stance as ``rig_gates``.
 """
@@ -38,7 +46,7 @@ from fnmatch import fnmatchcase
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Iterable, Optional
 
-from .rig_gates import read_batch_date
+from .rig_gates import read_batch_born_date, read_batch_date
 
 if TYPE_CHECKING:  # pandas is imported lazily; the filters are the only users
     import pandas as pd
@@ -46,6 +54,7 @@ if TYPE_CHECKING:  # pandas is imported lazily; the filters are the only users
 __all__ = [
     "FROZEN_COLUMN",
     "FolderRule",
+    "born_cutoff",
     "drop_frozen",
     "folder_freeze_rules",
     "frozen_folders_for_root",
@@ -88,8 +97,11 @@ class FolderRule:
         return self.before is not None
 
 # Batches already reported as undated, so a run with 100+ batch dirs prints each
-# one once instead of once per step. Keyed by resolved path.
+# one once instead of once per step. Keyed by resolved path. Two sets, not one:
+# a batch can have a readable recording date and no birth date, and silencing
+# the second warning because the first never fired would hide it entirely.
 _warned_undated: set[str] = set()
+_warned_unborn: set[str] = set()
 
 
 def _thawed(dataset: str, thawed: Iterable[str], thaw_all: bool) -> bool:
@@ -141,6 +153,50 @@ def folder_freeze_rules(
     return (cutoff, tuple(rules))
 
 
+def born_cutoff(
+    cfg: Any,
+    dataset: str,
+    *,
+    thawed: Iterable[str] = (),
+    thaw_all: bool = False,
+) -> Optional[date]:
+    """The cohort birth cutoff in force for *dataset*, or None.
+
+    Separate from :func:`folder_freeze_rules` rather than a third tuple slot so
+    every existing ``cutoff, rules = folder_freeze_rules(...)`` caller keeps
+    working, but gated identically: thawed and data-frozen datasets see None.
+
+    Recorded in the freeze fingerprint alongside the other two inputs.
+    """
+    if _thawed(dataset, thawed, thaw_all):
+        return None
+    override = (getattr(cfg, "dataset_overrides", None) or {}).get(dataset)
+    if override is not None and bool(getattr(override, "freeze_data", False)):
+        return None
+    return getattr(cfg, "freeze_folders_born_on_or_after", None)
+
+
+def _born_frozen(dataset: str, path: Path, cutoff: date) -> bool:
+    """Whether this batch's flies were born on or after *cutoff*.
+
+    Fail-open: an unreadable birth date warns once and keeps the batch, so a
+    metadata gap can never silently shrink a cohort.
+    """
+    born = read_batch_born_date(path)
+    if born is None:
+        key = str(path)
+        if key not in _warned_unborn:
+            _warned_unborn.add(key)
+            print(
+                f"[FREEZE] No 'Born (approx)' date for batch {path.name} ({path}); "
+                f"keeping it LIVE despite the born-on-or-after {cutoff} cohort "
+                f"cutoff. Add it to dataset_overrides.{dataset}.freeze.folders "
+                f"to freeze it explicitly."
+            )
+        return False
+    return born >= cutoff
+
+
 def is_frozen_folder(
     cfg: Any,
     dataset: str,
@@ -153,13 +209,19 @@ def is_frozen_folder(
     cutoff, rules = folder_freeze_rules(
         cfg, dataset, thawed=thawed, thaw_all=thaw_all
     )
-    if cutoff is None and not rules:
+    born_cut = born_cutoff(cfg, dataset, thawed=thawed, thaw_all=thaw_all)
+    if cutoff is None and not rules and born_cut is None:
         return False
 
     path = Path(batch_dir)
     # Name-only rules first: a direct instruction, and they cost no I/O.
     unbounded = [r for r in rules if not r.needs_date]
     if any(r.matches(path.name, None) for r in unbounded):
+        return True
+
+    # The cohort rule, before the recording-date rules: the three union, so any
+    # one match is the answer and the order only decides which I/O we skip.
+    if born_cut is not None and _born_frozen(dataset, path, born_cut):
         return True
 
     bounded = [r for r in rules if r.needs_date]
@@ -204,7 +266,8 @@ def iter_live_batch_dirs(
     name = dataset if dataset is not None else root_path.name
     dirs = sorted((p for p in root_path.iterdir() if p.is_dir()), key=lambda p: p.name)
     cutoff, names = folder_freeze_rules(cfg, name, thawed=thawed, thaw_all=thaw_all)
-    if cutoff is None and not names:
+    born_cut = born_cutoff(cfg, name, thawed=thawed, thaw_all=thaw_all)
+    if cutoff is None and not names and born_cut is None:
         return dirs
 
     live, skipped = [], []
@@ -256,6 +319,8 @@ def any_folder_rules(cfg: Any) -> bool:
     """Whether ANY folder freeze is configured, anywhere."""
     if getattr(cfg, "freeze_folders_before", None) is not None:
         return True
+    if getattr(cfg, "freeze_folders_born_on_or_after", None) is not None:
+        return True
     return any(
         getattr(ov, "freeze_folders", ())
         for ov in (getattr(cfg, "dataset_overrides", None) or {}).values()
@@ -296,7 +361,8 @@ def frozen_folders_for_root(
     root_path = Path(root)
     name = dataset if dataset is not None else root_path.name
     cutoff, names = folder_freeze_rules(cfg, name, thawed=thawed, thaw_all=thaw_all)
-    if cutoff is None and not names:
+    born_cut = born_cutoff(cfg, name, thawed=thawed, thaw_all=thaw_all)
+    if cutoff is None and not names and born_cut is None:
         return set()
     if not root_path.is_dir():
         return set()

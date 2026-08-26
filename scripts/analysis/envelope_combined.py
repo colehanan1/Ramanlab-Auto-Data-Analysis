@@ -184,6 +184,11 @@ def _resolve_trial_meta_for_csv(csv_path: Path | str, n_frames_hint: int | None 
     )
 DURING_END_FRAME = BEFORE_FRAMES + DURING_FRAMES
 
+from fbpipe.analysis.threshold import (
+    ThresholdRule,
+    symmetric_sigma as _symmetric_sigma,
+    upper_sigma as _upper_sigma,
+)
 from scripts.analysis import envelope_visuals
 from scripts.analysis.envelope_visuals import (
     EnvelopePlotConfig,
@@ -2027,6 +2032,7 @@ def _compute_trial_metrics(
     use_per_trial_baseline: bool = False,
     odor_on_frame: int | None = None,
     odor_off_frame: int | None = None,
+    threshold_rule: ThresholdRule | None = None,
 ) -> dict[str, float]:
     env = np.asarray(values, dtype=float)
     total_len = env.size
@@ -2041,26 +2047,49 @@ def _compute_trial_metrics(
     after = env[during_end:after_end]
 
     before_median = float(np.nanmedian(before)) if before.size else math.nan
-    before_sigma = _mad_sigma(before)
 
-    # Select baseline mode
-    if use_per_trial_baseline:
-        # Use only this trial's before period
-        baseline = before_median
-    else:
-        # Use the fly-level median (current behavior)
-        baseline = fly_before_median
-        if not np.isfinite(baseline):
-            baseline = before_median
-
-    if not np.isfinite(baseline):
-        baseline = 0.0
-    if not np.isfinite(before_sigma):
-        before_sigma = 0.0
-
-    threshold = baseline + 3.0 * before_sigma
+    # The AUC threshold is the SAME rule the trace figures draw and the rasters
+    # binarise against (fbpipe.analysis.threshold). It previously was not: this
+    # function used a *symmetric* MAD with k hardcoded to 3.0, while the figures
+    # used a one-sided MAD at the config's k (2.0). A caption's red line and the
+    # AUC printed beside it therefore came from different thresholds.
+    # No rule supplied means no config asked for one, which is the case for the
+    # v1 regression fixtures. Falling back to ThresholdRule.v1() keeps
+    # ``protocol: legacy`` byte-for-byte reproducible; any config that carries
+    # threshold_* keys overrides it.
+    rule = threshold_rule if threshold_rule is not None else ThresholdRule.v1()
 
     fps_eff = _effective_fps(fps, fallback=fallback_fps, default=default_fps)
+
+    if rule.anchor_s is not None:
+        # Anchored on the last seconds before odor onset, so it is per-trial by
+        # construction and the fly-level median plays no part.
+        threshold = rule.theta_from_baseline(before, fps=fps_eff)
+        if not np.isfinite(threshold):
+            threshold = 0.0
+    else:
+        before_sigma = (
+            (_symmetric_sigma(before) if rule.symmetric else _upper_sigma(before))
+            if before.size else 0.0
+        )
+
+        # Select baseline mode
+        if use_per_trial_baseline:
+            # Use only this trial's before period
+            baseline = before_median
+        else:
+            # Use the fly-level median (current behavior)
+            baseline = fly_before_median
+            if not np.isfinite(baseline):
+                baseline = before_median
+
+        if not np.isfinite(baseline):
+            baseline = 0.0
+        if not np.isfinite(before_sigma):
+            before_sigma = 0.0
+
+        threshold = baseline + max(rule.std_mult * before_sigma, rule.min_delta)
+
     dt = 1.0 / fps_eff if fps_eff > 0 else 0.0
 
     auc_before = _segment_auc(before, threshold, dt)
@@ -2632,6 +2661,7 @@ def build_wide_csv(
     non_reactive_threshold: float | None = None,
     low_max_threshold_px: float = LOW_MAX_FLAG_THRESHOLD_PX,
     use_per_trial_baseline: bool = False,
+    threshold_rule: ThresholdRule | None = None,
     frozen_slices: Mapping[str, tuple[pd.DataFrame, int]] | None = None,
     frozen_folders: Mapping[str, Iterable[str]] | None = None,
 ) -> None:
@@ -3054,6 +3084,7 @@ def build_wide_csv(
                 use_per_trial_baseline=use_per_trial_baseline,
                 odor_on_frame=odor_on_in,
                 odor_off_frame=odor_off_in,
+                threshold_rule=threshold_rule,
             )
 
             finite_mask = np.isfinite(values)
@@ -3935,6 +3966,20 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Use each trial's own before-period for baseline instead of fly-level mean.",
     )
+    wide_parser.add_argument(
+        "--threshold-std-mult", type=float, default=2.0,
+        help="k in theta = location + max(k*sigma_upper, min_delta).",
+    )
+    wide_parser.add_argument(
+        "--threshold-min-delta", type=float, default=0.0,
+        help="Floor on theta's excursion above the baseline, in units of that "
+             "fly's own full extension range. Calibrated optimum 5. 0 disables.",
+    )
+    wide_parser.add_argument(
+        "--threshold-anchor-s", type=float, default=None,
+        help="Anchor theta on the median of the last N seconds before odor onset "
+             "instead of the whole baseline. Omit for the legacy estimator.",
+    )
 
     matrix_parser = subparsers.add_parser("matrix", help="Convert wide CSV → float16 matrix + metadata.")
     matrix_parser.add_argument("--input-csv", required=True)
@@ -4022,6 +4067,11 @@ def main(argv: Sequence[str] | None = None) -> None:
             config_path=args.config,
             non_reactive_threshold=args.non_reactive_threshold,
             use_per_trial_baseline=args.use_per_trial_baseline,
+            threshold_rule=ThresholdRule(
+                std_mult=args.threshold_std_mult,
+                min_delta=args.threshold_min_delta,
+                anchor_s=args.threshold_anchor_s,
+            ),
         )
         return
 

@@ -46,6 +46,7 @@ for path in (str(SRC_ROOT), str(REPO_ROOT)):
 # fly_dir/trial_dir/file depth (>=3 parts). Bumping invalidates v1 caches.
 STATE_VERSION = 2
 
+from fbpipe.analysis.threshold import ThresholdRule
 from fbpipe.config import Settings, discover_flagged_directories, load_settings, resolve_config_path, _expand_datasets
 from fbpipe.pipeline import ORDERED_STEPS
 from fbpipe.steps import predict_reactions
@@ -416,6 +417,30 @@ def _compare_manifests(
     return is_valid, changes
 
 
+def _combined_threshold_key(combined_cfg: Mapping[str, Any] | None) -> list:
+    """Every distinct ThresholdRule the combined step will build a table under.
+
+    One config can build several wide tables (``combined.wide``,
+    ``combined.combined_base.wide``, each ``pair_groups`` entry) and they may
+    carry different threshold blocks, so the cache key is the set of them, not
+    one. Sorted so the key is stable across dict ordering.
+    """
+    cfg = combined_cfg or {}
+    # Only blocks that actually exist: an absent block builds no table, and
+    # folding in a default rule for it would make the key differ between two
+    # configs that produce identical output.
+    blocks = [cfg["wide"]] if isinstance(cfg.get("wide"), Mapping) else []
+    for name in ("combined_base", "distance_base"):
+        sub = cfg.get(name)
+        if isinstance(sub, Mapping):
+            blocks.append(sub.get("wide"))
+    rules = {
+        ThresholdRule.from_mapping(b if isinstance(b, Mapping) else {})
+        for b in blocks
+    }
+    return sorted(repr(r) for r in rules)
+
+
 def _freeze_fingerprint(
     settings,
     dataset: str,
@@ -427,6 +452,7 @@ def _freeze_fingerprint(
     low_max_threshold_px: float,
     use_per_trial_baseline: bool,
     trial_type_filter,
+    threshold_rule,
 ) -> dict:
     """Fingerprint for one dataset under one set of build_wide_csv parameters.
 
@@ -443,6 +469,12 @@ def _freeze_fingerprint(
         non_reactive_threshold=non_reactive_threshold,
         low_max_threshold_px=low_max_threshold_px,
         use_per_trial_baseline=use_per_trial_baseline,
+        # theta sets the AUC-* columns (envelope_combined._compute_trial_metrics).
+        # Without it here, changing the threshold rule would leave frozen datasets
+        # serving cached rows scored under the OLD rule while live folders got the
+        # new one -- a wide table that is half one rule and half the other, with
+        # nothing to show it. Required, not defaulted.
+        threshold_rule=repr(threshold_rule) if threshold_rule is not None else None,
         # build_wide_csv uses trial_type_filter to gate which trials become
         # rows at all (envelope_combined.py:2661-2673, :2703). Required, not
         # defaulted, so a caller cannot silently omit a value-affecting input.
@@ -456,6 +488,9 @@ def _freeze_fingerprint(
         # Folder freeze decides which rows are marked frozen, so a slice cached
         # under one policy must not be served under another.
         freeze_folders_before=getattr(settings, "freeze_folders_before", None),
+        freeze_folders_born_on_or_after=getattr(
+            settings, "freeze_folders_born_on_or_after", None
+        ),
     )
 
 
@@ -476,9 +511,15 @@ def _pipeline_expectation(settings, dataset_root: Path) -> dict[str, Any]:
     ``--thaw-all`` escape hatches invalidate the cache too -- a cache hit would
     otherwise silently neuter them.
     """
-    from fbpipe.utils.frozen_folders import folder_freeze_rules
+    from fbpipe.utils.frozen_folders import born_cutoff, folder_freeze_rules
 
     cutoff, rules = folder_freeze_rules(
+        settings,
+        dataset_root.name,
+        thawed=getattr(settings, "_thawed", ()),
+        thaw_all=getattr(settings, "_thaw_all", False),
+    )
+    born_cut = born_cutoff(
         settings,
         dataset_root.name,
         thawed=getattr(settings, "_thawed", ()),
@@ -492,6 +533,9 @@ def _pipeline_expectation(settings, dataset_root: Path) -> dict[str, Any]:
             f"{rule.pattern}@{rule.before}" for rule in rules
         ),
         "freeze_folders_before": None if cutoff is None else str(cutoff),
+        "freeze_folders_born_on_or_after": (
+            None if born_cut is None else str(born_cut)
+        ),
     }
 
 
@@ -529,6 +573,7 @@ def _resolve_frozen_slices(
     low_max_threshold_px: float,
     use_per_trial_baseline: bool,
     trial_type_filter,
+    threshold_rule,
     thawed=(),
     thaw_all: bool = False,
 ) -> dict:
@@ -561,6 +606,7 @@ def _resolve_frozen_slices(
             low_max_threshold_px=low_max_threshold_px,
             use_per_trial_baseline=use_per_trial_baseline,
             trial_type_filter=trial_type_filter,
+            threshold_rule=threshold_rule,
         )
         slice_ = _freeze.load_slice(settings.cache_dir, wide_block, dataset, fingerprint)
         if slice_ is None:
@@ -1330,6 +1376,9 @@ def _run_combined(
             combine_roots[config.root.name.lower()] = config.root
 
     wide_cfg = cfg.get("wide")
+    #: theta for the AUC-* columns of every wide table built below. Read once so
+    #: the build and the freeze fingerprint can never disagree about it.
+    wide_threshold_rule = ThresholdRule.from_mapping(wide_cfg or {})
     if wide_cfg:
         roots_cfg = wide_cfg.get("roots", [])
         if not roots_cfg:
@@ -1454,6 +1503,7 @@ def _run_combined(
             # same value or every run reports drift.
             low_max_threshold_px=LOW_MAX_FLAG_THRESHOLD_PX,
             use_per_trial_baseline=use_per_trial_baseline,
+            threshold_rule=wide_threshold_rule,
             # Same variable passed to the build_wide_csv(...) call below -- the
             # fingerprint must record exactly what the build used.
             trial_type_filter=trial_type_filter,
@@ -1472,6 +1522,7 @@ def _run_combined(
             str(output_csv),
             measure_cols=wide_measure_cols,
             fps_fallback=wide_fps_fallback,
+            threshold_rule=wide_threshold_rule,
             exclude_roots=wide_exclude_cfg,
             distance_limits=limits,
             config_path=config_path,
@@ -1555,6 +1606,13 @@ def _run_combined(
             base_use_per_trial_baseline = bool(
                 base_wide_cfg.get("use_per_trial_baseline", use_per_trial_baseline)
             )
+            # theta for the AUC-* columns. Read from this block, falling back to
+            # the outer combined.wide block, so a cohort can carry its own floor
+            # (the low-amplitude cohorts want a smaller one -- see
+            # fbpipe.analysis.threshold).
+            base_threshold_rule = ThresholdRule.from_mapping(
+                {**(wide_cfg or {}), **base_wide_cfg}
+            )
             if "exclude_roots" in base_wide_cfg:
                 base_exclude_cfg = [
                     str(_ensure_path(path, "combined_base.wide.exclude_roots"))
@@ -1609,6 +1667,7 @@ def _run_combined(
                 # same value or every run reports drift.
                 low_max_threshold_px=LOW_MAX_FLAG_THRESHOLD_PX,
                 use_per_trial_baseline=base_use_per_trial_baseline,
+                threshold_rule=base_threshold_rule,
                 # Same variable passed to the build_wide_csv(...) call below --
                 # the fingerprint must record exactly what the build used.
                 trial_type_filter=trial_type_filter,
@@ -1634,6 +1693,7 @@ def _run_combined(
                 extra_trial_exports=extra_exports or None,
                 non_reactive_threshold=non_reactive_threshold,
                 use_per_trial_baseline=base_use_per_trial_baseline,
+                threshold_rule=base_threshold_rule,
                 frozen_slices=_frozen or None,
                 frozen_folders=_resolve_frozen_folders(settings, roots) or None,
             )
@@ -1788,6 +1848,7 @@ def _run_combined(
                 # same value or every run reports drift.
                 low_max_threshold_px=LOW_MAX_FLAG_THRESHOLD_PX,
                 use_per_trial_baseline=use_per_trial_baseline,
+                threshold_rule=wide_threshold_rule,
                 # Same variable passed to the build_wide_csv(...) call below --
                 # the fingerprint must record exactly what the build used.
                 trial_type_filter=trial_type_filter,
@@ -1813,6 +1874,7 @@ def _run_combined(
                 extra_trial_exports=extra_exports,
                 non_reactive_threshold=non_reactive_threshold,
                 use_per_trial_baseline=use_per_trial_baseline,
+                threshold_rule=wide_threshold_rule,
                 frozen_slices=_frozen or None,
                 # resolved_roots, matching the roots this call actually builds
                 # from -- `roots` is a different list in this branch.
@@ -2730,6 +2792,11 @@ def main(argv: Sequence[str] | None = None) -> None:
             # after a v2 run (or vice versa) would hash-skip and reuse the wrong
             # figures.
             "protocol": settings.protocol,
+            # theta sets the AUC-* columns of every wide table. Changing the rule
+            # in config must invalidate this cache, or the run hash-skips and the
+            # CSVs keep the numbers from the old threshold with nothing to show
+            # it. Same reasoning as the freeze fingerprint (_freeze_fingerprint).
+            "threshold_rule": _combined_threshold_key(combined_cfg_input),
         }
         pair_cfg_input = combined_cfg_input.get("pair_groups")
         pair_expected: list[dict[str, Any]] = []

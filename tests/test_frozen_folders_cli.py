@@ -159,6 +159,7 @@ def test_freeze_fingerprint_changes_when_the_cutoff_changes():
         low_max_threshold_px=20.0,
         use_per_trial_baseline=True,
         trial_type_filter=None,
+        threshold_rule=rw.ThresholdRule(),
     )
     a = rw._freeze_fingerprint(_Cfg(freeze_folders_before=date(2026, 6, 26)), "DS", **kw)
     b = rw._freeze_fingerprint(_Cfg(freeze_folders_before=date(2026, 7, 1)), "DS", **kw)
@@ -174,11 +175,39 @@ def test_freeze_fingerprint_changes_when_the_folder_list_changes():
         low_max_threshold_px=20.0,
         use_per_trial_baseline=True,
         trial_type_filter=None,
+        threshold_rule=rw.ThresholdRule(),
     )
     a = rw._freeze_fingerprint(
         _Cfg(overrides={"DS": _Override(freeze_folders=[])}), "DS", **kw
     )
     b = rw._freeze_fingerprint(
         _Cfg(overrides={"DS": _Override(freeze_folders=["july_14_batch_2"])}), "DS", **kw
+    )
+    assert a != b
+
+
+def test_freeze_fingerprint_changes_when_the_threshold_rule_changes():
+    """A slice cached under one theta must not be served under another.
+
+    The AUC-* columns are a function of theta, so without this a threshold change
+    would leave frozen datasets serving rows scored under the old rule alongside
+    live folders scored under the new one -- one CSV, two thresholds, nothing in
+    it to say so.
+    """
+    kw = dict(
+        measure_cols=["combined_base"],
+        fps_fallback=40.0,
+        distance_limits=None,
+        non_reactive_threshold=None,
+        low_max_threshold_px=20.0,
+        use_per_trial_baseline=True,
+        trial_type_filter=None,
+    )
+    cfg = _Cfg(freeze_folders_before=date(2026, 6, 26))
+    a = rw._freeze_fingerprint(cfg, "DS", threshold_rule=rw.ThresholdRule(), **kw)
+    b = rw._freeze_fingerprint(
+        cfg, "DS",
+        threshold_rule=rw.ThresholdRule(std_mult=2.0, min_delta=5.0, anchor_s=5.0),
+        **kw,
     )
     assert a != b

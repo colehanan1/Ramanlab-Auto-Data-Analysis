@@ -69,6 +69,16 @@ ODOR_OFF_S = 60.0
 ODOR_LATENCY_S = 0.0
 LATENCY_SEC = 0.0
 AFTER_SHOW_SEC = 30.0
+from fbpipe.analysis.threshold import (
+    baseline_theta as _shared_theta,
+    compute_theta as _shared_compute_theta,
+)
+
+#: Floor on theta's excursion above the baseline, in units of that fly's own
+#: full extension range. Calibrated optimum 5 (see fbpipe.analysis.threshold).
+THRESHOLD_MIN_DELTA = 5.0
+#: Anchor theta on the last N seconds before odor onset; None = legacy rule.
+THRESHOLD_ANCHOR_S = 5.0
 THRESHOLD_STD_MULT = 3.0
 
 # ── shading constants (from envelope_visuals.py) ──────────────────────────
@@ -244,16 +254,28 @@ def _extract_env(row_vals: np.ndarray, trace_len: object = None) -> np.ndarray:
 
 
 def _compute_theta(env: np.ndarray, fps: float) -> float:
-    """Threshold = median_before + k * MAD_before (scaled to sigma)."""
+    """Threshold from fbpipe.analysis.threshold, on the pre-odor baseline.
+
+    This used the *symmetric* MAD, so the red line drawn here did not match the
+    one-sided rule used for the AUC columns and the rasters. Now shared.
+    """
     n_before = int(round(ODOR_ON_S * fps))
     before = env[:n_before]
     before = before[np.isfinite(before)]
     if before.size < 3:
         return float("nan")
-    med = float(np.median(before))
-    mad = float(np.median(np.abs(before - med)))
-    sigma_est = mad * 1.4826
-    return med + THRESHOLD_STD_MULT * sigma_est
+    return _shared_theta(
+        before,
+        THRESHOLD_STD_MULT,
+        min_delta=THRESHOLD_MIN_DELTA,
+    ) if THRESHOLD_ANCHOR_S is None else _shared_compute_theta(
+        env,
+        fps,
+        n_before / max(fps, 1e-9),
+        THRESHOLD_STD_MULT,
+        min_delta=THRESHOLD_MIN_DELTA,
+        anchor_s=THRESHOLD_ANCHOR_S,
+    )
 
 
 # ---------------------------------------------------------------------------
