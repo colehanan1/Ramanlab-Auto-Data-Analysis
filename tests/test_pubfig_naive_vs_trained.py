@@ -313,10 +313,10 @@ def test_bar_colours_follow_the_house_scheme(figure):
     """Trained = odor colour, control = grey, naive = open bar in the odor colour."""
     for ax in figure.axes:
         naive, trained, control = [p for p in ax.patches if p.get_width() > 0]
-        assert matplotlib.colors.to_hex(trained.get_facecolor()) == pal.DARK_GREEN
+        assert matplotlib.colors.to_hex(trained.get_facecolor()) == pal.OCTANOL_BLUE
         assert matplotlib.colors.to_hex(control.get_facecolor()) == pal.CTRL_COLOR
         assert matplotlib.colors.to_hex(naive.get_facecolor()) == "#ffffff"
-        assert matplotlib.colors.to_hex(naive.get_edgecolor()) == pal.DARK_GREEN
+        assert matplotlib.colors.to_hex(naive.get_edgecolor()) == pal.OCTANOL_BLUE
         assert naive.get_hatch()
 
 
@@ -362,8 +362,10 @@ def test_p_values_are_not_printed_on_the_figure(figure):
 
 
 def test_unpalettised_odor_falls_back_without_raising():
+    # Benzaldehyde used to be the odor with no entry; it has brown now, so this
+    # needs an odor that is genuinely absent from the palette.
     cmp_benz = Comparison(
-        odor="Benzaldehyde",
+        odor="Nonanal",
         concentration="0.1%",
         naive_dataset="RandomPanel-24-0.1",
         train_dataset="3OCT-Training-24-0.1",

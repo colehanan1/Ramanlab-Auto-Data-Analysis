@@ -36,6 +36,8 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.colors as mcolors  # noqa: E402
 import matplotlib.pyplot as plt  # noqa: E402
+import warnings
+
 import numpy as np  # noqa: E402
 import pandas as pd  # noqa: E402
 import yaml  # noqa: E402
@@ -76,6 +78,7 @@ from scripts.analysis.odor_bar_palette import (  # noqa: E402
     TRAIN_COLOR,
     odor_color,
 )
+from scripts.analysis.per_axis_labels import PERCENT_Y_LABEL  # noqa: E402
 
 LOGGER = logging.getLogger("dataset_means_specific_flies")
 
@@ -87,7 +90,7 @@ MAX_TIME_S = 90.0
 # control (``score_bars_*``). The band keeps the bars' control grey; the line
 # is darker so it stays visible against both the band and the shaded odor
 # window.
-Y_LABEL = "Average PER%"
+Y_LABEL = PERCENT_Y_LABEL
 CTRL_BAND_COLOR = CTRL_COLOR
 CTRL_LINE_COLOR = "#7f7f7f"
 
@@ -556,6 +559,8 @@ def _plot_training_vs_control_for_odor(
     train_label: str = "Trained",
     ctrl_label: str = "Control",
     title: str | None = None,
+    naive_trials: "np.ndarray | None" = None,
+    naive_label: str = "Naive",
 ) -> plt.Figure:
     # ``color_key`` lets a caller whose label carries extra text (a remapped
     # concentration, a presentation number) still hit the palette; the title
@@ -604,6 +609,40 @@ def _plot_training_vs_control_for_odor(
         label=f"{train_label} (n={len(train_per_fly)})",
     )
 
+    # Naive arm: flies that met this odorant without ever being conditioned to
+    # it. Plain black, so it reads as the reference line against whatever hue
+    # this odor's palette gives the trained arm, in every cohort.
+    #
+    # Its n counts TRIALS, not flies -- a naive fly meets each odor twice and
+    # there is no presentation to align on, so the trials are pooled. Labelling
+    # it "n=<flies>" like the other two arms would misstate what was averaged.
+    if naive_trials is not None and getattr(naive_trials, "size", 0):
+        n_naive = int(np.asarray(naive_trials).shape[0])
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", RuntimeWarning)  # all-NaN columns
+            naive_mean = np.nanmean(naive_trials, axis=0)
+            naive_sd = np.nanstd(naive_trials, axis=0, ddof=1) if n_naive > 1 else None
+        naive_sem = (
+            naive_sd / np.sqrt(n_naive) if naive_sd is not None
+            else np.zeros_like(naive_mean)
+        )
+        time_naive = np.arange(len(naive_mean)) / fps
+        ax.fill_between(
+            time_naive,
+            naive_mean - naive_sem,
+            naive_mean + naive_sem,
+            color="black",
+            alpha=0.14,
+            linewidth=0,
+        )
+        ax.plot(
+            time_naive,
+            naive_mean,
+            color="black",
+            linewidth=2.0,
+            label=f"{naive_label} (n={n_naive} trials)",
+        )
+
     ax.axvline(odor_on_s, color="black", linestyle="--", linewidth=0.8)
     ax.axvline(odor_off_s, color="black", linestyle="--", linewidth=0.8)
     ax.axvspan(odor_on_s, odor_off_s, alpha=0.10, color="grey")
@@ -613,7 +652,14 @@ def _plot_training_vs_control_for_odor(
         ax.set_ylim(*ylim)
     ax.set_xlabel("Time (s)")
     ax.set_ylabel(Y_LABEL)
-    ax.set_title(title if title is not None else f"{odor} - Trained vs Control",
+    # The default title must name every arm actually drawn: a three-arm figure
+    # captioned "Trained vs Control" misreports what the reader is looking at.
+    _default_title = (
+        f"{odor} - Trained vs Control vs Naive"
+        if (naive_trials is not None and getattr(naive_trials, "size", 0))
+        else f"{odor} - Trained vs Control"
+    )
+    ax.set_title(title if title is not None else _default_title,
                  fontsize=12)
     ax.legend(loc="upper right", fontsize=10, framealpha=0.9)
     ax.spines["top"].set_visible(False)

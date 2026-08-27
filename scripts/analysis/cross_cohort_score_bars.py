@@ -74,6 +74,7 @@ from scripts.analysis.envelope_visuals import (  # noqa: E402
 from scripts.analysis.reaction_matrix_from_spreadsheet import (  # noqa: E402
     _normalise_trial_label,
 )
+from scripts.analysis.per_axis_labels import SCORE_Y_LABEL as _SCORE_Y_LABEL  # noqa: E402
 
 PREDICTIONS_CSV = Path(
     "/home/ramanlab/Documents/cole/Data/CSVs-ALL-Opto-Flys/model_predictions.csv"
@@ -95,7 +96,7 @@ FIGURES_DIR = Path("/home/ramanlab/Documents/cole/Results/Figures")
 OCTNOV_PREFIXES = ("october_", "november_")
 
 SCORE_MIN, SCORE_MAX = -1.0, 5.0
-SCORE_Y_LABEL = "Mean PER Score"
+SCORE_Y_LABEL = _SCORE_Y_LABEL
 
 # AIR is not an odorant and has no palette entry; it keeps the blue every other
 # AIR bar in this project uses.

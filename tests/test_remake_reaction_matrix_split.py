@@ -151,7 +151,7 @@ def test_bars_figure_axis_labels() -> None:
     fig = render_bars_figure(stats)
     try:
         ax = fig.axes[0]
-        assert ax.get_ylabel() == "Average PER Response %"
+        assert ax.get_ylabel() == "Mean PER response %"
         assert ax.get_xlabel() == ""
     finally:
         plt.close(fig)
@@ -164,7 +164,7 @@ def test_shared_bar_helper_keeps_its_own_defaults() -> None:
     fig, ax = plt.subplots()
     try:
         plot_reaction_rate_bars(ax, stats, title="Reaction Rates by Odor")
-        assert ax.get_ylabel() == "PER %"
+        assert ax.get_ylabel() == "Mean PER response %"
         assert ax.get_xlabel() == "Presented Odor"
     finally:
         plt.close(fig)

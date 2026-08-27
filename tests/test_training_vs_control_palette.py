@@ -5,7 +5,7 @@ control bar grey. These trace figures used to invent their own hues
 (``ODOR_COLOURS``: citral red, ethyl butyrate blue) so the same odor read as
 two different things depending on the panel. They now pull from
 ``odor_bar_palette`` — trained line in the odor colour, control line grey — and
-label the y axis "Average PER%".
+label the y axis "Mean PER response %".
 """
 
 from __future__ import annotations
@@ -29,8 +29,8 @@ from scripts.analysis.dataset_means_specific_flies import (
 from scripts.analysis.odor_bar_palette import (
     ACV_COLOR,
     CTRL_COLOR,
-    DARK_GREEN,
-    DARKER_GREEN,
+    OCTANOL_BLUE,
+    LINALOOL_PURPLE,
     HEX_COLOR,
     PINK,
     TRAIN_COLOR,
@@ -90,9 +90,9 @@ def _close_figures():
     [
         ("Hexanol", HEX_COLOR),
         ("Apple Cider Vinegar", ACV_COLOR),
-        ("3-Octanol", DARK_GREEN),
-        ("3-Octonol", DARK_GREEN),  # the older spelling in the OctNov exports
-        ("Linalool", DARKER_GREEN),
+        ("3-Octanol", OCTANOL_BLUE),
+        ("3-Octonol", OCTANOL_BLUE),  # the older spelling in the OctNov exports
+        ("Linalool", LINALOOL_PURPLE),
         ("Ethyl Butyrate", PINK),
     ],
 )
@@ -117,8 +117,10 @@ def test_trained_colour_is_not_the_old_odor_colours_hue():
 
 
 def test_unpalettised_odor_falls_back_to_the_bar_train_colour():
-    """Benzaldehyde has no palette entry; the bars paint it TRAIN_COLOR."""
-    fig = _tvc_fig("Benzaldehyde")
+    """Nonanal has no palette entry; the bars paint it TRAIN_COLOR.
+
+    Benzaldehyde used to be the example here — it has brown of its own now."""
+    fig = _tvc_fig("Nonanal")
     trained = [
         line for line in fig.axes[0].get_lines()
         if str(line.get_label()).startswith("Trained")
@@ -142,7 +144,7 @@ def test_color_key_overrides_a_decorated_label():
 # --------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("odor", ["Hexanol", "Apple Cider Vinegar", "Benzaldehyde"])
+@pytest.mark.parametrize("odor", ["Hexanol", "Apple Cider Vinegar", "Nonanal"])
 def test_control_line_is_grey_for_every_odor(odor):
     fig = _tvc_fig(odor)
     control = [
@@ -181,12 +183,12 @@ def test_trained_and_control_bands_are_not_the_same_colour():
 # --------------------------------------------------------------------------
 
 
-def test_y_label_constant_is_average_per_percent():
-    assert Y_LABEL == "Average PER%"
+def test_y_label_constant_is_the_shared_percent_label():
+    assert Y_LABEL == "Mean PER response %"
 
 
 def test_training_vs_control_y_label():
-    assert _tvc_fig("Hexanol").axes[0].get_ylabel() == "Average PER%"
+    assert _tvc_fig("Hexanol").axes[0].get_ylabel() == "Mean PER response %"
 
 
 def test_pair_plot_y_label():
@@ -199,7 +201,7 @@ def test_pair_plot_y_label():
         odor_off_s=ODOR_OFF_S,
         ylim=None,
     )
-    assert fig.axes[0].get_ylabel() == "Average PER%"
+    assert fig.axes[0].get_ylabel() == "Mean PER response %"
 
 
 def test_group_plot_y_label():
@@ -216,7 +218,7 @@ def test_group_plot_y_label():
         odor_off_s=ODOR_OFF_S,
         ylim=None,
     )
-    assert fig.axes[0].get_ylabel() == "Average PER%"
+    assert fig.axes[0].get_ylabel() == "Mean PER response %"
 
 
 # --------------------------------------------------------------------------
@@ -270,8 +272,8 @@ def test_group_plot_lines_use_bar_palette():
     )
     assert _line_colors(fig.axes[0]) == [
         _rgba(HEX_COLOR),
-        _rgba(DARKER_GREEN),
-        _rgba(DARK_GREEN),
+        _rgba(LINALOOL_PURPLE),
+        _rgba(OCTANOL_BLUE),
     ]
 
 
@@ -313,20 +315,20 @@ def test_odor_window_guides_survive():
 
 def test_isoamyl_acetate_trace_is_purple():
     """The v2 cohorts relabel ACV as isoamyl acetate; it gets its own purple."""
-    from scripts.analysis.odor_bar_palette import ISOAMYL_PURPLE
+    from scripts.analysis.odor_bar_palette import ISOAMYL_YELLOW
 
     fig = _tvc_fig("Isoamyl Acetate (1%)")
     trained = [
         line for line in fig.axes[0].get_lines()
         if str(line.get_label()).startswith("Trained")
     ][0]
-    assert _rgba(trained.get_color()) == _rgba(ISOAMYL_PURPLE)
+    assert _rgba(trained.get_color()) == _rgba(ISOAMYL_YELLOW)
 
 
 def test_isoamyl_acetate_via_base_odor_key_color_key():
     """The per-presentation driver passes base_odor_key() as color_key."""
     from scripts.analysis.dataset_mean_traces_tvc import base_odor_key
-    from scripts.analysis.odor_bar_palette import ISOAMYL_PURPLE
+    from scripts.analysis.odor_bar_palette import ISOAMYL_YELLOW
 
     fig = _tvc_fig(
         "Isoamyl Acetate (1%) 2", color_key=base_odor_key("Isoamyl Acetate (1%) 2")
@@ -335,7 +337,7 @@ def test_isoamyl_acetate_via_base_odor_key_color_key():
         line for line in fig.axes[0].get_lines()
         if str(line.get_label()).startswith("Trained")
     ][0]
-    assert _rgba(trained.get_color()) == _rgba(ISOAMYL_PURPLE)
+    assert _rgba(trained.get_color()) == _rgba(ISOAMYL_YELLOW)
 
 
 def test_concentration_tagged_labels_still_hit_the_palette_without_a_color_key():

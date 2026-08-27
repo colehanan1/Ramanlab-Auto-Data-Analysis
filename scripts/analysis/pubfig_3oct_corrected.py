@@ -89,7 +89,7 @@ TRAINED_COLOR = "#1a3a6b"
 CONTROL_COLOR = "#b0b0b0"
 NAIVE_COLOR = "#ffffff"
 NAIVE_EDGE = "#444444"
-CSPLUS_TINT = pal.DARK_GREEN     # 3-Octanol's palette colour
+CSPLUS_TINT = pal.OCTANOL_BLUE     # 3-Octanol's palette colour
 
 FORMATS = (".png", ".svg", ".pdf")
 

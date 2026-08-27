@@ -60,6 +60,7 @@ from scripts.analysis.randompanel_conc_comparison import (
     _wilson_ci,
 )
 from scripts.analysis.score_summary import _load_scores
+from scripts.analysis.per_axis_labels import PERCENT_Y_LABEL, SCORE_Y_LABEL  # noqa: E402
 
 # Odor trials run 1..14 (7 odors x 2 exposure blocks); 15-20 are light-only and
 # already dropped by ``_load_scores`` (no odor token in the label).
@@ -392,7 +393,7 @@ def generate(
         plot_trial_position(
             trial_summary, trial_spear,
             value="mean_score", err="sem_score",
-            ylabel="Mean ordinal score",
+            ylabel=SCORE_Y_LABEL,
             title=f"RandomPanel: mean score by trial position{geno}",
             png_path=f1_score, reaction_line=True,
         )
@@ -401,8 +402,8 @@ def generate(
         plot_trial_position(
             trial_summary, trial_spear,
             value="pct_react", err=("ci_lo", "ci_hi"),
-            ylabel="% reacting (score >= 2)",
-            title=f"RandomPanel: % reaction by trial position{geno}",
+            ylabel=PERCENT_Y_LABEL,
+            title=f"RandomPanel: % reaction (score ≥ 2) by trial position{geno}",
             png_path=f1_react, as_pct=True,
         )
 
@@ -429,7 +430,7 @@ def generate(
                 plot_odor_grid(
                     sub, sp, conc=conc, pos_col=pos_col,
                     value="mean_score", err="sem_score",
-                    ylabel="Mean ordinal score", xlabel=xlabel,
+                    ylabel=SCORE_Y_LABEL, xlabel=xlabel,
                     title=f"RandomPanel conc {conc:g}: mean score by {xlabel.split(' (')[0].lower()} per odorant{geno}",
                     png_path=score_png, reaction_line=True,
                 )
@@ -438,7 +439,7 @@ def generate(
                 plot_odor_grid(
                     sub, sp, conc=conc, pos_col=pos_col,
                     value="pct_react", err=("ci_lo", "ci_hi"),
-                    ylabel="% reacting (score >= 2)", xlabel=xlabel,
+                    ylabel=PERCENT_Y_LABEL, xlabel=xlabel,
                     title=f"RandomPanel conc {conc:g}: % reaction by {xlabel.split(' (')[0].lower()} per odorant{geno}",
                     png_path=react_png, as_pct=True,
                 )

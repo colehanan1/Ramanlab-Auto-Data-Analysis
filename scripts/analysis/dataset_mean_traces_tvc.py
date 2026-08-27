@@ -85,6 +85,51 @@ _PRESENTATION_SUFFIX = re.compile(r"\s+\d+$")
 _CONCENTRATION_SUFFIX = re.compile(r"\s*\([^)]*\)\s*$")
 
 
+#: Subfolder the three-arm figures land in, so the existing two-arm files keep
+#: their names and anything globbing them keeps meaning what it meant.
+NAIVE_SUBDIR = "Trained_vs_Control_vs_Naive"
+
+
+def naive_dataset_for_odor(label: object) -> Optional[str]:
+    """The random panel run at this odor's concentration, or None.
+
+    Matching is per ODOR, not per cohort: one cohort's panel spans several doses
+    (Hexanol 0.1%, Citral 1%) and each dose has its own naive panel. The dose is
+    read off the display label, which is where ``odor_remap`` puts it -- so an
+    odor whose label carries no concentration has no naive baseline and simply
+    keeps its two-arm figure, rather than being matched to a neighbouring dose.
+    """
+    from scripts.analysis.pubfig_naive_vs_trained import (
+        naive_dataset_for,
+        parse_concentration,
+    )
+
+    return naive_dataset_for(parse_concentration(str(label)))
+
+
+def naive_mean_sem(trials: np.ndarray) -> tuple[np.ndarray, np.ndarray, int]:
+    """``(mean, sem, n_trials)`` pooled over TRIALS, not over fly means.
+
+    A naive fly meets each odor twice while the trained/control arms are split
+    by presentation, so there is no presentation to align a per-fly mean on.
+    Pooling trials also avoids the mean-of-means reweighting an unbalanced fly
+    contributes -- a fly with one usable trial would otherwise carry the same
+    weight as one with four.
+    """
+    arr = np.asarray(trials, dtype=float)
+    if arr.size == 0 or arr.ndim != 2 or arr.shape[0] == 0:
+        return np.empty(0), np.empty(0), 0
+    n = int(arr.shape[0])
+    import warnings as _w
+
+    with _w.catch_warnings():
+        _w.simplefilter("ignore", RuntimeWarning)  # columns that are all-NaN
+        mean = np.nanmean(arr, axis=0)
+        sd = np.nanstd(arr, axis=0, ddof=1) if n > 1 else np.zeros(arr.shape[1])
+    sem = sd / np.sqrt(n)
+    return mean, sem, n
+
+
 def base_odor_key(label: str) -> str:
     """Bare odor name behind a display label, for colour lookup.
 
@@ -187,6 +232,60 @@ def collect_presentations(
 def _sort_key(label: str) -> tuple[str, int]:
     m = _PRESENTATION_SUFFIX.search(label)
     return (base_odor_key(label).casefold(), int(m.group().strip()) if m else 0)
+
+
+def collect_naive_trials(
+    wide_df: pd.DataFrame,
+    dataset: str,
+    odor_label: str,
+    *,
+    fps: float,
+    odor_on_s: float,
+    genotypes: Sequence[str] = (),
+) -> np.ndarray:
+    """Every naive trial of ``odor_label``, baseline-corrected, as (n_trials, T).
+
+    Both presentations pooled: the naive panel shows each odor twice and the
+    trained/control arms are split by presentation, so there is nothing to align
+    on. Returns an empty array when the panel has no rows for this odor, which
+    the caller treats as "no naive arm for this odor".
+    """
+    ds_df = wide_df[wide_df["dataset"].astype(str).str.strip() == dataset]
+    if "trial_type" in ds_df.columns:
+        ds_df = ds_df[ds_df["trial_type"].astype(str).str.strip() == "testing"]
+    if genotypes:
+        ds_df = filter_by_genotype(ds_df, genotypes)
+    if ds_df.empty:
+        return np.empty((0, 0))
+
+    dir_cols = sorted(
+        [c for c in ds_df.columns if c.startswith("dir_val_")],
+        key=lambda c: int(c.split("_")[-1]),
+    )
+    per_odor, _ = collect_presentations(
+        ds_df,
+        _canon_dataset(dataset),
+        baseline_frames=max(1, int(round(odor_on_s * fps))),
+        dir_cols=dir_cols,
+    )
+    # collect_presentations keys on the display label WITH its presentation
+    # suffix; the naive arm wants every presentation of this base odor.
+    want = base_odor_key(odor_label).casefold()
+    traces: list[np.ndarray] = []
+    for label, per_fly in per_odor.items():
+        if base_odor_key(label).casefold() != want:
+            continue
+        for arr in per_fly.values():
+            a = np.asarray(arr, dtype=float)
+            if a.ndim == 1 and a.size:
+                traces.append(a)
+    if not traces:
+        return np.empty((0, 0))
+    width = max(t.size for t in traces)
+    out = np.full((len(traces), width), np.nan)
+    for i, t in enumerate(traces):
+        out[i, : t.size] = t
+    return out
 
 
 def _prepare(
@@ -344,6 +443,13 @@ def build_parser(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
                    help="Keep only flies of this canonical fly_type "
                         "(repeatable), e.g. GR5a-Old. Genotypes are never "
                         "pooled into one mean unless you ask for several.")
+    p.add_argument("--with-naive", action="store_true", default=False,
+                   help="Also draw the naive arm (black): flies from the random "
+                        "panel run at this odor's concentration, which met the "
+                        f"odorant without ever being conditioned to it. Writes a "
+                        f"second copy of each figure under {NAIVE_SUBDIR}/. An "
+                        "odor whose label carries no concentration has no naive "
+                        "panel and is skipped rather than matched to another dose.")
     p.add_argument("--protocol", default="v2", choices=["v2", "legacy"])
     p.add_argument("--overwrite", action="store_true", default=True)
     p.add_argument("--score-mean-trace", action="store_true", default=False,
@@ -406,6 +512,12 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
                 "Excluding %d flagged flies (%d in this pair)", len(dropped), len(in_scope)
             )
             wide_df = wide_df.loc[~flagged].copy()
+
+    # Snapshot before the batch filter: --batch selects a STARVATION batch of
+    # the cohort under test, and the naive panels have their own unrelated batch
+    # numbering. Filtering naive rows by it would silently drop most of the
+    # panel and quietly change what the black line means.
+    wide_all = wide_df.copy()
 
     if args.batch is not None:
         keep = wide_df["fly"].map(batch_of) == args.batch
@@ -486,6 +598,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     per_odor_meta: dict[str, dict[str, int]] = {}
     skipped: list[str] = []
     written: list[Path] = []
+    naive_written: list[Path] = []
     wanted_odors = {str(o).casefold() for o in args.odor}
     matched_odors: set[str] = set()
 
@@ -545,6 +658,57 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             fig.savefig(out_png, dpi=DPI, bbox_inches="tight")
             LOGGER.info("Saved %s", out_png)
         plt.close(fig)
+
+        # A SECOND figure with the naive arm, in its own subfolder. Written
+        # separately rather than replacing the two-arm figure so the existing
+        # filenames keep meaning what they meant, and so an odor with no naive
+        # panel simply has no three-arm file instead of a silently two-arm one
+        # sitting among three-arm siblings.
+        if getattr(args, "with_naive", False) and not args.rig_split:
+            naive_ds = naive_dataset_for_odor(odor)
+            if naive_ds is None:
+                LOGGER.info(
+                    "  %-28s no naive panel (label carries no concentration)", odor
+                )
+            else:
+                naive_trials = collect_naive_trials(
+                    wide_all, naive_ds, odor,
+                    fps=args.fps, odor_on_s=args.odor_on_s,
+                    genotypes=args.genotype,
+                )
+                if naive_trials.size == 0:
+                    LOGGER.warning(
+                        "  %-28s naive panel %s has no rows for it", odor, naive_ds
+                    )
+                else:
+                    fig3 = _plot_training_vs_control_for_odor(
+                        odor=odor,
+                        train_per_fly=train_per_fly,
+                        ctrl_per_fly=ctrl_per_fly,
+                        fps=args.fps,
+                        odor_on_s=args.odor_on_s,
+                        odor_off_s=args.odor_off_s,
+                        ylim=None,   # the naive arm can sit outside the 2-arm range
+                        color_key=base_odor_key(odor),
+                        train_label=label_a,
+                        ctrl_label=label_b,
+                        naive_trials=naive_trials,
+                        naive_label=f"Naive ({naive_ds})",
+                    )
+                    naive_dir = args.out_dir / NAIVE_SUBDIR
+                    naive_dir.mkdir(parents=True, exist_ok=True)
+                    out3 = (
+                        naive_dir
+                        / f"{_safe_odor_filename(odor)}_trained_vs_control_vs_naive.png"
+                    )
+                    naive_written.append(out3)
+                    if args.overwrite or not out3.exists():
+                        fig3.savefig(out3, dpi=DPI, bbox_inches="tight")
+                        LOGGER.info("Saved %s", out3)
+                    plt.close(fig3)
+                    entry["naive_dataset"] = naive_ds
+                    entry["n_naive_trials"] = int(naive_trials.shape[0])
+
         per_odor_meta[odor] = entry
 
     if wanted_odors and (missing := wanted_odors - matched_odors):
@@ -554,6 +718,11 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         )
 
     prune_stale_figures(args.out_dir, written, pattern=f"*_{tag}.png")
+    if getattr(args, "with_naive", False) and not args.rig_split:
+        prune_stale_figures(
+            args.out_dir / NAIVE_SUBDIR, naive_written,
+            pattern="*_trained_vs_control_vs_naive.png",
+        )
 
     sidecar = {
         "fps": args.fps,

@@ -7,8 +7,8 @@ rebuilds the matrix heatmap from the same predictions CSV used by
 
 For each of EB-Training, Hex-Training, and Benz-Training this script
 produces the same matrix heatmap but extends the bottom bar chart to
-show **both** the training PER% (dark blue) and the corresponding
-control PER% (gray) side by side for every odor.
+show **both** the training PER% (in the odor's own palette colour) and
+the corresponding control PER% (gray) side by side for every odor.
 
 Usage::
 
@@ -67,6 +67,9 @@ from scripts.analysis.envelope_visuals import (
     should_write,
     _safe_dirname,
 )
+from scripts.analysis import odor_bar_palette as pal
+from scripts.analysis import significance_brackets
+from scripts.analysis.per_axis_labels import PERCENT_Y_LABEL
 from scripts.analysis.reaction_matrix_from_spreadsheet import (
     SpreadsheetMatrixConfig,
     _filter_trial_types,
@@ -147,15 +150,6 @@ def _sig_stars(p: float) -> str:
     if p < 0.05:
         return "*"
     return "ns"
-
-
-def _format_p_value(p: float) -> str:
-    """Render a p-value for display on the bar plot."""
-    if pd.isna(p):
-        return ""
-    if p < 0.001:
-        return "p<0.001"
-    return f"p={p:.3f}"
 
 
 def _load_raw_binary_csv(out_dir: Path, dataset: str, subdir: str | None = None) -> pd.DataFrame:
@@ -262,53 +256,20 @@ def _draw_significance_brackets(
     merged: pd.DataFrame,
     p_values: dict[tuple[int, str], float],
 ) -> None:
-    """Draw bracket + stars + p-value between each train/control bar pair."""
-    for i, (_, row) in enumerate(merged.iterrows()):
+    """Stars over the significant pairs only, clear of the % / n labels.
+
+    This used to print a bracket and a p-value over every pair, "p=1.000 ns"
+    included, and guessed the height with a fixed ``top + 22`` that regularly
+    landed on the label it was meant to clear.
+    """
+    ordered: list[float | None] = []
+    for _, row in merged.iterrows():
         if "trial_num" in row.index:
             key = (int(row["trial_num"]), str(row["odor"]))
         else:
             key = (0, str(row["odor"]))
-        p = p_values.get(key, np.nan)
-        stars = _sig_stars(p)
-        p_str = _format_p_value(p)
-        if not stars and not p_str:
-            continue
-
-        # Height of bracket: well above the taller bar's annotation
-        rate_train = float(row["rate_train"])
-        rate_ctrl = float(row["rate_ctrl"])
-        top = max(rate_train, rate_ctrl)
-
-        # Raise bracket high above annotations (% + n=X text takes ~18 units)
-        bracket_y = top + 22
-        tip_y = bracket_y - 2  # small downward ticks
-
-        x_left = x_positions[i] - bar_w / 2
-        x_right = x_positions[i] + bar_w / 2
-
-        # Horizontal line
-        ax.plot(
-            [x_left, x_left, x_right, x_right],
-            [tip_y, bracket_y, bracket_y, tip_y],
-            color="black", linewidth=0.9, clip_on=False,
-        )
-        # Stars (top) + p-value (below stars). When the comparison is not
-        # significant, just show the p-value (skips the now-redundant "ns").
-        if stars and stars != "ns":
-            ax.text(
-                x_positions[i], bracket_y + 0.5, stars,
-                ha="center", va="bottom", fontsize=8, fontweight="bold",
-            )
-            label_y = bracket_y + 0.5
-            ax.text(
-                x_positions[i], label_y + 4.0, p_str,
-                ha="center", va="bottom", fontsize=7,
-            )
-        else:
-            ax.text(
-                x_positions[i], bracket_y + 0.5, p_str,
-                ha="center", va="bottom", fontsize=7,
-            )
+        ordered.append(p_values.get(key))
+    significance_brackets.draw(ax, x_positions, bar_w, ordered, fontsize=9)
 
 
 # ---------------------------------------------------------------------------
@@ -439,6 +400,32 @@ def _load_rates_from_binary_csv(
 # Grouped bar-chart: training (dark blue) + control (gray)
 # ---------------------------------------------------------------------------
 
+def plot_training_only_bars(ax: plt.Axes, training_stats: pd.DataFrame, *, title: str) -> None:
+    """Bars for a training cohort that has no matching control dataset.
+
+    ``_rate_stats_from_binary`` reports ``rate`` as a percentage (0-100);
+    ``plot_reaction_rate_bars`` takes a fraction (0-1) and scales it itself.
+    Handing one straight to the other printed 38% as "3846%" on every dataset
+    without a control pair, so convert here.
+    """
+    from scripts.analysis.envelope_visuals import plot_reaction_rate_bars
+
+    as_fraction = training_stats.assign(
+        rate=pd.to_numeric(training_stats["rate"], errors="coerce").fillna(0.0) / 100.0
+    )
+    plot_reaction_rate_bars(ax, as_fraction, title=title)
+
+
+def _cohort_label(name: str, counts) -> str:
+    """``"Training (n=11)"`` — the count belongs in the legend when it is shared.
+
+    Same helper as ``pubfig_score_train_vs_control``; kept local so this script
+    stays importable without the pubfig module.
+    """
+    uniq = {int(n) for n in pd.Series(counts).dropna()}
+    return f"{name} (n={uniq.pop()})" if len(uniq) == 1 else name
+
+
 def plot_training_vs_control_bars(
     ax: plt.Axes,
     training_stats: pd.DataFrame,
@@ -446,8 +433,18 @@ def plot_training_vs_control_bars(
     *,
     title: str,
     p_values: dict[tuple[int, str], float] | None = None,
+    train_label: str = "Training",
+    ctrl_label: str = "Control",
 ) -> None:
-    """Side-by-side bars: dark-blue training, gray control, per odor."""
+    """Side-by-side bars: per-odor training colour, gray control.
+
+    ``rig_batch_breakdowns`` reuses this panel to compare two rigs or two
+    batches within one arm, where neither series is a control cohort — hence
+    ``train_label`` / ``ctrl_label``.
+
+    Styled like ``pubfig_score_train_vs_control`` — see that module for the
+    palette and legend conventions these panels now share.
+    """
 
     if "trial_num" in training_stats.columns and "trial_num" in control_stats.columns:
         merge_keys = ["trial_num", "odor"]
@@ -475,61 +472,63 @@ def plot_training_vs_control_bars(
     x = np.arange(n)
     bar_w = 0.35
 
-    train_color_trained = "#1a3a6b"   # dark blue (trained odor)
-    train_color_other = "#7bafd4"     # lighter blue (non-trained)
-    ctrl_color_trained = "#808080"    # dark gray (trained odor)
-    ctrl_color_other = "#c8c8c8"     # lighter gray (non-trained)
+    # The pubfig's split: the training bar carries the odor's colour, every
+    # control bar is the one shared gray. Trained/untrained no longer changes
+    # the hue — the bold x tick marks the trained odor instead.
+    train_colors = pal.training_bar_colors(merged["odor"], merged["is_trained"])
 
     bars_train = ax.bar(
         x - bar_w / 2,
         merged["rate_train"].to_numpy(float),
         width=bar_w,
-        color=[train_color_trained if bool(t) else train_color_other for t in merged["is_trained"]],
+        color=train_colors,
         edgecolor="black",
         linewidth=0.75,
-        label="Training",
     )
     bars_ctrl = ax.bar(
         x + bar_w / 2,
         merged["rate_ctrl"].to_numpy(float),
         width=bar_w,
-        color=[ctrl_color_trained if bool(t) else ctrl_color_other for t in merged["is_trained"]],
+        color=pal.CTRL_COLOR,
         edgecolor="black",
         linewidth=0.75,
-        label="Control",
     )
 
-    labels = [
-        str(odor).upper() if bool(is_trained) else str(odor)
-        for odor, is_trained in zip(merged["odor"], merged["is_trained"])
-    ]
     ax.set_xticks(x)
-    ax.set_xticklabels(labels, rotation=35, ha="right")
-    for tick, is_trained in zip(ax.get_xticklabels(), merged["is_trained"]):
+    ax.set_xticklabels([str(odor) for odor in merged["odor"]], rotation=35, ha="right")
+    for tick, odor, is_trained in zip(
+        ax.get_xticklabels(), merged["odor"], merged["is_trained"]
+    ):
         if bool(is_trained):
-            tick.set_color(train_color_trained)
+            tick.set_color(pal.trained_tick_color(odor))
             tick.set_weight("bold")
 
     # Y-axis: 0-100% with headroom for annotations + brackets
     ax.set_ylim(0.0, 110)
-    ax.set_ylabel("PER %")
+    ax.set_ylabel(PERCENT_Y_LABEL)
     ax.set_xlabel("Presented Odor")
     ax.set_title(title, fontsize=12, weight="bold")
     ax.grid(axis="y", linestyle="--", linewidth=0.6, alpha=0.35)
     ax.margins(x=0.04)
-    ax.legend(loc="upper right", fontsize=9, framealpha=0.8)
+    pal.add_training_legend(
+        ax,
+        train_colors,
+        ctrl_color=pal.CTRL_COLOR,
+        train_label=_cohort_label(train_label, merged["num_trials_train"]),
+        ctrl_label=_cohort_label(ctrl_label, merged["num_trials_ctrl"]),
+        loc="upper right",
+    )
 
     def _annotate(bars, rate_col, trials_col):
+        """Just the rate — the cohort n is in the legend."""
         for bar, (_, row) in zip(bars, merged.iterrows()):
             rate = float(row[rate_col])
-            trials = int(row[trials_col])
-            if trials == 0:
+            if int(row[trials_col]) == 0:
                 continue
-            text_y = rate + 1.5
             ax.text(
                 bar.get_x() + bar.get_width() / 2,
-                text_y,
-                f"{rate:.0f}%\n(n={trials})",
+                rate + 1.5,
+                f"{rate:.0f}%",
                 ha="center",
                 va="bottom",
                 fontsize=7.5,
@@ -923,8 +922,10 @@ def generate_training_vs_control_matrices(cfg: SpreadsheetMatrixConfig) -> None:
                         p_values=p_values if p_values else None,
                     )
                 elif not train_rate.empty:
-                    from scripts.analysis.envelope_visuals import plot_reaction_rate_bars
-                    plot_reaction_rate_bars(ax_bar, train_rate, title="Reaction Rates by Odor")
+                    plot_training_only_bars(
+                        ax_bar, train_rate,
+                        title=f"Reaction Rates – {odor_label} (Training only)",
+                    )
                 else:
                     ax_bar.text(0.5, 0.5, "No odors available for rate summary",
                                 ha="center", va="center", fontsize=11,

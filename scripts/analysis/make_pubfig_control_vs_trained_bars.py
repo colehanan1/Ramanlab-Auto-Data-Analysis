@@ -12,6 +12,15 @@ import matplotlib.pyplot as plt
 from matplotlib import font_manager
 import numpy as np
 import pandas as pd
+
+import sys
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from scripts.analysis import odor_bar_palette as pal  # noqa: E402
+from scripts.analysis.per_axis_labels import PERCENT_Y_LABEL  # noqa: E402
 from PIL import Image
 
 try:
@@ -139,6 +148,49 @@ def _load_dataset_rates(dataset: str) -> tuple[dict[str, float], int] | tuple[No
     return values, n_flies
 
 
+def draw_comparison_bars(
+    ax,
+    *,
+    labels: list[str],
+    control: list[float],
+    trained: list[float],
+    control_n: int,
+    trained_n: int,
+    control_label: str,
+    trained_label: str,
+) -> None:
+    """Control (gray) beside trained (each odor's own colour).
+
+    The trained series used to be one flat ``#1f77b4`` for every odor, which
+    made this panel the odd one out beside the reaction-matrix and score
+    figures. It now shares their palette.
+    """
+    x = np.arange(len(labels))
+    width = 0.36
+
+    trained_colors = pal.training_bar_colors(labels, [True] * len(labels))
+    ax.bar(
+        x - width / 2, control, width,
+        color=pal.CTRL_COLOR, edgecolor="black", linewidth=0.8,
+    )
+    ax.bar(
+        x + width / 2, trained, width,
+        color=trained_colors, edgecolor="black", linewidth=0.8,
+    )
+
+    ax.set_ylim(0, 100)
+    ax.set_ylabel(PERCENT_Y_LABEL, fontsize=12)
+    ax.set_xticks(x)
+    ax.set_xticklabels(labels, fontsize=12)
+    ax.tick_params(axis="y", labelsize=14)
+    pal.add_training_legend(
+        ax, trained_colors, ctrl_color=pal.CTRL_COLOR,
+        train_label=f"{trained_label} (n = {trained_n})",
+        ctrl_label=f"{control_label} (n = {control_n})",
+        loc="upper right", fontsize=14,
+    )
+
+
 def plot_comparison(
     *,
     title: str,
@@ -154,36 +206,18 @@ def plot_comparison(
     trained = [float(trained_values.get(key, 0.0)) for key, _ in BAR_ORDER]
     control = [float(control_values.get(key, 0.0)) for key, _ in BAR_ORDER]
 
-    x = np.arange(len(labels))
-    width = 0.36
-
     fig, ax = plt.subplots(figsize=(11, 6))
-    ax.bar(
-        x - width / 2,
-        control,
-        width,
-        color="#9e9e9e",
-        edgecolor="black",
-        linewidth=0.8,
-        label=f"{control_label} (n = {control_n})",
+    draw_comparison_bars(
+        ax,
+        labels=labels,
+        control=control,
+        trained=trained,
+        control_n=control_n,
+        trained_n=trained_n,
+        control_label=control_label,
+        trained_label=trained_label,
     )
-    ax.bar(
-        x + width / 2,
-        trained,
-        width,
-        color="#1f77b4",
-        edgecolor="black",
-        linewidth=0.8,
-        label=f"{trained_label} (n = {trained_n})",
-    )
-
-    ax.set_ylim(0, 100)
-    ax.set_ylabel("PER%", fontsize=12)
     ax.set_title(title, fontsize=14, weight="bold", loc="center", pad=6)
-    ax.set_xticks(x)
-    ax.set_xticklabels(labels, fontsize=12)
-    ax.tick_params(axis="y", labelsize=14)
-    ax.legend(loc="upper right", frameon=True, fontsize=14)
 
     _save_all(fig, out_path)
     plt.close(fig)

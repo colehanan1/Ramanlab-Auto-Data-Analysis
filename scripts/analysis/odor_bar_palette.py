@@ -1,11 +1,11 @@
 """One odor palette for every bar figure that draws training bars.
 
-The trace figures shade their odor windows green for Hexanol and orange for
-Apple Cider Vinegar (``make_pubfig_october_02_fly_1_testing_1_to_5.py``). The
-bar figures used to paint all training bars one dark blue, so the same odor
-looked like two different things depending on the panel. These helpers give the
-bars the trace colours; odors with no palette entry keep the original dark blue
-(trained) / light blue (untrained) split.
+The trace figures shade their odor windows green for Hexanol
+(``make_pubfig_october_02_fly_1_testing_1_to_5.py``). The bar figures used to
+paint all training bars one dark blue, so the same odor looked like two
+different things depending on the panel. These helpers give the bars the trace
+colours; odors with no palette entry keep the original dark blue (trained) /
+light blue (untrained) split.
 """
 from __future__ import annotations
 
@@ -15,13 +15,27 @@ from typing import Iterable, Sequence
 import matplotlib.patches as mpatches
 from matplotlib.legend_handler import HandlerTuple
 
-HEX_COLOR = "#6cc070"       # Hexanol: the trace figure's green
-ACV_COLOR = "#ffc685"       # Apple Cider Vinegar: the trace figure's orange
-DARK_GREEN = "#2e7d32"      # 3-Octanol
-DARKER_GREEN = "#14532d"    # Linalool
-PINK = "#e78ac3"            # Ethyl Butyrate
-CITRAL_YELLOW = "#f2d43c"   # Citral
-ISOAMYL_PURPLE = "#8e6bbf"  # Isoamyl Acetate
+# One hue per odor. 3-Octanol, Linalool and Hexanol used to be three steps of
+# one green, and Benzaldehyde had no entry at all, so four of the eight bars in
+# a panel read as the same thing. Each odor now owns a distinct hue, checked
+# with the dataviz palette validator: the worst normal-vision pair clears the
+# separation floor (ΔE 15.8) and the worst dichromat pair sits at ΔE 7.7, which
+# is legal here because every bar is named by its own x tick — colour is a
+# second channel on these figures, never the only one.
+HEX_COLOR = "#6cc070"           # Hexanol: the trace figure's green (unchanged)
+ETHYL_BUTYRATE_PINK = "#e78ac3"  # Ethyl Butyrate (unchanged)
+OCTANOL_BLUE = "#0d5c96"        # 3-Octanol   (was DARK_GREEN)
+LINALOOL_PURPLE = "#9b3fc4"     # Linalool    (was DARKER_GREEN)
+CITRAL_ORANGE = "#f2921f"       # Citral      (was CITRAL_YELLOW)
+ISOAMYL_YELLOW = "#f2d43c"      # Isoamyl Acetate — Citral's old yellow
+BENZALDEHYDE_BROWN = "#8c4a17"  # Benzaldehyde — had no entry, fell back to blue
+ACV_COLOR = "#e14b3a"           # Apple Cider Vinegar — moved off orange, which
+                                # Citral now owns and which it shares a panel
+                                # with in Hex-24-0.005, EB-Control-24-0.1 and
+                                # every RandomPanel dataset.
+YEAST_TEAL = "#0e9594"          # Sour Dough Yeast — had no entry
+
+PINK = ETHYL_BUTYRATE_PINK  # the old name; still accurate, still widely used
 
 TRAIN_COLOR = "#1a3a6b"      # dark blue: the trained odor, no palette entry
 NON_TRAIN_COLOR = "#4a7fbf"  # light blue: every other odor
@@ -30,12 +44,14 @@ CTRL_COLOR = "#b0b0b0"       # gray: control cohort
 ODOR_BAR_COLORS = {
     "hexanol": HEX_COLOR,
     "apple cider vinegar": ACV_COLOR,
-    "3-octanol": DARK_GREEN,
-    "3-octonol": DARK_GREEN,  # older spelling still in some exports
-    "linalool": DARKER_GREEN,
-    "ethyl butyrate": PINK,
-    "citral": CITRAL_YELLOW,
-    "isoamyl acetate": ISOAMYL_PURPLE,
+    "3-octanol": OCTANOL_BLUE,
+    "3-octonol": OCTANOL_BLUE,  # older spelling still in some exports
+    "linalool": LINALOOL_PURPLE,
+    "ethyl butyrate": ETHYL_BUTYRATE_PINK,
+    "citral": CITRAL_ORANGE,
+    "isoamyl acetate": ISOAMYL_YELLOW,
+    "benzaldehyde": BENZALDEHYDE_BROWN,
+    "sour dough yeast": YEAST_TEAL,
 }
 
 
@@ -79,8 +95,9 @@ def training_bar_colors(
 def trained_tick_color(odor: str) -> str:
     """Colour for the trained odor's x tick label.
 
-    The palette greens and oranges are too pale to read as text, so those fall
-    back to black and rely on bold for emphasis.
+    The palette's yellow and green are too pale to read as text, so every odor
+    with an entry falls back to black and relies on bold for emphasis; the bar
+    beside the tick is what carries the colour.
     """
     return "black" if odor_color(odor) else TRAIN_COLOR
 

@@ -92,10 +92,12 @@ class _Cfg:
         *,
         freeze_folders_before=None,
         freeze_folders_born_on_or_after=None,
+        keep_folders_born_on_or_after=None,
         overrides=None,
     ):
         self.freeze_folders_before = freeze_folders_before
         self.freeze_folders_born_on_or_after = freeze_folders_born_on_or_after
+        self.keep_folders_born_on_or_after = keep_folders_born_on_or_after
         self.dataset_overrides = dict(overrides or {})
 
 
@@ -338,3 +340,97 @@ def test_born_cutoff_changes_the_pipeline_cache_key(tmp_path):
 
     assert expectation(date(2026, 8, 11)) != expectation(date(2026, 8, 20))
     assert expectation(date(2026, 8, 11)) != expectation(None)
+
+
+# ---------------------------------------------------------------------------
+# Reopening the cohort: keep_folders_born_on_or_after
+# ---------------------------------------------------------------------------
+#
+# The birth cutoff is a half-line: everything born on or after it is frozen,
+# forever. That is wrong once a later cohort is good again -- the flies born on
+# or after 2026-08-20 are keepers, while 8/11-8/19 stay retired. One date cannot
+# say that, so a second key closes the window:
+#
+#     freeze_folders_born_on_or_after: 2026-08-11   # window opens (frozen)
+#     keep_folders_born_on_or_after:   2026-08-20   # window closes (live again)
+#
+# Frozen iff  freeze_cutoff <= born < keep_from.  Without the second key the
+# window has no end and the behaviour is exactly as before.
+
+
+def test_fly_born_on_the_keep_date_is_live_again(tmp_path):
+    """The boundary that matters: 8/20 itself is a keeper."""
+    batch = make_batch(tmp_path, "august_26_batch_1_rig_2", born="2026-08-20")
+    cfg = _Cfg(
+        freeze_folders_born_on_or_after=date(2026, 8, 11),
+        keep_folders_born_on_or_after=date(2026, 8, 20),
+    )
+    assert is_frozen_folder(cfg, "Hex-Control-24-0.1", batch) is False
+
+
+def test_fly_born_after_the_keep_date_is_live(tmp_path):
+    batch = make_batch(tmp_path, "august_26_batch_1_rig_2", born="2026-08-21")
+    cfg = _Cfg(
+        freeze_folders_born_on_or_after=date(2026, 8, 11),
+        keep_folders_born_on_or_after=date(2026, 8, 20),
+    )
+    assert is_frozen_folder(cfg, "Hex-Control-24-0.1", batch) is False
+
+
+def test_fly_born_inside_the_window_is_still_frozen(tmp_path):
+    batch = make_batch(tmp_path, "august_25_batch_2_rig_2", born="2026-08-19")
+    cfg = _Cfg(
+        freeze_folders_born_on_or_after=date(2026, 8, 11),
+        keep_folders_born_on_or_after=date(2026, 8, 20),
+    )
+    assert is_frozen_folder(cfg, "Hex-Control-24-0.1", batch) is True
+
+
+def test_fly_born_before_the_window_is_still_live(tmp_path):
+    batch = make_batch(tmp_path, "august_14_batch_1_rig_2", born="2026-08-10")
+    cfg = _Cfg(
+        freeze_folders_born_on_or_after=date(2026, 8, 11),
+        keep_folders_born_on_or_after=date(2026, 8, 20),
+    )
+    assert is_frozen_folder(cfg, "Hex-Control-24-0.1", batch) is False
+
+
+def test_keep_date_alone_freezes_nothing(tmp_path):
+    """No window opener means no window; the closer cannot freeze on its own."""
+    batch = make_batch(tmp_path, "august_25_batch_2_rig_2", born="2026-08-19")
+    cfg = _Cfg(keep_folders_born_on_or_after=date(2026, 8, 20))
+    assert is_frozen_folder(cfg, "Hex-Control-24-0.1", batch) is False
+
+
+def test_keep_date_does_not_thaw_an_explicit_folder_rule(tmp_path):
+    """The three freeze rules union. Reopening the cohort only undoes the
+    cohort rule -- a folder named outright stays frozen."""
+    batch = make_batch(tmp_path, "august_26_batch_1_rig_2", born="2026-08-21")
+    cfg = _Cfg(
+        freeze_folders_born_on_or_after=date(2026, 8, 11),
+        keep_folders_born_on_or_after=date(2026, 8, 20),
+        overrides={
+            "Hex-Control-24-0.1": _Override(
+                freeze_folders=["august_26_batch_1_rig_2"]
+            )
+        },
+    )
+    assert is_frozen_folder(cfg, "Hex-Control-24-0.1", batch) is True
+
+
+def test_unknown_birth_date_stays_live_with_a_window(tmp_path):
+    batch = make_batch(tmp_path, "may_21_batch_1_rig_2", born=None)
+    cfg = _Cfg(
+        freeze_folders_born_on_or_after=date(2026, 8, 11),
+        keep_folders_born_on_or_after=date(2026, 8, 20),
+    )
+    assert is_frozen_folder(cfg, "Hex-Control-24-0.1", batch) is False
+
+
+def test_the_shipped_config_reopens_the_cohort_at_the_keep_date():
+    """The live config must carry the window, not just the opener."""
+    import yaml
+
+    raw = yaml.safe_load(open("config/config_new.yaml", encoding="utf-8"))
+    assert raw["freeze_folders_born_on_or_after"] == dt.date(2026, 8, 11)
+    assert raw["keep_folders_born_on_or_after"] == dt.date(2026, 8, 20)

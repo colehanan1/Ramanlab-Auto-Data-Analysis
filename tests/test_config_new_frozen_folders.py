@@ -17,7 +17,7 @@ import pytest
 
 from fbpipe.config import load_settings
 from fbpipe.utils.frozen_folders import frozen_folders_for_root
-from fbpipe.utils.rig_gates import read_batch_date
+from fbpipe.utils.rig_gates import read_batch_born_date, read_batch_date
 
 DATA_ROOT = Path("/home/ramanlab/Documents/cole/Data/flys_New")
 
@@ -71,8 +71,21 @@ def test_post_repair_rig_3_folders_are_live(cfg, dataset):
     An unbounded ``*_rig_3`` glob froze august_13_batch_2_rig_3 the moment it
     was recorded, so YOLO never touched it. Datasets with no post-repair rig_3
     batch yet simply have nothing to check.
+
+    Folders retired by the COHORT rule (``freeze_folders_born_on_or_after``) are
+    not evidence of a rig_3 leak — they are frozen on purpose, by an independent
+    rule, and several post-repair rig_3 batches are also post-cutoff births. This
+    test is about the rig_3 bound only, so it judges the rig_3 rule alone.
     """
     frozen = frozen_folders_for_root(cfg, DATA_ROOT / dataset)
+    born_cut = getattr(cfg, "freeze_folders_born_on_or_after", None)
+
+    def cohort_frozen(path: Path) -> bool:
+        if born_cut is None:
+            return False
+        born = read_batch_born_date(path)
+        return born is not None and born >= born_cut
+
     swallowed = [
         p.name
         for p in sorted((DATA_ROOT / dataset).iterdir())
@@ -80,6 +93,7 @@ def test_post_repair_rig_3_folders_are_live(cfg, dataset):
         and p.name.endswith("_rig_3")
         and (read_batch_date(p) or dt.date(1970, 1, 1)) >= RIG3_CUTOFF
         and p.name in frozen
+        and not cohort_frozen(p)
     ]
     assert swallowed == [], f"{dataset} froze repaired rig_3 folders: {swallowed}"
 

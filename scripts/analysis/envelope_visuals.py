@@ -57,6 +57,8 @@ from fbpipe.odor_constants import (
 )
 from fbpipe.plot_style import apply_lab_style
 from fbpipe.utils.tables import read_table
+from scripts.analysis import odor_bar_palette
+from scripts.analysis.per_axis_labels import PERCENT_Y_LABEL
 
 apply_lab_style()
 
@@ -1438,10 +1440,15 @@ def plot_reaction_rate_bars(
     stats_df: pd.DataFrame,
     *,
     title: str,
-    ylabel: str = "PER %",
+    ylabel: str = PERCENT_Y_LABEL,
     xlabel: str | None = "Presented Odor",
 ) -> None:
-    """Plot a reaction-rate bar chart into the provided axis."""
+    """Plot a reaction-rate bar chart into the provided axis.
+
+    Styled like ``pubfig_score_train_vs_control``: each bar wears its odor's
+    palette colour, and the trained odor is marked by a bold tick rather than
+    by shouting its name in blue capitals.
+    """
 
     if stats_df.empty:
         ax.set_visible(False)
@@ -1451,9 +1458,9 @@ def plot_reaction_rate_bars(
         stats_df = stats_df.sort_values(["trial_num", "odor"], kind="mergesort").reset_index(drop=True)
 
     x = np.arange(len(stats_df))
-    colors = [
-        "tab:blue" if bool(is_trained) else "0.6" for is_trained in stats_df["is_trained"]
-    ]
+    colors = odor_bar_palette.training_bar_colors(
+        stats_df["odor"], stats_df["is_trained"]
+    )
 
     bars = ax.bar(
         x,
@@ -1463,18 +1470,15 @@ def plot_reaction_rate_bars(
         linewidth=0.75,
     )
     ax.set_xticks(x)
+    ax.set_xticklabels(
+        [str(odor) for odor in stats_df["odor"]], rotation=35, ha="right"
+    )
 
-    # Display trained odor in ALL CAPS and blue
-    labels = [
-        str(odor).upper() if bool(is_trained) else str(odor)
-        for odor, is_trained in zip(stats_df["odor"], stats_df["is_trained"])
-    ]
-    ax.set_xticklabels(labels, rotation=35, ha="right")
-
-    # Color trained odor labels blue
-    for tick, is_trained in zip(ax.get_xticklabels(), stats_df["is_trained"]):
+    for tick, odor, is_trained in zip(
+        ax.get_xticklabels(), stats_df["odor"], stats_df["is_trained"]
+    ):
         if bool(is_trained):
-            tick.set_color("tab:blue")
+            tick.set_color(odor_bar_palette.trained_tick_color(odor))
             tick.set_weight("bold")
     ax.set_ylim(0.0, 110.0)
     ax.set_ylabel(ylabel)
@@ -1486,9 +1490,8 @@ def plot_reaction_rate_bars(
 
     for bar, (_, row) in zip(bars, stats_df.iterrows()):
         rate = float(row["rate"])
-        trials = int(row["num_trials"])
         text_y = min(rate * 100.0 + 5.0, 102.0)
-        annotation = f"{rate:.0%}\n(n={trials})"
+        annotation = f"{rate:.0%}"  # the n is in the legend
         ax.text(
             bar.get_x() + bar.get_width() / 2,
             text_y,
@@ -1498,19 +1501,35 @@ def plot_reaction_rate_bars(
             fontsize=9,
         )
 
+    # The pubfig's swatch-row key. One cohort, so there is no control entry.
+    odor_bar_palette.add_training_legend(
+        ax, colors, train_label=_cohort_legend_label(stats_df), loc="upper right"
+    )
+
+
+def _cohort_legend_label(stats_df: pd.DataFrame, name: str = "Training") -> str:
+    """``"Training (n=13)"`` when every odor shares one trial count."""
+    counts = {int(n) for n in pd.Series(stats_df["num_trials"]).dropna()}
+    return f"{name} (n={counts.pop()})" if len(counts) == 1 else name
+
 
 def _style_trained_xticks(ax, labels: Sequence[str], trained_display: str, fontsize: int) -> None:
+    """Mark the trained odor's tick, the way the bar panel below it does.
+
+    These ticks head the matrix heatmap, and the bar panel in the same figure
+    marks its trained odor with a bold tick in the odor's own tick colour. This
+    used to upper-case the label and paint it ``tab:blue``, so the two halves of
+    one figure disagreed about how to say "trained" — and the blue collided with
+    3-Octanol once the palette gave it a blue of its own.
+    """
     ax.set_xticks(np.arange(len(labels)))
-    styled = []
-    for label in labels:
-        if label.strip().lower() == trained_display.lower():
-            styled.append(label.upper())
-        else:
-            styled.append(label)
-    ax.set_xticklabels(styled, rotation=35, ha="right", va="top", fontsize=fontsize)
-    for tick, label in zip(ax.get_xticklabels(), styled):
-        if label.upper() == trained_display.upper():
-            tick.set_color("tab:blue")
+    ax.set_xticklabels(
+        list(labels), rotation=35, ha="right", va="top", fontsize=fontsize
+    )
+    for tick, label in zip(ax.get_xticklabels(), labels):
+        if str(label).strip().lower() == trained_display.lower():
+            tick.set_color(odor_bar_palette.trained_tick_color(label))
+            tick.set_weight("bold")
     ax.tick_params(axis="x", pad=2)
 
 

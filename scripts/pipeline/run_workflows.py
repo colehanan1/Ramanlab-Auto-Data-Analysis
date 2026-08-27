@@ -491,6 +491,9 @@ def _freeze_fingerprint(
         freeze_folders_born_on_or_after=getattr(
             settings, "freeze_folders_born_on_or_after", None
         ),
+        keep_folders_born_on_or_after=getattr(
+            settings, "keep_folders_born_on_or_after", None
+        ),
     )
 
 
@@ -511,7 +514,11 @@ def _pipeline_expectation(settings, dataset_root: Path) -> dict[str, Any]:
     ``--thaw-all`` escape hatches invalidate the cache too -- a cache hit would
     otherwise silently neuter them.
     """
-    from fbpipe.utils.frozen_folders import born_cutoff, folder_freeze_rules
+    from fbpipe.utils.frozen_folders import (
+        born_cutoff,
+        born_keep_from,
+        folder_freeze_rules,
+    )
 
     cutoff, rules = folder_freeze_rules(
         settings,
@@ -520,6 +527,12 @@ def _pipeline_expectation(settings, dataset_root: Path) -> dict[str, Any]:
         thaw_all=getattr(settings, "_thaw_all", False),
     )
     born_cut = born_cutoff(
+        settings,
+        dataset_root.name,
+        thawed=getattr(settings, "_thawed", ()),
+        thaw_all=getattr(settings, "_thaw_all", False),
+    )
+    keep_from = born_keep_from(
         settings,
         dataset_root.name,
         thawed=getattr(settings, "_thawed", ()),
@@ -535,6 +548,9 @@ def _pipeline_expectation(settings, dataset_root: Path) -> dict[str, Any]:
         "freeze_folders_before": None if cutoff is None else str(cutoff),
         "freeze_folders_born_on_or_after": (
             None if born_cut is None else str(born_cut)
+        ),
+        "keep_folders_born_on_or_after": (
+            None if keep_from is None else str(keep_from)
         ),
     }
 
@@ -2660,6 +2676,7 @@ def main(argv: Sequence[str] | None = None) -> None:
                 reaction_prediction=True,
                 reaction_matrix=True,
                 dataset_means=True,
+                cohort_figures=True,
             ),
         )
 
@@ -3014,6 +3031,30 @@ def main(argv: Sequence[str] | None = None) -> None:
             scores_csv,
         )
 
+    # -- per-cohort PER rasters + training-AUC; needs the same predictions --
+    if scores_csv.exists():
+        cf_expected = _cohort_figures_expected(
+            analysis_cfg, settings, config_path=config_path
+        )
+        skip_cf = _should_skip(
+            settings, "cohort_figures", "analysis", cf_expected,
+            force_flag=settings.force.cohort_figures,
+        )
+        if skip_cf:
+            print(
+                "[analysis] cohort_figures cached → skipping. "
+                "Set force.cohort_figures=true to recompute."
+            )
+        else:
+            _run_cohort_figures(analysis_cfg, settings, config_path=config_path)
+            payload = dict(cf_expected, version=STATE_VERSION)
+            _write_state(settings, "cohort_figures", "analysis", payload)
+    else:
+        LOGGER.info(
+            "[analysis] cohort_figures skipped; no predictions CSV at %s",
+            scores_csv,
+        )
+
     # All figures are now rendered (combined, envelope_visuals, deferred
     # model-annotated re-renders, dataset_means). NOW copy local experiment data
     # to secured storage (and optionally delete local) — deferred to here so the
@@ -3212,9 +3253,16 @@ def _dataset_mean_traces_commands(
             cmd.extend(["--genotype", genotype])
         if bool(cfg.get("score_mean_trace", False)):
             cmd.append("--score-mean-trace")
+        # The naive arm (black): the random panel run at each odor's own
+        # concentration. Writes a second copy of every figure under
+        # Trained_vs_Control_vs_Naive/, leaving the two-arm files untouched.
+        if bool(cfg.get("with_naive", True)):
+            cmd.append("--with-naive")
         if config_path is not None:
             # Carries dataset_overrides.odor_remap, so ACV reads
             # "Isoamyl Acetate (1%)" exactly as in the reaction matrices.
+            # It is also what puts the concentration on the label, which is how
+            # each odor finds its naive panel.
             cmd.extend(["--config", str(config_path)])
         commands.append(cmd)
     return commands + conc_commands
@@ -3275,6 +3323,197 @@ def _naive_vs_trained_command(
         # labels are what pick each odor's naive panel.
         cmd.extend(["--config", str(config_path)])
     return cmd
+
+
+#: The three per-cohort figure sets, as ``(script, mode, out_dir config key)``.
+#: ``mode`` is None for the script that has no mode flag.
+_COHORT_FIGURE_SETS = (
+    ("binarized_per_rasters.py", "binary", "binarized_out_dir"),
+    ("binarized_per_rasters.py", "graded", "graded_out_dir"),
+    ("training_auc_vs_control_response.py", None, "training_auc_out_dir"),
+)
+
+
+def _cohort_figure_commands(
+    analysis_cfg: Mapping[str, Any] | None,
+    settings: Any,
+    *,
+    python_exec: str,
+    config_path: Path | None,
+) -> list[list[str]]:
+    """The per-cohort raster / training-AUC commands, one per figure set.
+
+    Pure, like ``_naive_vs_trained_command``: the caller checks for a predictions
+    CSV on disk before running any of them. Returns ``[]`` when the block is
+    absent, disabled, or names no cohorts -- an unconfigured pipeline must not
+    start rendering figures.
+
+    No ``--threshold-*`` flag is ever passed. The raster script resolves its
+    :class:`ThresholdRule` from the ``--config`` file's own wide block, which is
+    the point of the wiring: retuning the threshold in config moves the rasters,
+    the AUC columns and the red line on the trace figures together. A flag here
+    would silently pin the rasters to a stale value.
+    """
+    cfg = (analysis_cfg or {}).get("cohort_figures") or {}
+    if not cfg or not bool(cfg.get("enabled", True)):
+        return []
+
+    datasets = [str(d).strip() for d in (cfg.get("datasets") or []) if str(d).strip()]
+    if not datasets:
+        return []
+
+    training_wide = str(cfg.get("training_wide_csv", "") or "")
+    testing_wide = str(cfg.get("testing_wide_csv", "") or "")
+    predictions_csv = str(
+        cfg.get("predictions_csv")
+        or getattr(getattr(settings, "reaction_prediction", None), "output_csv", "")
+        or ""
+    )
+    if not training_wide or not testing_wide:
+        print(
+            "[analysis] cohort_figures skipped; training_wide_csv and "
+            "testing_wide_csv are both required."
+        )
+        return []
+
+    cmds: list[list[str]] = []
+    for script_name, mode, out_key in _COHORT_FIGURE_SETS:
+        out_dir = str(cfg.get(out_key, "") or "")
+        if not out_dir:
+            # One set with nowhere to write must not take the other two down.
+            print(f"[analysis] cohort_figures: {out_key} unset; skipping that set.")
+            continue
+        script = REPO_ROOT / "scripts" / "analysis" / script_name
+        cmd = [str(Path(python_exec).expanduser()), str(script)]
+
+        if script_name == "training_auc_vs_control_response.py":
+            cmd += ["--training-wide-csv", training_wide,
+                    "--testing-wide-csv", testing_wide]
+            if predictions_csv:
+                cmd += ["--predictions-csv", predictions_csv]
+        else:
+            # The raster script spells the testing table --wide-csv.
+            cmd += ["--training-wide-csv", training_wide,
+                    "--wide-csv", testing_wide,
+                    "--mode", str(mode),
+                    # Fold-change of extension over each trial's own baseline,
+                    # averaged across the fly's conditioning trials.
+                    "--sort-by", str(cfg.get("sort_by") or "ratio")]
+            if predictions_csv:
+                cmd += ["--predictions-csv", predictions_csv]
+            if config_path is not None:
+                cmd += ["--config", str(config_path)]
+
+        for dataset in datasets:
+            cmd += ["--dataset", dataset]
+        cmd += ["--out-dir", out_dir]
+        cmds.append(cmd)
+
+    # The trained arms of the same cohorts get the SAME three figure sets, on
+    # the same row ordering, so a trained figure and its control partner can be
+    # read side by side without mentally correcting for a different sort.
+    trained = [
+        str(d).strip()
+        for d in (cfg.get("trained_raster_datasets") or [])
+        if str(d).strip()
+    ]
+    if trained:
+        trained_sort = str(cfg.get("trained_sort_by") or cfg.get("sort_by") or "ratio")
+        for script_name, mode, out_key in _COHORT_FIGURE_SETS:
+            out_dir = str(cfg.get(out_key, "") or "")
+            if not out_dir:
+                continue
+            script = REPO_ROOT / "scripts" / "analysis" / script_name
+            cmd = [str(Path(python_exec).expanduser()), str(script)]
+            if script_name == "training_auc_vs_control_response.py":
+                # Valid for a trained arm too -- "does conditioning vigor
+                # predict the test response" is well posed either way. Its
+                # captions follow the arm (see that module's protocol_line), so
+                # a trained figure does not claim the odor was unpaired.
+                cmd += ["--training-wide-csv", training_wide,
+                        "--testing-wide-csv", testing_wide]
+                if predictions_csv:
+                    cmd += ["--predictions-csv", predictions_csv]
+            else:
+                cmd += ["--training-wide-csv", training_wide,
+                        "--wide-csv", testing_wide,
+                        "--mode", str(mode),
+                        "--sort-by", trained_sort]
+                if predictions_csv:
+                    cmd += ["--predictions-csv", predictions_csv]
+                if config_path is not None:
+                    cmd += ["--config", str(config_path)]
+            for dataset in trained:
+                cmd += ["--dataset", dataset]
+            cmd += ["--out-dir", out_dir]
+            cmds.append(cmd)
+    return cmds
+
+
+def _cohort_figures_expected(
+    analysis_cfg: Mapping[str, Any] | None,
+    settings: Any,
+    *,
+    config_path: Path | None,
+) -> dict[str, Any]:
+    """Cache key: the wide tables' and predictions' mtimes plus every command.
+
+    The commands carry the cohort list and the output directories, so editing
+    either invalidates. The threshold rule is NOT in this key by name -- it
+    arrives through the config file, and a config edit already rebuilds the wide
+    tables, whose mtimes are here.
+    """
+    cmds = _cohort_figure_commands(
+        analysis_cfg, settings, python_exec=sys.executable, config_path=config_path
+    )
+    cfg = (analysis_cfg or {}).get("cohort_figures") or {}
+    watched = [
+        cfg.get("training_wide_csv"),
+        cfg.get("testing_wide_csv"),
+        cfg.get("predictions_csv")
+        or getattr(getattr(settings, "reaction_prediction", None), "output_csv", ""),
+    ]
+    return {
+        "inputs": [
+            _file_mtime_key(_resolve_path(str(w))) if w else None for w in watched
+        ],
+        "commands": sorted(" ".join(c) for c in cmds),
+    }
+
+
+def _run_cohort_figures(
+    analysis_cfg: Mapping[str, Any] | None,
+    settings: Any,
+    *,
+    config_path: Path | None,
+) -> None:
+    """Binarised + graded PER rasters and training-AUC vs testing response."""
+    python_exec = getattr(
+        getattr(settings, "reaction_prediction", None), "python", ""
+    ) or sys.executable
+    cmds = _cohort_figure_commands(
+        analysis_cfg, settings, python_exec=python_exec, config_path=config_path
+    )
+    if not cmds:
+        LOGGER.info("[analysis] cohort_figures not configured; skipping.")
+        return
+
+    env = os.environ.copy()
+    env["MPLBACKEND"] = "Agg"
+    env["PYTHONPATH"] = os.pathsep.join(
+        filter(None, [str(REPO_ROOT / "src"), env.get("PYTHONPATH")])
+    )
+    for cmd in cmds:
+        LOGGER.info("[analysis] cohort_figures → %s", " ".join(cmd))
+        result = subprocess.run(cmd, env=env, capture_output=False)
+        if result.returncode != 0:
+            # One cohort set failing must not abort the remaining figure sets or
+            # the SMB copy that follows -- same stance as naive_vs_trained.
+            LOGGER.warning(
+                "[analysis] cohort_figures command exited with code %d: %s",
+                result.returncode, " ".join(cmd),
+            )
+    LOGGER.info("[analysis] cohort_figures complete.")
 
 
 def _naive_vs_trained_expected(

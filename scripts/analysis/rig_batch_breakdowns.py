@@ -81,16 +81,19 @@ from scripts.analysis.reaction_matrix_specific_flies_vs_control import (  # noqa
 from scripts.analysis.reaction_matrix_training_vs_control import (  # noqa: E402
     _RC_CONTEXT,
     _build_during_matrix,
-    _format_p_value,
     plot_training_vs_control_bars,
 )
 from scripts.analysis.score_summary import (  # noqa: E402
     REACTION_BOUNDARY_Y,
+    _cohort_n_label,
     SCORES,
     _load_scores,
     _per_fly_score_matrix,
     _score_cmap,
 )
+from scripts.analysis import odor_bar_palette  # noqa: E402
+from scripts.analysis import significance_brackets  # noqa: E402
+from scripts.analysis.per_axis_labels import SCORE_Y_LABEL  # noqa: E402
 
 # Rig 1 has no suffix. The `_rig_` prefix in the pattern is what keeps the
 # `batch_N` token from being read as a rig number.
@@ -119,10 +122,10 @@ def set_batch_labels(labels: dict[int, str]) -> None:
 def batch_label(value: int) -> str:
     return _BATCH_LABELS.get(int(value), f"Batch {value}")
 
-TRAIN_COLOR_TRAINED = "#1a3a6b"
-TRAIN_COLOR_OTHER = "#7bafd4"
-CTRL_COLOR_TRAINED = "#808080"
-CTRL_COLOR_OTHER = "#c8c8c8"
+# The bars used to split four ways on trained-ness (#1a3a6b/#7bafd4 and
+# #808080/#c8c8c8). Colour now comes from odor_bar_palette: each odor's own hue
+# for series A, the one shared gray for series B, and a bold tick for the
+# trained odor.
 
 
 # ---------------------------------------------------------------------------
@@ -315,18 +318,77 @@ def _fly_count(df: pd.DataFrame) -> int:
     return int(df[["fly", "fly_number"]].drop_duplicates().shape[0])
 
 
-def _relabel_legend(ax: plt.Axes, label_a: str, label_b: str) -> None:
-    """Rename the Training/Control legend for within-arm comparisons."""
-    handles, labels = ax.get_legend_handles_labels()
-    renamed = []
-    for lab in labels:
-        if lab == "Training":
-            renamed.append(label_a)
-        elif lab == "Control":
-            renamed.append(label_b)
-        else:
-            renamed.append(lab)
-    ax.legend(handles, renamed, loc="upper right", fontsize=9, framealpha=0.8)
+def plot_score_comparison_bars(
+    ax: plt.Axes,
+    columns: Sequence[str],
+    is_trained: Sequence[bool],
+    stats_a: pd.DataFrame,
+    stats_b: pd.DataFrame,
+    *,
+    label_a: str,
+    label_b: str,
+    title: str,
+    y_top: float | None = None,
+) -> None:
+    """Two score cohorts side by side, styled like the pubfig.
+
+    Series A takes each odor's palette colour and series B the shared gray —
+    the same split the reaction-rate panel above it uses. The two series are
+    not always Training and Control here (a rig-2-vs-rig-3 panel compares one
+    arm against itself), so the legend carries ``label_a``/``label_b`` verbatim
+    instead of assuming.
+    """
+    x = np.arange(len(columns))
+    bar_w = 0.35
+    vals_a = stats_a["mean_score"].fillna(0.0).to_numpy(float)
+    vals_b = stats_b["mean_score"].fillna(0.0).to_numpy(float)
+    err_a = stats_a["sem_score"].fillna(0.0).to_numpy(float)
+    err_b = stats_b["sem_score"].fillna(0.0).to_numpy(float)
+    if y_top is None:
+        y_top = float(
+            np.max(np.concatenate([np.maximum(vals_a + err_a, 0.0),
+                                   np.maximum(vals_b + err_b, 0.0)]))
+        ) if len(columns) else 0.0
+
+    colors_a = odor_bar_palette.training_bar_colors(columns, is_trained)
+    ax.bar(x - bar_w / 2, vals_a, width=bar_w, yerr=err_a, capsize=4,
+           color=colors_a, edgecolor="black", linewidth=0.75)
+    ax.bar(x + bar_w / 2, vals_b, width=bar_w, yerr=err_b, capsize=4,
+           color=odor_bar_palette.CTRL_COLOR, edgecolor="black", linewidth=0.75)
+
+    for xi, mean_v, sem_v in zip(x - bar_w / 2, vals_a, err_a):
+        ax.text(xi, mean_v + sem_v + 0.12, f"{mean_v:.2f}",
+                ha="center", va="bottom", fontsize=7, rotation=90)
+    for xi, mean_v, sem_v in zip(x + bar_w / 2, vals_b, err_b):
+        ax.text(xi, mean_v + sem_v + 0.12, f"{mean_v:.2f}",
+                ha="center", va="bottom", fontsize=7, rotation=90)
+
+    label_a_key, a_has_n = _cohort_n_label(label_a, stats_a["n_flies"])
+    label_b_key, b_has_n = _cohort_n_label(label_b, stats_b["n_flies"])
+
+    ax.set_xticks(x)
+    if a_has_n and b_has_n:
+        tick_labels = [str(o) for o in columns]
+    else:
+        tick_labels = [f"{o}\n(n={na}/{nb})"
+                       for o, na, nb in zip(columns, stats_a["n_flies"],
+                                            stats_b["n_flies"])]
+    ax.set_xticklabels(tick_labels, rotation=35, ha="right")
+    for tick, odor, t in zip(ax.get_xticklabels(), columns, is_trained):
+        if t:
+            tick.set_color(odor_bar_palette.trained_tick_color(odor))
+            tick.set_weight("bold")
+
+    ax.set_ylabel(SCORE_Y_LABEL)
+    ax.set_xlabel("Presented Odor")
+    ax.set_title(title, fontsize=13, weight="bold")
+    ax.axhline(y=0, color="gray", linewidth=0.5, linestyle="--")
+    ax.set_ylim(-1.5, max(6.1, y_top + 1.0))
+    ax.grid(axis="y", linestyle="--", linewidth=0.6, alpha=0.35)
+    odor_bar_palette.add_training_legend(
+        ax, colors_a, ctrl_color=odor_bar_palette.CTRL_COLOR,
+        train_label=label_a_key, ctrl_label=label_b_key, loc="upper right",
+    )
 
 
 def _write_sidecar(
@@ -398,8 +460,9 @@ def reaction_figures(
             ax_bar, rate_a, rate_b,
             title=f"Reaction Rates – {odor_label} ({comp.title_suffix})",
             p_values=p_values,
+            train_label=comp.a.label,
+            ctrl_label=comp.b.label,
         )
-        _relabel_legend(ax_bar, comp.a.label, comp.b.label)
         bar_path = out_dir / f"reaction_matrix_{stub}.png"
         fig_bar.savefig(bar_path, dpi=300, bbox_inches="tight")
         print(f"[SAVED] {bar_path}")
@@ -459,26 +522,12 @@ def _draw_score_brackets(
     stats_b: pd.DataFrame,
     p_values: dict[str, float],
 ) -> None:
-    for i, odor in enumerate(stats_a["odor"]):
-        p = p_values.get(odor, np.nan)
-        p_str = _format_p_value(p)
-        if not p_str:
-            continue
-        a = stats_a.iloc[i]
-        b = stats_b.iloc[i]
-        top = max(
-            0.0,
-            float(np.nan_to_num(a["mean_score"])) + float(a["sem_score"]),
-            float(np.nan_to_num(b["mean_score"])) + float(b["sem_score"]),
-        )
-        bracket_y = top + 0.75
-        tip_y = bracket_y - 0.08
-        ax.plot(
-            [x[i] - bar_w / 2, x[i] - bar_w / 2, x[i] + bar_w / 2, x[i] + bar_w / 2],
-            [tip_y, bracket_y, bracket_y, tip_y],
-            color="black", linewidth=0.9, clip_on=False,
-        )
-        ax.text(x[i], bracket_y + 0.05, p_str, ha="center", va="bottom", fontsize=7)
+    """Stars over the significant pairs only, clear of the value labels."""
+    significance_brackets.draw(
+        ax, x, bar_w,
+        [p_values.get(odor) for odor in stats_a["odor"]],
+        fontsize=8,
+    )
 
 
 def score_figures(
@@ -521,48 +570,12 @@ def score_figures(
 
     with plt.rc_context(_RC_CONTEXT):
         fig, ax = plt.subplots(figsize=(max(7, len(columns) * 1.0 + 2), 5.5))
-        ax.bar(
-            x - bar_w / 2, vals_a, width=bar_w, yerr=err_a, capsize=4,
-            color=[TRAIN_COLOR_TRAINED if t else TRAIN_COLOR_OTHER for t in is_trained],
-            edgecolor="black", linewidth=0.75, label=comp.a.label,
+        plot_score_comparison_bars(
+            ax, columns, is_trained, stats_a, stats_b,
+            label_a=comp.a.label, label_b=comp.b.label,
+            title=f"Mean Model Score – {label} ({comp.title_suffix})",
+            y_top=y_top,
         )
-        ax.bar(
-            x + bar_w / 2, vals_b, width=bar_w, yerr=err_b, capsize=4,
-            color=[CTRL_COLOR_TRAINED if t else CTRL_COLOR_OTHER for t in is_trained],
-            edgecolor="black", linewidth=0.75, label=comp.b.label,
-        )
-        for xi, mean_v, sem_v in zip(x - bar_w / 2, vals_a, err_a):
-            ax.text(xi, mean_v + sem_v + 0.12, f"{mean_v:.2f}",
-                    ha="center", va="bottom", fontsize=7, rotation=90)
-        for xi, mean_v, sem_v in zip(x + bar_w / 2, vals_b, err_b):
-            ax.text(xi, mean_v + sem_v + 0.12, f"{mean_v:.2f}",
-                    ha="center", va="bottom", fontsize=7, rotation=90)
-
-        labels = [
-            f"{str(o).upper() if t else str(o)}\n(n={na}/{nb})"
-            for o, t, na, nb in zip(
-                columns, is_trained, stats_a["n_flies"], stats_b["n_flies"]
-            )
-        ]
-        ax.set_xticks(x)
-        ax.set_xticklabels(labels, rotation=35, ha="right")
-        for tick, t in zip(ax.get_xticklabels(), is_trained):
-            if t:
-                tick.set_color(TRAIN_COLOR_TRAINED)
-                tick.set_weight("bold")
-
-        ax.set_ylabel("Mean Score")
-        ax.set_xlabel("Presented Odor")
-        ax.set_title(
-            f"Mean Model Score – {label} ({comp.title_suffix})",
-            fontsize=13, weight="bold",
-        )
-        ax.axhline(y=0, color="gray", linewidth=0.5, linestyle="--")
-        ax.axhline(y=REACTION_BOUNDARY_Y, color="red", linewidth=0.8, linestyle=":",
-                   alpha=0.6, label="Reaction Boundary")
-        ax.set_ylim(-1.5, max(6.1, y_top + 1.0))
-        ax.grid(axis="y", linestyle="--", linewidth=0.6, alpha=0.35)
-        ax.legend(loc="upper right", fontsize=9, framealpha=0.85)
         _draw_score_brackets(ax, x, bar_w, stats_a, stats_b, p_values)
         plt.tight_layout()
         bar_path = out_dir / f"mean_score_{comp.tag}.png"
@@ -607,12 +620,11 @@ def score_figures(
             ax.set_yticks([])
             ax.set_xticks(np.arange(len(columns)))
             ax.set_xticklabels(
-                [str(c).upper() if t else str(c) for c, t in zip(columns, is_trained)],
-                rotation=35, ha="right", fontsize=8,
+                [str(c) for c in columns], rotation=35, ha="right", fontsize=8,
             )
-            for tick, t in zip(ax.get_xticklabels(), is_trained):
+            for tick, odor, t in zip(ax.get_xticklabels(), columns, is_trained):
                 if t:
-                    tick.set_color(TRAIN_COLOR_TRAINED)
+                    tick.set_color(odor_bar_palette.trained_tick_color(odor))
                     tick.set_weight("bold")
             ax.set_title(f"{panel_label} ({mat.shape[0]} Flies)",
                          fontsize=12, weight="bold")

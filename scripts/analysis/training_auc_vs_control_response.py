@@ -1,4 +1,4 @@
-"""Does odor-only conditioning vigor predict a control fly's test response?
+"""Does conditioning vigor predict a fly's test response?
 
 Control flies get the odor during "training" with nothing paired to it. This
 module asks whether the flies that nonetheless extended most during that
@@ -184,6 +184,40 @@ ODOR_PRETTY = {
 # Parsing
 # --------------------------------------------------------------------------- #
 
+
+def is_trained_arm(dataset: object) -> bool:
+    """Whether *dataset* names a TRAINED arm rather than a control one.
+
+    Cohorts are named ``<odor>-{Training,Control}-<starvation>-<conc>``, so the
+    arm is in the name. Anything that does not clearly say "Training" reads as
+    not-trained: the captions then keep their original control wording, which is
+    the safer failure -- it never claims a pairing the protocol may not have had.
+    """
+    return "-training-" in f"-{str(dataset).strip().strip('-').lower()}-"
+
+
+def cohort_noun(dataset: object) -> str:
+    """The noun for this cohort's flies, e.g. "control" / "trained"."""
+    return "trained" if is_trained_arm(dataset) else "control"
+
+
+def protocol_line(dataset: object, odor_label: object) -> str:
+    """One sentence describing what this cohort got during conditioning.
+
+    The control wording ("presented with nothing paired to it") is a statement
+    about the protocol, and it is FALSE for a trained arm -- there the odor was
+    paired with the light. Printing it on a trained figure would be a fabricated
+    claim about how the experiment was run, so the sentence follows the arm.
+    """
+    if is_trained_arm(dataset):
+        return (
+            f"Trained cohort: {odor_label} presented during conditioning paired "
+            f"with the light stimulus."
+        )
+    return (
+        f"Control cohort: {odor_label} presented during conditioning with nothing "
+        f"paired to it."
+    )
 
 def parse_trial(label: object) -> tuple[int, str] | None:
     """``"testing_8_hexanol"`` -> ``(8, "hexanol")``; ``None`` if unparseable."""
@@ -1097,7 +1131,7 @@ def figure_simple_overview(
         top = _suptitle(
             fig,
             "Do flies that extend more during training react more at test?",
-            f"{dataset} control cohort, n = {len(table)} flies, {odor_label} throughout.  "
+            f"{dataset} {cohort_noun(dataset)} cohort, n = {len(table)} flies, {odor_label} throughout.  "
             f"Bars sort the flies into {len(order)} equal-sized groups by training "
             "extension; the bracket tests the trend over every fly individually "
             "(Spearman), not the end bars.\n"
@@ -1196,7 +1230,7 @@ def figure_trial_predictors(
             fig,
             f"Which training trial predicts the {label} test? — {dataset}",
             f"Each bar is one conditioning trial's proboscis extension (AUC-During) "
-            f"against the {label} test outcome, n = {len(table)} control flies.\n"
+            f"against the {label} test outcome, n = {len(table)} {cohort_noun(dataset)} flies.\n"
             "Taller bar = better prediction.   "
             "* p < 0.05    ** p < 0.01    *** p < 0.001    n.s. = not significant.",
         )
@@ -1389,9 +1423,8 @@ def figure_per(
         top = _suptitle(
             fig,
             f"Conditioning vigor vs whether the fly reacts — {dataset}",
-            f"Control cohort: {odor_label} presented during conditioning with nothing "
-            f"paired to it.  Each dot is one fly (n = {len(table)}); "
-            f"bar = median, spine = IQR.",
+            f"{protocol_line(dataset, odor_label)}  Each dot is one fly "
+            f"(n = {len(table)}); bar = median, spine = IQR.",
         )
         fig.tight_layout(rect=(0, 0.045, 1, top))
     return fig, stats
@@ -1515,8 +1548,8 @@ def figure_score(
         top = _suptitle(
             fig,
             f"Conditioning vigor vs how strongly the fly reacts — {dataset}",
-            f"Control cohort: {odor_label} presented during conditioning with nothing "
-            f"paired to it.  Each dot is one fly (n = {len(table)}).",
+            f"{protocol_line(dataset, odor_label)}  Each dot is one fly "
+            f"(n = {len(table)}).",
         )
         fig.tight_layout(rect=(0, 0.045, 1, top))
     return fig, stats
@@ -1608,7 +1641,7 @@ def figure_trial_matrix(
         top = _suptitle(
             fig,
             f"Which conditioning trial predicts the test response? — {dataset}",
-            f"Spearman ρ, {len(table)} control flies.  "
+            f"Spearman ρ, {len(table)} {cohort_noun(dataset)} flies.  "
             "* raw p < 0.05  ·  ** Benjamini-Hochberg q < 0.05 across the grid.  "
             "PER is binary, so its ρ is the rank-biserial correlation.",
         )
@@ -1768,7 +1801,7 @@ def figure_trial_profile(
             fig,
             f"Does the prediction build across conditioning? — {dataset}",
             f"Spearman ρ between a single conditioning trial's AUC and each testing "
-            f"outcome, {len(table)} control flies, {odor_label} throughout.",
+            f"outcome, {len(table)} {cohort_noun(dataset)} flies, {odor_label} throughout.",
         )
         fig.tight_layout(rect=(0, 0.075, 1, top))
     return fig, payload
@@ -1828,7 +1861,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
                    help="Full wide table, for testing-side AUC. Omit to skip the "
                         "AUC outcome columns.")
     p.add_argument("--dataset", action="append", required=True,
-                   help="Control dataset to analyse; repeatable.")
+                   help="Dataset to analyse (either arm); repeatable.")
     p.add_argument("--odor-token", default="",
                    help="Testing odor to score. Defaults to the conditioning odor.")
     p.add_argument("--out-dir", type=Path, required=True)

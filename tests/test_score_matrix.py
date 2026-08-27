@@ -21,6 +21,8 @@ module = importlib.util.module_from_spec(spec)
 sys.modules[spec.name] = module
 spec.loader.exec_module(module)
 
+from scripts.analysis.per_axis_labels import SCORE_Y_LABEL  # noqa: E402
+
 
 def test_score_palette_has_one_colour_per_score():
     assert module.SCORES == [-1, 0, 1, 2, 3, 4, 5]
@@ -236,7 +238,7 @@ def _render_v2(tmp_path, rows=None):
     finally:
         plt.close = real_close
     fig = next(f for f in map(plt.figure, plt.get_fignums())
-               if any(a.get_ylabel() == "Mean Score" for a in f.axes))
+               if any(a.get_ylabel() == SCORE_Y_LABEL for a in f.axes))
     return fig, out_dir
 
 
@@ -254,7 +256,7 @@ def test_v2_figure_is_written(tmp_path):
 def test_v2_figure_has_matrix_and_bar_axes(tmp_path):
     fig, _ = _render_v2(tmp_path)
     ylabels = {a.get_ylabel() for a in fig.axes}
-    assert "Mean Score" in ylabels
+    assert SCORE_Y_LABEL in ylabels
     assert any(lbl.endswith("Flies") for lbl in ylabels), "no matrix panel"
 
 
@@ -262,7 +264,7 @@ def test_matrix_and_bars_share_an_identical_x_span(tmp_path):
     """TRAP 1: fig.colorbar(ax=ax_m) shrinks only the matrix and breaks this."""
     fig, _ = _render_v2(tmp_path)
     ax_m = next(a for a in fig.axes if a.get_ylabel().endswith("Flies"))
-    ax_b = next(a for a in fig.axes if a.get_ylabel() == "Mean Score")
+    ax_b = next(a for a in fig.axes if a.get_ylabel() == SCORE_Y_LABEL)
     pm, pb = ax_m.get_position(), ax_b.get_position()
     assert pm.x0 == pytest.approx(pb.x0, abs=1e-9), "matrix/bars misaligned"
     assert pm.x1 == pytest.approx(pb.x1, abs=1e-9), "matrix/bars misaligned"
@@ -281,7 +283,7 @@ def test_bar_labels_survive_matrix_labelling(tmp_path):
     """
     fig, _ = _render_v2(tmp_path)
     ax_m = next(a for a in fig.axes if a.get_ylabel().endswith("Flies"))
-    ax_b = next(a for a in fig.axes if a.get_ylabel() == "Mean Score")
+    ax_b = next(a for a in fig.axes if a.get_ylabel() == SCORE_Y_LABEL)
     bar_texts = [t.get_text() for t in ax_b.get_xticklabels()]
     matrix_texts = [t.get_text() for t in ax_m.get_xticklabels()]
     assert any("(n=" in t for t in bar_texts), f"bar labels clobbered: {bar_texts}"
@@ -305,17 +307,20 @@ def test_matrix_carries_its_own_odor_labels_below(tmp_path):
     assert ax_m.child_axes, "matrix has no secondary axis -> odor labels missing"
     ax_lab = ax_m.child_axes[0]
     texts = [t.get_text() for t in ax_lab.get_xticklabels()]
-    assert "Hexanol" in texts, f"non-trained odor should not be uppercased: {texts}"
+    assert "Hexanol" in texts, f"odor labels missing: {texts}"
+    # The trained odor is marked by weight, not by shouting: these ticks head
+    # the bar panel below, which bolds it the same way.
     trained = [t for t in ax_lab.get_xticklabels()
-               if t.get_text() == "ETHYL BUTYRATE"]
-    assert trained, f"trained odor not uppercased on the matrix: {texts}"
-    assert trained[0].get_color() == "#1a3a6b"
+               if t.get_text() == "Ethyl Butyrate"]
+    assert trained, f"trained odor missing from the matrix: {texts}"
     assert trained[0].get_weight() == "bold"
+    assert [t for t in ax_lab.get_xticklabels()
+            if t.get_text() == "Hexanol"][0].get_weight() != "bold"
 
 
 def test_bar_y_axis_spans_the_full_score_range(tmp_path):
     fig, _ = _render_v2(tmp_path)
-    ax_b = next(a for a in fig.axes if a.get_ylabel() == "Mean Score")
+    ax_b = next(a for a in fig.axes if a.get_ylabel() == SCORE_Y_LABEL)
     assert ax_b.get_ylim() == (module.SCORE_MIN, module.SCORE_MAX)
     assert [int(t) for t in ax_b.get_yticks()] == module.SCORES
 
@@ -396,7 +401,7 @@ def test_missing_cell_renders_as_missing_colour(tmp_path):
     finally:
         plt.close = real_close
     fig = next(f for f in map(plt.figure, plt.get_fignums())
-               if any(a.get_ylabel() == "Mean Score" for a in f.axes))
+               if any(a.get_ylabel() == SCORE_Y_LABEL for a in f.axes))
     ax_m = next(a for a in fig.axes if a.get_ylabel().endswith("Flies"))
     img = ax_m.images[0]
     arr = img.get_array()
@@ -448,7 +453,7 @@ def test_legacy_figure_has_no_matrix_panel(tmp_path):
 
     assert (out_dir / "mean_score_EB-Training.png").exists()
     fig = next(f for f in map(plt.figure, plt.get_fignums())
-               if any(a.get_ylabel() == "Mean Score" for a in f.axes))
+               if any(a.get_ylabel() == SCORE_Y_LABEL for a in f.axes))
     assert not any(a.get_ylabel().endswith("Flies") for a in fig.axes), \
         "legacy figure grew a matrix panel"
 

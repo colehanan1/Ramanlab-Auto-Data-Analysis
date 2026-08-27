@@ -79,6 +79,7 @@ def build_fingerprint(
     tracking: Any,
     freeze_folders_before: Any = None,
     freeze_folders_born_on_or_after: Any = None,
+    keep_folders_born_on_or_after: Any = None,
 ) -> dict:
     """Everything that determines a dataset's rows OTHER than its raw data.
 
@@ -165,6 +166,13 @@ def build_fingerprint(
             None
             if freeze_folders_born_on_or_after is None
             else str(freeze_folders_born_on_or_after)
+        ),
+        # ...and the date that closes that cohort window, which moves folders
+        # the other way -- back into the figures.
+        "keep_folders_born_on_or_after": (
+            None
+            if keep_folders_born_on_or_after is None
+            else str(keep_folders_born_on_or_after)
         ),
         # build_wide_csv reads settings.tracking internally (envelope_combined.py:2622)
         # and derives the tracking_missing_frames / tracking_pct_missing /

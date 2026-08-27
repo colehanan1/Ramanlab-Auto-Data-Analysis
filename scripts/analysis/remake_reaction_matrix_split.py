@@ -46,6 +46,7 @@ from scripts.analysis.envelope_visuals import (  # noqa: E402
     _trained_label,
     plot_reaction_rate_bars,
 )
+from scripts.analysis.per_axis_labels import PERCENT_Y_LABEL  # noqa: E402
 
 DEFAULT_EXCLUDE: frozenset[str] = frozenset({"Benzaldehyde"})
 
@@ -186,7 +187,7 @@ def render_bars_figure(stats: pd.DataFrame) -> plt.Figure:
         ax,
         stats,
         title="Reaction Rates by Odor",
-        ylabel="Average PER Response %",
+        ylabel=PERCENT_Y_LABEL,
         xlabel=None,
     )
     return fig

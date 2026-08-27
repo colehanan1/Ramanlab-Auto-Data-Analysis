@@ -589,6 +589,7 @@ class ForceSettings:
     dataset_means: bool = True
     dataset_mean_traces: bool = True
     naive_vs_trained: bool = True
+    cohort_figures: bool = True
 
 
 @dataclass
@@ -760,6 +761,7 @@ class Settings:
     # varies per batch, so a recording cutoff cannot express a cohort. Read from
     # each batch's own ``Born (approx):`` metadata line. None = no cohort rule.
     freeze_folders_born_on_or_after: Optional[_dt.date] = None
+    keep_folders_born_on_or_after: Optional[_dt.date] = None
 
 def _get(d: Dict[str, Any], key: str, default: Any):
     return d.get(key, default)
@@ -1222,6 +1224,28 @@ def load_settings(config_path: str | Path) -> Settings:
             f"got {_raw_born_cutoff!r}."
         )
 
+    # Closes the window the cutoff above opens: flies born on or after this are
+    # keepers again. Same strictness -- a typo would silently leave the newest
+    # cohort retired.
+    _raw_born_keep = _get(data, "keep_folders_born_on_or_after", None)
+    keep_folders_born_on_or_after = _coerce_date(_raw_born_keep)
+    if _raw_born_keep is not None and keep_folders_born_on_or_after is None:
+        raise ValueError(
+            f"keep_folders_born_on_or_after must be an ISO date (YYYY-MM-DD), "
+            f"got {_raw_born_keep!r}."
+        )
+    if (
+        keep_folders_born_on_or_after is not None
+        and freeze_folders_born_on_or_after is not None
+        and keep_folders_born_on_or_after <= freeze_folders_born_on_or_after
+    ):
+        raise ValueError(
+            f"keep_folders_born_on_or_after ({keep_folders_born_on_or_after}) must "
+            f"be later than freeze_folders_born_on_or_after "
+            f"({freeze_folders_born_on_or_after}); otherwise the cohort window is "
+            f"empty and no folder is born-frozen at all."
+        )
+
     rig_gate_overrides: list[RigGateOverride] = []
     for block in data.get("rig_gate_overrides") or []:
         if not isinstance(block, dict):
@@ -1298,4 +1322,5 @@ def load_settings(config_path: str | Path) -> Settings:
         dataset_overrides=dataset_overrides,
         freeze_folders_before=freeze_folders_before,
         freeze_folders_born_on_or_after=freeze_folders_born_on_or_after,
+        keep_folders_born_on_or_after=keep_folders_born_on_or_after,
     )

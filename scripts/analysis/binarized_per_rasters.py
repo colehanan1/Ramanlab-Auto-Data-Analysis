@@ -2,9 +2,16 @@
 
 Takes the same envelope traces the per-fly figures under
 ``Raw-Training-PER-Traces/`` draw, thresholds each trial at the **same red line**
-those figures show -- ``theta = median_before + k * MAD_before`` with k = 2, the
-one-sided baseline threshold from ``envelope_visuals._baseline_theta`` -- and
-collapses each trace to 0/1 per frame.
+those figures show, and collapses each trace to 0/1 per frame.
+
+The threshold is not this module's to choose. It is read from the pipeline's own
+``analysis.combined.combined_base.wide`` block via :func:`resolve_threshold_rule`
+-- the same block that sets the AUC-* columns, the red line on the trace figures
+and the scoring filters -- so the raster and the figure beside it can only move
+together. Passing ``--threshold-k`` and friends overrides it for a one-off
+comparison; supplying neither a config nor a complete rule is an error, because
+the old behaviour (silently falling back to k = 2, no floor, no anchor) binarised
+at a different theta than everything it was displayed next to.
 
 Flies are then ranked by the mean fraction of the **odor window** spent above
 threshold, averaged over that fly's training trials. That single ordering is
@@ -65,6 +72,7 @@ for _p in (str(ROOT), str(ROOT / "src")):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
+from fbpipe.analysis.threshold import ThresholdRule  # noqa: E402
 from scripts.analysis.envelope_visuals import _compute_theta as _ev_compute_theta  # noqa: E402
 from scripts.analysis.envelope_visuals import _rolling_baseline as _ev_rolling_baseline  # noqa: E402
 from scripts.analysis.score_scale_figure import SCORE_COLORS  # noqa: E402
@@ -269,6 +277,165 @@ def baseline_location(
     return float(loc)
 
 
+#: Where the pipeline's threshold rule lives in the config. The same block
+#: ``run_workflows`` feeds to ``ThresholdRule.from_mapping`` for the wide table,
+#: so the raster and the AUC-* columns can only ever move together.
+WIDE_BLOCK_PATH = ("analysis", "combined", "combined_base", "wide")
+
+
+def resolve_threshold_rule(
+    config_path: Optional[Path],
+    *,
+    k: Optional[float] = None,
+    min_delta: Optional[float] = None,
+    anchor_s: Optional[float] = None,
+    noise_block_s: Optional[float] = None,
+    noise_pctl: Optional[float] = None,
+) -> ThresholdRule:
+    """The θ rule for this run: the pipeline's, unless a flag overrides it.
+
+    Read from the config block at :data:`WIDE_BLOCK_PATH` -- the one that drives
+    the AUC-* columns, the red line on the trace figures and the scoring filters.
+    Any argument that is not None overrides the corresponding config key, so a
+    one-off comparison run can still say ``-k 6`` without editing config.
+
+    ``anchor_s=0`` means "use the legacy whole-window estimator", matching
+    ``ThresholdRule.from_mapping``'s treatment of a non-positive anchor. There is
+    no way to spell "anchor on zero seconds", which would be an empty window.
+
+    Raises ``SystemExit`` when the config supplies no rule AND the caller named
+    no complete one. The old behaviour -- quietly falling back to k = 2, no
+    floor, no anchor -- produced rasters binarised at a different threshold than
+    the figures beside them, with nothing on the artifact to say so.
+    """
+    block: dict | None = None
+    path = Path(config_path) if config_path is not None else None
+    if path is not None and path.is_file():
+        import yaml
+
+        try:
+            data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        except Exception as exc:  # malformed YAML must not silently downgrade
+            raise SystemExit(f"[threshold] cannot read {path}: {exc}") from exc
+        node: object = data
+        for key in WIDE_BLOCK_PATH:
+            if not isinstance(node, dict):
+                node = None
+                break
+            node = node.get(key)
+        if isinstance(node, dict) and any(
+            str(key).startswith("threshold_") for key in node
+        ):
+            block = node
+
+    explicit = {
+        "threshold_std_mult": k,
+        "threshold_min_delta": min_delta,
+        "threshold_anchor_s": anchor_s,
+        "threshold_noise_block_s": noise_block_s,
+        "threshold_noise_pctl": noise_pctl,
+    }
+    given = {key: val for key, val in explicit.items() if val is not None}
+
+    if block is None:
+        # A partial override cannot stand in for the pipeline rule: the keys the
+        # caller left out would fall back to ThresholdRule's legacy defaults,
+        # which is the silent mismatch this function exists to prevent.
+        required = {
+            "threshold_std_mult", "threshold_min_delta", "threshold_anchor_s"
+        }
+        if not required.issubset(given):
+            raise SystemExit(
+                f"[threshold] no threshold rule found at "
+                f"{'.'.join(WIDE_BLOCK_PATH)} in {path}. Point --config at the "
+                f"pipeline config so the rasters binarise at the same theta as "
+                f"the AUC columns and the trace figures, or state the rule in "
+                f"full with --threshold-k, --threshold-min-delta and "
+                f"--threshold-anchor-s."
+            )
+        merged = dict(given)
+    else:
+        merged = {**block, **given}
+
+    return ThresholdRule.from_mapping(merged)
+
+
+def rule_baseline_location(
+    trace: Sequence[float], *, fps: float, baseline_until_s: float, rule: ThresholdRule
+) -> float:
+    """:func:`baseline_location` under a :class:`ThresholdRule`.
+
+    Separate from :func:`trial_theta` because the graded raster paints "% above
+    rest" and therefore needs the location on its own. Passes the rule's noise
+    settings through -- the older call site hardcoded the defaults, so a config
+    that retuned ``threshold_noise_pctl`` moved theta but not the shading.
+    """
+    t = np.asarray(trace, dtype=float)
+    if t.size == 0 or not math.isfinite(fps) or fps <= 0:
+        return float("nan")
+    end = min(int(round(baseline_until_s * fps)), t.size)
+    if end <= 0:
+        return float("nan")
+    before = t[:end]
+    if rule.anchor_s is None:
+        finite = before[np.isfinite(before)]
+        return float(np.median(finite)) if finite.size else float("nan")
+    loc, _ = _ev_rolling_baseline(
+        before, fps, float(rule.anchor_s), rule.noise_block_s, rule.noise_pctl
+    )
+    return float(loc)
+
+
+def window_area(
+    trace: Sequence[float], *, fps: float, start_s: float, end_s: float
+) -> float:
+    """Area under the envelope over ``[start_s, end_s)``, in units x seconds.
+
+    Deliberately NOT the wide table's ``AUC-Before``/``AUC-During``, which
+    integrate the part of the trace ABOVE theta. That is 0 for any fly that held
+    still through its baseline -- 40-74% of training trials here -- so their
+    ratio is undefined exactly where the fly was best behaved. Area under the
+    envelope is defined for every trial, and reads as the plain fold-change of
+    extension over baseline that "AUC during / AUC before" describes in words.
+    """
+    t = np.asarray(trace, dtype=float)
+    if t.size == 0 or not math.isfinite(fps) or fps <= 0:
+        return float("nan")
+    a = max(0, min(int(round(start_s * fps)), t.size))
+    z = max(a, min(int(round(end_s * fps)), t.size))
+    if z <= a:
+        return float("nan")
+    seg = t[a:z]
+    finite = seg[np.isfinite(seg)]
+    if finite.size == 0:
+        return float("nan")
+    return float(finite.sum() / fps)
+
+
+#: Denominator substituted for a baseline area of exactly zero, so the division
+#: still has an answer (user's call, 2026-08-26). It does not bind on the
+#: current cohorts -- the smallest baseline envelope area measured across all
+#: eight is 22.9 -- so it guards a degenerate trace rather than shaping figures.
+ZERO_BEFORE_SUBSTITUTE = 1.0
+
+
+def auc_ratio(during: float, before: float) -> float:
+    """``during / before``, with a zero baseline area standing in as 1.
+
+    Only an actual zero is substituted. A NaN baseline means the window could
+    not be computed at all -- there is nothing to substitute FOR -- so it stays
+    NaN, and :func:`fly_order` sorts that fly last rather than giving it a rank
+    derived from a broken trace. A small-but-real baseline keeps its own value:
+    this is a zero-substitute, not a floor.
+    """
+    d, b = float(during), float(before)
+    if not math.isfinite(d) or not math.isfinite(b):
+        return float("nan")
+    if b == 0.0:
+        b = ZERO_BEFORE_SUBSTITUTE
+    return d / b
+
+
 def binarize(trace: Sequence[float], theta: float) -> np.ndarray:
     """1 where the envelope is strictly above theta.
 
@@ -326,12 +493,21 @@ def build_trials(
     k: float = K_DEFAULT,
     min_delta: float = 0.0,
     anchor_s: Optional[float] = None,
+    rule: Optional[ThresholdRule] = None,
 ) -> pd.DataFrame:
     """One row per trial: its threshold, its binary trace, and its odor-window score.
 
-    ``min_delta`` and ``anchor_s`` select the baseline rule (see
-    :func:`trial_theta`). Both default off, so an existing raster is unchanged.
+    ``rule`` is the pipeline's :class:`ThresholdRule` and wins over the loose
+    ``k``/``min_delta``/``anchor_s`` arguments, which remain only for the older
+    unit tests and for callers comparing two thresholds by hand. Prefer the rule:
+    it is the only path that honours ``noise_block_s``/``noise_pctl``.
     """
+    if rule is None:
+        rule = ThresholdRule(
+            std_mult=float(k),
+            min_delta=float(min_delta),
+            anchor_s=None if anchor_s is None else float(anchor_s),
+        )
     want_ds = str(dataset).strip().casefold()
     df = wide_df[wide_df["dataset"].astype(str).str.strip().str.casefold() == want_ds]
     if "trial_type" in df.columns:
@@ -373,16 +549,13 @@ def build_trials(
             LOGGER.warning("Skipping %s %s: no odor window", r["fly"], r["trial_label"])
             continue
 
-        theta = trial_theta(
-            trace,
-            fps=fps,
-            baseline_until_s=on_s,
-            k=k,
-            min_delta=min_delta,
-            anchor_s=anchor_s,
-        )
-        baseline_loc = baseline_location(
-            trace, fps=fps, baseline_until_s=on_s, anchor_s=anchor_s
+        theta = rule.theta(trace, fps=fps, baseline_until_s=on_s)
+        # Envelope-area AUCs, for the fold-change row ordering. See window_area
+        # for why these are not the wide table's threshold-relative AUC columns.
+        before_area = window_area(trace, fps=fps, start_s=0.0, end_s=on_s)
+        during_area = window_area(trace, fps=fps, start_s=on_s, end_s=off_s)
+        baseline_loc = rule_baseline_location(
+            trace, fps=fps, baseline_until_s=on_s, rule=rule
         )
         binary = binarize(trace, theta)
         # Magnitude above the resting position, kept only where the trace cleared
@@ -417,6 +590,9 @@ def build_trials(
             "graded": graded,
             "trace": trace,
             "auc_during": float(pd.to_numeric(r.get("AUC-During"), errors="coerce")),
+            "auc_before_raw": before_area,
+            "auc_during_raw": during_area,
+            "auc_ratio": auc_ratio(during_area, before_area),
             "n_ones_odor": int(binary[a:z].sum()) if z > a else 0,
             "n_frames_odor": int(z - a) if z > a else 0,
             "odor_fraction": frac,
@@ -437,7 +613,28 @@ def build_trials(
 SORT_KEYS = {
     "binary": "odor_fraction",   # fraction of the odor window above theta
     "auc": "auc_during",         # AUC-During, straight from the wide table
+    # No backing column: rows are shuffled, not ranked. For a TRAINED arm the
+    # conditioning trials were paired with light, so PER during training is
+    # partly the light-evoked response rather than a trait of the fly --
+    # ordering the testing rows by it would draw a gradient the data need not
+    # contain. See RANDOM_SORT.
+    "random": None,
+    # Fold-change of extension over that trial's own baseline, averaged over a
+    # fly's conditioning trials. Preferred over bare AUC-During for the control
+    # arms: it asks "how much more than this fly's own resting level", which is
+    # comparable across flies of different size and framing.
+    "ratio": "auc_ratio",
+    # The same quantity on the FIRST trained-odor exposure only. For a TRAINED
+    # arm a mean across conditioning trials measures the conditioning rather
+    # than the animal -- by trial 6 the fly has been trained.
+    "ratio_first": "auc_ratio",
 }
+
+#: Sort keys scored on one trial rather than the mean of a fly's trials.
+FIRST_TRIAL_SORTS = frozenset({"ratio_first"})
+
+#: The sort key that imposes no ranking.
+RANDOM_SORT = "random"
 
 
 def fly_scores(training_trials: pd.DataFrame, by: str = "binary") -> dict[str, float]:
@@ -448,20 +645,75 @@ def fly_scores(training_trials: pd.DataFrame, by: str = "binary") -> dict[str, f
     """
     if by not in SORT_KEYS:
         raise ValueError(f"unknown sort key {by!r}; expected one of {sorted(SORT_KEYS)}")
+    # A shuffled order has no magnitude behind it. Returning one anyway would
+    # put a number beside every row and imply the rows were ranked after all.
+    if by == RANDOM_SORT:
+        return {}
     if training_trials.empty:
         return {}
     col = SORT_KEYS[by]
+    if by in FIRST_TRIAL_SORTS:
+        # First conditioning trial per fly, by trial index -- not row order,
+        # which is only incidentally sorted.
+        first = (
+            training_trials.sort_values("trial_index")
+            .groupby("fly_id", as_index=True)[col]
+            .first()
+        )
+        return {str(k): float(v) for k, v in first.items()}
     g = training_trials.groupby("fly_id")[col].mean()
     return {str(k): float(v) for k, v in g.items()}
 
 
-def fly_order(training_trials: pd.DataFrame, by: str = "binary") -> list[str]:
+def fly_order_rows(
+    order: Sequence[str], scores: Optional[dict[str, float]]
+) -> pd.DataFrame:
+    """The ``<dataset>_fly_order.csv`` table for a row order.
+
+    ``scores`` may be empty or partial: a random order has no per-fly score at
+    all, and indexing it unconditionally raised KeyError *after* both figures had
+    been written, leaving a half-finished cohort on disk. A missing score is NaN
+    -- the rank and the fly id are the load-bearing columns.
+    """
+    lookup = scores or {}
+    return pd.DataFrame({
+        "rank": range(1, len(order) + 1),
+        "fly_id": list(order),
+        "mean_training_odor_fraction": [
+            lookup.get(f, float("nan")) for f in order
+        ],
+    })
+
+
+def fly_order(
+    training_trials: pd.DataFrame,
+    by: str = "binary",
+    seed: Optional[str] = None,
+) -> list[str]:
     """Fly ids, most responsive during conditioning first.
 
     Ties break on the fly id so the row order is reproducible across runs and
     across the training/testing figures. A NaN score sorts last rather than
     silently leading.
+
+    ``by="random"`` shuffles instead of ranking. The shuffle is SEEDED -- from
+    ``seed`` (pass the dataset name) or from a fixed constant -- because an
+    unseeded shuffle would redraw a different figure on every pipeline run, and
+    the training and testing panels of one cohort would stop agreeing about
+    which row is which fly.
     """
+    if by == RANDOM_SORT:
+        if training_trials.empty:
+            return []
+        # Sorted first so the shuffle starts from a deterministic sequence:
+        # groupby order is an implementation detail and must not leak in.
+        ids = sorted({str(f) for f in training_trials["fly_id"]})
+        rng = np.random.default_rng(
+            abs(hash(("binarized_per_rasters", str(seed)))) % (2**32)
+        )
+        rng.shuffle(ids)
+        return list(ids)
+
     scores = fly_scores(training_trials, by=by)
     return sorted(
         scores,
@@ -621,11 +873,27 @@ class Panel:
     rank: int = 1
 
 
+def trained_odor(training_trials: pd.DataFrame) -> Optional[str]:
+    """The CS, read off the conditioning trials -- they are all the trained odor.
+
+    Derived from the data rather than parsed out of the dataset name, so it is
+    right for both arms of a cohort and for a dataset whose name does not spell
+    its odor. None when there are no training trials to read.
+    """
+    if training_trials is None or training_trials.empty:
+        return None
+    if "odor" not in training_trials.columns:
+        return None
+    modes = training_trials["odor"].mode()
+    return str(modes.iloc[0]) if not modes.empty else None
+
+
 def testing_panels(
     testing_trials: pd.DataFrame,
     *,
     exclude_odors: Sequence[str] = DEFAULT_EXCLUDE_ODORS,
     dataset: Optional[str] = None,
+    trained: Optional[str] = None,
 ) -> list[Panel]:
     """One panel per odor, splitting an odor that is presented more than once.
 
@@ -666,12 +934,24 @@ def testing_panels(
                   median_index=float(g["trial_index"].median()), odor=str(odor),
                   rank=int(rank))
         )
-    # Group key: the odor's earliest panel. Sorting on that keeps every
-    # presentation of one odor contiguous.
-    first = {}
-    for p in panels:
-        first[p.odor] = min(first.get(p.odor, p.median_index), p.median_index)
-    panels.sort(key=lambda p: (first[p.odor], p.odor, p.rank))
+    # A FIXED order: the trained odor's presentations first (1 then 2), then
+    # every other odor alphanumerically by the label the reader actually sees.
+    #
+    # Not by median trial index, which is what this used to do. Testing trials
+    # 2-7 are randomised per fly, so the median index of an odor depends on the
+    # draw a particular cohort happened to get -- which meant a control figure
+    # and its trained partner could put different odors in column N, and the two
+    # could not be read side by side. Name order does not move.
+    cs = str(trained).strip().casefold() if trained else None
+
+    def key(p: Panel) -> tuple[int, str, int]:
+        is_cs = 0 if (cs and str(p.odor).strip().casefold() == cs) else 1
+        # The CS group sorts by presentation only, so "1" precedes "2"; the rest
+        # sort on the displayed label, which is what "alphanumeric" means to a
+        # reader looking at the column headings.
+        return (is_cs, "" if is_cs == 0 else p.label, p.rank)
+
+    panels.sort(key=key)
     return panels
 
 
@@ -874,17 +1154,25 @@ def _figure(
 _SORT_BLURB = {
     "binary": "the mean fraction of the odor window spent above θ",
     "auc": "mean AUC-During",
+    "random": "no ranking — rows are in random order",
+    "ratio": "mean AUC-During / AUC-Before (fold-change over each trial's own baseline)",
+    "ratio_first": (
+        "AUC-During / AUC-Before on the FIRST trained-odor exposure"
+    ),
 }
 
 
 def figure_training(
     training_trials: pd.DataFrame, order: Sequence[str], *, dataset: str,
-    k: float = K_DEFAULT, mode: Mode = BINARY_MODE, sort_by: str = "binary", **kw,
+    k: float = K_DEFAULT, mode: Mode = BINARY_MODE, sort_by: str = "binary",
+    rule_text: Optional[str] = None, **kw,
 ) -> tuple[plt.Figure, dict]:
     scores = fly_scores(training_trials, by=sort_by)
     if mode.key == "binary":
         what = "Binarised PER"
-        rule = (f"  θ = median$_{{before}}$ + {k:g}·MAD$_{{before}}$, per trial.")
+        rule = rule_text or (
+            f"  θ = median$_{{before}}$ + {k:g}·MAD$_{{before}}$, per trial."
+        )
     elif mode.key == "graded":
         what = "PER above baseline"
         rule = (
@@ -899,8 +1187,15 @@ def figure_training(
         mode=mode,
         title=f"{what} across conditioning — {dataset}",
         subtitle=(
-            f"Each row is one fly ({len(order)} flies), sorted top-to-bottom by "
-            f"{_SORT_BLURB.get(sort_by, sort_by)} across all training trials.{rule}"
+            (
+                f"Each row is one fly ({len(order)} flies), in random order — "
+                f"rows are NOT ranked.{rule}"
+            )
+            if sort_by == RANDOM_SORT else
+            (
+                f"Each row is one fly ({len(order)} flies), sorted top-to-bottom by "
+                f"{_SORT_BLURB.get(sort_by, sort_by)} across all training trials.{rule}"
+            )
         ),
         **kw,
     )
@@ -910,7 +1205,7 @@ def figure_testing(
     testing_trials: pd.DataFrame, order: Sequence[str], *, dataset: str,
     k: float = K_DEFAULT, scores: Optional[dict[str, float]] = None,
     exclude_odors: Sequence[str] = DEFAULT_EXCLUDE_ODORS,
-    mode: Mode = BINARY_MODE, sort_by: str = "binary", **kw,
+    mode: Mode = BINARY_MODE, sort_by: str = "binary", trained: Optional[str] = None, **kw,
 ) -> tuple[plt.Figure, dict]:
     dropped = sorted({
         odor_display(o, dataset)
@@ -923,14 +1218,26 @@ def figure_testing(
         "graded": "PER above baseline",
     }.get(mode.key, "Proboscis extension")
     return _figure(
-        testing_panels(testing_trials, exclude_odors=exclude_odors, dataset=dataset),
+        testing_panels(testing_trials, exclude_odors=exclude_odors,
+                       dataset=dataset, trained=trained),
         order, dataset=dataset, scores=scores, mode=mode,
         title=f"{what} at test, by odor — {dataset}",
         subtitle=(
-            "Same fly order as the training figure — row N is the same fly in both, "
-            f"sorted by {_SORT_BLURB.get(sort_by, sort_by)} during training.  "
-            "Panels are keyed on the odor, not the trial index: testing trials 2–7 are "
-            f"randomised per fly.{note}"
+            (
+                "Same fly order as the training figure — row N is the same fly in "
+                "both. Rows are in random order, NOT ranked: this cohort's "
+                "conditioning trials were paired with light, so training PER is not "
+                "a neutral trait to rank testing rows by.  "
+                "Panels are keyed on the odor, not the trial index: testing trials "
+                f"2–7 are randomised per fly.{note}"
+            )
+            if sort_by == RANDOM_SORT else
+            (
+                "Same fly order as the training figure — row N is the same fly in both, "
+                f"sorted by {_SORT_BLURB.get(sort_by, sort_by)} during training.  "
+                "Panels are keyed on the odor, not the trial index: testing trials 2–7 are "
+                f"randomised per fly.{note}"
+            )
         ),
         **kw,
     )
@@ -1128,7 +1435,7 @@ def figure_training_continuous_heatmap(
 def figure_testing_continuous_heatmap(
     testing_trials: pd.DataFrame, order: Sequence[str], *, dataset: str,
     exclude_odors: Sequence[str] = DEFAULT_EXCLUDE_ODORS,
-    mode: Mode = ENVELOPE_MODE, sort_by: str = "auc", row_gap_px: int = 2, **kw,
+    mode: Mode = ENVELOPE_MODE, sort_by: str = "auc", row_gap_px: int = 2, trained: Optional[str] = None, **kw,
 ) -> tuple[plt.Figure, dict]:
     dropped = sorted({
         odor_display(o, dataset)
@@ -1137,7 +1444,8 @@ def figure_testing_continuous_heatmap(
     }) if not testing_trials.empty else []
     note = f"  {', '.join(dropped)} not shown." if dropped else ""
     return _continuous_heatmap_figure(
-        testing_panels(testing_trials, exclude_odors=exclude_odors, dataset=dataset),
+        testing_panels(testing_trials, exclude_odors=exclude_odors,
+                       dataset=dataset, trained=trained),
         order, dataset=dataset, mode=mode, row_gap_px=row_gap_px,
         title=f"Testing proboscis extension timeline by odor — {dataset}",
         subtitle=(
@@ -1331,7 +1639,7 @@ def figure_training_stacked_heatmap(
 def figure_testing_stacked_heatmap(
     testing_trials: pd.DataFrame, order: Sequence[str], *, dataset: str,
     exclude_odors: Sequence[str] = DEFAULT_EXCLUDE_ODORS,
-    mode: Mode = ENVELOPE_MODE, sort_by: str = "auc", row_gap_px: int = 2, **kw,
+    mode: Mode = ENVELOPE_MODE, sort_by: str = "auc", row_gap_px: int = 2, trained: Optional[str] = None, **kw,
 ) -> tuple[plt.Figure, dict]:
     dropped = sorted({
         odor_display(o, dataset)
@@ -1340,7 +1648,8 @@ def figure_testing_stacked_heatmap(
     }) if not testing_trials.empty else []
     note = f"  {', '.join(dropped)} not shown." if dropped else ""
     return _stacked_heatmap_figure(
-        testing_panels(testing_trials, exclude_odors=exclude_odors, dataset=dataset),
+        testing_panels(testing_trials, exclude_odors=exclude_odors,
+                       dataset=dataset, trained=trained),
         order, dataset=dataset, mode=mode, row_gap_px=row_gap_px,
         title=f"Testing proboscis extension stacked by fly — {dataset}",
         subtitle=(
@@ -1385,7 +1694,8 @@ def _save(fig: plt.Figure, out_dir: Path, stem: str, *, svg: bool = True) -> Non
     plt.close(fig)
 
 
-def main(argv: Optional[Sequence[str]] = None) -> None:
+def _build_arg_parser() -> argparse.ArgumentParser:
+    """The CLI, split out of ``main`` so the flags can be unit-tested."""
     p = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
@@ -1396,8 +1706,10 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
                    help="Restrict to the flies the behavioural figures keep.")
     p.add_argument("--dataset", action="append", required=True)
     p.add_argument("--out-dir", type=Path, required=True)
-    p.add_argument("-k", "--threshold-k", type=float, default=K_DEFAULT,
-                   help="θ = median_before + k·MAD_before (default 2, matching the "
+    p.add_argument("-k", "--threshold-k", type=float, default=None,
+                   help="Override the config's threshold_std_mult. Omit to use the "
+                        "pipeline rule from --config. Historic help follows: "
+                        "θ = median_before + k·MAD_before (was 2, matching the "
                         "red line in Raw-Training-PER-Traces).")
     p.add_argument("--sort-by", choices=tuple(SORT_KEYS), default="binary",
                    help="Row ordering for the binary raster, computed on the "
@@ -1406,11 +1718,21 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
                         "AUC-During, which is what the heatmap uses and is "
                         "independent of θ -- so the row order stops moving when the "
                         "threshold rule changes.")
-    p.add_argument("--threshold-min-delta", type=float, default=0.0,
+    p.add_argument("--sort-seed", type=str, default=None,
+                   help="Seed for --sort-by random. Defaults to the dataset name, so "
+                        "a rerun redraws the same figure and the training and testing "
+                        "panels agree on which row is which fly.")
+    p.add_argument("--threshold-min-delta", type=float, default=None,
                    help="Floor on how far above the baseline θ may sit, in units of "
                         "that fly's own full extension range (dir_val is normalised "
                         "per fly). Guards the flat-baseline case where the MAD "
                         "collapses. Calibrated optimum 5. 0 disables.")
+    p.add_argument("--threshold-noise-block-s", type=float, default=None,
+                   help="Override the config's threshold_noise_block_s (rolling "
+                        "window, seconds, used only under the anchored rule).")
+    p.add_argument("--threshold-noise-pctl", type=float, default=None,
+                   help="Override the config's threshold_noise_pctl (percentile of "
+                        "rolling sigma that sets the scale).")
     p.add_argument("--threshold-anchor-s", type=float, default=None,
                    help="Anchor θ on the median of the last N seconds before odor "
                         "onset instead of the whole baseline, with the noise scale a "
@@ -1448,6 +1770,11 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
                         "(default 2).")
     p.add_argument("--no-svg", action="store_true")
     p.add_argument("--verbose", action="store_true")
+    return p
+
+
+def main(argv: Optional[Sequence[str]] = None) -> None:
+    p = _build_arg_parser()
     args = p.parse_args(argv)
 
     logging.basicConfig(
@@ -1464,6 +1791,19 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     else:
         LOGGER.warning("No config at %s — odor labels stay unremapped", args.config)
 
+    # One rule for the whole run, resolved from the same config block that drives
+    # the AUC-* columns and the red line on the trace figures. Logged because it
+    # is the single number that decides what "reacted" means in these figures.
+    rule = resolve_threshold_rule(
+        args.config,
+        k=args.threshold_k,
+        min_delta=args.threshold_min_delta,
+        anchor_s=args.threshold_anchor_s,
+        noise_block_s=args.threshold_noise_block_s,
+        noise_pctl=args.threshold_noise_pctl,
+    )
+    LOGGER.info("threshold rule: %s", rule.describe())
+
     from fbpipe.analysis.traces import read_wide_table
 
     training_wide = read_wide_table(args.training_wide_csv)
@@ -1476,16 +1816,18 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         )
         train = build_trials(
             training_wide, dataset=dataset, trial_type="training",
-            keep=keep, k=args.threshold_k,
-            min_delta=args.threshold_min_delta, anchor_s=args.threshold_anchor_s,
+            keep=keep, rule=rule,
         )
         if train.empty:
             LOGGER.warning("No training trials for %s — skipping", dataset)
             continue
+        # The CS, read off this cohort's own conditioning trials. Fixes the
+        # panel order so a control figure and its trained partner put the same
+        # odor in the same column.
+        cs_odor = trained_odor(train)
         test = build_trials(
             testing_wide, dataset=dataset, trial_type="testing",
-            keep=keep, k=args.threshold_k,
-            min_delta=args.threshold_min_delta, anchor_s=args.threshold_anchor_s,
+            keep=keep, rule=rule,
         )
 
         ds_dir = args.out_dir / dataset.replace("/", "_")
@@ -1495,23 +1837,36 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         metadata: dict[str, object] = {
             "mode": args.mode,
             "sort_by": args.sort_by,
-            "threshold_k": args.threshold_k,
-            "threshold_min_delta": args.threshold_min_delta,
-            "threshold_anchor_s": args.threshold_anchor_s,
-            "threshold": "median_before + k * 1.4826 * MAD_before (upward only)",
+            "sort_seed": (
+                (args.sort_seed or dataset) if args.sort_by == RANDOM_SORT else None
+            ),
+            "threshold_k": rule.std_mult,
+            "threshold_min_delta": rule.min_delta,
+            "threshold_anchor_s": rule.anchor_s,
+            "threshold_noise_block_s": rule.noise_block_s,
+            "threshold_noise_pctl": rule.noise_pctl,
+            "threshold": rule.describe(),
+            "threshold_source": str(args.config),
         }
 
         if args.mode in {"binary", "both"}:
-            order = fly_order(train, by=args.sort_by)
+            order = fly_order(train, by=args.sort_by, seed=args.sort_seed or dataset)
             scores = fly_scores(train, by=args.sort_by)
-            LOGGER.info(
-                "%s binary: %d flies, %d training / %d testing trials; top fly %s "
-                "(%.2f), bottom %s (%.2f)",
-                dataset, len(order), len(train), len(test),
-                order[0], scores[order[0]], order[-1], scores[order[-1]],
-            )
+            if scores and order:
+                LOGGER.info(
+                    "%s binary: %d flies, %d training / %d testing trials; top fly %s "
+                    "(%.2f), bottom %s (%.2f)",
+                    dataset, len(order), len(train), len(test),
+                    order[0], scores[order[0]], order[-1], scores[order[-1]],
+                )
+            else:
+                LOGGER.info(
+                    "%s binary: %d flies, %d training / %d testing trials; "
+                    "rows unranked (sort_by=%s)",
+                    dataset, len(order), len(train), len(test), args.sort_by,
+                )
             fig, meta_train = figure_training(
-                train, order, dataset=dataset, k=args.threshold_k,
+                train, order, dataset=dataset, k=rule.std_mult,
                 mode=BINARY_MODE, sort_by=args.sort_by, **win
             )
             _save(fig, ds_dir, f"{stem}_training_raster", svg=svg)
@@ -1519,26 +1874,24 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             meta_test = None
             if not test.empty:
                 fig, meta_test = figure_testing(
-                    test, order, dataset=dataset, k=args.threshold_k, scores=scores,
-                    exclude_odors=exclude, mode=BINARY_MODE, sort_by=args.sort_by, **win
+                    test, order, dataset=dataset, k=rule.std_mult, scores=scores,
+                    exclude_odors=exclude, mode=BINARY_MODE, sort_by=args.sort_by, **win,
+                    trained=cs_odor,
                 )
                 _save(fig, ds_dir, f"{stem}_testing_raster", svg=svg)
             else:
                 LOGGER.warning("No testing trials for %s", dataset)
 
-            rank = pd.DataFrame({
-                "rank": range(1, len(order) + 1),
-                "fly_id": order,
-                "mean_training_odor_fraction": [scores[f] for f in order],
-            })
-            rank.to_csv(ds_dir / f"{stem}_fly_order.csv", index=False)
+            fly_order_rows(order, scores).to_csv(
+                ds_dir / f"{stem}_fly_order.csv", index=False
+            )
             # Backward-compatible keys for the original binary-only workflow.
             metadata["training"] = meta_train
             metadata["testing"] = meta_test
             metadata["binary"] = {"training": meta_train, "testing": meta_test}
 
         if args.mode == "graded":
-            order = fly_order(train, by=args.sort_by)
+            order = fly_order(train, by=args.sort_by, seed=args.sort_seed or dataset)
             scores = fly_scores(train, by=args.sort_by)
             if str(args.graded_vmax).strip().lower().startswith("p"):
                 pct = float(str(args.graded_vmax).strip()[1:] or 99.0)
@@ -1552,7 +1905,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
                         dataset, len(order), vmax)
 
             fig, meta_train = figure_training(
-                train, order, dataset=dataset, k=args.threshold_k,
+                train, order, dataset=dataset, k=rule.std_mult,
                 mode=gmode, sort_by=args.sort_by, **win
             )
             _save(fig, ds_dir, f"{stem}_training_graded", svg=svg)
@@ -1560,16 +1913,15 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             meta_test = None
             if not test.empty:
                 fig, meta_test = figure_testing(
-                    test, order, dataset=dataset, k=args.threshold_k, scores=scores,
-                    exclude_odors=exclude, mode=gmode, sort_by=args.sort_by, **win
+                    test, order, dataset=dataset, k=rule.std_mult, scores=scores,
+                    exclude_odors=exclude, mode=gmode, sort_by=args.sort_by, **win,
+                    trained=cs_odor,
                 )
                 _save(fig, ds_dir, f"{stem}_testing_graded", svg=svg)
 
-            pd.DataFrame({
-                "rank": range(1, len(order) + 1),
-                "fly_id": order,
-                "sort_score": [scores[f] for f in order],
-            }).to_csv(ds_dir / f"{stem}_fly_order.csv", index=False)
+            fly_order_rows(order, scores).rename(
+                columns={"mean_training_odor_fraction": "sort_score"}
+            ).to_csv(ds_dir / f"{stem}_fly_order.csv", index=False)
             metadata["graded"] = {
                 "training": meta_train, "testing": meta_test, "vmax": float(vmax),
             }
@@ -1585,7 +1937,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
                 order[0], scores[order[0]], order[-1], scores[order[-1]],
             )
             fig, meta_train = figure_training(
-                train, order, dataset=dataset, k=args.threshold_k,
+                train, order, dataset=dataset, k=rule.std_mult,
                 mode=heatmap_mode, sort_by="auc", **win
             )
             _save(fig, ds_dir, f"{stem}_training_heatmap", svg=svg)
@@ -1605,20 +1957,23 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             meta_test_stack = None
             if not test.empty:
                 fig, meta_test = figure_testing(
-                    test, order, dataset=dataset, k=args.threshold_k, scores=scores,
-                    exclude_odors=exclude, mode=heatmap_mode, sort_by="auc", **win
+                    test, order, dataset=dataset, k=rule.std_mult, scores=scores,
+                    exclude_odors=exclude, mode=heatmap_mode, sort_by="auc", **win,
+                    trained=cs_odor,
                 )
                 _save(fig, ds_dir, f"{stem}_testing_heatmap", svg=svg)
                 fig, meta_test_timeline = figure_testing_continuous_heatmap(
                     test, order, dataset=dataset, exclude_odors=exclude,
                     mode=heatmap_mode, sort_by="auc", row_gap_px=args.fly_gap_px,
                     **win,
+                    trained=cs_odor,
                 )
                 _save(fig, ds_dir, f"{stem}_testing_heatmap_timeline", svg=svg)
                 fig, meta_test_stack = figure_testing_stacked_heatmap(
                     test, order, dataset=dataset, exclude_odors=exclude,
                     mode=heatmap_mode, sort_by="auc", row_gap_px=args.fly_gap_px,
                     **win,
+                    trained=cs_odor,
                 )
                 _save(fig, ds_dir, f"{stem}_testing_heatmap_stack", svg=svg)
             else:

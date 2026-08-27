@@ -265,11 +265,23 @@ def test_repeated_odor_presentations_sit_next_to_each_other():
     assert labels.index("Hexanol 2") == labels.index("Hexanol 1") + 1
 
 
-def test_testing_panels_lead_with_the_earliest_odor():
+def test_testing_panels_lead_with_the_trained_odor():
+    """Panel order is fixed: the CS's presentations first, then the rest
+    alphanumerically. It used to key on median trial index, but testing trials
+    2-7 are randomised per fly, so that put different odors in column N for a
+    control cohort and its trained partner and the two could not be compared."""
+    train = mod.build_trials(_training_frame(), dataset=DATASET, trial_type="training")
+    t = mod.build_trials(_testing_frame(), dataset=DATASET, trial_type="testing")
+    labels = [p.label for p in mod.testing_panels(t, trained=mod.trained_odor(train))]
+    assert labels[0] == "Hexanol 1"
+    assert labels[1] == "Hexanol 2"
+    assert labels[2:] == sorted(labels[2:])
+
+
+def test_testing_panels_are_alphanumeric_without_a_trained_odor():
     t = mod.build_trials(_testing_frame(), dataset=DATASET, trial_type="testing")
     labels = [p.label for p in mod.testing_panels(t)]
-    assert labels[0] == "Hexanol 1"          # always testing_1
-    assert labels.index("Citral") > labels.index("Hexanol 2")
+    assert labels == sorted(labels)
 
 
 def test_testing_panels_drop_light_only_by_default():
@@ -407,7 +419,9 @@ def test_testing_figure_uses_the_training_order_unchanged():
     train = mod.build_trials(_training_frame(), dataset=DATASET, trial_type="training")
     test = mod.build_trials(_testing_frame(), dataset=DATASET, trial_type="testing")
     order = mod.fly_order(train)
-    fig, meta = mod.figure_testing(test, order, dataset=DATASET)
+    fig, meta = mod.figure_testing(
+        test, order, dataset=DATASET, trained=mod.trained_odor(train)
+    )
     try:
         assert meta["fly_order"] == order
         labels = [p["label"] for p in meta["panels"]]

@@ -66,10 +66,10 @@ def _train_bars(ax):
 
 def test_training_bars_are_coloured_by_odor(ax):
     assert [to_hex(b.get_facecolor()) for b in _train_bars(ax)] == [
-        pal.DARK_GREEN,
-        pal.DARK_GREEN,
-        pal.ISOAMYL_PURPLE,
-        pal.DARKER_GREEN,
+        pal.OCTANOL_BLUE,
+        pal.OCTANOL_BLUE,
+        pal.ISOAMYL_YELLOW,
+        pal.LINALOOL_PURPLE,
     ]
 
 

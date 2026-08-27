@@ -229,7 +229,7 @@ def test_flagged_exclusions_apply_to_the_percentage_metric(tmp_path):
 def test_metric_specs_have_the_right_axes():
     assert pub.SCORE_METRIC.y_label == "Mean PER Score"
     assert (pub.SCORE_METRIC.y_min, pub.SCORE_METRIC.y_max) == (-1.5, 5.0)
-    assert pub.PERCENT_METRIC.y_label == "% of Flies Responding"
+    assert pub.PERCENT_METRIC.y_label == "Mean PER response %"
     assert (pub.PERCENT_METRIC.y_min, pub.PERCENT_METRIC.y_max) == (0.0, 100.0)
 
 
@@ -243,7 +243,7 @@ def test_percentage_panel_uses_the_percentage_axis(tmp_path):
     )
     fig, ax = plt.subplots()
     pub.plot_train_vs_control(ax, rows, title="t", metric=pub.PERCENT_METRIC)
-    assert ax.get_ylabel() == "% of Flies Responding"
+    assert ax.get_ylabel() == "Mean PER response %"
     assert ax.get_ylim() == (0.0, 100.0)
     plt.close(fig)
 

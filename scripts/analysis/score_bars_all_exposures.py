@@ -51,6 +51,7 @@ from scripts.analysis.envelope_visuals import (  # noqa: E402
 from scripts.analysis.reaction_matrix_from_spreadsheet import (  # noqa: E402
     _normalise_trial_label,
 )
+from scripts.analysis.per_axis_labels import SCORE_Y_LABEL as _SCORE_Y_LABEL  # noqa: E402
 
 PREDICTIONS_CSV = Path(
     "/home/ramanlab/Documents/cole/Data/CSVs-ALL-Opto-Flys/model_predictions.csv"
@@ -62,7 +63,7 @@ HEX_ACV_KEYS = {"hexanol", "apple cider vinegar"}
 CTRL_COLOR = odor_bar_palette.CTRL_COLOR
 
 SCORE_MIN, SCORE_MAX = -1, 5
-SCORE_Y_LABEL = "Mean PER Score"
+SCORE_Y_LABEL = _SCORE_Y_LABEL
 # The tallest Hexanol bar's error bar reaches ~4.3 and carries a value label
 # above it, so the shared bracket row needs this much clearance...
 BRACKET_GAP = 0.75

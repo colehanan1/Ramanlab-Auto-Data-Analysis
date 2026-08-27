@@ -73,7 +73,7 @@ def test_cohort_label_replaces_the_dataset_in_the_percent_title(tmp_path):
             ["--cohort-label", "Hex-24-0.01, August", "--metric", "percent-responding"],
         )
     )
-    assert "Flies Responding" in svg
+    assert "Mean PER response %" in svg
     assert "Hex-24-0.01, August" in svg
 
 

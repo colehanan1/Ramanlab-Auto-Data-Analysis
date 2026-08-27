@@ -20,6 +20,14 @@ from matplotlib.lines import Line2D
 import numpy as np
 import pandas as pd
 
+import sys
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from scripts.analysis.per_axis_labels import PERCENT_Y_LABEL  # noqa: E402
+
 
 ROOT = Path("/home/ramanlab/Documents/cole")
 
@@ -234,7 +242,7 @@ def main() -> None:
         linewidth=bar_linewidths,
     )
     ax_bar.set_ylim(0, 75.0)
-    ax_bar.set_ylabel("PER%", fontsize=12)
+    ax_bar.set_ylabel(PERCENT_Y_LABEL, fontsize=12)
     ax_bar.set_title("PER% During Testing by Odor", fontsize=14, weight="bold", loc="center", pad=6)
     ax_bar.set_xticks(x_pos)
     ax_bar.set_xticklabels(bar_labels, fontsize=12)

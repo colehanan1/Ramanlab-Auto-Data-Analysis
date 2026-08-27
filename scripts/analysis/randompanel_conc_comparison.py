@@ -53,6 +53,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from scripts.analysis.score_summary import _load_scores
 from scripts.analysis.envelope_visuals import set_protocol, should_write
+from scripts.analysis.per_axis_labels import PERCENT_Y_LABEL, SCORE_Y_LABEL  # noqa: E402
 
 # Map the three RandomPanel testing datasets to their delivered concentration.
 CONC_BY_DATASET = {
@@ -765,7 +766,7 @@ def generate_conc_comparison(
             summary, stats,
             value="mean_score", err="sem_score",
             measure="score",
-            ylabel="Mean Ordinal Score",
+            ylabel=SCORE_Y_LABEL,
             title=f"RandomPanel: mean PER score by odorant × concentration{geno}",
             png_path=score_png,
         )
@@ -776,8 +777,8 @@ def generate_conc_comparison(
             summary, stats,
             value="pct_react", err="sem_react",
             measure="reaction",
-            ylabel="Response rate (score ≥ 2)",
-            title=f"RandomPanel: reaction rate by odorant × concentration{geno}",
+            ylabel=PERCENT_Y_LABEL,
+            title=f"RandomPanel: reaction rate (score ≥ 2) by odorant × concentration{geno}",
             png_path=react_png,
             as_pct=True,
         )

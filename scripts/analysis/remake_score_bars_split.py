@@ -56,13 +56,14 @@ from scripts.analysis.remake_reaction_matrix_split import (  # noqa: E402
     _is_excluded,
     load_binary_reactions,
 )
+from scripts.analysis.per_axis_labels import SCORE_Y_LABEL as _SCORE_Y_LABEL  # noqa: E402
 
 DEFAULT_PREDICTIONS_CSV = Path(
     "/home/ramanlab/Documents/cole/Data/CSVs-ALL-Opto-Flys/model_predictions.csv"
 )
 
 SCORE_MIN, SCORE_MAX = -1.0, 5.0
-SCORE_Y_LABEL = "Mean PER Score"
+SCORE_Y_LABEL = _SCORE_Y_LABEL
 
 # AIR is not an odorant, so it has no entry in the shared palette. It keeps the
 # blue the reaction-rate figure gives the trained bar; every named odorant takes

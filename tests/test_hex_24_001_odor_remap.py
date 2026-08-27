@@ -160,11 +160,11 @@ def test_remapped_labels_still_resolve_to_palette_colours() -> None:
     ACV becoming isoamyl acetate is a real colour change (orange -> purple);
     everything else must keep the colour it had before the concentration tag.
     """
-    assert pal.odor_color("Isoamyl Acetate (1%)") == pal.ISOAMYL_PURPLE
+    assert pal.odor_color("Isoamyl Acetate (1%)") == pal.ISOAMYL_YELLOW
     assert pal.odor_color("Hexanol (0.01%)") == pal.HEX_COLOR
     assert pal.odor_color("Hexanol (0.01%) 2") == pal.HEX_COLOR
-    assert pal.odor_color("3-Octanol (0.1%)") == pal.DARK_GREEN
+    assert pal.odor_color("3-Octanol (0.1%)") == pal.OCTANOL_BLUE
     assert pal.odor_color("Benzaldehyde (0.1%)") is pal.odor_color("Benzaldehyde")
-    assert pal.odor_color("Citral (1%)") == pal.CITRAL_YELLOW
+    assert pal.odor_color("Citral (1%)") == pal.CITRAL_ORANGE
     assert pal.odor_color("Ethyl Butyrate (1%)") == pal.PINK
-    assert pal.odor_color("Linalool (1%)") == pal.DARKER_GREEN
+    assert pal.odor_color("Linalool (1%)") == pal.LINALOOL_PURPLE

@@ -55,6 +55,7 @@ __all__ = [
     "FROZEN_COLUMN",
     "FolderRule",
     "born_cutoff",
+    "born_keep_from",
     "drop_frozen",
     "folder_freeze_rules",
     "frozen_folders_for_root",
@@ -176,8 +177,38 @@ def born_cutoff(
     return getattr(cfg, "freeze_folders_born_on_or_after", None)
 
 
-def _born_frozen(dataset: str, path: Path, cutoff: date) -> bool:
-    """Whether this batch's flies were born on or after *cutoff*.
+def born_keep_from(
+    cfg: Any,
+    dataset: str,
+    *,
+    thawed: Iterable[str] = (),
+    thaw_all: bool = False,
+) -> Optional[date]:
+    """The date the birth cutoff stops applying again, or None.
+
+    ``freeze_folders_born_on_or_after`` opens a retirement window that would
+    otherwise never close, retiring every batch recorded from here on.
+    ``keep_folders_born_on_or_after`` closes it: flies born on or after this
+    date are keepers again. Frozen iff ``freeze_cutoff <= born < keep_from``.
+
+    Gated exactly like :func:`born_cutoff` -- but the gating is moot, since a
+    dataset whose cutoff is None is not born-frozen either way.
+    """
+    if _thawed(dataset, thawed, thaw_all):
+        return None
+    override = (getattr(cfg, "dataset_overrides", None) or {}).get(dataset)
+    if override is not None and bool(getattr(override, "freeze_data", False)):
+        return None
+    return getattr(cfg, "keep_folders_born_on_or_after", None)
+
+
+def _born_frozen(
+    dataset: str, path: Path, cutoff: date, keep_from: Optional[date] = None
+) -> bool:
+    """Whether this batch's flies were born inside the retirement window.
+
+    That is ``cutoff <= born`` and, when *keep_from* is set, ``born <
+    keep_from``.
 
     Fail-open: an unreadable birth date warns once and keeps the batch, so a
     metadata gap can never silently shrink a cohort.
@@ -194,7 +225,9 @@ def _born_frozen(dataset: str, path: Path, cutoff: date) -> bool:
                 f"to freeze it explicitly."
             )
         return False
-    return born >= cutoff
+    if born < cutoff:
+        return False
+    return keep_from is None or born < keep_from
 
 
 def is_frozen_folder(
@@ -210,6 +243,7 @@ def is_frozen_folder(
         cfg, dataset, thawed=thawed, thaw_all=thaw_all
     )
     born_cut = born_cutoff(cfg, dataset, thawed=thawed, thaw_all=thaw_all)
+    keep_from = born_keep_from(cfg, dataset, thawed=thawed, thaw_all=thaw_all)
     if cutoff is None and not rules and born_cut is None:
         return False
 
@@ -221,7 +255,7 @@ def is_frozen_folder(
 
     # The cohort rule, before the recording-date rules: the three union, so any
     # one match is the answer and the order only decides which I/O we skip.
-    if born_cut is not None and _born_frozen(dataset, path, born_cut):
+    if born_cut is not None and _born_frozen(dataset, path, born_cut, keep_from):
         return True
 
     bounded = [r for r in rules if r.needs_date]

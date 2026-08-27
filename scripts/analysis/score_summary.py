@@ -49,6 +49,9 @@ from scripts.analysis.envelope_visuals import (
     should_skip_frozen_figure,
     should_write,
 )
+from scripts.analysis import odor_bar_palette  # noqa: E402
+from scripts.analysis import significance_brackets  # noqa: E402
+from scripts.analysis.per_axis_labels import SCORE_Y_LABEL  # noqa: E402
 
 _RC_CONTEXT = {
     "figure.dpi": 300,
@@ -536,13 +539,14 @@ def _draw_score_matrix(
     # formatter, so labelling ax_m directly would also relabel the bars.
     ax_lab = ax_m.secondary_xaxis("bottom")
     ax_lab.set_xticks(x)
+    # Bold, not upper-cased: these ticks head the bar panel directly below, and
+    # the two halves of one figure must say "trained" the same way.
     ax_lab.set_xticklabels(
-        [str(o).upper() if t else str(o) for o, t in zip(columns, is_trained)],
-        rotation=35, ha="right", fontsize=8,
+        [str(o) for o in columns], rotation=35, ha="right", fontsize=8,
     )
-    for tick, t in zip(ax_lab.get_xticklabels(), is_trained):
+    for tick, odor, t in zip(ax_lab.get_xticklabels(), columns, is_trained):
         if t:
-            tick.set_color("#1a3a6b")
+            tick.set_color(odor_bar_palette.trained_tick_color(odor))
             tick.set_weight("bold")
     ax_lab.tick_params(axis="x", length=0, pad=2)
     for sp in ax_lab.spines.values():
@@ -602,7 +606,13 @@ def _plot_bar_charts(
                 trained.casefold())
         else:
             is_trained = pd.Series([False] * len(sub), index=sub.index)
-        bar_colors = ["#1a3a6b" if t else "#b0b0b0" for t in is_trained]
+        # Legacy panels are keyed on trial number, not odor, so there is no
+        # odor to look a colour up by: they keep the flat gray they always had.
+        bar_colors = (
+            single_cohort_bar_colors(sub["odor_col"], is_trained)
+            if is_v2 and "odor_col" in sub.columns
+            else ["#b0b0b0"] * len(sub)
+        )
 
         matrix, fly_keys = (
             _per_fly_score_matrix(df, odor, sub["odor_col"].tolist())
@@ -644,7 +654,9 @@ def _plot_bar_charts(
 
             ax.bar(
                 x, sub["mean_score"].values, yerr=sub["sem_score"].values,
-                capsize=4, color=bar_colors, edgecolor="white", linewidth=0.5,
+                capsize=4, color=bar_colors,
+                edgecolor="black" if is_v2 else "white",
+                linewidth=0.75 if is_v2 else 0.5,
             )
             # Print the mean value above each bar (clear of its SEM whisker).
             for xi, mean_v, sem_v in zip(
@@ -675,14 +687,9 @@ def _plot_bar_charts(
                 ax.set_yticks(SCORES)
             else:
                 ax.set_ylim(-1.5, 5.5)
-            ax.set_ylabel("Mean Score")
+            ax.set_ylabel(SCORE_Y_LABEL)
             ax.set_xlabel("Presented Odor" if is_v2 else "Testing Trial")
             ax.axhline(y=0, color="gray", linewidth=0.5, linestyle="--")
-            ax.axhline(
-                y=REACTION_BOUNDARY_Y, color="red", linewidth=0.8, linestyle=":",
-                alpha=0.6, label="Reaction Boundary",
-            )
-            ax.legend(fontsize=8, loc="upper right")
             if not show_matrix:
                 plt.tight_layout()
             fig.savefig(png_path, dpi=300, bbox_inches="tight")
@@ -695,44 +702,122 @@ def _draw_score_significance_brackets(
     bar_w: float,
     sub: pd.DataFrame,
 ) -> None:
-    for i, row in enumerate(sub.itertuples(index=False)):
-        p = float(row.score_p_value) if pd.notna(row.score_p_value) else np.nan
-        stars = _sig_stars(p)
-        if not stars:
-            continue
+    """Stars over the significant pairs only, clear of the value labels."""
+    significance_brackets.draw(
+        ax, x_positions, bar_w,
+        [row.score_p_value for row in sub.itertuples(index=False)],
+        fontsize=8,
+    )
 
-        train_top = (
-            float(row.mean_score_train) + float(row.sem_score_train)
-            if pd.notna(row.mean_score_train)
-            else 0.0
-        )
-        ctrl_top = (
-            float(row.mean_score_ctrl) + float(row.sem_score_ctrl)
-            if pd.notna(row.mean_score_ctrl)
-            else 0.0
-        )
-        top = max(0.0, train_top, ctrl_top)
-        bracket_y = top + 0.45
-        tip_y = bracket_y - 0.08
-        x_left = x_positions[i] - bar_w / 2
-        x_right = x_positions[i] + bar_w / 2
+def single_cohort_bar_colors(odors, is_trained) -> list[str]:
+    """Bar colours for a one-cohort score panel, in plotted order.
 
-        ax.plot(
-            [x_left, x_left, x_right, x_right],
-            [tip_y, bracket_y, bracket_y, tip_y],
-            color="black",
-            linewidth=0.9,
-            clip_on=False,
+    These bars used to be dark blue for the trained odor and a flat gray for
+    every other one, so a panel of eight odors carried two colours. They now
+    take the same per-odor palette the paired panels use; the gray is reserved
+    for the control series, where it actually means something.
+    """
+    return odor_bar_palette.training_bar_colors(odors, is_trained)
+
+
+def _cohort_n_label(name: str, counts) -> tuple[str, bool]:
+    """``("Training (n=12)", True)`` when one count covers the whole cohort.
+
+    The second value says whether the legend now carries the n. When it does
+    not — an odor dropped a fly, say — the caller keeps the per-bar n rather
+    than letting a number that varies vanish from the figure.
+    """
+    uniq = {int(v) for v in pd.Series(counts).dropna()}
+    if len(uniq) == 1:
+        return f"{name} (n={uniq.pop()})", True
+    return name, False
+
+
+def plot_score_train_vs_control(
+    ax: plt.Axes,
+    rows: pd.DataFrame,
+    *,
+    title: str,
+    label: str = "",
+) -> tuple[np.ndarray, float]:
+    """One training-vs-control score panel, styled like the pubfig.
+
+    Training bars take each odor's palette colour, control bars are the single
+    shared gray, and the trained odor is marked by a bold tick rather than by
+    upper-casing its name in dark blue. Returns ``(x, bar_w)`` so the caller can
+    place significance brackets over the same geometry.
+    """
+    x = np.arange(len(rows))
+    bar_w = 0.35
+
+    train_vals = rows["mean_score_train"].fillna(0.0).to_numpy(float)
+    ctrl_vals = rows["mean_score_ctrl"].fillna(0.0).to_numpy(float)
+    train_err = rows["sem_score_train"].fillna(0.0).to_numpy(float)
+    ctrl_err = rows["sem_score_ctrl"].fillna(0.0).to_numpy(float)
+
+    y_top = 0.0
+    if len(rows):
+        y_top = float(
+            np.max(
+                np.concatenate([
+                    np.maximum(train_vals + train_err, 0.0),
+                    np.maximum(ctrl_vals + ctrl_err, 0.0),
+                ])
+            )
         )
-        ax.text(
-            x_positions[i],
-            bracket_y + 0.05,
-            stars,
-            ha="center",
-            va="bottom",
-            fontsize=8,
-            fontweight="bold",
-        )
+
+    train_colors = odor_bar_palette.training_bar_colors(
+        rows["odor"], rows["is_trained"]
+    )
+    ax.bar(
+        x - bar_w / 2, train_vals, width=bar_w, yerr=train_err, capsize=4,
+        color=train_colors, edgecolor="black", linewidth=0.75,
+    )
+    ax.bar(
+        x + bar_w / 2, ctrl_vals, width=bar_w, yerr=ctrl_err, capsize=4,
+        color=odor_bar_palette.CTRL_COLOR, edgecolor="black", linewidth=0.75,
+    )
+
+    # Print the mean value above each bar (clear of its SEM whisker).
+    for xi, mean_v, sem_v in zip(x - bar_w / 2, train_vals, train_err):
+        ax.text(xi, mean_v + sem_v + 0.12, f"{mean_v:.2f}",
+                ha="center", va="bottom", fontsize=7, rotation=90)
+    for xi, mean_v, sem_v in zip(x + bar_w / 2, ctrl_vals, ctrl_err):
+        ax.text(xi, mean_v + sem_v + 0.12, f"{mean_v:.2f}",
+                ha="center", va="bottom", fontsize=7, rotation=90)
+
+    n_train = rows["n_flies_train"].fillna(0).astype(int)
+    n_ctrl = rows["n_flies_ctrl"].fillna(0).astype(int)
+    train_key, train_has_n = _cohort_n_label("Training", n_train)
+    ctrl_key, ctrl_has_n = _cohort_n_label("Control", n_ctrl)
+
+    # The n belongs in the legend. It only stays on the ticks when it varies
+    # by odor, where one legend number would be wrong.
+    ax.set_xticks(x)
+    if train_has_n and ctrl_has_n:
+        tick_labels = [str(odor) for odor in rows["odor"]]
+    else:
+        tick_labels = [f"{odor}\n(n={nt}/{nc})"
+                       for odor, nt, nc in zip(rows["odor"], n_train, n_ctrl)]
+    ax.set_xticklabels(tick_labels, rotation=35, ha="right")
+    for tick, odor, is_trained in zip(
+        ax.get_xticklabels(), rows["odor"], rows["is_trained"]
+    ):
+        if bool(is_trained):
+            tick.set_color(odor_bar_palette.trained_tick_color(odor))
+            tick.set_weight("bold")
+
+    ax.set_ylabel(SCORE_Y_LABEL)
+    ax.set_xlabel("Testing Trial / Presented Odor")
+    ax.set_title(title, fontsize=13, weight="bold")
+    ax.axhline(y=0, color="gray", linewidth=0.5, linestyle="--")
+    ax.set_ylim(-1.5, max(6.1, y_top + 1.0))
+    ax.grid(axis="y", linestyle="--", linewidth=0.6, alpha=0.35)
+    odor_bar_palette.add_training_legend(
+        ax, train_colors, ctrl_color=odor_bar_palette.CTRL_COLOR,
+        train_label=train_key, ctrl_label=ctrl_key, loc="upper right",
+    )
+    return x, bar_w
 
 
 def _plot_training_vs_control_bars(
@@ -769,108 +854,14 @@ def _plot_training_vs_control_bars(
             sub = sub.sort_values(["trial_num", "odor"]).reset_index(drop=True)
         else:
             sub = sub.sort_values("odor", key=lambda s: s.str.casefold()).reset_index(drop=True)
-        x = np.arange(len(sub))
-        bar_w = 0.35
-        train_vals = sub["mean_score_train"].fillna(0.0).to_numpy(float)
-        ctrl_vals = sub["mean_score_ctrl"].fillna(0.0).to_numpy(float)
-        train_err = sub["sem_score_train"].fillna(0.0).to_numpy(float)
-        ctrl_err = sub["sem_score_ctrl"].fillna(0.0).to_numpy(float)
-
-        y_top = 0.0
-        if len(sub):
-            y_top = float(
-                np.max(
-                    np.concatenate(
-                        [
-                            np.maximum(train_vals + train_err, 0.0),
-                            np.maximum(ctrl_vals + ctrl_err, 0.0),
-                        ]
-                    )
-                )
-            )
-
-        train_color_trained = "#1a3a6b"   # dark blue (trained odor)
-        train_color_other = "#7bafd4"     # lighter blue (non-trained)
-        ctrl_color_trained = "#808080"    # dark gray (trained odor)
-        ctrl_color_other = "#c8c8c8"     # lighter gray (non-trained)
-
         with plt.rc_context(_RC_CONTEXT):
             fig, ax = plt.subplots(figsize=(max(7, len(sub) * 1.0 + 2), 5.5))
-            ax.bar(
-                x - bar_w / 2,
-                train_vals,
-                width=bar_w,
-                yerr=train_err,
-                capsize=4,
-                color=[
-                    train_color_trained if bool(is_trained) else train_color_other
-                    for is_trained in sub["is_trained"]
-                ],
-                edgecolor="black",
-                linewidth=0.75,
-                label="Training",
+            x, bar_w = plot_score_train_vs_control(
+                ax,
+                sub,
+                title=f"Mean Model Score - {label} (Training vs Control, Trials Separate)",
+                label=label,
             )
-            ax.bar(
-                x + bar_w / 2,
-                ctrl_vals,
-                width=bar_w,
-                yerr=ctrl_err,
-                capsize=4,
-                color=[
-                    ctrl_color_trained if bool(is_trained) else ctrl_color_other
-                    for is_trained in sub["is_trained"]
-                ],
-                edgecolor="black",
-                linewidth=0.75,
-                label="Control",
-            )
-
-            # Print the mean value above each bar (clear of its SEM whisker).
-            for xi, mean_v, sem_v in zip(x - bar_w / 2, train_vals, train_err):
-                ax.text(
-                    xi, mean_v + sem_v + 0.12, f"{mean_v:.2f}",
-                    ha="center", va="bottom", fontsize=7, rotation=90,
-                )
-            for xi, mean_v, sem_v in zip(x + bar_w / 2, ctrl_vals, ctrl_err):
-                ax.text(
-                    xi, mean_v + sem_v + 0.12, f"{mean_v:.2f}",
-                    ha="center", va="bottom", fontsize=7, rotation=90,
-                )
-
-            n_train = sub["n_flies_train"].fillna(0).astype(int)
-            n_ctrl = sub["n_flies_ctrl"].fillna(0).astype(int)
-            labels = [
-                f"{str(odor).upper() if bool(is_trained) else str(odor)}\n(n={nt}/{nc})"
-                for odor, is_trained, nt, nc in zip(
-                    sub["odor"], sub["is_trained"], n_train, n_ctrl
-                )
-            ]
-            ax.set_xticks(x)
-            ax.set_xticklabels(labels, rotation=35, ha="right")
-            for tick, is_trained in zip(ax.get_xticklabels(), sub["is_trained"]):
-                if bool(is_trained):
-                    tick.set_color(train_color_trained)
-                    tick.set_weight("bold")
-
-            ax.set_ylabel("Mean Score")
-            ax.set_xlabel("Testing Trial / Presented Odor")
-            ax.set_title(
-                f"Mean Model Score - {label} (Training vs Control, Trials Separate)",
-                fontsize=13,
-                weight="bold",
-            )
-            ax.axhline(y=0, color="gray", linewidth=0.5, linestyle="--")
-            ax.axhline(
-                y=1.5,
-                color="red",
-                linewidth=0.8,
-                linestyle=":",
-                alpha=0.6,
-                label="Reaction Boundary",
-            )
-            ax.set_ylim(-1.5, max(6.1, y_top + 1.0))
-            ax.grid(axis="y", linestyle="--", linewidth=0.6, alpha=0.35)
-            ax.legend(loc="upper right", fontsize=9, framealpha=0.85)
 
             _draw_score_significance_brackets(ax, x, bar_w, sub)
 

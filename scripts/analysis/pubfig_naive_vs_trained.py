@@ -58,6 +58,7 @@ from scripts.analysis.randompanel_conc_comparison import (  # noqa: E402
     fisher_freeman_halton_mc,
     holm_adjust,
 )
+from scripts.analysis.per_axis_labels import PERCENT_Y_LABEL, SCORE_Y_LABEL as _SCORE_Y_LABEL  # noqa: E402
 
 FIGURES_DIR = Path("/home/ramanlab/Documents/cole/Results/Figures")
 PREDICTIONS_CSV = Path(
@@ -69,8 +70,8 @@ GENOTYPE = "GR5a-Old"
 COHORTS = ("Naive", "Trained", "Control")
 REACTION_BOUNDARY = 2  # score >= 2 is a reaction (matches score_summary)
 SCORE_MIN, SCORE_MAX = -1.0, 5.0
-SCORE_Y_LABEL = "Mean PER Score"
-RATE_Y_LABEL = "Responding flies (%)"
+SCORE_Y_LABEL = _SCORE_Y_LABEL
+RATE_Y_LABEL = PERCENT_Y_LABEL
 ALPHA = 0.05
 
 NAIVE_FACE = "#ffffff"     # open bar: same odor, never conditioned

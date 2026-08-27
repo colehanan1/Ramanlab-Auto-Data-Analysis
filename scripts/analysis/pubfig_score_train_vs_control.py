@@ -42,6 +42,7 @@ for _p in (str(REPO_ROOT), str(REPO_ROOT / "src")):
         sys.path.insert(0, _p)
 
 from scripts.analysis import odor_bar_palette as pal  # noqa: E402
+from scripts.analysis.per_axis_labels import PERCENT_Y_LABEL, SCORE_Y_LABEL  # noqa: E402
 
 FIGURES_DIR = Path("/home/ramanlab/Documents/cole/Results/Figures")
 PREDICTIONS_CSV = Path(
@@ -51,7 +52,7 @@ CONFIG = REPO_ROOT / "config" / "config_new.yaml"
 GENOTYPE = "GR5a-Old"
 
 SCORE_MIN, SCORE_MAX = -1.0, 5.0
-Y_LABEL = "Mean PER Score"
+Y_LABEL = SCORE_Y_LABEL
 ALPHA = 0.05
 
 # The ordinal PER model emits only {-1, 0, 2, 3, 4, 5} -- it never outputs 1 --
@@ -111,7 +112,7 @@ SCORE_METRIC = Metric(
 )
 PERCENT_METRIC = Metric(
     key="percent-responding",
-    y_label="% of Flies Responding",
+    y_label=PERCENT_Y_LABEL,
     y_min=0.0,
     y_max=100.0,
     value_fmt="{:.0f}%",
