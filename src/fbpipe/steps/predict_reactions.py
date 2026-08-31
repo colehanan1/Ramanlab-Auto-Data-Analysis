@@ -146,6 +146,39 @@ def _filter_trial_types(
     return df.loc[mask].copy()
 
 
+def _read_input_tables(
+    data_csv: Path, extra_csvs: Iterable[Path | str]
+) -> pd.DataFrame:
+    """Read the main wide table plus any extra ones, concatenated.
+
+    ``combine`` writes a separate table per trial type (the main one is
+    testing-only), so the naive pretest panel arrives as its own file. Extra
+    tables are optional: a cohort that never ran a pre-test simply has none, and
+    the file does not exist until a run produces it, so a missing extra is a
+    skip with a note rather than a failure. The main table is still required.
+    """
+
+    if not data_csv.exists():
+        raise FileNotFoundError(f"Data CSV not found: {data_csv}")
+
+    frames = [read_table(data_csv)]
+    for raw in extra_csvs:
+        path = Path(raw).expanduser().resolve()
+        if not path.exists():
+            print(f"[REACTION] Extra data table not found, skipping: {path}")
+            continue
+        extra = read_table(path)
+        if extra.empty:
+            print(f"[REACTION] Extra data table is empty, skipping: {path}")
+            continue
+        print(f"[REACTION] Scoring {len(extra)} extra row(s) from {path.name}")
+        frames.append(extra)
+
+    if len(frames) == 1:
+        return frames[0]
+    return pd.concat(frames, ignore_index=True, sort=False)
+
+
 def _write_empty_predictions(output_csv: Path, columns: Sequence[str]) -> None:
     cols = list(columns)
     if "prediction" not in cols:
@@ -245,12 +278,10 @@ def main(cfg: Settings) -> None:
     output_csv = Path(settings.output_csv).expanduser().resolve()
     output_csv.parent.mkdir(parents=True, exist_ok=True)
 
-    if not data_csv.exists():
-        raise FileNotFoundError(f"Data CSV not found: {data_csv}")
     if not model_path.exists():
         raise FileNotFoundError(f"Model file not found: {model_path}")
 
-    df = read_table(data_csv)
+    df = _read_input_tables(data_csv, settings.extra_data_csvs)
     # --figures-only reuses whatever wide table is on disk; one built before
     # folder freeze existed marks nothing and silently under-filters.
     from ..utils.frozen_folders import warn_if_unmarked
@@ -259,10 +290,11 @@ def main(cfg: Settings) -> None:
     df, _n_frozen = _drop_frozen_rows(
         df, include_frozen=bool(getattr(cfg, "include_frozen", False))
     )
-    df = _filter_trial_types(df, allowed=("testing",))
+    allowed_types = tuple(settings.trial_types) or ("testing",)
+    df = _filter_trial_types(df, allowed=allowed_types)
     if df.empty:
         print(
-            "[REACTION] No testing trials found in data_csv; "
+            f"[REACTION] No {'/'.join(allowed_types)} trials found in data_csv; "
             "writing empty predictions spreadsheet."
         )
         _write_empty_predictions(output_csv, [])

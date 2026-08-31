@@ -915,7 +915,34 @@ def _copy_output_to_smb(local_path: Path | str, smb_path: str | None) -> None:
         LOGGER.error(f"Error copying to SMB: {e}")
 
 
-def _run_light_only_traces(cfg: Mapping[str, Any] | None) -> None:
+def _figure_frozen_datasets(settings: Any) -> list[str]:
+    """Names of datasets frozen for FIGURES, honoring this run's thaw flags.
+
+    ``freeze.data`` alone is not enough: a data-frozen dataset still redraws
+    from its cached rows (that is the point of the two independent flags), so
+    only ``freeze.figures`` suppresses a render.
+    """
+    from fbpipe.freeze import freeze_flags
+
+    from fbpipe.odor_constants import canon_dataset
+
+    overrides = getattr(settings, "dataset_overrides", None) or {}
+    thawed = getattr(settings, "_thawed", ())
+    thaw_all = getattr(settings, "_thaw_all", False)
+    names: list[str] = []
+    for name in overrides:
+        if not freeze_flags(settings, name, thawed=thawed, thaw_all=thaw_all)[1]:
+            continue
+        names.append(str(name))
+        # Also the canonical spelling: config says "3Oct-Training-24-0.1",
+        # every figure path says "3OCT-Training-24-0.1".
+        canon = canon_dataset(str(name))
+        if canon and canon != str(name):
+            names.append(canon)
+    return names
+
+
+def _run_light_only_traces(cfg: Mapping[str, Any] | None, settings: Any = None) -> None:
     """Render per-fly light-only PER trace figures, sorted by dataset.
 
     Driven by the ``analysis.light_only_traces`` config block:
@@ -926,7 +953,11 @@ def _run_light_only_traces(cfg: Mapping[str, Any] | None) -> None:
       enabled:     set false to skip the stage.
 
     These are figures, so the stage always re-renders when configured (it reads
-    the existing wide CSV and so runs under ``--figures-only`` too).
+    the existing wide CSV and so runs under ``--figures-only`` too) -- EXCEPT
+    for datasets frozen for figures, which are dropped before rendering. The
+    drop is applied after the config ``datasets:`` allow-list, so listing a
+    frozen dataset there cannot resurrect it; ``--thaw``/``--thaw-all`` still
+    lift it for one run.
     """
     if not cfg or not cfg.get("enabled", True):
         return
@@ -947,8 +978,17 @@ def _run_light_only_traces(cfg: Mapping[str, Any] | None) -> None:
     from scripts.analysis.light_trial_traces import generate as _generate_light_only
 
     datasets = cfg.get("datasets") or None
+    skip = _figure_frozen_datasets(settings)
     print(f"[analysis] light_only_traces → {out_dir}")
-    result = _generate_light_only(csv_path, Path(out_dir), datasets=datasets)
+    result = _generate_light_only(
+        csv_path, Path(out_dir), datasets=datasets, skip_datasets=skip
+    )
+    if result.get("skipped_datasets"):
+        LOGGER.info(
+            "[analysis] light_only_traces: skipped %d dataset(s) frozen for "
+            "figures: %s",
+            len(result["skipped_datasets"]), ", ".join(result["skipped_datasets"]),
+        )
     LOGGER.info(
         "[analysis] light_only_traces: %d figures across %d dataset(s) → %s",
         result["n_figures"], len(result["per_dataset"]), out_dir,
@@ -1196,6 +1236,9 @@ def _run_training(cfg: Mapping[str, Any] | None, settings: Settings | None = Non
             fly_state_csv=fly_state_csv,
             fly_state_column=fly_state_column,
             trials_of_interest=trials,
+            # Per-cohort latency figures are that cohort's figures: a dataset
+            # frozen for figures must not redraw them.
+            frozen_datasets=_figure_frozen_datasets(settings),
             **opts,
         )
 
@@ -2118,8 +2161,13 @@ def _pubfig_commands(
 
     script = REPO_ROOT / "scripts" / "analysis" / "pubfig_score_train_vs_control.py"
     flagged_csv = str(getattr(settings, "flagged_flies_csv", "") or "")
+    frozen_figures = set(_figure_frozen_datasets(settings))
     commands: list[list[str]] = []
     for cohort in pub.cohorts:
+        if cohort.train_dataset in frozen_figures:
+            # The cohort is keyed by its trained arm; frozen there means the
+            # published figure is final.
+            continue
         for metric in cohort.metrics:
             stem = _PUBFIG_STEM_PREFIX[metric] + (
                 cohort.out_stem or cohort.train_dataset
@@ -2334,6 +2382,7 @@ def _run_reactions(settings: Settings, config_path: Path | None = None) -> None:
         # datasets (labels without odor suffixes) don't hit the v2-only code path.
         cmd.extend(["--protocol", str(settings.protocol)])
 
+        cmd.extend(_thaw_cli_args(settings))
         print("[analysis] reactions.matrix →", " ".join(cmd))
         subprocess.run(cmd, check=True, env=env)
 
@@ -2379,6 +2428,7 @@ def _run_reactions(settings: Settings, config_path: Path | None = None) -> None:
             if config_path is not None:
                 tvc_cmd.extend(["--config", str(config_path)])
             tvc_cmd.extend(["--protocol", str(settings.protocol)])
+            tvc_cmd.extend(_thaw_cli_args(settings))
             print("[analysis] reactions.train_vs_ctrl →", " ".join(tvc_cmd))
             subprocess.run(tvc_cmd, check=True, env=env)
         else:
@@ -2427,6 +2477,7 @@ def _run_reactions(settings: Settings, config_path: Path | None = None) -> None:
                 ]
                 if config_path is not None:
                     conc_cmd.extend(["--config", str(config_path)])
+                conc_cmd.extend(_thaw_cli_args(settings))
                 print("[analysis] randompanel_conc_comparison →", " ".join(conc_cmd))
                 subprocess.run(conc_cmd, check=True, env=env)
             else:
@@ -2932,7 +2983,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         _run_training(None, settings=settings)
 
     # -- light-only PER traces (per-fly figures, sorted by dataset) --
-    _run_light_only_traces(analysis_cfg.get("light_only_traces"))
+    _run_light_only_traces(analysis_cfg.get("light_only_traces"), settings=settings)
 
     _run_reactions(settings, config_path=config_path)
 
@@ -2984,8 +3035,8 @@ def main(argv: Sequence[str] | None = None) -> None:
             "Set force.dataset_means=true to recompute."
         )
     else:
-        _run_dataset_means(config_path, no_overwrite=True)
-        _run_dataset_means_training(config_path, no_overwrite=True)
+        _run_dataset_means(config_path, no_overwrite=True, settings=settings)
+        _run_dataset_means_training(config_path, no_overwrite=True, settings=settings)
         payload = dict(dm_expected, version=STATE_VERSION)
         _write_state(settings, "dataset_means", "analysis", payload)
 
@@ -3028,6 +3079,39 @@ def main(argv: Sequence[str] | None = None) -> None:
     else:
         LOGGER.info(
             "[analysis] naive_vs_trained skipped; no predictions CSV at %s",
+            scores_csv,
+        )
+
+    # -- pre-test-baselined trial score bars; same predictions CSV --
+    if scores_csv.exists():
+        _run_pretest_score_bars(analysis_cfg, settings, config_path=config_path)
+    else:
+        LOGGER.info(
+            "[analysis] pretest_score_bars skipped; no predictions CSV at %s",
+            scores_csv,
+        )
+
+    # -- pre-test vs post-test, paired within fly; same predictions CSV --
+    if scores_csv.exists():
+        pvt_expected = _pretest_vs_test_expected(
+            analysis_cfg, settings, config_path=config_path
+        )
+        skip_pvt = _should_skip(
+            settings, "pretest_vs_test", "analysis", pvt_expected,
+            force_flag=getattr(settings.force, "pretest_vs_test", False),
+        )
+        if skip_pvt:
+            print(
+                "[analysis] pretest_vs_test cached → skipping. "
+                "Set force.pretest_vs_test=true to recompute."
+            )
+        else:
+            _run_pretest_vs_test(analysis_cfg, settings, config_path=config_path)
+            payload = dict(pvt_expected, version=STATE_VERSION)
+            _write_state(settings, "pretest_vs_test", "analysis", payload)
+    else:
+        LOGGER.info(
+            "[analysis] pretest_vs_test skipped; no predictions CSV at %s",
             scores_csv,
         )
 
@@ -3135,6 +3219,8 @@ def _dataset_mean_traces_commands(
     if not cfg or not bool(cfg.get("enabled", True)):
         return []
 
+    frozen_figures = set(_figure_frozen_datasets(settings))
+
     wide_csv = str(cfg.get("wide_csv", "") or "")
     out_root = str(cfg.get("out_root", "") or "")
     if not wide_csv or not out_root:
@@ -3191,6 +3277,10 @@ def _dataset_mean_traces_commands(
         for name, conc in members.items():
             cmd.extend(["--dataset", f"{str(name).strip()}={float(conc):g}"])
             conc_datasets.add(str(name).strip())
+        if members and all(str(n).strip() in frozen_figures for n in members):
+            # Every member frozen -> the whole series is final. One live member
+            # still redraws it: the figure IS the comparison between them.
+            continue
         for genotype in (_as_genotype_list(raw.get("genotype")) or block_genotypes):
             cmd.extend(["--genotype", genotype])
         if flagged_csv:
@@ -3229,7 +3319,41 @@ def _dataset_mean_traces_commands(
         ]
 
     commands: list[list[str]] = []
+
+    # Pre-test vs post-training: both arms are the SAME flies, so there is no
+    # control cohort and no trained/control pairing. Emitted alongside the
+    # trained-vs-control commands rather than as a separate step, so the two
+    # sets always come from one wide table and one flagged-flies rule.
+    pretest_wide = str(cfg.get("pretest_wide_csv", "") or "")
+    phase_cohorts = [
+        str(d).strip() for d in (cfg.get("phase_cohorts") or [])
+        if str(d).strip() and str(d).strip() not in frozen_figures
+    ]
+    if pretest_wide and phase_cohorts:
+        for dataset in phase_cohorts:
+            phase_out = Path(out_root) / dataset / "Pre-Test_vs_Post-Training"
+            phase_cmd = [
+                str(Path(python_exec).expanduser()),
+                str(script),
+                "--wide-csv", wide_csv,
+                "--pretest-wide-csv", pretest_wide,
+                "--train-dataset", dataset,
+                "--out-dir", str(phase_out),
+                "--fps", str(fps),
+                "--odor-on-s", str(odor_on_s),
+            ]
+            if flagged_csv:
+                phase_cmd += ["--flagged-flies-csv", flagged_csv]
+            if config_path is not None:
+                phase_cmd += ["--config", str(config_path)]
+            commands.append(phase_cmd)
+
     for train, control, out_dir, batch in entries:
+        if train in frozen_figures and control in frozen_figures:
+            # Both arms frozen for figures -> the pair is final. A frozen arm
+            # paired with a live one still redraws, or new flies in the live arm
+            # would never appear in the comparison.
+            continue
         out_path = Path(out_dir)
         if not out_path.is_absolute():
             out_path = Path(out_root) / out_dir
@@ -3320,8 +3444,11 @@ def _naive_vs_trained_command(
     cmd.append("--trend-p" if bool(cfg.get("trend_p", True)) else "--no-trend-p")
     if config_path is not None:
         # Carries dataset_overrides.odor_remap: the concentration tags on the
-        # labels are what pick each odor's naive panel.
+        # labels are what pick each odor's naive panel. It also carries
+        # freeze.figures -- the sweep skips cohorts whose three arms are all
+        # frozen, so this run's --thaw goes with it.
         cmd.extend(["--config", str(config_path)])
+        cmd.extend(_thaw_cli_args(settings))
     return cmd
 
 
@@ -3358,12 +3485,22 @@ def _cohort_figure_commands(
     if not cfg or not bool(cfg.get("enabled", True)):
         return []
 
-    datasets = [str(d).strip() for d in (cfg.get("datasets") or []) if str(d).strip()]
+    frozen = set(_figure_frozen_datasets(settings))
+    datasets = [
+        str(d).strip() for d in (cfg.get("datasets") or [])
+        if str(d).strip() and str(d).strip() not in frozen
+    ]
     if not datasets:
+        # Either nothing configured, or every configured cohort is frozen for
+        # figures. Both mean "render nothing" -- a frozen cohort's rasters are
+        # final and must not be restyled by a later threshold or palette.
         return []
 
     training_wide = str(cfg.get("training_wide_csv", "") or "")
     testing_wide = str(cfg.get("testing_wide_csv", "") or "")
+    # Optional third phase for the *-Sensitivity-* cohorts. Raster-only: the
+    # training-AUC script has no naive arm to plot.
+    pretest_wide = str(cfg.get("pretest_wide_csv", "") or "")
     predictions_csv = str(
         cfg.get("predictions_csv")
         or getattr(getattr(settings, "reaction_prediction", None), "output_csv", "")
@@ -3399,6 +3536,8 @@ def _cohort_figure_commands(
                     # Fold-change of extension over each trial's own baseline,
                     # averaged across the fly's conditioning trials.
                     "--sort-by", str(cfg.get("sort_by") or "ratio")]
+            if pretest_wide:
+                cmd += ["--pretest-wide-csv", pretest_wide]
             if predictions_csv:
                 cmd += ["--predictions-csv", predictions_csv]
             if config_path is not None:
@@ -3415,7 +3554,7 @@ def _cohort_figure_commands(
     trained = [
         str(d).strip()
         for d in (cfg.get("trained_raster_datasets") or [])
-        if str(d).strip()
+        if str(d).strip() and str(d).strip() not in frozen
     ]
     if trained:
         trained_sort = str(cfg.get("trained_sort_by") or cfg.get("sort_by") or "ratio")
@@ -3439,6 +3578,8 @@ def _cohort_figure_commands(
                         "--wide-csv", testing_wide,
                         "--mode", str(mode),
                         "--sort-by", trained_sort]
+                if pretest_wide:
+                    cmd += ["--pretest-wide-csv", pretest_wide]
                 if predictions_csv:
                     cmd += ["--predictions-csv", predictions_csv]
                 if config_path is not None:
@@ -3514,6 +3655,191 @@ def _run_cohort_figures(
                 result.returncode, " ".join(cmd),
             )
     LOGGER.info("[analysis] cohort_figures complete.")
+
+
+def _pretest_score_bars_command(
+    analysis_cfg: Mapping[str, Any] | None,
+    settings: Any,
+    *,
+    python_exec: str,
+    config_path: Path | None,
+) -> list[str] | None:
+    """``naive_vs_trial_score_bars.py --pretest-baseline``, or None.
+
+    The *-Sensitivity-* cohorts baseline each trial against the fly's OWN
+    pre-test panel instead of a separate concentration-matched cohort. Wired
+    into the pipeline because the hand-run original is exactly the kind of
+    figure set that goes stale when a run rewrites model_predictions.csv.
+    """
+    cfg = (analysis_cfg or {}).get("pretest_score_bars") or {}
+    if not cfg or not bool(cfg.get("enabled", True)):
+        return None
+
+    out_dir = str(cfg.get("out_dir", "") or "")
+    if not out_dir:
+        print("[analysis] pretest_score_bars skipped; out_dir is required.")
+        return None
+
+    datasets = [str(d).strip() for d in (cfg.get("datasets") or []) if str(d).strip()]
+    if not datasets:
+        return None
+
+    predictions_csv = str(
+        cfg.get("predictions_csv")
+        or getattr(getattr(settings, "reaction_prediction", None), "output_csv", "")
+        or ""
+    )
+    script = REPO_ROOT / "scripts" / "analysis" / "naive_vs_trial_score_bars.py"
+    cmd = [
+        str(Path(python_exec).expanduser()),
+        str(script),
+        "--pretest-baseline",
+        "--out-dir", out_dir,
+    ]
+    if predictions_csv:
+        cmd += ["--predictions-csv", predictions_csv]
+    training_wide = str(cfg.get("training_wide_csv", "") or "")
+    if training_wide:
+        cmd += ["--training-wide-csv", training_wide]
+    for dataset in datasets:
+        cmd += ["--dataset", dataset]
+    return cmd
+
+
+def _run_pretest_score_bars(
+    analysis_cfg: Mapping[str, Any] | None,
+    settings: Any,
+    *,
+    config_path: Path | None,
+) -> None:
+    python_exec = getattr(
+        getattr(settings, "reaction_prediction", None), "python", ""
+    ) or sys.executable
+    cmd = _pretest_score_bars_command(
+        analysis_cfg, settings, python_exec=python_exec, config_path=config_path
+    )
+    if cmd is None:
+        LOGGER.info("[analysis] pretest_score_bars not configured; skipping.")
+        return
+    env = os.environ.copy()
+    env["MPLBACKEND"] = "Agg"
+    env["PYTHONPATH"] = os.pathsep.join(
+        filter(None, [str(REPO_ROOT / "src"), env.get("PYTHONPATH")])
+    )
+    LOGGER.info("[analysis] pretest_score_bars → %s", " ".join(cmd))
+    result = subprocess.run(cmd, env=env, capture_output=False)
+    if result.returncode != 0:
+        LOGGER.warning(
+            "[analysis] pretest_score_bars exited with code %d", result.returncode
+        )
+
+
+def _pretest_vs_test_command(
+    analysis_cfg: Mapping[str, Any] | None,
+    settings: Any,
+    *,
+    python_exec: str,
+    config_path: Path | None,
+) -> list[str] | None:
+    """The ``pretest_vs_test_comparison.py`` command, or None when unconfigured.
+
+    Pure, like ``_naive_vs_trained_command``: the caller checks for a
+    predictions CSV on disk before running it.
+    """
+    cfg = (analysis_cfg or {}).get("pretest_vs_test") or {}
+    if not cfg or not bool(cfg.get("enabled", True)):
+        return None
+
+    out_dir = str(cfg.get("out_dir", "") or "")
+    if not out_dir:
+        print("[analysis] pretest_vs_test skipped; out_dir is required.")
+        return None
+
+    predictions_csv = str(
+        cfg.get("predictions_csv")
+        or getattr(getattr(settings, "reaction_prediction", None), "output_csv", "")
+        or ""
+    )
+    if not predictions_csv:
+        print("[analysis] pretest_vs_test skipped; no reaction_prediction.output_csv.")
+        return None
+
+    script = REPO_ROOT / "scripts" / "analysis" / "pretest_vs_test_comparison.py"
+    cmd = [
+        str(Path(python_exec).expanduser()),
+        str(script),
+        "--predictions-csv", predictions_csv,
+        "--out-root", out_dir,
+    ]
+    cohorts = [str(name) for name in (cfg.get("cohorts") or []) if str(name).strip()]
+    if cohorts:
+        cmd.append("--cohorts")
+        cmd.extend(cohorts)
+    if cfg.get("binary_threshold") is not None:
+        cmd.extend(["--binary-threshold", str(int(cfg["binary_threshold"]))])
+    # Falls back to the pipeline-wide table, like every other figure step: a
+    # fly flagged there must not survive into these figures either.
+    flagged = str(
+        cfg.get("flagged_flies_csv")
+        or getattr(settings, "flagged_flies_csv", "")
+        or ""
+    )
+    if flagged:
+        cmd.extend(["--flagged-flies-csv", flagged])
+    return cmd
+
+
+def _pretest_vs_test_expected(
+    analysis_cfg: Mapping[str, Any] | None,
+    settings: Any,
+    *,
+    config_path: Path | None,
+) -> dict[str, Any]:
+    """Cache key: the predictions CSV's mtime plus the exact command."""
+    cmd = _pretest_vs_test_command(
+        analysis_cfg, settings, python_exec=sys.executable, config_path=config_path
+    )
+    predictions = (
+        _resolve_path(cmd[cmd.index("--predictions-csv") + 1]) if cmd else None
+    )
+    return {
+        "predictions_mtime": _file_mtime_key(predictions),
+        "command": " ".join(cmd) if cmd else "",
+    }
+
+
+def _run_pretest_vs_test(
+    analysis_cfg: Mapping[str, Any] | None,
+    settings: Any,
+    *,
+    config_path: Path | None,
+) -> None:
+    """Pre-test vs post-test PER, paired within fly, per sensitivity cohort."""
+    python_exec = getattr(
+        getattr(settings, "reaction_prediction", None), "python", ""
+    ) or sys.executable
+    cmd = _pretest_vs_test_command(
+        analysis_cfg, settings, python_exec=python_exec, config_path=config_path
+    )
+    if cmd is None:
+        LOGGER.info("[analysis] pretest_vs_test not configured; skipping.")
+        return
+
+    env = os.environ.copy()
+    env["MPLBACKEND"] = "Agg"
+    env["PYTHONPATH"] = os.pathsep.join(
+        filter(None, [str(REPO_ROOT / "src"), env.get("PYTHONPATH")])
+    )
+    LOGGER.info("[analysis] pretest_vs_test → %s", " ".join(cmd))
+    result = subprocess.run(cmd, env=env, capture_output=False)
+    if result.returncode != 0:
+        # A cohort with no pre-test panel is normal, not fatal: only the
+        # *-Sensitivity-* datasets run one. Never abort the run over it.
+        LOGGER.warning(
+            "[analysis] pretest_vs_test exited with code %d", result.returncode
+        )
+    else:
+        LOGGER.info("[analysis] pretest_vs_test complete.")
 
 
 def _naive_vs_trained_expected(
@@ -3623,7 +3949,9 @@ def _run_dataset_mean_traces(
     LOGGER.info("[analysis] dataset_mean_traces complete.")
 
 
-def _run_dataset_means(config_path: Path, *, no_overwrite: bool = False) -> None:
+def _run_dataset_means(
+    config_path: Path, *, no_overwrite: bool = False, settings: Any = None
+) -> None:
     """Generate dataset-level mean plots from the wide envelope CSV."""
     LOGGER.info("[analysis] Running dataset_means ...")
     repo_root = _find_repo_root(Path(__file__).resolve())
@@ -3635,6 +3963,9 @@ def _run_dataset_means(config_path: Path, *, no_overwrite: bool = False) -> None
     ]
     if no_overwrite:
         cmd.append("--no-overwrite")
+    # The script drops figure-frozen datasets itself (it reads the same config);
+    # this only forwards THIS run's --thaw selection, which lives on settings.
+    cmd.extend(_thaw_cli_args(settings))
     env = os.environ.copy()
     env["MPLBACKEND"] = "Agg"
     result = subprocess.run(cmd, env=env, capture_output=False)
@@ -3644,7 +3975,9 @@ def _run_dataset_means(config_path: Path, *, no_overwrite: bool = False) -> None
         LOGGER.info("[analysis] dataset_means complete.")
 
 
-def _run_dataset_means_training(config_path: Path, *, no_overwrite: bool = False) -> None:
+def _run_dataset_means_training(
+    config_path: Path, *, no_overwrite: bool = False, settings: Any = None
+) -> None:
     """Generate dataset-level mean plots for training odors."""
     LOGGER.info("[analysis] Running dataset_means_training ...")
     repo_root = _find_repo_root(Path(__file__).resolve())
@@ -3656,6 +3989,7 @@ def _run_dataset_means_training(config_path: Path, *, no_overwrite: bool = False
     ]
     if no_overwrite:
         cmd.append("--no-overwrite")
+    cmd.extend(_thaw_cli_args(settings))
     env = os.environ.copy()
     env["MPLBACKEND"] = "Agg"
     result = subprocess.run(cmd, env=env, capture_output=False)

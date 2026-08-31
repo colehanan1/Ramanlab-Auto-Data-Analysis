@@ -126,7 +126,7 @@ def set_runtime_settings(cfg: Settings | None) -> None:
 # (e.g. ``<batch>/angle_distance_rms_envelope/training_10_citral_fly1_…csv``)
 # instead of the per-trial folder.
 _TRIAL_LABEL_FROM_NAME = re.compile(
-    r"(?P<type>training|testing)_(?P<index>\d+)", re.IGNORECASE
+    r"(?P<type>pretest|training|testing)_(?P<index>\d+)", re.IGNORECASE
 )
 
 
@@ -263,9 +263,16 @@ TESTING_HINT_PREFIXES = (
     "testing",
     "test",
     "probe",
-    "pretest",
     "posttest",
     "extinction",
+)
+# The naive panel the *-Sensitivity-* cohorts run BEFORE training. It used to
+# live in TESTING_HINT_PREFIXES, which silently pooled naive trials with
+# post-training ones in every figure. It is its own phase — see
+# tests/test_pretest_trial_type.py.
+PRETEST_HINT_PREFIXES = (
+    "pretest",
+    "pretesting",
 )
 
 ANGLE_COLS = ["angle_centered_pct", "angle_centered_percentage", "angle_pct"]
@@ -290,14 +297,14 @@ FRAME_COLS = ["Frame", "FrameNumber", "Frame Number"]
 # e.g. "testing_3_Benzaldehyde_fly1_distances..." → ("testing", "3", "Benzaldehyde")
 # e.g. "testing_3_fly1_distances..." → ("testing", "3", None)
 TRIAL_REGEX = re.compile(
-    r"(testing|training)_(\d+)(?:_((?!fly\d|distances)[A-Za-z0-9._-]+?))?(?:_fly\d|_distances|$)",
+    r"(pretest|testing|training)_(\d+)(?:_((?!fly\d|distances)[A-Za-z0-9._-]+?))?(?:_fly\d|_distances|$)",
     re.IGNORECASE,
 )
 # v1 ("legacy") regex: group 3 greedily captures the entire suffix after the
 # trial index, so a stem like ``testing_3_Benzaldehyde_fly1_distances_...`` keeps
 # the full ``Benzaldehyde_fly1_distances_...`` as the trial label — matching v1's
 # label strings (and therefore its code_maps / matrix metadata) exactly.
-TRIAL_REGEX_LEGACY = re.compile(r"(testing|training)_(\d+)(?:_(.+))?", re.IGNORECASE)
+TRIAL_REGEX_LEGACY = re.compile(r"(pretest|testing|training)_(\d+)(?:_(.+))?", re.IGNORECASE)
 
 
 def _trial_regex(path: Path | str | None = None) -> "re.Pattern[str]":
@@ -308,6 +315,14 @@ def _trial_regex(path: Path | str | None = None) -> "re.Pattern[str]":
 
 TESTING_REGEX = re.compile(r"testing_(\d+)(?:_(.+))?", re.IGNORECASE)
 TRAINING_REGEX = re.compile(r"training_(\d+)(?:_(.+))?", re.IGNORECASE)
+PRETEST_REGEX = re.compile(r"pretest_(\d+)(?:_(.+))?", re.IGNORECASE)
+# Phase -> the regex that keys its trials. Order matters: "testing" first keeps
+# the arm ordering the pre-pretest pipeline produced.
+TRIAL_TYPE_REGEXES: tuple[tuple[str, "re.Pattern[str]"], ...] = (
+    ("testing", TESTING_REGEX),
+    ("training", TRAINING_REGEX),
+    ("pretest", PRETEST_REGEX),
+)
 FLY_SLOT_REGEX = re.compile(r"(fly\d+)_distances", re.IGNORECASE)
 FLY_NUMBER_REGEX = re.compile(r"fly\s*[_-]?\s*(\d+)", re.IGNORECASE)
 
@@ -1201,6 +1216,10 @@ def _testing_hints() -> tuple[str, ...]:
     return _hint_prefixes(TESTING_HINT_PREFIXES, os.environ.get("FBPIPE_TESTING_HINTS"))
 
 
+def _pretest_hints() -> tuple[str, ...]:
+    return _hint_prefixes(PRETEST_HINT_PREFIXES, os.environ.get("FBPIPE_PRETEST_HINTS"))
+
+
 def _match_hint(tokens: Iterable[str], hints: Sequence[str]) -> tuple[int, str] | None:
     """Return the longest hint prefix that matches any token."""
 
@@ -1269,28 +1288,45 @@ def _infer_category(path: Path) -> str:
         if token:
             filename_tokens.add(token)
 
-    filename_training = _match_hint(filename_tokens, _training_hints())
-    filename_testing = _match_hint(filename_tokens, _testing_hints())
-
     # If filename clearly indicates one type, use that
-    if filename_training and not filename_testing:
-        return "training"
-    if filename_testing and not filename_training:
-        return "testing"
+    resolved = _resolve_category(filename_tokens)
+    if resolved is not None:
+        return resolved
 
     # If ambiguous or not found in filename, check full path
-    tokens = _path_tokens(path)
-    training_match = _match_hint(tokens, _training_hints())
-    testing_match = _match_hint(tokens, _testing_hints())
-    if training_match and not testing_match:
-        return "training"
-    if testing_match and not training_match:
-        return "testing"
-    if training_match and testing_match:
-        if training_match[0] >= testing_match[0]:
-            return "training"
-        return "testing"
+    resolved = _resolve_category(_path_tokens(path))
+    if resolved is not None:
+        return resolved
     return "testing"
+
+
+# Tie-break when two phases match hints of the same length. Training winning
+# over testing is v1 behaviour and is preserved; pretest sits between them so a
+# path carrying both "pretest" and "testing" resolves to the more specific one.
+_CATEGORY_TIE_ORDER = {"training": 2, "pretest": 1, "testing": 0}
+
+
+def _resolve_category(tokens: Iterable[str]) -> str | None:
+    """Pick the phase whose longest hint matches ``tokens``, or None if unclear.
+
+    A single unambiguous match wins outright. When several phases match, the
+    longest hint wins ("pretest" beats "test"), with ``_CATEGORY_TIE_ORDER``
+    breaking exact ties.
+    """
+
+    tokens = list(tokens)
+    hits = [
+        (match[0], _CATEGORY_TIE_ORDER[name], name)
+        for name, match in (
+            ("training", _match_hint(tokens, _training_hints())),
+            ("pretest", _match_hint(tokens, _pretest_hints())),
+            ("testing", _match_hint(tokens, _testing_hints())),
+        )
+        if match
+    ]
+    if not hits:
+        return None
+    return max(hits)[2]
 
 
 def _build_odor_map(fly_dir: Path) -> dict[str, str]:
@@ -1301,7 +1337,7 @@ def _build_odor_map(fly_dir: Path) -> dict[str, str]:
     Returns: {"testing_3": "Benzaldehyde", "training_1": "Hexanol", ...}
     """
     odor_map: dict[str, str] = {}
-    pat = re.compile(r"(testing|training)_(\d+)_([A-Za-z0-9][A-Za-z0-9 .()-]+?)_\d{8}_", re.IGNORECASE)
+    pat = re.compile(r"(pretest|testing|training)_(\d+)_([A-Za-z0-9][A-Za-z0-9 .()-]+?)_\d{8}_", re.IGNORECASE)
 
     # Try the given directory and alternate base paths where recording CSVs may live
     search_dirs = [fly_dir]
@@ -1581,7 +1617,13 @@ def _trial_csv_candidates(fly_dir: Path, suffix_globs: Iterable[str] | str) -> l
         for path in fly_dir.rglob(pattern):
             if not path.is_file():
                 continue
-            if "training" not in path.name.lower() and "testing" not in path.name.lower():
+            # Phase tokens, derived from TRIAL_TYPE_REGEXES so this allowlist
+            # cannot drift from the arms combine actually processes. "pretest"
+            # is NOT a substring of "testing", so a hardcoded training|testing
+            # check dropped every pretest file here — before
+            # _ensure_angle_percentages could write angle_centered_pct, which
+            # left the pretest arm with distance files and no angle partner.
+            if not any(f"_{name}_" in path.name.lower() for name, _ in TRIAL_TYPE_REGEXES):
                 continue
             real = path.resolve()
             if real in seen:
@@ -1807,11 +1849,36 @@ def _collect_distance_entries(
 
 
 def _has_training_trials(*trial_groups: Sequence[tuple[str, Path, str]]) -> bool:
+    return _has_trials_of_type("training", *trial_groups)
+
+
+def _has_trials_of_type(
+    trial_type: str, *trial_groups: Sequence[tuple[str, Path, str]]
+) -> bool:
+    target = trial_type.strip().lower()
     for group in trial_groups:
         for _, _, category in group:
-            if str(category).strip().lower() == "training":
+            if str(category).strip().lower() == target:
                 return True
     return False
+
+
+def _build_trial_configs(
+    *trial_groups: Sequence[tuple[str, Path, str]],
+) -> list[tuple[str, "re.Pattern[str]"]]:
+    """The (phase, regex) arms to process for one fly.
+
+    ``testing`` is always present — a fly with no testing trials is already
+    skipped upstream for want of distance entries. ``training`` and ``pretest``
+    are added only when that fly actually recorded them, so cohorts that never
+    ran a naive panel are untouched by the pretest arm.
+    """
+
+    configs: list[tuple[str, re.Pattern[str]]] = []
+    for name, regex in TRIAL_TYPE_REGEXES:
+        if name == "testing" or _has_trials_of_type(name, *trial_groups):
+            configs.append((name, regex))
+    return configs
 
 
 def _trial_csv_alias_key(csv_path: Path, fly_dir: Path) -> tuple[str, str]:
@@ -1854,12 +1921,16 @@ def _find_trial_csvs(fly_dir: Path) -> Iterator[Path]:
     seen: set[Path] = set()
     seen_stems: set[str] = set()
     all_paths: list[Path] = []
-    # Prefer parquet over csv so a trial present in both formats is read once.
+    # Prefer parquet over csv so a trial present in both formats is read once —
+    # so ALL parquet patterns must run before ANY csv pattern, which is why the
+    # two comprehensions are separate rather than one loop over phases.
+    # Derived from TRIAL_TYPE_REGEXES: this was hardcoded to testing/training
+    # and matched no "pretest_*" envelope, so build_wide_csv put zero pretest
+    # rows in the wide table even once combine had written the envelopes.
+    _phases = tuple(name for name, _ in TRIAL_TYPE_REGEXES)
     for pattern in (
-        "**/*testing*.parquet",
-        "**/*training*.parquet",
-        "**/*testing*.csv",
-        "**/*training*.csv",
+        *(f"**/*{phase}*.parquet" for phase in _phases),
+        *(f"**/*{phase}*.csv" for phase in _phases),
     ):
         for csv in base.glob(pattern):
             if not csv.is_file():
@@ -2210,16 +2281,14 @@ def combine_distance_angle(cfg: CombineConfig) -> None:
             print(f"[{fly_name}] No distance trials found — skipping.")
             continue
 
+        trial_configs = _build_trial_configs(angle_entries, distance_entries)
+
         angle_idx_map: dict[str, dict[str, Path]] = {}
         angle_fallback_map: dict[str, dict[str, Path]] = {}
-        for trial_type, regex in (("testing", TESTING_REGEX), ("training", TRAINING_REGEX)):
+        for trial_type, regex in TRIAL_TYPE_REGEXES:
             idx, fallback = _index_trials(angle_entries, regex, trial_type)
             angle_idx_map[trial_type] = idx
             angle_fallback_map[trial_type] = fallback
-
-        trial_configs: list[tuple[str, re.Pattern[str]]] = [("testing", TESTING_REGEX)]
-        if include_training:
-            trial_configs.append(("training", TRAINING_REGEX))
 
         out_csv_dir = fly_dir / "angle_distance_rms_envelope"
         out_csv_dir.mkdir(parents=True, exist_ok=True)
@@ -2816,7 +2885,7 @@ def build_wide_csv(
                 )
 
     if not items and not frozen:
-        raise RuntimeError("No eligible testing/training CSVs found in provided roots.")
+        raise RuntimeError("No eligible pretest/testing/training CSVs found in provided roots.")
 
     # Compute max_len via a cheap row count (parquet footer or csv line count;
     # avoids a full read per file).

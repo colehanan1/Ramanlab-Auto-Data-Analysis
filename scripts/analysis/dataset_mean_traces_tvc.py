@@ -89,6 +89,21 @@ _CONCENTRATION_SUFFIX = re.compile(r"\s*\([^)]*\)\s*$")
 #: their names and anything globbing them keeps meaning what it meant.
 NAIVE_SUBDIR = "Trained_vs_Control_vs_Naive"
 
+#: Arm labels for the usual trained-vs-control figure.
+DEFAULT_ARM_LABELS = ("Trained", "Control")
+#: Filename tag for the phase comparison, distinct from "training_vs_control"
+#: so the two never overwrite each other in the same cohort folder.
+PHASE_TAG = "post_vs_pretest"
+
+
+def phase_arm_labels() -> tuple[str, str]:
+    """Arm labels for the pre-test comparison.
+
+    Not "Trained"/"Control": both arms are the SAME flies, and neither is a
+    control cohort — the earlier phase is the control.
+    """
+    return ("Post-training", "Pre-test")
+
 
 def naive_dataset_for_odor(label: object) -> Optional[str]:
     """The random panel run at this odor's concentration, or None.
@@ -294,12 +309,18 @@ def _prepare(
     *,
     fps: float,
     odor_on_s: float,
+    trial_type: str = "testing",
 ) -> tuple[dict[str, dict[str, np.ndarray]], dict[str, list], pd.DataFrame]:
     ds_df = wide_df[wide_df["dataset"].astype(str).str.strip() == dataset]
     if "trial_type" in ds_df.columns:
-        ds_df = ds_df[ds_df["trial_type"].astype(str).str.strip() == "testing"]
+        # Parameterised, not hardcoded: the pre-test arm passes "pretest".
+        # "pretest" is not a substring of "testing", so an unconditional
+        # testing filter silently emptied that arm.
+        ds_df = ds_df[
+            ds_df["trial_type"].astype(str).str.strip() == str(trial_type)
+        ]
     if ds_df.empty:
-        LOGGER.warning("No testing rows for %s", dataset)
+        LOGGER.warning("No %s rows for %s", trial_type, dataset)
         return {}, {}, ds_df
     dir_cols = sorted(
         [c for c in ds_df.columns if c.startswith("dir_val_")],
@@ -418,7 +439,15 @@ def build_parser(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     p.add_argument("--wide-csv", type=Path, required=True,
                    help="all_envelope_rows_wide_combined_base CSV or Parquet.")
     p.add_argument("--train-dataset", required=True)
-    p.add_argument("--control-dataset", required=True)
+    p.add_argument("--control-dataset", default=None,
+                   help="The control cohort. Not required with "
+                        "--pretest-wide-csv, where the fly's own pre-test panel "
+                        "is the control and there is no second cohort.")
+    p.add_argument("--pretest-wide-csv", type=Path, default=None,
+                   help="Wide table of the naive pre-training panel. Switches "
+                        "the second arm from a control DATASET to the pre-test "
+                        "PHASE of --train-dataset (the *-Sensitivity-* "
+                        "cohorts): same flies, before vs after.")
     p.add_argument("--out-dir", type=Path, required=True)
     p.add_argument("--config", type=str, default="",
                    help="Pipeline config YAML; loads dataset_overrides.odor_remap.")
@@ -460,7 +489,14 @@ def build_parser(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
                    help="Ordinal model JSON; overrides the config's model_path.")
     p.add_argument("--binary-threshold", type=int, default=None)
     p.add_argument("--verbose", action="store_true")
-    return p.parse_args(argv)
+    args = p.parse_args(argv)
+    if args.pretest_wide_csv is None and not args.control_dataset:
+        p.error("--control-dataset is required without --pretest-wide-csv")
+    if args.pretest_wide_csv is not None and not args.control_dataset:
+        # Both arms are the same cohort; keeps downstream code that reads
+        # control_dataset working without special-casing None.
+        args.control_dataset = args.train_dataset
+    return args
 
 
 def _resolve_model(args) -> tuple[Path, int] | None:
@@ -554,8 +590,46 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
                 f"No usable traces for {arm_ds} "
                 f"{label_a if not train else label_b}"
             )
+    elif args.pretest_wide_csv is not None:
+        # Phase comparison: the two arms are the SAME flies, before and after
+        # training, so the second arm comes from the pre-test table rather than
+        # a second dataset. _prepare already takes the frame as an argument,
+        # which is the only reason this needs no other change.
+        label_a, label_b = phase_arm_labels()
+        tag = PHASE_TAG
+        pretest_df = read_wide_table(args.pretest_wide_csv)
+        LOGGER.info("Loaded %d pre-test rows from %s",
+                    len(pretest_df), args.pretest_wide_csv)
+        # The SAME filters the post-training arm got, or the two arms would be
+        # drawn from different fly sets and the pairing would be a fiction.
+        pretest_df = _normalise_fly_columns(pretest_df)
+        pretest_df = filter_by_genotype(pretest_df, args.genotype)
+        if args.flagged_flies_csv:
+            pre_flagged = compute_non_reactive_flags(
+                pretest_df, flagged_flies_csv=args.flagged_flies_csv
+            )
+            if pre_flagged.any():
+                pretest_df = pretest_df.loc[~pre_flagged].copy()
+        if args.batch is not None:
+            pretest_df = pretest_df.loc[
+                pretest_df["fly"].map(batch_of) == args.batch
+            ].copy()
+        LOGGER.info("=== %s post-training", args.train_dataset)
+        train, train_rows, train_df = _prepare(
+            wide_df, args.train_dataset, fps=args.fps, odor_on_s=args.odor_on_s
+        )
+        LOGGER.info("=== %s pre-test", args.train_dataset)
+        control, ctrl_rows, ctrl_df = _prepare(
+            pretest_df, args.train_dataset, fps=args.fps, odor_on_s=args.odor_on_s,
+            trial_type="pretest",
+        )
+        if not train or not control:
+            raise RuntimeError(
+                f"No usable {'post-training' if not train else 'pre-test'} "
+                f"traces for {args.train_dataset}"
+            )
     else:
-        label_a, label_b = "Trained", "Control"
+        label_a, label_b = DEFAULT_ARM_LABELS
         tag = "training_vs_control"
         LOGGER.info("=== %s", args.train_dataset)
         train, train_rows, train_df = _prepare(

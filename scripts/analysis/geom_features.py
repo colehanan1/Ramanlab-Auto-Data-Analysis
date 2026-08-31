@@ -38,8 +38,8 @@ from fbpipe.config import (
 LOGGER = logging.getLogger(__name__)
 
 
-TRIAL_TYPE_PATTERN = re.compile(r"(training|testing)", re.IGNORECASE)
-TRIAL_LABEL_PATTERN = re.compile(r"(training|testing)_[^/\\]+", re.IGNORECASE)
+TRIAL_TYPE_PATTERN = re.compile(r"(pretest|training|testing)", re.IGNORECASE)
+TRIAL_LABEL_PATTERN = re.compile(r"(pretest|training|testing)_[^/\\]+", re.IGNORECASE)
 YOLO_CSV_PATTERN = re.compile(r"_distances\.csv$", re.IGNORECASE)
 FLY_SLOT_PATTERN = re.compile(r"(fly\d+)", re.IGNORECASE)
 FLY_NUMBER_PATTERN = re.compile(r"fly[^0-9]*(\d+)", re.IGNORECASE)

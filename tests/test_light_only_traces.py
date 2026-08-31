@@ -132,6 +132,88 @@ def test_pipeline_stage_wiring(tmp_path):
     print("PASS: test_pipeline_stage_wiring")
 
 
+# --- freeze awareness -------------------------------------------------
+
+
+class _Ov:
+    def __init__(self, data=False, figures=False):
+        self.freeze_data = data
+        self.freeze_figures = figures
+
+
+class _Settings:
+    """Minimal stand-in for fbpipe Settings: only what freeze_flags reads."""
+
+    def __init__(self, overrides, thawed=(), thaw_all=False):
+        self.dataset_overrides = overrides
+        self._thawed = thawed
+        self._thaw_all = thaw_all
+
+
+def test_generate_skips_frozen_datasets(tmp_path):
+    csv = _synthetic_csv(tmp_path / "wide.csv")
+    out = tmp_path / "Light-Only"
+    result = lt.generate(csv, out, datasets=None, skip_datasets=["DS-Light-B"])
+    assert result["datasets"] == ["DS-Light-A"]
+    assert result["skipped_datasets"] == ["DS-Light-B"]
+    assert not (out / "DS-Light-B").exists()
+    # The summary CSV must not carry the frozen dataset either.
+    summ = pd.read_csv(out / "light_trial_summary.csv")
+    assert set(summ["dataset"].unique()) == {"DS-Light-A"}
+    print("PASS: test_generate_skips_frozen_datasets")
+
+
+def test_pipeline_stage_skips_figure_frozen_dataset(tmp_path):
+    from scripts.pipeline.run_workflows import _run_light_only_traces
+
+    csv = _synthetic_csv(tmp_path / "wide.csv")
+    out = tmp_path / "Light-Only"
+    settings = _Settings({"DS-Light-B": _Ov(data=True, figures=True)})
+    _run_light_only_traces({"input_csv": str(csv), "out_dir": str(out)}, settings=settings)
+    assert (out / "DS-Light-A" / "DS-Light-A_sess1.png").is_file()
+    assert not (out / "DS-Light-B").exists()
+    print("PASS: test_pipeline_stage_skips_figure_frozen_dataset")
+
+
+def test_pipeline_stage_data_freeze_alone_still_renders(tmp_path):
+    """freeze.data without freeze.figures must NOT suppress the figures."""
+    from scripts.pipeline.run_workflows import _run_light_only_traces
+
+    csv = _synthetic_csv(tmp_path / "wide.csv")
+    out = tmp_path / "Light-Only"
+    settings = _Settings({"DS-Light-B": _Ov(data=True, figures=False)})
+    _run_light_only_traces({"input_csv": str(csv), "out_dir": str(out)}, settings=settings)
+    assert (out / "DS-Light-B" / "DS-Light-B_sess1.png").is_file()
+    print("PASS: test_pipeline_stage_data_freeze_alone_still_renders")
+
+
+def test_pipeline_stage_thaw_overrides_freeze(tmp_path):
+    from scripts.pipeline.run_workflows import _run_light_only_traces
+
+    csv = _synthetic_csv(tmp_path / "wide.csv")
+    out = tmp_path / "Light-Only"
+    settings = _Settings({"DS-Light-B": _Ov(data=True, figures=True)}, thawed=("DS-Light-B",))
+    _run_light_only_traces({"input_csv": str(csv), "out_dir": str(out)}, settings=settings)
+    assert (out / "DS-Light-B" / "DS-Light-B_sess1.png").is_file()
+    print("PASS: test_pipeline_stage_thaw_overrides_freeze")
+
+
+def test_explicit_allow_list_still_honors_freeze(tmp_path):
+    """A config `datasets:` allow-list does not override a figure freeze."""
+    from scripts.pipeline.run_workflows import _run_light_only_traces
+
+    csv = _synthetic_csv(tmp_path / "wide.csv")
+    out = tmp_path / "Light-Only"
+    settings = _Settings({"DS-Light-B": _Ov(data=True, figures=True)})
+    _run_light_only_traces(
+        {"input_csv": str(csv), "out_dir": str(out),
+         "datasets": ["DS-Light-A", "DS-Light-B"]},
+        settings=settings,
+    )
+    assert not (out / "DS-Light-B").exists()
+    print("PASS: test_explicit_allow_list_still_honors_freeze")
+
+
 if __name__ == "__main__":
     import tempfile
 
@@ -140,6 +222,11 @@ if __name__ == "__main__":
         test_generate_sorts_by_dataset,
         test_generate_explicit_dataset_filter,
         test_pipeline_stage_wiring,
+        test_generate_skips_frozen_datasets,
+        test_pipeline_stage_skips_figure_frozen_dataset,
+        test_pipeline_stage_data_freeze_alone_still_renders,
+        test_pipeline_stage_thaw_overrides_freeze,
+        test_explicit_allow_list_still_honors_freeze,
     ):
         with tempfile.TemporaryDirectory() as d:
             fn(Path(d))

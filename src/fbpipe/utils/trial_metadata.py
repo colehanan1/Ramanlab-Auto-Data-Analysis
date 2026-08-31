@@ -37,12 +37,12 @@ LOGGER = logging.getLogger(__name__)
 
 # Cycle-name format: "<trial_type>_<index>[_<Odor>]"  e.g. "testing_3_Hexanol"
 _CYCLE_RE = re.compile(
-    r"^(?P<type>training|testing)_(?P<index>\d+)(?:_(?P<odor>[A-Za-z0-9._\-]+))?$",
+    r"^(?P<type>pretest|training|testing)_(?P<index>\d+)(?:_(?P<odor>[A-Za-z0-9._\-]+))?$",
     re.IGNORECASE,
 )
 
 # Sidecar filename: "output_<batch>_<cycle>_<Odor>_<timestamp>.txt"
-_SIDECAR_RE = re.compile(r"^output_.+_(training|testing)_\d+_.+_\d{8}_\d{6}\.txt$", re.IGNORECASE)
+_SIDECAR_RE = re.compile(r"^output_.+_(pretest|training|testing)_\d+_.+_\d{8}_\d{6}\.txt$", re.IGNORECASE)
 
 CACHE_FILENAME = "_trial_meta.json"
 
@@ -406,7 +406,7 @@ def _parse_cycle_name(cycle: str) -> tuple[Optional[str], Optional[int], Optiona
 def _odor_from_filename(path: Path) -> Optional[str]:
     """Pull the odor token out of ``output_<batch>_<type>_<N>_<Odor>_<ts>.<ext>``."""
     m = re.match(
-        r"^output_.+?_(?:training|testing)_\d+_(?P<odor>[A-Za-z0-9._\-]+?)_\d{8}_\d{6}\.[a-z0-9]+$",
+        r"^output_.+?_(?:pretest|training|testing)_\d+_(?P<odor>[A-Za-z0-9._\-]+?)_\d{8}_\d{6}\.[a-z0-9]+$",
         path.name,
         re.IGNORECASE,
     )
@@ -509,7 +509,7 @@ def _override_odor_window(override: object) -> tuple[Optional[float], Optional[f
 
 
 def _fallback_trial_type_from_folder(trial_dir: Path) -> Optional[str]:
-    m = re.search(r"(training|testing)", trial_dir.name, re.IGNORECASE)
+    m = re.search(r"(pretest|training|testing)", trial_dir.name, re.IGNORECASE)
     return m.group(1).lower() if m else None
 
 
@@ -611,7 +611,7 @@ def load_trial_metadata(
     if not raw_trial_type:
         raw_trial_type = _fallback_trial_type_from_folder(trial_dir)
     if trial_index is None:
-        m = re.search(r"(?:training|testing)_(\d+)", trial_dir.name, re.IGNORECASE)
+        m = re.search(r"(?:pretest|training|testing)_(\d+)", trial_dir.name, re.IGNORECASE)
         if m:
             trial_index = int(m.group(1))
 

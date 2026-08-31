@@ -6,7 +6,7 @@ from ..config import Settings, get_main_directories
 
 DEST_FOLDER = "videos_with_rms"
 VIDEO_EXTS = {".mp4",".mov",".avi",".mkv",".mpg",".mpeg",".m4v"}
-TRIAL_DIR_RE = re.compile(r"^(?P<fly>.+)_(?P<phase>testing|training)_(?P<idx>\d+)$", re.IGNORECASE)
+TRIAL_DIR_RE = re.compile(r"^(?P<fly>.+)_(?P<phase>pretest|testing|training)_(?P<idx>\d+)$", re.IGNORECASE)
 
 def is_video(p: Path): return p.is_file() and p.suffix.lower() in VIDEO_EXTS
 

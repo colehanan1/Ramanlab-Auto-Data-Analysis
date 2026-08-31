@@ -149,7 +149,7 @@ _RC = {
     "pdf.fonttype": 42,
 }
 
-_TRIAL_RE = re.compile(r"^(?:training|testing)_(\d+)_(.+)$", re.IGNORECASE)
+_TRIAL_RE = re.compile(r"^(?:pretest|training|testing)_(\d+)_(.+)$", re.IGNORECASE)
 
 ODOR_SHORT = {
     "hexanol": "Hex",

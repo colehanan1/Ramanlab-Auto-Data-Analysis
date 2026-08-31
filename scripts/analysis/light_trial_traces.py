@@ -394,7 +394,7 @@ def _read_wide_for_light(csv_path) -> pd.DataFrame:
     return df
 
 
-def generate(csv_path, out_dir, datasets=None) -> dict:
+def generate(csv_path, out_dir, datasets=None, skip_datasets=None) -> dict:
     """Render per-fly light-only PER traces, sorted into per-dataset subfolders.
 
     Args:
@@ -402,6 +402,9 @@ def generate(csv_path, out_dir, datasets=None) -> dict:
         out_dir:  root output dir; one subfolder per dataset is created under it.
         datasets: explicit dataset allow-list. When ``None``, every dataset that
                   has light trials is auto-detected and rendered.
+        skip_datasets: datasets to drop even if they are in ``datasets`` -- the
+                  caller's figure-freeze set. Applied AFTER the allow-list, so
+                  a config allow-list can never resurrect a frozen dataset.
 
     Returns a summary dict: ``n_figures``, ``per_dataset`` (dataset -> count),
     ``datasets`` (rendered, sorted), ``summary_csv``, ``out_dir``.
@@ -416,6 +419,11 @@ def generate(csv_path, out_dir, datasets=None) -> dict:
     else:
         wanted = detect_light_datasets(df)
         print(f"Auto-detected {len(wanted)} light dataset(s): {wanted}")
+    skipped = sorted({str(d) for d in (skip_datasets or [])} & set(wanted),
+                     key=natural_sort_key)
+    if skipped:
+        wanted = [d for d in wanted if d not in set(skipped)]
+        print(f"  frozen for figures, skipping: {skipped}")
     df = df[df["dataset"].isin(wanted)].copy()
     rendered = sorted(df["dataset"].unique().tolist(), key=natural_sort_key)
     print(f"  {len(df)} rows across datasets: {rendered}")
@@ -451,6 +459,7 @@ def generate(csv_path, out_dir, datasets=None) -> dict:
         "n_figures": made,
         "per_dataset": per_dataset,
         "datasets": [d for d in rendered if d in per_dataset] or rendered,
+        "skipped_datasets": skipped,
         "summary_csv": summary_path,
         "out_dir": out_dir,
     }

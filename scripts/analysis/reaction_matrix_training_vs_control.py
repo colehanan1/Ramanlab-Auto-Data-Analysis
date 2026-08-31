@@ -73,6 +73,7 @@ from scripts.analysis.per_axis_labels import PERCENT_Y_LABEL
 from scripts.analysis.reaction_matrix_from_spreadsheet import (
     SpreadsheetMatrixConfig,
     _filter_trial_types,
+    _frozen_datasets_from_config,
     _normalise_trial_label,
 )
 
@@ -797,6 +798,20 @@ def generate_training_vs_control_matrices(cfg: SpreadsheetMatrixConfig) -> None:
     present = df["dataset_canon"].unique().tolist()
     # Auto-derive Training→Control pairs from datasets actually in the data
     active_pairs = _auto_training_control_pairs(present)
+    # Freeze: a comparison is dropped only when BOTH arms are frozen for
+    # figures. A frozen control against a live trained arm must keep redrawing,
+    # or flies added to the live arm would never reach the figure (same rule as
+    # envelope_visuals.should_skip_frozen_figure).
+    frozen = {str(d) for d in (getattr(cfg, "frozen_datasets", None) or ())}
+    if frozen:
+        dropped = [t for t, c in active_pairs.items() if t in frozen and c in frozen]
+        if dropped:
+            print("[INFO] train_vs_ctrl: frozen for figures, skipping:",
+                  ", ".join(sorted(dropped)))
+        active_pairs = {
+            t: c for t, c in active_pairs.items()
+            if not (t in frozen and c in frozen)
+        }
     saved_unordered_pngs: list[Path] = []
 
     # Per-dataset genotype split (mirrors reaction_matrix_from_spreadsheet): when
@@ -1036,7 +1051,13 @@ def main(argv: Sequence[str] | None = None) -> None:
     p.add_argument("--protocol", type=str, default="v2", choices=["v2", "legacy"],
                    help="Protocol version for trial ordering (default: v2).")
     p.add_argument("--config", type=str, default="",
-                   help="Pipeline config YAML; used to load dataset_overrides.odor_remap.")
+                   help="Pipeline config YAML; used to load dataset_overrides.odor_remap "
+                        "and dataset_overrides.*.freeze.figures.")
+    p.add_argument("--thaw", action="append", default=[], metavar="DATASET",
+                   help="Draw this dataset even though the config freezes its "
+                        "figures (repeatable). Run-only; it does not edit the config.")
+    p.add_argument("--thaw-all", action="store_true",
+                   help="Ignore every freeze.figures for this run.")
     args = p.parse_args(argv)
     set_protocol(args.protocol)
     try:
@@ -1073,6 +1094,9 @@ def main(argv: Sequence[str] | None = None) -> None:
         include_hexanol=not args.exclude_hexanol,
         overwrite=args.overwrite,
         flagged_flies_csv=args.flagged_flies_csv or "",
+        frozen_datasets=_frozen_datasets_from_config(
+            args.config, thawed=args.thaw, thaw_all=args.thaw_all
+        ),
     )
 
     generate_training_vs_control_matrices(cfg)

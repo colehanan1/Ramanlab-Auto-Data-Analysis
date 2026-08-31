@@ -326,7 +326,7 @@ def _display_odor(dataset_canon: str, trial_label: str) -> str:
     # authoritative per-trial odor recorded by the rig and is correct for
     # randomised-odor datasets like RandomPanel.
     label_match = re.match(
-        r"^(?:training|testing)_\d+_(?P<odor>[A-Za-z0-9][A-Za-z0-9 .()_-]*)$",
+        r"^(?:pretest|training|testing)_\d+_(?P<odor>[A-Za-z0-9][A-Za-z0-9 .()_-]*)$",
         str(trial_label).strip(),
     )
     if label_match:
@@ -743,6 +743,24 @@ def _latency_records_from_csv(
 # ---------------------------------------------------------------------------
 
 
+def _frozen_keys(frozen_datasets) -> set:
+    """Normalised freeze keys, so a config spelling matches a canonical one.
+
+    The config says ``3Oct-Training-24-0.1``; every frame here carries the
+    canonical ``3OCT-Training-24-0.1``. Comparing the raw strings silently
+    matched nothing and the cohort kept redrawing.
+    """
+    from fbpipe.freeze import _freeze_key
+
+    return {_freeze_key(name) for name in (frozen_datasets or ()) if str(name).strip()}
+
+
+def _is_frozen(dataset_canon, frozen_keys) -> bool:
+    from fbpipe.freeze import _freeze_key
+
+    return bool(frozen_keys) and _freeze_key(dataset_canon) in frozen_keys
+
+
 def _plot_latency_per_fly(
     lat_df: pd.DataFrame,
     out_dir: Path,
@@ -750,6 +768,7 @@ def _plot_latency_per_fly(
     latency_ceiling: float,
     trials_of_interest: Sequence[int],
     overwrite: bool,
+    frozen_datasets: Sequence[str] = (),
 ) -> None:
     work = lat_df.copy()
     if "fly_number" not in work.columns:
@@ -757,6 +776,7 @@ def _plot_latency_per_fly(
     work["dataset_canon"] = work["dataset_canon"].fillna("UNKNOWN")
     work["fly"] = work["fly"].fillna("UNKNOWN")
     work["fly_number_norm"] = work["fly_number"].map(_norm_fly_number)
+    frozen_keys = _frozen_keys(frozen_datasets)
 
     for (dataset_canon, fly, fly_number), subset in work.groupby(
         ["dataset_canon", "fly", "fly_number_norm"],
@@ -764,6 +784,10 @@ def _plot_latency_per_fly(
         sort=True,
     ):
         if subset.empty:
+            continue
+        if _is_frozen(dataset_canon, frozen_keys):
+            # This cohort's figures are final; drawing them again would restyle
+            # published figures with the current palette and threshold.
             continue
 
         target_dir = _target_dir(out_dir, [str(dataset_canon)])
@@ -866,8 +890,12 @@ def _plot_latency_by_odor(
     latency_ceiling: float,
     trials_of_interest: Sequence[int],
     overwrite: bool,
+    frozen_datasets: Sequence[str] = (),
 ) -> None:
+    frozen_keys = _frozen_keys(frozen_datasets)
     for odor in sorted(lat_df["dataset_canon"].unique()):
+        if _is_frozen(odor, frozen_keys):
+            continue
         target_dir = _target_dir(out_dir, odor)
         filename = f"{odor}_training_{'_'.join(map(str, trials_of_interest))}_mean_latency.png"
         out_png = target_dir / filename
@@ -951,8 +979,15 @@ def _plot_latency_grand_means(
     out_dir: Path,
     latency_ceiling: float,
     overwrite: bool,
+    frozen_datasets: Sequence[str] = (),
 ) -> None:
     odors = sorted(lat_df["dataset_canon"].dropna().unique())
+    # Pooled panel: retired only when EVERY contributing cohort is frozen. One
+    # live cohort still has to reach it.
+    frozen_keys = _frozen_keys(frozen_datasets)
+    if odors and all(_is_frozen(o, frozen_keys) for o in odors):
+        print("[FROZEN] Skipping grand-mean latency panel: every cohort is frozen.")
+        return
     rows = []
     means = []
     sems = []
@@ -1052,6 +1087,7 @@ def latency_reports(
     odor_on_s: float = 30.0,
     odor_off_s: float = 60.0,
     odor_latency_s: float = 0.0,
+    frozen_datasets: Sequence[str] = (),
 ) -> None:
     """Generate latency plots and summaries for the requested trials.
 
@@ -1158,6 +1194,7 @@ def latency_reports(
         latency_ceiling=latency_ceiling,
         trials_of_interest=trials_of_interest,
         overwrite=overwrite,
+        frozen_datasets=frozen_datasets,
     )
     _plot_latency_by_odor(
         lat_df,
@@ -1165,8 +1202,12 @@ def latency_reports(
         latency_ceiling=latency_ceiling,
         trials_of_interest=trials_of_interest,
         overwrite=overwrite,
+        frozen_datasets=frozen_datasets,
     )
-    _plot_latency_grand_means(lat_df, out_dir, latency_ceiling, overwrite)
+    _plot_latency_grand_means(
+        lat_df, out_dir, latency_ceiling, overwrite,
+        frozen_datasets=frozen_datasets,
+    )
 
 
 # ---------------------------------------------------------------------------

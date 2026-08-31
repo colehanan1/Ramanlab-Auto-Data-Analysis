@@ -160,7 +160,7 @@ LIGHT_CHECK_FULL_FRACTION = 0.95
 LIGHT_CHECK_PASS_COLOR = "#006300"
 LIGHT_CHECK_WARN_COLOR = "#d03b3b"
 
-_LIGHT_TRIAL_LABEL_RE = re.compile(r"^(training|testing)_(\d+)", re.IGNORECASE)
+_LIGHT_TRIAL_LABEL_RE = re.compile(r"^(pretest|training|testing)_(\d+)", re.IGNORECASE)
 
 
 def set_light_check_fractions(
@@ -585,12 +585,28 @@ def _trained_label(dataset_canon: str) -> str:
     if result:
         return result
     # Auto-derive: "EB-Control-24-0.1" → base odor "EB" → display "Ethyl Butyrate"
-    m = re.match(r"^([A-Za-z0-9]+)[-_](?:Training|Control)", dataset_canon, re.IGNORECASE)
+    # "Sensitivity" is the pre-test protocol's arm name. Without it every
+    # *-Sensitivity-* cohort fell through to the dataset NAME, so no CS+ odor
+    # could be identified: no tick was bolded and the trained-odor figures
+    # silently did not render.
+    m = re.match(
+        r"^([A-Za-z0-9]+)[-_](?:Training|Control|Sensitivity)",
+        dataset_canon,
+        re.IGNORECASE,
+    )
     if m:
         base = m.group(1)
         label = _display_label_ci(base)
         if label != base:
             return label
+        # _display_label_ci carries the rig spellings, not the short dataset
+        # prefixes: "Hex" and "3Oct" are not in it, so they used to fall
+        # through. _BASE_ODORS does know them — reached here via a synthetic
+        # "-Control" name so the shared _DATASET_FOLDER_RE (training|control
+        # only, and also driving train<->control pairing) stays untouched.
+        alias = _auto_display_label(f"{base}-Control")
+        if alias:
+            return alias
     # Same auto-derive against odor_constants._BASE_ODORS, which knows base
     # tokens _DISPLAY_LABEL_LOWER does not ("3oct" — that table only carries the
     # rig spelling "3-octonol"). Without this, "3OCT-Training-24-0.1" fell
@@ -619,14 +635,29 @@ _DISPLAY_LABEL_LOWER.update({
 
 def _display_label_ci(key: str) -> str:
     """Case-insensitive DISPLAY_LABEL lookup."""
-    return _DISPLAY_LABEL_LOWER.get(key.lower(), key)
+    lower = key.lower()
+    label = _DISPLAY_LABEL_LOWER.get(lower)
+    if label is not None:
+        return label
+    # Fall back through ODOR_CANON, which knows rig spellings the display table
+    # is not keyed by ("isoamylacetate" -> "IAA" -> "Isoamyl Acetate"). Reached
+    # only when the token had no label at all, so no existing label can move.
+    # Without it the IAA odor rendered as the raw token and therefore never
+    # matched _trained_label("IAA-Sensitivity-24-1"), so that cohort's CS+
+    # figures silently did not render.
+    canon = ODOR_CANON.get(lower)
+    if canon is not None:
+        resolved = DISPLAY_LABEL.get(canon)
+        if resolved:
+            return resolved
+    return key
 
 
 def _display_odor_v2(dataset_canon: str, trial_label: str) -> str:
     """V2 protocol: extract odor name from trial label suffix or fall back to dataset label."""
     label_str = str(trial_label)
     # Try to extract odor suffix from label like "testing_2_Hexanol" or "training_1_ACV"
-    match = re.match(r"(?:testing|training)_\d+_(.+)", label_str, re.IGNORECASE)
+    match = re.match(r"(?:pretest|testing|training)_\d+_(.+)", label_str, re.IGNORECASE)
     if match:
         odor_suffix = match.group(1)
         if odor_suffix.lower() == "lightonly":
@@ -1535,7 +1566,7 @@ def _style_trained_xticks(ax, labels: Sequence[str], trained_display: str, fonts
 
 def _extract_odor_from_label(trial_label: str) -> str:
     """Extract the odor suffix from a trial label like 'testing_3_Benzaldehyde' → 'Benzaldehyde'."""
-    m = re.match(r"(?:testing|training)_\d+_(.+)", str(trial_label), re.IGNORECASE)
+    m = re.match(r"(?:pretest|testing|training)_\d+_(.+)", str(trial_label), re.IGNORECASE)
     if m:
         return m.group(1)
     return str(trial_label)
@@ -2271,13 +2302,28 @@ class NoTargetTrialsError(RuntimeError):
     """
 
 
+# Phases a trace figure can be rendered for. ``pretest`` is the naive panel the
+# *-Sensitivity-* cohorts run before training (Raw-Pre-Testing-PER-Traces).
+SUPPORTED_TRIAL_TYPES = frozenset({"testing", "training", "pretest"})
+
+# Human-readable phase names for the figure title. Without a pretest entry the
+# naive panel was titled "...Across Testing Trials", identical to the
+# post-training panel sitting in the sibling folder.
+_PHASE_LABELS = {"training": "Training", "testing": "Testing", "pretest": "Pre-Test"}
+
+
+def _phase_label(trial_type: str) -> str:
+    """Title-case phase name for the figure heading."""
+    return _PHASE_LABELS.get(str(trial_type).strip().lower(), "Testing")
+
+
 def generate_envelope_plots(cfg: EnvelopePlotConfig) -> None:
     if cfg.wide_input:
         df, env_cols = _load_wide_table(cfg.wide_input)
     else:
         df, env_cols = _load_matrix(cfg.matrix_npy, cfg.codes_json)
     trial_type = cfg.trial_type.strip().lower()
-    if trial_type not in {"testing", "training"}:
+    if trial_type not in SUPPORTED_TRIAL_TYPES:
         raise ValueError(f"Unsupported trial type: {cfg.trial_type!r}")
     light_annotation_mode = str(cfg.light_annotation_mode).strip().lower()
     if light_annotation_mode not in {"none", "line", "paired-span"}:
@@ -2932,7 +2978,7 @@ def generate_envelope_plots(cfg: EnvelopePlotConfig) -> None:
             if cfg.figure_subtitle_y is not None
             else title_y - 0.035
         )
-        phase_label = "Training" if trial_type == "training" else "Testing"
+        phase_label = _phase_label(trial_type)
         if cfg.show_figure_title:
             fig.text(
                 float(cfg.figure_title_x),

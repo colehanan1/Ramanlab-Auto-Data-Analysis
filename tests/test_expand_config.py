@@ -4,7 +4,8 @@
 import sys, os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "PiCode"))
 
-from expand_config import expand_config, _testing_odor_sequence, _ALL_ODOR_PINS
+from expand_config import (expand_config, _odor_label, _testing_odor_sequence, _ALL_ODOR_PINS,
+                            _DEFAULTS)
 
 def _make_v2(trained="OFM_B"):
     return {
@@ -42,7 +43,7 @@ def test_cycle1_training():
     result = expand_config(_make_v2("OFM_B"))
     c1 = result["cycles"][0]
     assert c1["repeat"] == 6
-    assert c1["delay_after"] == 1680
+    assert c1["delay_after"] == _DEFAULTS["wait_before_testing"]
     odor_steps = [s for s in c1["steps"] if "light_schedule" in s]
     assert len(odor_steps) == 1
     assert odor_steps[0]["actions"][0]["pin"] == "OFM_B"
@@ -291,6 +292,126 @@ def test_manual_and_control_together():
     assert result["control"] is True
     print("PASS: test_manual_and_control_together")
 
+
+# ── wait_before_testing override ──────────────────────────────────────
+
+def _cycle1(result):
+    return next(c for c in result["cycles"] if c["cycle"] == 1)
+
+def test_wait_before_testing_default():
+    """No override anywhere -> whatever _DEFAULTS says."""
+    assert (_cycle1(expand_config(_make_v2()))["delay_after"]
+            == _DEFAULTS["wait_before_testing"])
+    print("PASS: test_wait_before_testing_default")
+
+def test_wait_before_testing_from_config():
+    cfg = _make_v2()
+    cfg["experiment"]["wait_before_testing"] = 300
+    assert _cycle1(expand_config(cfg))["delay_after"] == 300
+    print("PASS: test_wait_before_testing_from_config")
+
+def test_wait_before_testing_cli_override():
+    """CLI kwarg wins over both the default and the config value."""
+    cfg = _make_v2()
+    cfg["experiment"]["wait_before_testing"] = 300
+    r = expand_config(cfg, wait_before_testing=0)
+    assert _cycle1(r)["delay_after"] == 0
+    print("PASS: test_wait_before_testing_cli_override")
+
+def test_wait_before_testing_cli_none_keeps_config():
+    """None means 'not specified' - config/default still apply."""
+    cfg = _make_v2()
+    cfg["experiment"]["wait_before_testing"] = 300
+    assert _cycle1(expand_config(cfg, wait_before_testing=None))["delay_after"] == 300
+    print("PASS: test_wait_before_testing_cli_none_keeps_config")
+
+def test_wait_before_testing_does_not_mutate_caller_config():
+    cfg = _make_v2()
+    expand_config(cfg, wait_before_testing=0)
+    assert "wait_before_testing" not in cfg["experiment"]
+    print("PASS: test_wait_before_testing_does_not_mutate_caller_config")
+
+def test_wait_before_testing_zero_leaves_rest_intact():
+    """Only delay_after changes; trial structure is untouched."""
+    base = expand_config(_make_v2())
+    zero = expand_config(_make_v2(), wait_before_testing=0)
+    assert _cycle1(zero)["steps"] == _cycle1(base)["steps"]
+    assert _cycle1(zero)["repeat"] == _cycle1(base)["repeat"]
+    print("PASS: test_wait_before_testing_zero_leaves_rest_intact")
+
+
+# ── testing_sequence: all_random ──────────────────────────────────────
+
+def _cycle2(result):
+    return next(c for c in result["cycles"] if c["cycle"] == 2)
+
+def _testing_odors(cycle):
+    """Odor labels in trial order, read off the Start Recording steps."""
+    return [s["odor_label"] for s in cycle["steps"] if s["name"] == "Start Recording"]
+
+def test_sequence_default_is_trained_first():
+    """Unspecified -> unchanged 8-trial trained/…/trained sequence."""
+    odors = _testing_odors(_cycle2(expand_config(_make_v2("OFM_B"))))
+    assert len(odors) == 8
+    assert odors[0] == odors[-1] == "Benzaldehyde"
+
+def test_sequence_all_random_has_7_trials():
+    cfg = _make_v2("OFM_B")
+    cfg["experiment"]["testing_sequence"] = "all_random"
+    odors = _testing_odors(_cycle2(expand_config(cfg)))
+    assert len(odors) == 7
+
+def test_sequence_all_random_covers_every_odor_once():
+    cfg = _make_v2("OFM_H")
+    cfg["experiment"]["testing_sequence"] = "all_random"
+    odors = _testing_odors(_cycle2(expand_config(cfg)))
+    assert sorted(odors) == sorted(_odor_label(p) for p in _ALL_ODOR_PINS)
+
+def test_sequence_all_random_includes_trained_odor():
+    cfg = _make_v2("OFM_H")
+    cfg["experiment"]["testing_sequence"] = "all_random"
+    assert "Hexanol" in _testing_odors(_cycle2(expand_config(cfg)))
+
+def test_sequence_all_random_order_varies():
+    """Order is reshuffled per expansion, not fixed."""
+    cfg = _make_v2("OFM_B")
+    cfg["experiment"]["testing_sequence"] = "all_random"
+    seen = {tuple(_testing_odors(_cycle2(expand_config(cfg)))) for _ in range(30)}
+    assert len(seen) > 1
+
+def test_sequence_all_random_no_light():
+    cfg = _make_v2("OFM_B")
+    cfg["experiment"]["testing_sequence"] = "all_random"
+    for s in _cycle2(expand_config(cfg))["steps"]:
+        assert "light_schedule" not in s
+
+def test_sequence_all_random_keeps_training_cycle_identical():
+    """Training must be untouched: same 6 trials, same timings."""
+    base = _cycle1(expand_config(_make_v2("OFM_B")))
+    cfg = _make_v2("OFM_B")
+    cfg["experiment"]["testing_sequence"] = "all_random"
+    alt = _cycle1(expand_config(cfg))
+    assert alt["steps"] == base["steps"] and alt["repeat"] == base["repeat"] == 6
+
+def test_sequence_all_random_gap_between_trials():
+    cfg = _make_v2("OFM_B")
+    cfg["experiment"]["testing_sequence"] = "all_random"
+    gap = _DEFAULTS["testing_inter_trial_baseline"]
+    # Every trial opens with its own 30 s baseline; the inter-trial gaps are the
+    # Baseline Period steps carrying the gap duration.
+    gaps = [s for s in _cycle2(expand_config(cfg))["steps"]
+            if s["name"] == "Baseline Period" and s["duration"] == gap]
+    assert len(gaps) == 6                       # 7 trials -> 6 gaps
+
+def test_sequence_unknown_value_rejected():
+    cfg = _make_v2("OFM_B")
+    cfg["experiment"]["testing_sequence"] = "nonsense"
+    try:
+        expand_config(cfg)
+    except ValueError:
+        return
+    raise AssertionError("unknown testing_sequence should raise ValueError")
+
 if __name__ == "__main__":
     test_passthrough()
     test_3_cycles()
@@ -311,4 +432,10 @@ if __name__ == "__main__":
     test_odor_label_on_odor_steps()
     test_odor_label_light_only()
     test_odor_label_values()
+    test_wait_before_testing_default()
+    test_wait_before_testing_from_config()
+    test_wait_before_testing_cli_override()
+    test_wait_before_testing_cli_none_keeps_config()
+    test_wait_before_testing_does_not_mutate_caller_config()
+    test_wait_before_testing_zero_leaves_rest_intact()
     print("\n=== ALL TESTS PASSED ===")

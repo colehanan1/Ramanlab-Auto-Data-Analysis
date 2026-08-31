@@ -268,7 +268,7 @@ def find_trial_video_candidates(trial_dir: Path) -> list[Path]:
 
     batch = trial_dir.parent
     import re
-    m = re.search(r"(training|testing)_(\d+)$", trial_dir.name, re.IGNORECASE)
+    m = re.search(r"(pretest|training|testing)_(\d+)$", trial_dir.name, re.IGNORECASE)
     if m:
         phase = m.group(1).lower()
         staged = batch / "videos_with_rms" / phase / annotated.name

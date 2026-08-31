@@ -90,7 +90,7 @@ _MONTHS = {
     )
 }
 _DATE_RE = re.compile(r"^([a-z]+)_(\d+)", re.IGNORECASE)
-_TRIAL_RE = re.compile(r"^(?:training|testing)_(\d+)_(.+)$", re.IGNORECASE)
+_TRIAL_RE = re.compile(r"^(?:pretest|training|testing)_(\d+)_(.+)$", re.IGNORECASE)
 
 
 # ---------------------------------------------------------------------------

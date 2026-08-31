@@ -44,7 +44,20 @@ pytestmark = pytest.mark.skipif(
 
 @pytest.fixture(scope="module")
 def cfg():
-    return load_settings("config/config_new.yaml")
+    """config_new.yaml with every dataset's DATA freeze lifted.
+
+    As of 2026-08-27 every dataset except the four ``*-Sensitivity-*`` cohorts
+    carries ``freeze: {data: true}``, and a data-frozen dataset is never
+    folder-frozen — its root is not walked at all, so ``frozen_folders_for_root``
+    correctly returns nothing. That would make every assertion below vacuously
+    pass. These tests are about whether the retirement RULES are right, which
+    still matters the moment a dataset is thawed, so the data freeze is lifted
+    here and only here.
+    """
+    settings = load_settings("config/config_new.yaml")
+    for override in (settings.dataset_overrides or {}).values():
+        override.freeze_data = False
+    return settings
 
 
 def _live(cfg, dataset: str) -> list[Path]:

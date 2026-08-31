@@ -253,7 +253,10 @@ def test_a_figure_the_sweep_no_longer_builds_is_removed(tmp_path):
     kept = stale_dir / "notes.txt"
     kept.write_text("not mine to delete")
 
-    written, _ = build_sweep(out_dir=tmp_path, df=_frame())
+    # thaw_all: this test is about PRUNING, and build_sweep defaults to the
+    # shipped config, where every non-sensitivity cohort is frozen for figures.
+    # Freeze behaviour has its own file (test_pubfig_naive_freeze.py).
+    written, _ = build_sweep(out_dir=tmp_path, df=_frame(), thaw_all=True)
     assert written, "nothing was built, so the prune proves nothing"
     assert not stale.exists()
     assert kept.exists(), "only this driver's own outputs may be pruned"
@@ -265,7 +268,7 @@ def test_pruned_files_are_reported(tmp_path, capsys):
     stale = tmp_path / "3OCT-24-0.1" / "pubfig_naive_vs_trained_Gone_1pct.svg"
     stale.parent.mkdir(parents=True)
     stale.write_bytes(b"old")
-    build_sweep(out_dir=tmp_path, df=_frame())
+    build_sweep(out_dir=tmp_path, df=_frame(), thaw_all=True)
     assert "Gone_1pct" in capsys.readouterr().out
 
 

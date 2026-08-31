@@ -406,7 +406,12 @@ def test_shipped_config_renders_the_published_3oct_figure_set():
     import yaml
 
     raw = yaml.safe_load(CONFIG_PATH.read_text())
+    # Command SHAPE test: thaw everything so the shipped config's freeze
+    # state (all non-sensitivity datasets are frozen) does not empty the
+    # command list. Freeze behaviour itself is covered by
+    # tests/test_figure_freeze_adherence.py.
     settings = load_settings(CONFIG_PATH)
+    settings._thaw_all = True
     cmds = rw._dataset_mean_traces_commands(
         raw.get("analysis") or {},
         settings,
@@ -436,7 +441,12 @@ def test_shipped_config_covers_randompanel_with_a_concentration_series():
     import yaml
 
     raw = yaml.safe_load(CONFIG_PATH.read_text())
+    # Command SHAPE test: thaw everything so the shipped config's freeze
+    # state (all non-sensitivity datasets are frozen) does not empty the
+    # command list. Freeze behaviour itself is covered by
+    # tests/test_figure_freeze_adherence.py.
     settings = load_settings(CONFIG_PATH)
+    settings._thaw_all = True
     cmds = rw._dataset_mean_traces_commands(
         raw.get("analysis") or {},
         settings,

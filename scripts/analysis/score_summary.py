@@ -146,7 +146,7 @@ TRAINING_CONTROL_PAIRS = dict(_STATIC_PAIRS)
 def _normalise_trial_label(label: str) -> str:
     """Keep odor suffix for v2: testing_3_benzaldehyde → testing_3_benzaldehyde."""
     m = re.match(
-        r"((?:testing|training)_\d+(?:_(?!fly\d|distances)[A-Za-z0-9._-]+?)?)"
+        r"((?:pretest|testing|training)_\d+(?:_(?!fly\d|distances)[A-Za-z0-9._-]+?)?)"
         r"(?:_fly\d|_distances|$)",
         str(label), re.IGNORECASE,
     )
@@ -158,7 +158,17 @@ def _load_scores(
     *,
     threshold: float | None = None,
     flagged_flies_csv: str = "",
+    trial_types: Sequence[str] = ("testing",),
 ) -> pd.DataFrame:
+    """Load scored trials for one phase.
+
+    ``trial_types`` defaults to the post-training panel, which is what every
+    existing figure wants. Pass ``("pretest",)`` for the naive panel. Load ONE
+    phase per call: the odor-occurrence numbering below groups by trial index
+    within a fly, and ``pretest_1`` and ``testing_1`` share an index, so mixing
+    the phases in one frame would merge them.
+    """
+
     df = pd.read_csv(csv_path)
     required = {"dataset", "fly", "fly_number", "trial_label", "score"}
     missing = required.difference(df.columns)
@@ -167,13 +177,16 @@ def _load_scores(
 
     df = df.copy()
 
-    # Filter to testing trials
+    # Filter to the requested phase
+    wanted = {str(value).strip().lower() for value in trial_types}
     if "trial_type" in df.columns:
-        mask = df["trial_type"].astype(str).str.strip().str.lower() == "testing"
+        mask = df["trial_type"].astype(str).str.strip().str.lower().isin(wanted)
         df = df.loc[mask].copy()
 
     if df.empty:
-        raise RuntimeError("No testing trials found in predictions CSV.")
+        raise RuntimeError(
+            f"No {'/'.join(sorted(wanted))} trials found in predictions CSV."
+        )
 
     df["dataset"] = df["dataset"].astype(str).str.strip()
     df["fly"] = df["fly"].astype(str).str.strip()

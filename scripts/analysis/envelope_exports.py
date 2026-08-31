@@ -109,7 +109,7 @@ def _resolve_trial_meta_for_csv(csv_path: Path | str | None, n_frames_hint: int 
 TIMESTAMP_CANDIDATES = ("UTC_ISO", "Timestamp", "Number", "MonoNs")
 FRAME_CANDIDATES = ("Frame", "FrameNumber", "Frame Number")
 TRIAL_REGEX = re.compile(
-    r"(testing|training)_(\d+)(?:_((?!fly\d|distances)[A-Za-z0-9._-]+?))?(?:_fly\d|_distances|$)",
+    r"(pretest|testing|training)_(\d+)(?:_((?!fly\d|distances)[A-Za-z0-9._-]+?))?(?:_fly\d|_distances|$)",
     re.IGNORECASE,
 )
 FLY_SLOT_REGEX = re.compile(r"(fly\d+)_distances", re.IGNORECASE)
@@ -297,12 +297,23 @@ def _compute_envelope(series: pd.Series, win_frames: int) -> np.ndarray:
     )
 
 
+# Every trial phase the rigs record, most specific FIRST: "pretest" must be
+# tested before "testing"/"training" (it contains neither, but ordering keeps
+# the intent obvious). Kept in step with envelope_combined.TRIAL_TYPE_REGEXES —
+# tests/test_pretest_arm_pairing.py asserts the two agree.
+TRIAL_PHASES = ("pretest", "testing", "training")
+
+# Trial types whose pre-odor window feeds the per-fly baseline pool. Pretest
+# trials fed it before they were split out of "testing"; naming both keeps the
+# normalisation of every sensitivity fly byte-identical across that change.
+BASELINE_POOL_TRIAL_TYPES = ("testing", "pretest")
+
+
 def _infer_trial_type(path: Path) -> str:
     composite = (path.stem + "/" + "/".join(parent.name for parent in path.parents)).lower()
-    if "testing" in composite:
-        return "testing"
-    if "training" in composite:
-        return "training"
+    for phase in TRIAL_PHASES:
+        if phase in composite:
+            return phase
     return "unknown"
 
 
@@ -313,7 +324,7 @@ def _build_odor_map(fly_dir: Path) -> dict[str, str]:
     Returns: {"testing_3": "Benzaldehyde", "training_1": "Hexanol", ...}
     """
     odor_map: dict[str, str] = {}
-    pat = re.compile(r"(testing|training)_(\d+)_([A-Za-z0-9][A-Za-z0-9 .()-]+?)_\d{8}_", re.IGNORECASE)
+    pat = re.compile(r"(pretest|testing|training)_(\d+)_([A-Za-z0-9][A-Za-z0-9 .()-]+?)_\d{8}_", re.IGNORECASE)
 
     search_dirs = [fly_dir]
     fly_rel = fly_dir.name
@@ -380,7 +391,12 @@ def _find_trial_csvs(fly_dir: Path) -> Iterator[Path]:
     print(
         f"[DEBUG]    Searching for trial CSVs under {search_root}"
     )
-    patterns = ("**/*testing*.csv", "**/*training*.csv")
+    # One glob per known phase, derived from the same table combine iterates so
+    # the two cannot drift. This was hardcoded to testing/training only, which
+    # matched no "pretest_*" envelope at all: combine wrote them, the wide table
+    # never saw them, the pretest subset came out header-only and no
+    # pre-vs-post figure was ever drawn.
+    patterns = tuple(f"**/*{name}*.csv" for name in TRIAL_PHASES)
     seen: set[Path] = set()
     all_paths: list[Path] = []
     for pattern in patterns:
@@ -401,7 +417,7 @@ def _find_trial_csvs(fly_dir: Path) -> Iterator[Path]:
         if "distances_fly" not in stem.lower():
             # Check if a distances_fly variant exists in the same directory
             match = re.match(
-                r"((?:testing|training)_\d+_fly\d+)_(.+)", stem, re.IGNORECASE
+                r"((?:pretest|testing|training)_\d+_fly\d+)_(.+)", stem, re.IGNORECASE
             )
             if match:
                 prefix = match.group(1)
@@ -558,7 +574,7 @@ def collect_envelopes(cfg: CollectConfig) -> None:
                 )
 
     if not items:
-        raise RuntimeError("No eligible testing/training CSVs found in provided roots.")
+        raise RuntimeError("No eligible pretest/testing/training CSVs found in provided roots.")
 
     print(f"[INFO] Datasets: {[root.name for root in cfg.roots]}")
     print(f"[INFO] Discovered {len(items)} videos. Max frames = {max_len}")
@@ -646,7 +662,7 @@ def collect_envelopes(cfg: CollectConfig) -> None:
             )
         except Exception:
             _baseline_end = BEFORE_FRAMES
-        if item["trial_type"].lower() == "testing":
+        if item["trial_type"].lower() in BASELINE_POOL_TRIAL_TYPES:
             before_len = min(_baseline_end, env.size)
             if before_len > 0:
                 before_segment = env[:before_len]

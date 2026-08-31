@@ -653,11 +653,11 @@ def _plot_training_vs_control_for_odor(
     ax.set_xlabel("Time (s)")
     ax.set_ylabel(Y_LABEL)
     # The default title must name every arm actually drawn: a three-arm figure
-    # captioned "Trained vs Control" misreports what the reader is looking at.
-    _default_title = (
-        f"{odor} - Trained vs Control vs Naive"
-        if (naive_trials is not None and getattr(naive_trials, "size", 0))
-        else f"{odor} - Trained vs Control"
+    # captioned "Trained vs Control" misreports what the reader is looking at,
+    # and so does a pre-test-vs-post-training one.
+    _default_title = default_arm_title(
+        odor, train_label, ctrl_label,
+        with_naive=bool(naive_trials is not None and getattr(naive_trials, "size", 0)),
     )
     ax.set_title(title if title is not None else _default_title,
                  fontsize=12)
@@ -667,6 +667,19 @@ def _plot_training_vs_control_for_odor(
     ax.grid(axis="y", alpha=0.3, linewidth=0.5)
     fig.tight_layout()
     return fig
+
+
+def default_arm_title(
+    odor: str, train_label: str, ctrl_label: str, *, with_naive: bool = False
+) -> str:
+    """Figure title naming the arms actually drawn.
+
+    Derived from the labels rather than hardcoded: the same plotting function
+    now serves trained-vs-control, the three-arm naive figure, and the
+    pre-test-vs-post-training phase comparison.
+    """
+    title = f"{odor} - {train_label} vs {ctrl_label}"
+    return f"{title} vs Naive" if with_naive else title
 
 
 # Canonical odor-pair groupings requested for cross-odor trained-vs-control

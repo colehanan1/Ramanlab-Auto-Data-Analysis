@@ -75,7 +75,7 @@ def _normalise_trial_label(label: str) -> str:
     """
     # Match testing/training_N, optionally followed by _OdorName (stops before _fly or _distances)
     m = _re.match(
-        r"((?:testing|training)_\d+(?:_(?!fly\d|distances)[A-Za-z0-9._-]+?)?)"
+        r"((?:pretest|testing|training)_\d+(?:_(?!fly\d|distances)[A-Za-z0-9._-]+?)?)"
         r"(?:_fly\d|_distances|$)",
         str(label),
         _re.IGNORECASE,
@@ -124,6 +124,9 @@ class SpreadsheetMatrixConfig:
     overwrite: bool = True
     non_reactive_threshold: float | None = None
     flagged_flies_csv: str = ""
+    #: Datasets frozen for FIGURES: present in the predictions CSV, but their
+    #: matrices are final and must not be redrawn. Empty means "render all".
+    frozen_datasets: frozenset = frozenset()
 
 
 def _filter_trial_types(
@@ -243,6 +246,13 @@ def generate_reaction_matrices_from_csv(cfg: SpreadsheetMatrixConfig) -> None:
     norm = BoundaryNorm([-0.5, 0.5, 1.5], cmap.N)
 
     present = df["dataset_canon"].unique().tolist()
+    frozen = {str(d) for d in (cfg.frozen_datasets or ())}
+    if frozen:
+        skipped = [d for d in present if str(d) in frozen]
+        if skipped:
+            print("[INFO] reaction_matrix_csv: frozen for figures, skipping:",
+                  ", ".join(map(str, sorted(skipped))))
+        present = [d for d in present if str(d) not in frozen]
     ordered_present = [odor for odor in ODOR_ORDER if odor in present]
     extras = sorted(odor for odor in present if odor not in ODOR_ORDER)
 
@@ -688,7 +698,21 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         "--config",
         type=str,
         default="",
-        help="Pipeline config YAML; used to load dataset_overrides.odor_remap.",
+        help="Pipeline config YAML; used to load dataset_overrides.odor_remap "
+             "and dataset_overrides.*.freeze.figures.",
+    )
+    parser.add_argument(
+        "--thaw",
+        action="append",
+        default=[],
+        metavar="DATASET",
+        help="Draw this dataset even though the config freezes its figures "
+             "(repeatable). Run-only; it does not edit the config.",
+    )
+    parser.add_argument(
+        "--thaw-all",
+        action="store_true",
+        help="Ignore every freeze.figures for this run.",
     )
     parser.set_defaults(overwrite=True)
     return parser.parse_args(argv)
@@ -721,6 +745,28 @@ def _apply_odor_remap_from_config(config_path: str) -> None:
         set_dataset_odor_remap(remap)
 
 
+def _frozen_datasets_from_config(config_path, *, thawed=(), thaw_all=False) -> frozenset:
+    """Datasets whose figures the config freezes, honoring this run's thaw.
+
+    Reads the YAML directly rather than through ``load_settings``: this script
+    is a subprocess whose only job is drawing, and load_settings validates the
+    whole pipeline (it raises when a data-frozen dataset's raw folder is
+    missing). An unreadable config means "nothing frozen" -- a redundant figure
+    is a far better failure than a silently missing one.
+    """
+    if not config_path:
+        return frozenset()
+    try:
+        import yaml
+
+        from fbpipe.freeze import figure_frozen_from_raw
+
+        raw = yaml.safe_load(Path(config_path).read_text(encoding="utf-8")) or {}
+    except Exception:  # noqa: BLE001 -- see docstring
+        return frozenset()
+    return frozenset(figure_frozen_from_raw(raw, thawed=thawed, thaw_all=thaw_all))
+
+
 def main(argv: Sequence[str] | None = None) -> None:
     args = _parse_args(argv)
     set_protocol(args.protocol)
@@ -744,6 +790,9 @@ def main(argv: Sequence[str] | None = None) -> None:
         overwrite=args.overwrite,
         non_reactive_threshold=args.non_reactive_threshold,
         flagged_flies_csv=args.flagged_flies_csv or "",
+        frozen_datasets=_frozen_datasets_from_config(
+            args.config, thawed=args.thaw, thaw_all=args.thaw_all
+        ),
     )
     generate_reaction_matrices_from_csv(cfg)
 

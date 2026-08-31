@@ -190,15 +190,48 @@ def test_pipeline_asks_for_the_naive_arm():
     path = Path(rw.REPO_ROOT) / "config" / "config_new.yaml"
     if not path.is_file():
         pytest.skip("config_new.yaml not present")
+    # Command SHAPE test: thaw everything so the shipped config's freeze state
+    # (all non-sensitivity datasets are frozen) does not empty the command list.
+    # Freeze behaviour is covered by tests/test_figure_freeze_adherence.py.
+    settings = load_settings(path)
+    settings._thaw_all = True
     cmds = rw._dataset_mean_traces_commands(
         (yaml.safe_load(path.read_text(encoding="utf-8")) or {}).get("analysis"),
-        load_settings(path), python_exec=sys.executable, config_path=path,
+        settings, python_exec=sys.executable, config_path=path,
     )
+    # The same script now also serves the pre-test vs post-training phase
+    # comparison, which has no naive arm by construction: the fly's own
+    # pre-test IS the baseline, so --with-naive would be meaningless there.
+    # Scope this to the trained-vs-control commands it was written for.
     tvc_cmds = [c for c in cmds
-                if any(str(p).endswith("dataset_mean_traces_tvc.py") for p in c)]
+                if any(str(p).endswith("dataset_mean_traces_tvc.py") for p in c)
+                and "--pretest-wide-csv" not in c]
     assert tvc_cmds, "no trained-vs-control mean trace commands built"
     for cmd in tvc_cmds:
         assert "--with-naive" in cmd
+
+
+def test_the_phase_comparison_does_not_ask_for_a_naive_arm():
+    """Its baseline is the fly's own pre-test; a naive cohort would be a third
+    arm answering a question the figure is not asking."""
+    import yaml
+    import scripts.pipeline.run_workflows as rw
+    from fbpipe.config import load_settings
+
+    path = Path(rw.REPO_ROOT) / "config" / "config_new.yaml"
+    if not path.is_file():
+        pytest.skip("config_new.yaml not present")
+    settings = load_settings(path)
+    settings._thaw_all = True
+    cmds = rw._dataset_mean_traces_commands(
+        (yaml.safe_load(path.read_text(encoding="utf-8")) or {}).get("analysis"),
+        settings, python_exec=sys.executable, config_path=path,
+    )
+    phase_cmds = [c for c in cmds if "--pretest-wide-csv" in c]
+    assert phase_cmds, "no phase-comparison commands built"
+    for cmd in phase_cmds:
+        assert "--with-naive" not in cmd
+        assert "--control-dataset" not in cmd
 
 
 def test_three_arm_title_names_all_three_arms():

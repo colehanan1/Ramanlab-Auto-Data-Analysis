@@ -597,6 +597,19 @@ def write_sidecar(
 # ---------------------------------------------------------------------------
 
 
+def datasets_to_render(names, cfg_data, *, thawed=(), thaw_all=False) -> list:
+    """*names* minus the datasets frozen for figures, order preserved.
+
+    ``freeze.data`` alone is deliberately kept: those rows are spliced back into
+    the wide table from the freeze cache and still belong in this run's figures.
+    Only ``freeze.figures`` retires a dataset from drawing.
+    """
+    from fbpipe.freeze import figure_frozen_from_raw
+
+    frozen = figure_frozen_from_raw(cfg_data, thawed=thawed, thaw_all=thaw_all)
+    return [n for n in names if str(n) not in frozen]
+
+
 def build_parser(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=__doc__,
@@ -613,6 +626,19 @@ def build_parser(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         type=Path,
         default=None,
         help="Path to all_envelope_rows_wide.csv (defaults to config when available)",
+    )
+    parser.add_argument(
+        "--thaw",
+        action="append",
+        default=[],
+        metavar="DATASET",
+        help="Render this dataset even though the config freezes its figures "
+             "(repeatable). Run-only; it does not edit the config.",
+    )
+    parser.add_argument(
+        "--thaw-all",
+        action="store_true",
+        help="Ignore every freeze.figures for this run.",
     )
     parser.add_argument(
         "--flagged-csv",
@@ -708,8 +734,19 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     outdir = _select_outdir_arg(args.outdir, cfg_data, trial_type=args.trial_type).expanduser().resolve()
     _ensure_directory(outdir)
 
+    _, freeze_cfg = _load_config_data(args.config)
+    found = sorted(wide_df["dataset"].unique())
+    to_render = datasets_to_render(
+        found, freeze_cfg,
+        thawed=getattr(args, "thaw", ()) or (),
+        thaw_all=bool(getattr(args, "thaw_all", False)),
+    )
+    skipped = [d for d in found if d not in set(to_render)]
+    if skipped:
+        LOGGER.info("Frozen for figures, skipping: %s", ", ".join(map(str, skipped)))
+
     processed = 0
-    for dataset_name in sorted(wide_df["dataset"].unique()):
+    for dataset_name in to_render:
         LOGGER.info("=== Dataset: %s ===", dataset_name)
 
         ds_df = wide_df[wide_df["dataset"] == dataset_name].copy()

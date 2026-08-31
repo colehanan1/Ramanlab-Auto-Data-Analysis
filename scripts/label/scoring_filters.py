@@ -50,7 +50,7 @@ def filter_trials(df: pd.DataFrame, dataset: str | None = None) -> pd.DataFrame:
     out = df[df["trial_type"].astype(str).str.strip().str.lower() == "testing"].copy()
     out = out[
         out["trial_label"].astype(str).str.match(
-            r"(?:testing|training)_\d+", case=False, na=False
+            r"(?:pretest|testing|training)_\d+", case=False, na=False
         )
     ]
     out = out[~out["dataset"].astype(str).isin(LIGHT_ONLY_DATASETS)]

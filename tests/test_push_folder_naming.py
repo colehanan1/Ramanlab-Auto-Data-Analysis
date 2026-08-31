@@ -117,3 +117,50 @@ def test_manual_dataset_name_still_canonicalizes_downstream():
     assert canon != canon_dataset("Hex-Training-24-0.005")
     # …but still resolves to the same trained odor.
     assert resolve_dataset_label(canon) == "Hexanol"
+
+
+# ── sensitivity (pre-test protocol) cohorts ───────────────────────────
+# The pre-test protocol measures naive odor sensitivity before training, so its
+# data must not land in the plain Control cohort folder — the naive panel would
+# pool with control trials that have no pre-test at all.
+
+
+def test_sensitivity_replaces_the_control_segment():
+    remote = get_push_folder(
+        "OFM_H", "Control", BASE, starvation_hours=24, odor_vial_conc="0.1%",
+        sensitivity=True,
+    )
+    assert _folder(remote) == "Hex-Sensitivity-24-0.1"
+
+
+def test_sensitivity_training_arm_stays_separate():
+    """A light-paired pre-test run must not merge with the no-light one."""
+    remote = get_push_folder(
+        "OFM_H", "Training", BASE, starvation_hours=24, odor_vial_conc="0.1%",
+        sensitivity=True,
+    )
+    assert _folder(remote) == "Hex-Sensitivity-Training-24-0.1"
+
+
+def test_sensitivity_off_by_default():
+    remote = get_push_folder(
+        "OFM_H", "Control", BASE, starvation_hours=24, odor_vial_conc="0.1%"
+    )
+    assert _folder(remote) == "Hex-Control-24-0.1"
+
+
+def test_sensitivity_still_honours_manual():
+    remote = get_push_folder(
+        "OFM_E", "Control", BASE, starvation_hours=24, odor_vial_conc="0.1%",
+        sensitivity=True, manual=True,
+    )
+    assert _folder(remote) == "EB-Sensitivity-24-0.1-Manual"
+
+
+def test_sensitivity_ignored_for_mode_invariant_pins():
+    """RandomPanel has no mode segment, so there is nothing to rename."""
+    remote = get_push_folder(
+        "OFM_PANEL", "Control", BASE, starvation_hours=24, odor_vial_conc="10%",
+        sensitivity=True,
+    )
+    assert _folder(remote) == "RandomPanel-24-10"

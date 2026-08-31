@@ -125,7 +125,7 @@ _RC = {
     "pdf.fonttype": 42,
 }
 
-_TRIAL_RE = re.compile(r"^(?:training|testing)_(\d+)_(.+)$", re.IGNORECASE)
+_TRIAL_RE = re.compile(r"^(?:pretest|training|testing)_(\d+)_(.+)$", re.IGNORECASE)
 
 ODOR_PRETTY = {
     "hexanol": "Hexanol",
@@ -1205,8 +1205,16 @@ def figure_testing(
     testing_trials: pd.DataFrame, order: Sequence[str], *, dataset: str,
     k: float = K_DEFAULT, scores: Optional[dict[str, float]] = None,
     exclude_odors: Sequence[str] = DEFAULT_EXCLUDE_ODORS,
-    mode: Mode = BINARY_MODE, sort_by: str = "binary", trained: Optional[str] = None, **kw,
+    mode: Mode = BINARY_MODE, sort_by: str = "binary", trained: Optional[str] = None,
+    phase: str = "test", **kw,
 ) -> tuple[plt.Figure, dict]:
+    """Per-odor panel for one non-conditioning phase.
+
+    ``phase`` names it in the title: "test" for the post-training panel,
+    "pre-test" for the naive panel the *-Sensitivity-* cohorts run first. Both
+    land in the same cohort folder, so a shared title would make them
+    indistinguishable — the exact pre/post confusion the phase split prevents.
+    """
     dropped = sorted({
         odor_display(o, dataset)
         for o in testing_trials["odor"].unique()
@@ -1221,7 +1229,7 @@ def figure_testing(
         testing_panels(testing_trials, exclude_odors=exclude_odors,
                        dataset=dataset, trained=trained),
         order, dataset=dataset, scores=scores, mode=mode,
-        title=f"{what} at test, by odor — {dataset}",
+        title=f"{what} at {phase}, by odor — {dataset}",
         subtitle=(
             (
                 "Same fly order as the training figure — row N is the same fly in "
@@ -1235,8 +1243,13 @@ def figure_testing(
             (
                 "Same fly order as the training figure — row N is the same fly in both, "
                 f"sorted by {_SORT_BLURB.get(sort_by, sort_by)} during training.  "
-                "Panels are keyed on the odor, not the trial index: testing trials 2–7 are "
-                f"randomised per fly.{note}"
+                + (
+                    "This panel was recorded BEFORE training; it is ordered by the "
+                    "conditioning that followed so the three panels stack row-for-row.  "
+                    if phase == "pre-test" else ""
+                )
+                + "Panels are keyed on the odor, not the trial index: "
+                f"{phase} trials are randomised per fly.{note}"
             )
         ),
         **kw,
@@ -1702,6 +1715,12 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--training-wide-csv", type=Path, required=True)
     p.add_argument("--wide-csv", type=Path, required=True,
                    help="Full wide table (testing trials).")
+    p.add_argument("--pretest-wide-csv", type=Path, default=None,
+                   help="Optional wide table of the naive pre-training panel "
+                        "(the *-Sensitivity-* cohorts). When given, a third "
+                        "raster panel is drawn on the SAME row order as the "
+                        "training and testing panels. Cohorts without a naive "
+                        "panel simply omit it.")
     p.add_argument("--predictions-csv", type=Path, default=None,
                    help="Restrict to the flies the behavioural figures keep.")
     p.add_argument("--dataset", action="append", required=True)
@@ -1808,6 +1827,18 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
 
     training_wide = read_wide_table(args.training_wide_csv)
     testing_wide = read_wide_table(args.wide_csv)
+    # Optional third phase: the naive panel. Absent for every cohort that never
+    # ran one, and absent until a full run has produced the table, so a missing
+    # file is a skip with a note rather than a failure.
+    pretest_wide = None
+    if args.pretest_wide_csv is not None:
+        if Path(args.pretest_wide_csv).exists():
+            pretest_wide = read_wide_table(args.pretest_wide_csv)
+        else:
+            LOGGER.warning(
+                "pre-test table not found, skipping the naive panel: %s",
+                args.pretest_wide_csv,
+            )
     win = {"pre_s": args.pre_s, "post_s": args.post_s, "bin_s": args.bin_s}
 
     for dataset in args.dataset:
@@ -1828,6 +1859,14 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         test = build_trials(
             testing_wide, dataset=dataset, trial_type="testing",
             keep=keep, rule=rule,
+        )
+        pretest = (
+            build_trials(
+                pretest_wide, dataset=dataset, trial_type="pretest",
+                keep=keep, rule=rule,
+            )
+            if pretest_wide is not None
+            else pd.DataFrame()
         )
 
         ds_dir = args.out_dir / dataset.replace("/", "_")
@@ -1882,6 +1921,16 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             else:
                 LOGGER.warning("No testing trials for %s", dataset)
 
+            meta_pretest = None
+            if not pretest.empty:
+                fig, meta_pretest = figure_testing(
+                    pretest, order, dataset=dataset, k=rule.std_mult, scores=scores,
+                    exclude_odors=exclude, mode=BINARY_MODE, sort_by=args.sort_by,
+                    **win, trained=cs_odor, phase="pre-test",
+                )
+                _save(fig, ds_dir, f"{stem}_pretest_raster", svg=svg)
+            metadata["pretest"] = meta_pretest
+
             fly_order_rows(order, scores).to_csv(
                 ds_dir / f"{stem}_fly_order.csv", index=False
             )
@@ -1919,11 +1968,21 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
                 )
                 _save(fig, ds_dir, f"{stem}_testing_graded", svg=svg)
 
+            meta_pretest = None
+            if not pretest.empty:
+                fig, meta_pretest = figure_testing(
+                    pretest, order, dataset=dataset, k=rule.std_mult, scores=scores,
+                    exclude_odors=exclude, mode=gmode, sort_by=args.sort_by, **win,
+                    trained=cs_odor, phase="pre-test",
+                )
+                _save(fig, ds_dir, f"{stem}_pretest_graded", svg=svg)
+
             fly_order_rows(order, scores).rename(
                 columns={"mean_training_odor_fraction": "sort_score"}
             ).to_csv(ds_dir / f"{stem}_fly_order.csv", index=False)
             metadata["graded"] = {
-                "training": meta_train, "testing": meta_test, "vmax": float(vmax),
+                "training": meta_train, "testing": meta_test,
+                "pretest": meta_pretest, "vmax": float(vmax),
             }
 
         if args.mode in {"heatmap", "both"}:

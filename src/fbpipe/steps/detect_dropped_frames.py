@@ -89,7 +89,7 @@ def _process_fly_dir(fly_dir: Path, cfg: Settings) -> None:
         all_dropped = sorted(set(missing) | set(dropped))
         flagged_runs = _consecutive_runs(all_dropped, min_len=10)
         trial_label = ""
-        trial_match = re.search(r"(testing|training)_\d+", csv_path.stem, re.IGNORECASE)
+        trial_match = re.search(r"(pretest|testing|training)_\d+", csv_path.stem, re.IGNORECASE)
         if trial_match:
             trial_label = trial_match.group(0)
 

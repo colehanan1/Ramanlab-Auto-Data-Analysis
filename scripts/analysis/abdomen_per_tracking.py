@@ -777,7 +777,7 @@ def apply_signed_percent(arr, ref):
 
 def _trial_key(stem):
     """(category, number, odor) for ordering trials 1 (top) .. N (bottom)."""
-    m = re.search(r"(testing|training)_(\d+)_([A-Za-z0-9\-]+)", stem)
+    m = re.search(r"(pretest|testing|training)_(\d+)_([A-Za-z0-9\-]+)", stem)
     if m:
         return (m.group(1), int(m.group(2)), m.group(3))
     return ("zzz", 999, stem)

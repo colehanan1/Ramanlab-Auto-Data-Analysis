@@ -37,7 +37,7 @@ from fbpipe.utils.notify import ntfy_notify  # noqa: E402
 from fbpipe.utils.parallel import parallel_map  # noqa: E402
 from fbpipe.utils.trial_metadata import load_trial_metadata  # noqa: E402
 
-TRIAL_DIR_RE = re.compile(r"(training|testing)_(\d+)$", re.IGNORECASE)
+TRIAL_DIR_RE = re.compile(r"(pretest|training|testing)_(\d+)$", re.IGNORECASE)
 
 DEFAULT_CSV_PATH = REPO_ROOT / "logs" / "light_stimulus_flags.csv"
 DEFAULT_PLOTS_DIR = REPO_ROOT / "figures" / "light_stimulus_check"

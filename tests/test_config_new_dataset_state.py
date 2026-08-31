@@ -10,9 +10,10 @@ Two config decisions live here:
    remap content itself is pinned by test_3oct_odor_remap.py).
 
 2. The three finished RandomPanel cohorts were thawed for FIGURES on
-   2026-08-11 so their figures regenerate, while their wide rows stay served
-   from the freeze cache (``data: true``). A regression back to
-   ``figures: true`` would silently stop their figures from updating.
+   2026-08-11, then RE-FROZEN on 2026-08-27 when every dataset except the four
+   ``*-Sensitivity-*`` cohorts was frozen for both data and figures. Thawing one
+   again is a deliberate act — flip it back here and in config_new.yaml
+   together, or the figures silently stop updating.
 """
 
 from __future__ import annotations
@@ -28,7 +29,8 @@ CONFIG_PATH = Path(__file__).resolve().parents[1] / "config" / "config_new.yaml"
 
 MANUAL_DATASET = "3Oct-Training-24-0.1-Manual"
 
-THAWED_FIGURE_DATASETS = (
+# Re-frozen 2026-08-27 along with every other finished dataset.
+REFROZEN_FIGURE_DATASETS = (
     "RandomPanel-Training-24-10",
     "RandomPanel-24-1",
     "RandomPanel-24-0.1",
@@ -63,16 +65,17 @@ def test_manual_3oct_dataset_carries_the_3oct_remap() -> None:
     assert dict(manual.odor_remap) == dict(sibling.odor_remap)
 
 
-@pytest.mark.parametrize("dataset", THAWED_FIGURE_DATASETS)
-def test_randompanel_figures_thawed(dataset: str) -> None:
-    """Figures regenerate; wide rows still come from the freeze cache."""
+@pytest.mark.parametrize("dataset", REFROZEN_FIGURE_DATASETS)
+def test_randompanel_figures_refrozen(dataset: str) -> None:
+    """Frozen for both: a run touches only the *-Sensitivity-* cohorts."""
     settings = load_settings(CONFIG_PATH)
     ov = settings.dataset_overrides[dataset]
-    assert ov.freeze_figures is False, (
-        f"{dataset} figures re-frozen; figure generation was thawed 2026-08-11"
+    assert ov.freeze_figures is True, (
+        f"{dataset} figures thawed; every non-Sensitivity dataset is frozen "
+        f"as of 2026-08-27 — thaw deliberately, not by accident"
     )
     assert ov.freeze_data is True, (
-        f"{dataset} raw data left the freeze cache; only figures were thawed"
+        f"{dataset} raw data left the freeze cache"
     )
 
 

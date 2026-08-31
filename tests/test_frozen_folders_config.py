@@ -182,6 +182,11 @@ def test_rig_3_from_august_11_is_live(tmp_path):
     from fbpipe.utils.frozen_folders import is_frozen_folder
 
     cfg = load_settings("config/config_new.yaml")
+    # Every non-Sensitivity dataset is data-frozen as of 2026-08-27, and a
+    # data-frozen dataset is never folder-frozen (its root is not walked), which
+    # would make the assertions below vacuous. The RULE is what is under test.
+    for override in (cfg.dataset_overrides or {}).values():
+        override.freeze_data = False
 
     def batch(name: str, stamp: str):
         d = tmp_path / name

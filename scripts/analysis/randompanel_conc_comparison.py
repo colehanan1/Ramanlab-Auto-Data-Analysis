@@ -305,7 +305,15 @@ def _load_panel(
     # cleared the reaction boundary (0, 0.5 or 1). Averaging that fraction over
     # flies reproduces the pooled per-trial response rate reported in the paper.
     df["_reacted_trial"] = (df["score"] >= REACTION_BOUNDARY).astype(float)
-    fly = df.groupby(["odor", "conc", "fly", "fly_number"], as_index=False).agg(
+    # ``dataset_canon`` is a grouping key purely so it survives the aggregation:
+    # the all-contributors freeze check in generate_conc_comparison reads it off
+    # this frame, and without it the run died with KeyError: 'dataset_canon'.
+    # CONC_BY_DATASET maps each dataset to a DISTINCT concentration and df is
+    # already filtered to its keys, so dataset_canon is a function of conc here
+    # -- adding it splits no group and the per-fly pooling below is unchanged.
+    fly = df.groupby(
+        ["odor", "conc", "dataset_canon", "fly", "fly_number"], as_index=False
+    ).agg(
         score=("score", "mean"),
         reacted=("_reacted_trial", "mean"),
         n_trials=("score", "size"),
@@ -712,6 +720,26 @@ def _resolve_out_dir(
     return out_dir / _safe_dirname(fly_type)
 
 
+def _frozen_datasets_from_config(config_path, *, thawed=(), thaw_all=False) -> frozenset:
+    """Datasets whose figures the config freezes, honoring this run's thaw.
+
+    Reads the YAML directly rather than through ``load_settings``: a figure
+    subprocess must not inherit the pipeline's disk validation. An unreadable
+    config means nothing is frozen -- a redundant figure beats a missing one.
+    """
+    if not config_path:
+        return frozenset()
+    try:
+        import yaml
+
+        from fbpipe.freeze import figure_frozen_from_raw
+
+        raw = yaml.safe_load(Path(config_path).read_text(encoding="utf-8")) or {}
+    except Exception:  # noqa: BLE001 -- see docstring
+        return frozenset()
+    return frozenset(figure_frozen_from_raw(raw, thawed=thawed, thaw_all=thaw_all))
+
+
 def generate_conc_comparison(
     csv_path: Path,
     out_dir: Path,
@@ -722,6 +750,8 @@ def generate_conc_comparison(
     seed: int = 0,
     overwrite: bool = True,
     genotype_subdir: bool = False,
+    thawed: Sequence[str] = (),
+    thaw_all: bool = False,
 ) -> None:
     df = _load_panel(csv_path, fly_type=fly_type, config=config)
     if df.empty:
@@ -736,6 +766,18 @@ def generate_conc_comparison(
         print(
             f"[conc_compare] Only concentrations {sorted(present)} present for "
             f"fly_type={fly_type!r}; need {CONC_ORDER}. Skipping."
+        )
+        return
+
+    # Freeze: this is ONE figure set drawn from all three RandomPanel datasets,
+    # so it is retired only when every contributor is frozen for figures. One
+    # live concentration keeps it -- the figure IS the comparison between them.
+    frozen = _frozen_datasets_from_config(config, thawed=thawed, thaw_all=thaw_all)
+    contributors = {str(d) for d in df["dataset_canon"].unique()}
+    if frozen and contributors and contributors <= frozen:
+        print(
+            "[conc_compare] every contributing dataset is frozen for figures "
+            f"({', '.join(sorted(contributors))}); skipping."
         )
         return
 
@@ -790,6 +832,15 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--out-dir", type=Path, required=True)
     parser.add_argument("--fly-type", type=str, default="GR5a-Old")
     parser.add_argument("--config", type=str, default="")
+    parser.add_argument(
+        "--thaw", action="append", default=[], metavar="DATASET",
+        help="Draw this dataset even though the config freezes its figures "
+             "(repeatable). Run-only; it does not edit the config.",
+    )
+    parser.add_argument(
+        "--thaw-all", action="store_true",
+        help="Ignore every freeze.figures for this run.",
+    )
     parser.add_argument("--n-iter", type=int, default=50_000)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--overwrite", action="store_true", default=True)
@@ -813,6 +864,8 @@ def main(argv: Sequence[str] | None = None) -> None:
         seed=args.seed,
         overwrite=args.overwrite,
         genotype_subdir=args.genotype_subdir,
+        thawed=args.thaw,
+        thaw_all=bool(args.thaw_all),
     )
 
 

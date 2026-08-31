@@ -327,13 +327,19 @@ def sweep_comparisons(
     naive_by_conc: dict[float, str] | None = None,
     genotype: str = GENOTYPE,
     naive_pool_trials: bool = True,
+    frozen_datasets: Iterable[str] = (),
 ) -> tuple[list[Comparison], list[dict]]:
     """Every (cohort, odor, presentation) that all three arms can support.
 
     Returns ``(comparisons, skipped)``. Nothing is dropped silently: each skip
     carries the cohort, odor and the reason, so a missing figure is traceable
     to a missing naive panel or an untagged concentration rather than to a bug.
+
+    ``frozen_datasets`` names datasets frozen for figures. A comparison has
+    three arms, so it is dropped only when all three are frozen -- one live arm
+    means new flies still have to reach the figure.
     """
+    frozen = {str(d) for d in (frozen_datasets or ())}
     frame = df
     if "fly_type" in frame.columns and genotype:
         frame = frame[frame["fly_type"].astype(str).str.strip() == genotype]
@@ -357,6 +363,12 @@ def sweep_comparisons(
             if naive is None:
                 skipped.append({
                     **note, "reason": f"no naive panel at {concentration:g}%",
+                })
+                continue
+            if frozen and {train, control, naive} <= frozen:
+                skipped.append({
+                    **note, "naive": naive,
+                    "reason": "frozen for figures (all three arms)",
                 })
                 continue
             naive_present = _naive_presentations(frame, naive, odor)
@@ -803,18 +815,48 @@ def build(
 _SWEEP_PREFIX = "pubfig_naive_vs_trained_"
 
 
-def _prune_stale(out_dir: Path, written: list[Path]) -> list[Path]:
+def _frozen_cohort_dirs(frozen_datasets: Iterable[str]) -> set[str]:
+    """Output subfolder names belonging to frozen cohorts.
+
+    ``sweep_comparisons`` names each cohort folder after its trained arm with
+    ``-Training-`` collapsed (``EB-Training-24-1`` -> ``EB-24-1``), so that is
+    the mapping the prune has to undo to recognise a frozen cohort's folder.
+    """
+    dirs: set[str] = set()
+    for name in frozen_datasets or ():
+        text = str(name).strip()
+        if not text:
+            continue
+        dirs.add(text)
+        if "-Training-" in text:
+            dirs.add(text.replace("-Training-", "-", 1))
+        if "-Control-" in text:
+            dirs.add(text.replace("-Control-", "-", 1))
+    return dirs
+
+
+def _prune_stale(
+    out_dir: Path, written: list[Path], frozen_datasets: Iterable[str] = ()
+) -> list[Path]:
     """Delete figures this driver wrote before but no longer builds.
 
     A withdrawn naive panel or a retagged odor changes which comparisons are
     legitimate; the figure that is no longer built must not sit in the folder
     looking current. Only this driver's own outputs are touched -- matched by
     filename prefix -- and each removal is printed.
+
+    A FROZEN cohort is never pruned. Freezing means "stop redrawing", never
+    "delete what is published": a frozen cohort builds nothing this run, so
+    without this exemption the prune would wipe every figure the freeze exists
+    to protect.
     """
     keep = {p.with_suffix("") for p in written}
+    protected = _frozen_cohort_dirs(frozen_datasets)
     removed: list[Path] = []
     for path in sorted(out_dir.rglob(f"{_SWEEP_PREFIX}*")):
         if not path.is_file() or path.suffix not in {".png", ".pdf", ".svg", ".csv"}:
+            continue
+        if protected and any(part in protected for part in path.parts):
             continue
         stem = path.with_suffix("")
         if stem.name.endswith("_stats"):
@@ -828,6 +870,26 @@ def _prune_stale(out_dir: Path, written: list[Path]) -> list[Path]:
     return removed
 
 
+def _frozen_datasets_from_config(config_path, *, thawed=(), thaw_all=False) -> frozenset:
+    """Datasets whose figures the config freezes, honoring this run's thaw.
+
+    Reads the YAML directly: this script draws figures as a subprocess and must
+    not inherit ``load_settings``'s pipeline validation. An unreadable config
+    means "nothing frozen" -- a redundant figure beats a missing one.
+    """
+    if not config_path:
+        return frozenset()
+    try:
+        import yaml
+
+        from fbpipe.freeze import figure_frozen_from_raw
+
+        raw = yaml.safe_load(Path(config_path).read_text(encoding="utf-8")) or {}
+    except Exception:  # noqa: BLE001 -- see docstring
+        return frozenset()
+    return frozenset(figure_frozen_from_raw(raw, thawed=thawed, thaw_all=thaw_all))
+
+
 def build_sweep(
     *,
     predictions_csv: Path = PREDICTIONS_CSV,
@@ -839,6 +901,8 @@ def build_sweep(
     correction: str = "none",
     naive_pool_trials: bool = True,
     df: pd.DataFrame | None = None,
+    thawed: Iterable[str] = (),
+    thaw_all: bool = False,
 ) -> tuple[list[Path], pd.DataFrame]:
     """Render every cohort x odor x presentation into ``out_dir``.
 
@@ -847,8 +911,10 @@ def build_sweep(
     rather than dropped, so an absent figure is always explainable.
     """
     frame = _load_predictions(predictions_csv, config) if df is None else df
+    frozen = _frozen_datasets_from_config(config, thawed=thawed, thaw_all=thaw_all)
     comparisons, skipped = sweep_comparisons(
-        frame, genotype=genotype, naive_pool_trials=naive_pool_trials
+        frame, genotype=genotype, naive_pool_trials=naive_pool_trials,
+        frozen_datasets=frozen,
     )
 
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -882,7 +948,7 @@ def build_sweep(
         rows.insert(1, "presentation", comparison.presentation)
         stats_frames.append(rows)
 
-    _prune_stale(out_dir, written)
+    _prune_stale(out_dir, written, frozen_datasets=frozen)
 
     stats = (
         pd.concat(stats_frames, ignore_index=True)
@@ -920,6 +986,15 @@ def main(argv: Sequence[str] | None = None) -> None:
                         help="Render one comparison instead of all of them.")
     parser.add_argument("--predictions-csv", type=Path, default=PREDICTIONS_CSV)
     parser.add_argument("--config", type=Path, default=CONFIG)
+    parser.add_argument(
+        "--thaw", action="append", default=[], metavar="DATASET",
+        help="Draw this dataset even though the config freezes its figures "
+             "(repeatable). Run-only; it does not edit the config.",
+    )
+    parser.add_argument(
+        "--thaw-all", action="store_true",
+        help="Ignore every freeze.figures for this run.",
+    )
     parser.add_argument("--figures-dir", type=Path, default=FIGURES_DIR)
     parser.add_argument("--genotype", default=GENOTYPE)
     args = parser.parse_args(argv)
@@ -936,6 +1011,8 @@ def main(argv: Sequence[str] | None = None) -> None:
             trend_p=bool(args.trend_p),
             correction=args.correction,
             df=df,
+            thawed=args.thaw,
+            thaw_all=bool(args.thaw_all),
         )
         for png in written:
             print(f"[SAVED] {png}")

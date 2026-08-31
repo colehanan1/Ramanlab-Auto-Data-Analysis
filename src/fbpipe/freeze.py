@@ -44,6 +44,32 @@ class FrozenSlice(NamedTuple):
     own_max_len: int
 
 
+def _freeze_key(name: object) -> str:
+    """Normalise a dataset name for freeze lookups.
+
+    Config spells cohorts the way a human types them (``3Oct-Training-24-0.1``);
+    every figure path works in the canonical name from
+    ``odor_constants.canon_dataset``, which re-cases that one to
+    ``3OCT-Training-24-0.1``. An exact dict lookup therefore missed and the
+    whole 3Oct cohort kept re-rendering while the config said it was frozen.
+
+    The ``-flagged`` split is the same cohort, so it normalises to the same key:
+    a frozen dataset must not come back to life through its flagged rows.
+    """
+    text = str(name).strip()
+    if not text:
+        return ""
+    try:
+        from .odor_constants import canon_dataset
+
+        text = canon_dataset(text)
+    except Exception:  # noqa: BLE001 -- a name we cannot canonicalise is used as-is
+        pass
+    if text.lower().endswith("-flagged"):
+        text = text[: -len("-flagged")]
+    return text.casefold()
+
+
 def freeze_flags(
     cfg: Any,
     dataset: str,
@@ -56,9 +82,21 @@ def freeze_flags(
     ``thawed`` names datasets to treat as unfrozen for this run only;
     ``thaw_all`` unfreezes everything. Neither edits config.
     """
-    if thaw_all or dataset in set(thawed):
+    if thaw_all:
         return (False, False)
-    override = (getattr(cfg, "dataset_overrides", None) or {}).get(dataset)
+    key = _freeze_key(dataset)
+    if key and key in {_freeze_key(name) for name in thawed}:
+        return (False, False)
+    overrides = getattr(cfg, "dataset_overrides", None) or {}
+    override = overrides.get(dataset)
+    if override is None and key:
+        # Fall back to a canonical match: config spelling vs canon_dataset
+        # spelling (see _freeze_key). Exact hit wins, so an explicit entry is
+        # never shadowed.
+        for name, candidate in overrides.items():
+            if _freeze_key(name) == key:
+                override = candidate
+                break
     if override is None:
         return (False, False)
     return (bool(override.freeze_data), bool(override.freeze_figures))
@@ -292,3 +330,45 @@ def drift_reason(
         if cached.get(key) != current.get(key):
             return f"{key}: {cached.get(key)!r} -> {current.get(key)!r}"
     return None
+
+
+def figure_frozen_from_raw(
+    raw: Any,
+    *,
+    thawed: Iterable[str] = (),
+    thaw_all: bool = False,
+) -> set[str]:
+    """Datasets frozen for FIGURES, read straight off a raw config mapping.
+
+    For figure scripts that run as subprocesses and hold only a ``--config``
+    path: ``load_settings`` validates the whole pipeline (it raises when a
+    data-frozen dataset's raw folder is missing) and a figure script must not
+    die for a reason unrelated to drawing.
+
+    Only ``freeze.figures`` counts -- ``freeze.data`` alone means "do not
+    re-derive the rows", and those cached rows still redraw. Anything
+    unreadable counts as LIVE: the failure mode of a config we cannot parse has
+    to be a redundant figure, never a silently missing one.
+    """
+    if thaw_all:
+        return set()
+    overrides = (raw or {}).get("dataset_overrides") if isinstance(raw, Mapping) else None
+    if not isinstance(overrides, Mapping):
+        return set()
+    skip = {_freeze_key(n) for n in thawed}
+    frozen = set()
+    for name, block in overrides.items():
+        if _freeze_key(name) in skip or not isinstance(block, Mapping):
+            continue
+        fz = block.get("freeze")
+        if isinstance(fz, Mapping) and fz.get("figures") is True:
+            # Both spellings: callers compare against config names AND against
+            # the canonical names the figure paths carry (see _freeze_key).
+            frozen.add(str(name))
+            try:
+                from .odor_constants import canon_dataset
+
+                frozen.add(canon_dataset(str(name)))
+            except Exception:  # noqa: BLE001
+                pass
+    return frozen

@@ -109,8 +109,13 @@ def test_pipeline_sends_both_arms_to_the_auc_set():
     data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
     from fbpipe.config import load_settings
 
+    # Command SHAPE test: thaw everything so the shipped config's freeze state
+    # (all non-sensitivity datasets are frozen) does not empty the command list.
+    # Freeze behaviour is covered by tests/test_figure_freeze_adherence.py.
+    settings = load_settings(path)
+    settings._thaw_all = True
     cmds = rw._cohort_figure_commands(
-        data.get("analysis"), load_settings(path),
+        data.get("analysis"), settings,
         python_exec=sys.executable, config_path=path,
     )
     auc = [c for c in cmds
@@ -128,9 +133,14 @@ def test_pipeline_makes_graded_rasters_for_the_trained_arms():
     path = Path(rw.REPO_ROOT) / "config" / "config_new.yaml"
     if not path.is_file():
         pytest.skip("config_new.yaml not present")
+    # Command SHAPE test: thaw everything so the shipped config's freeze state
+    # (all non-sensitivity datasets are frozen) does not empty the command list.
+    # Freeze behaviour is covered by tests/test_figure_freeze_adherence.py.
+    settings = load_settings(path)
+    settings._thaw_all = True
     cmds = rw._cohort_figure_commands(
         (yaml.safe_load(path.read_text(encoding="utf-8")) or {}).get("analysis"),
-        load_settings(path), python_exec=sys.executable, config_path=path,
+        settings, python_exec=sys.executable, config_path=path,
     )
     graded = [c for c in cmds
               if "--mode" in c and c[c.index("--mode") + 1] == "graded"]
@@ -146,9 +156,14 @@ def test_trained_rasters_now_sort_like_the_controls():
     path = Path(rw.REPO_ROOT) / "config" / "config_new.yaml"
     if not path.is_file():
         pytest.skip("config_new.yaml not present")
+    # Command SHAPE test: thaw everything so the shipped config's freeze state
+    # (all non-sensitivity datasets are frozen) does not empty the command list.
+    # Freeze behaviour is covered by tests/test_figure_freeze_adherence.py.
+    settings = load_settings(path)
+    settings._thaw_all = True
     cmds = rw._cohort_figure_commands(
         (yaml.safe_load(path.read_text(encoding="utf-8")) or {}).get("analysis"),
-        load_settings(path), python_exec=sys.executable, config_path=path,
+        settings, python_exec=sys.executable, config_path=path,
     )
     for cmd in cmds:
         if "--sort-by" in cmd:

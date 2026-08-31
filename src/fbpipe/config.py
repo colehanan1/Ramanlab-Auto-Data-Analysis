@@ -436,6 +436,14 @@ class PublicationFigureSettings:
 @dataclass
 class ReactionPredictionSettings:
     data_csv: str = ""
+    #: Extra wide tables to score alongside ``data_csv``. ``combine`` partitions
+    #: its output by trial type (the main table is testing-only), so the naive
+    #: pre-training panel of the *-Sensitivity-* cohorts lives in its own table
+    #: and has to be named here to be scored at all.
+    extra_data_csvs: Tuple[str, ...] = ()
+    #: Trial types kept before scoring. Default is the historical testing-only
+    #: behaviour; add "pretest" to score the naive panel too.
+    trial_types: Tuple[str, ...] = ("testing",)
     model_path: str = ""
     output_csv: str = ""
     output_csv_smb: str = ""  # SMB path for CSV export
@@ -589,6 +597,7 @@ class ForceSettings:
     dataset_means: bool = True
     dataset_mean_traces: bool = True
     naive_vs_trained: bool = True
+    pretest_vs_test: bool = True
     cohort_figures: bool = True
 
 
@@ -924,6 +933,13 @@ def load_settings(config_path: str | Path) -> Settings:
 
     reaction_prediction = ReactionPredictionSettings(
         data_csv=str(os.getenv("REACTION_DATA_CSV", reaction_cfg.get("data_csv", ""))),
+        extra_data_csvs=tuple(
+            str(path) for path in (reaction_cfg.get("extra_data_csvs") or [])
+        ),
+        trial_types=tuple(
+            str(value).strip().lower()
+            for value in (reaction_cfg.get("trial_types") or ["testing"])
+        ),
         model_path=str(os.getenv("REACTION_MODEL_PATH", reaction_cfg.get("model_path", ""))),
         output_csv=str(os.getenv("REACTION_OUTPUT_CSV", reaction_cfg.get("output_csv", ""))),
         python=reaction_python,
@@ -947,6 +963,7 @@ def load_settings(config_path: str | Path) -> Settings:
         dataset_means=_as_bool(force_cfg_raw.get("dataset_means"), True),
         dataset_mean_traces=_as_bool(force_cfg_raw.get("dataset_mean_traces"), True),
         naive_vs_trained=_as_bool(force_cfg_raw.get("naive_vs_trained"), True),
+        pretest_vs_test=_as_bool(force_cfg_raw.get("pretest_vs_test"), True),
     )
 
     force.pipeline = _as_bool(os.getenv("FORCE_PIPELINE"), force.pipeline)
@@ -965,6 +982,9 @@ def load_settings(config_path: str | Path) -> Settings:
     force.dataset_means = _as_bool(os.getenv("FORCE_DATASET_MEANS"), force.dataset_means)
     force.dataset_mean_traces = _as_bool(
         os.getenv("FORCE_DATASET_MEAN_TRACES"), force.dataset_mean_traces
+    )
+    force.pretest_vs_test = _as_bool(
+        os.getenv("FORCE_PRETEST_VS_TEST"), force.pretest_vs_test
     )
     force.naive_vs_trained = _as_bool(
         os.getenv("FORCE_NAIVE_VS_TRAINED"), force.naive_vs_trained

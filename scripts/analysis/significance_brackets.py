@@ -93,12 +93,19 @@ def draw(
     p_values: Sequence[float | None],
     *,
     fontsize: float = 9,
+    expand: bool = True,
 ) -> None:
     """Bracket + stars over each significant pair, clear of everything drawn.
 
     Call this *after* the bars and their value labels are on the axes — it
     measures them. ``p_values`` is positional: one entry per bar pair, ``None``
     or ``nan`` where there is no test.
+
+    ``expand`` (default True, the historical behaviour) lets the axis grow so a
+    tall bracket has room. Pass ``expand=False`` on a figure with deliberately
+    FIXED limits — a publication panel whose axis must be identical across
+    cohorts — and brackets are packed into the existing range instead, so a
+    significant result cannot silently rescale the axis.
     """
     y_lo, y_hi = ax.get_ylim()
     span = float(y_hi - y_lo) or 1.0
@@ -115,6 +122,12 @@ def draw(
         x_left = x_positions[i] - bar_w / 2
         x_right = x_positions[i] + bar_w / 2
         bracket_y = _data_top_over(ax, x_left - bar_w / 2, x_right + bar_w / 2) + gap
+        if not expand:
+            # Fixed axis: keep the bracket AND its star inside the range. A bar
+            # at the ceiling (100 %) leaves no headroom, so the bracket tucks
+            # just under the top rather than running off the canvas.
+            ceiling = y_hi - (star_pad + 0.055 * span)
+            bracket_y = min(bracket_y, ceiling)
 
         ax.plot(
             [x_left, x_left, x_right, x_right],
@@ -129,5 +142,6 @@ def draw(
         highest = max(highest, bracket_y + 3 * star_pad + 0.03 * span)
 
     # Give the tallest bracket room rather than letting it run off the top.
-    if np.isfinite(highest) and highest > y_hi:
+    # Skipped when the caller pinned the axis on purpose (see ``expand``).
+    if expand and np.isfinite(highest) and highest > y_hi:
         ax.set_ylim(y_lo, highest)

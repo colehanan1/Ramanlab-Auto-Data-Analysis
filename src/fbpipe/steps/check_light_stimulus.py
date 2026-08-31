@@ -27,7 +27,7 @@ from ..utils.notify import ntfy_notify
 from ..utils.parallel import parallel_map
 from ..utils.trial_metadata import load_trial_metadata
 
-TRIAL_DIR_RE = re.compile(r"(training|testing)_(\d+)$", re.IGNORECASE)
+TRIAL_DIR_RE = re.compile(r"(pretest|training|testing)_(\d+)$", re.IGNORECASE)
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_CSV_PATH = REPO_ROOT / "logs" / "light_stimulus_flags.csv"

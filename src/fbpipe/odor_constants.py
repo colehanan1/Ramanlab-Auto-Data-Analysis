@@ -19,6 +19,19 @@ ODOR_CANON: Mapping[str, str] = {
     "acv": "ACV",
     "apple cider vinegar": "ACV",
     "apple-cider-vinegar": "ACV",
+    # The OFM_A valve carries isoamyl acetate as of 2026-08-27; the rigs write
+    # "IsoamylAcetate" in trial names and "IAA-*" cohort folders. Historical
+    # ACV-* datasets above are real apple cider vinegar and keep that name.
+    "iaa": "IAA",
+    "isoamylacetate": "IAA",
+    "isoamyl acetate": "IAA",
+    "isoamyl-acetate": "IAA",
+    "iaa-control": "IAA-Control",
+    "iaa_control": "IAA-Control",
+    "iaa control": "IAA-Control",
+    "iaa-training": "IAA-Training",
+    "iaa_training": "IAA-Training",
+    "iaa training": "IAA-Training",
     "3-octonol": "3-octonol",
     "3 octonol": "3-octonol",
     "3-octanol": "3-octonol",
@@ -167,6 +180,9 @@ ODOR_CANON: Mapping[str, str] = {
 
 DISPLAY_LABEL: dict[str, str] = {
     "ACV": "Apple Cider Vinegar",
+    "IAA": "Isoamyl Acetate",
+    "IAA-Control": "Isoamyl Acetate",
+    "IAA-Training": "Isoamyl Acetate",
     "3-octonol": "3-Octanol",
     "Benz": "Benzaldehyde",
     "10s_Odor_Benz": "Benzaldehyde",
@@ -231,6 +247,9 @@ DISPLAY_LABEL: dict[str, str] = {
 ODOR_ORDER: list[str] = [
     "ACV",
     "ACV-Training",
+    "IAA",
+    "IAA-Control",
+    "IAA-Training",
     "3-octonol",
     "Benz",
     "EB",
