@@ -117,7 +117,14 @@ def _analysis_expected(cfg: Mapping[str, Any] | None, extra: dict[str, Any] | No
 def _dataset_means_expected(analysis_cfg: Mapping[str, Any]) -> dict[str, Any]:
     """Build expected-state for dataset_means from the wide CSV mtime."""
     combined = analysis_cfg.get("combined") or {}
-    wide = combined.get("wide") or {}
+    # config_new keeps the wide table under combined.combined_base.wide; only
+    # older configs have combined.wide. Reading just the latter made this key a
+    # constant {None, None}, so the gate could never see that the data changed.
+    wide = (
+        (combined.get("combined_base") or {}).get("wide")
+        or combined.get("wide")
+        or {}
+    )
     wide_csv = _resolve_path(wide.get("output_csv"))
     # Also check training export if present
     training_csv_mtime: float | None = None
@@ -3035,8 +3042,12 @@ def main(argv: Sequence[str] | None = None) -> None:
             "Set force.dataset_means=true to recompute."
         )
     else:
-        _run_dataset_means(config_path, no_overwrite=True, settings=settings)
-        _run_dataset_means_training(config_path, no_overwrite=True, settings=settings)
+        # NOT no_overwrite=True: that froze every figure on first write, so a
+        # PNG could never be redrawn by any run while its sidecar refreshed
+        # every time. The step is already gated by _should_skip /
+        # force.dataset_means, so redrawing here costs no extra work.
+        _run_dataset_means(config_path, no_overwrite=False, settings=settings)
+        _run_dataset_means_training(config_path, no_overwrite=False, settings=settings)
         payload = dict(dm_expected, version=STATE_VERSION)
         _write_state(settings, "dataset_means", "analysis", payload)
 
@@ -3081,6 +3092,9 @@ def main(argv: Sequence[str] | None = None) -> None:
             "[analysis] naive_vs_trained skipped; no predictions CSV at %s",
             scores_csv,
         )
+
+    # -- conditioning-trial scores; must precede every figure that reads them --
+    _run_training_scores(analysis_cfg, settings, config_path=config_path)
 
     # -- pre-test-baselined trial score bars; same predictions CSV --
     if scores_csv.exists():
@@ -3655,6 +3669,80 @@ def _run_cohort_figures(
                 result.returncode, " ".join(cmd),
             )
     LOGGER.info("[analysis] cohort_figures complete.")
+
+
+def _training_scores_command(
+    analysis_cfg: Mapping[str, Any] | None,
+    settings: Any,
+    *,
+    python_exec: str,
+    config_path: Path | None,
+) -> list[str] | None:
+    """Score the CONDITIONING trials into their own predictions sidecar.
+
+    ``predict_reactions`` scores only testing and pretest trials, so nothing in
+    the pipeline produced training-trial scores: the sidecar existed purely as
+    a side-effect of hand-running a figure script, and was never refreshed as
+    new cohorts landed. A cohort missing from it renders as a confident ``n=0``
+    bar rather than an error, so it is made a first-class pipeline artefact.
+    """
+    cfg = (analysis_cfg or {}).get("training_scores") or {}
+    if not cfg or not bool(cfg.get("enabled", True)):
+        return None
+
+    training_wide = str(cfg.get("training_wide_csv", "") or "")
+    output_csv = str(cfg.get("output_csv", "") or "")
+    if not training_wide or not output_csv:
+        print(
+            "[analysis] training_scores skipped; training_wide_csv and "
+            "output_csv are both required."
+        )
+        return None
+
+    script = REPO_ROOT / "scripts" / "analysis" / "naive_vs_trial_score_bars.py"
+    cmd = [
+        str(Path(python_exec).expanduser()),
+        str(script),
+        "--score-training-only",
+        "--training-wide-csv", training_wide,
+        "--training-predictions-csv", output_csv,
+    ]
+    model_path = str(cfg.get("model_path", "") or "")
+    if model_path:
+        cmd += ["--model-path", model_path]
+    # Always rebuild: the freshness check inside the script compares mtimes, but
+    # the pipeline has just rewritten the wide table, so this is the moment the
+    # rebuild is meant to happen.
+    cmd.append("--rescore")
+    return cmd
+
+
+def _run_training_scores(
+    analysis_cfg: Mapping[str, Any] | None,
+    settings: Any,
+    *,
+    config_path: Path | None,
+) -> None:
+    python_exec = getattr(
+        getattr(settings, "reaction_prediction", None), "python", ""
+    ) or sys.executable
+    cmd = _training_scores_command(
+        analysis_cfg, settings, python_exec=python_exec, config_path=config_path
+    )
+    if cmd is None:
+        LOGGER.info("[analysis] training_scores not configured; skipping.")
+        return
+    env = os.environ.copy()
+    env["MPLBACKEND"] = "Agg"
+    env["PYTHONPATH"] = os.pathsep.join(
+        filter(None, [str(REPO_ROOT / "src"), env.get("PYTHONPATH")])
+    )
+    LOGGER.info("[analysis] training_scores → %s", " ".join(cmd))
+    result = subprocess.run(cmd, env=env, capture_output=False)
+    if result.returncode != 0:
+        LOGGER.warning(
+            "[analysis] training_scores exited with code %d", result.returncode
+        )
 
 
 def _pretest_score_bars_command(

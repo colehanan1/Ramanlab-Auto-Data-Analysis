@@ -126,10 +126,39 @@ def _ensure_directory(path: Path) -> None:
     path.mkdir(parents=True, exist_ok=True)
 
 
-def _save_figure(fig: plt.Figure, base_path: Path, *, overwrite: bool = True) -> None:
-    png = base_path.with_suffix(".png")
-    if not overwrite and png.exists():
-        LOGGER.info("Skipped (exists) %s", png)
+def figure_path(base_path: Path, suffix: str) -> Path:
+    """``base_path`` + ``suffix``, APPENDED rather than substituted.
+
+    ``Path.with_suffix`` replaces everything after the last dot, and every
+    concentration-suffixed dataset name contains one. It turned both
+    ``3Oct-Training-24-0.1_testing_odors_mean`` and
+    ``..._training_odors_mean`` into the same ``3Oct-Training-24-0.png``, so
+    the testing and training figures overwrote each other — and with the
+    exists-skip below, whichever landed first was frozen there permanently.
+    """
+    return base_path.parent / f"{base_path.name}{suffix}"
+
+
+def _save_figure(
+    fig: plt.Figure,
+    base_path: Path,
+    *,
+    overwrite: bool = True,
+    source_mtime: float | None = None,
+) -> None:
+    png = figure_path(base_path, ".png")
+    # Existence is not freshness. These figures were skipped whenever the file
+    # existed, so every one on disk predated the data it claimed to plot while
+    # the JSON sidecar beside it refreshed every run. Skip only when the figure
+    # is demonstrably newer than the table it was drawn from; an unknown source
+    # means redraw, never silently keep.
+    if (
+        not overwrite
+        and png.exists()
+        and source_mtime is not None
+        and png.stat().st_mtime >= source_mtime
+    ):
+        LOGGER.info("Skipped (up to date) %s", png)
         plt.close(fig)
         return
     fig.savefig(png, dpi=DPI, bbox_inches="tight")
@@ -777,7 +806,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             _save_figure(fig, base, overwrite=not args.no_overwrite)
 
         write_sidecar(
-            base.with_suffix(".json"),
+            figure_path(base, ".json"),
             dataset_name=dataset_name,
             fps=fps,
             odor_on_s=odor_on_s,

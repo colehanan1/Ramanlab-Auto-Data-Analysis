@@ -777,6 +777,26 @@ def _prepare_training_input(wide: pd.DataFrame) -> pd.DataFrame:
     return frame
 
 
+def training_predictions_are_stale(output_csv: Path, training_wide: Path) -> bool:
+    """Whether the conditioning-score sidecar needs rebuilding.
+
+    Existence alone is NOT enough. The sidecar is derived per-dataset, so one
+    built before a cohort existed simply has no rows for it — and a missing
+    cohort renders as a confident ``n=0`` bar rather than an error. Compare
+    against the wide table it came from: if that is newer, new trials have
+    landed and the scores must be recomputed.
+
+    A missing input is not "stale": there is nothing to rebuild from, and the
+    caller raises a clearer error for that case.
+    """
+    output_csv, training_wide = Path(output_csv), Path(training_wide)
+    if not output_csv.exists():
+        return True
+    if not training_wide.exists():
+        return False
+    return training_wide.stat().st_mtime > output_csv.stat().st_mtime
+
+
 def ensure_training_predictions(
     training_wide: Path,
     model_path: Path,
@@ -791,7 +811,7 @@ def ensure_training_predictions(
     training scores come from. The filters applied here mirror that step, or the
     training bars would be drawn from a different fly set than the testing ones.
     """
-    if output_csv.exists() and not rescore:
+    if not rescore and not training_predictions_are_stale(output_csv, training_wide):
         return output_csv
     if not training_wide.exists():
         raise FileNotFoundError(f"Training wide table not found: {training_wide}")
@@ -1071,11 +1091,28 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="Which figures to draw; repeatable. Default: both score and percent.",
     )
     parser.add_argument(
+        "--score-training-only",
+        action="store_true",
+        help="Build the conditioning-trial score sidecar and exit without "
+             "drawing anything. This is how the pipeline owns the artefact: "
+             "predict_reactions never scores training trials, so without it "
+             "the sidecar exists only as a side-effect of hand-running this "
+             "script and silently goes stale as new cohorts land.",
+    )
+    parser.add_argument(
         "--rescore",
         action="store_true",
         help="Rebuild the training-score sidecar even if it already exists.",
     )
     args = parser.parse_args(argv)
+
+    if args.score_training_only:
+        out = ensure_training_predictions(
+            args.training_wide_csv, args.model_path,
+            args.training_predictions_csv, rescore=args.rescore,
+        )
+        print(f"[OK] conditioning-trial scores → {out}")
+        return 0
 
     # Registry and output folder move together — a pre-test figure must never
     # land in the naive-baselined folder, where its baseline would be unreadable.
