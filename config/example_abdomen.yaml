@@ -1,0 +1,49 @@
+# Abdomen geometry pipeline (adjacent to config_new.yaml). Copy to
+# config/config_abdomen.yaml (gitignored) and edit paths.
+#   conda run -n yolo-env python scripts/pipeline/run_abdomen_workflows.py --config config/config_abdomen.yaml
+protocol: v2
+allow_cpu: false
+
+# The 4-class YOLO26-OBB model (abdomen, abdomenTip, eye, proboscis). Use `train`, NOT `train4`.
+# Loads only under the yolo-env conda env (ultralytics >= 8.4).
+model_path: /home/ramanlab/Documents/cole/Workflow&Code/runs/obb/train/weights/best.pt
+
+# Demo tree. `datasets` are expanded into main_directories exactly as in config_new.yaml,
+# but only dirs that exist under dataset_bases.data are used. Point `data` at
+# Data/flys_New to run on the real tree later.
+dataset_bases:
+  data: /home/ramanlab/Documents/cole/Data/flys_Abdomen
+  secured: /securedstorage/DATAsec/cole/Data-secured-New   # read-only source for the copy script
+datasets:
+  - Hex-Sensitivity-24-0.1
+
+cache_dir: /home/ramanlab/Documents/cole/cache_abdomen
+odor_on_s: 30.0
+odor_off_s: 60.0
+fps_default: 40.0
+
+yolo:
+  conf_thres: 0.25
+  inference_batch_size: 16
+  max_flies: 5
+  num_workers: 1
+  zero_iou_epsilon: 1.0e-08
+
+geometry:
+  imgsz: 1088
+  iou: 0.7
+  table_format: csv            # csv for the demo, parquet afterwards (CSVs are never deleted)
+  out_subdir: geometry         # <batch>/geometry/<trial>/
+  measure_in: native           # native = source pixels (undistorted angles); model = 1080x1080 (production-comparable px)
+  warmup_frames: 25
+  warmup_presence_min: 0.5
+  proboscis_max_jump_px: 80.0
+  per_min_px: 10.0
+  per_effective_max_floor_px: 95.0
+  angle_pct_min_range_deg: 0.0 # 0 = literal per-fly min/max angle
+  rest_min_samples: 200
+  limits: {}                   # optional FlyGeometryLimits overrides, e.g. {d_eye_abd_max: 8.0}
+  annotated_video: true
+  wide_out_dir: /home/ramanlab/Documents/cole/Data/CSVs-New-Opto-Flys/Abdomen-Geometry
+  figures_out_dir: /home/ramanlab/Documents/cole/Results/New-Opto-Fly-Figures/Abdomen-Geometry
+  trace_max_s: 90.0
