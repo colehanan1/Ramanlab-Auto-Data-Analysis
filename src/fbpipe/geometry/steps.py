@@ -148,3 +148,17 @@ def run_wide(settings: Settings, gcfg: GeometrySettings) -> dict:
     for measure, path in files.items():
         print(f"[GEOMETRY] wide {measure}: {len(tables[measure])} row(s) -> {path}")
     return {"files": files, "rows": {m: len(t) for m, t in tables.items()}}
+
+
+def run_figures(settings: Settings, gcfg: GeometrySettings) -> dict:
+    """Per-fly trace figures + QC + trial summary for every live batch -> geometry.figures_out_dir."""
+    from .figures import generate
+    total = 0
+    outputs = []
+    for batch_dir, dataset, _ in iter_batches(settings):
+        result = generate(batch_dir, dataset, settings, gcfg, Path(gcfg.figures_out_dir))
+        if result["n_figures"]:
+            total += result["n_figures"]
+            outputs.append(result["out_dir"])
+            print(f"[GEOMETRY] figures {batch_dir.name}: {result['n_figures']} figure(s) -> {result['out_dir']}")
+    return {"n_figures": total, "out_dirs": outputs}
