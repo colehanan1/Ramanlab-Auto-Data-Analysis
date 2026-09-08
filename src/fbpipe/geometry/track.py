@@ -300,6 +300,7 @@ def track_video(video_path: Path, info: TrialInfo, *, predict_fn: Callable[[list
     vg = VideoGeometry(width, height, mw, mh, measure_native=(gcfg.measure_in == "native"))
     limits = gcfg.limits
 
+    batch_size = max(1, int(batch_size if batch_size is not None else settings.inference_batch_size))
     warm: List[np.ndarray] = []
     while len(warm) < gcfg.warmup_frames:
         ok, fr = cap.read()
@@ -307,7 +308,11 @@ def track_video(video_path: Path, info: TrialInfo, *, predict_fn: Callable[[list
             break
         warm.append(vg.to_model_frame(fr))
     cap.release()
-    warm_parts = [parts_from_result(r, id_to_label) for r in (predict_fn(warm, settings.conf_thres) if warm else [])]
+    # Chunked like the main loop: a dynamic TensorRT engine rejects any batch above its profile.
+    warm_results: List[object] = []
+    for i in range(0, len(warm), batch_size):
+        warm_results.extend(predict_fn(warm[i:i + batch_size], settings.conf_thres))
+    warm_parts = [parts_from_result(r, id_to_label) for r in warm_results]
     frozen, axis, chirality = freeze_slots(warm_parts, vg, limits, max_flies=settings.max_flies,
                                            presence_min=gcfg.warmup_presence_min,
                                            zero_iou_eps=settings.zero_iou_epsilon)
@@ -350,7 +355,6 @@ def track_video(video_path: Path, info: TrialInfo, *, predict_fn: Callable[[list
     counts = {fz.slot: {"proboscis": 0, "abdomen": 0, "abdomen_tip": 0} for fz in frozen}
     cap = _open(video_path)
     idx = 0
-    batch_size = max(1, int(batch_size if batch_size is not None else settings.inference_batch_size))
     while True:
         batch: List[np.ndarray] = []
         while len(batch) < batch_size and (max_frames is None or idx + len(batch) < max_frames):

@@ -182,3 +182,17 @@ def test_slot_palette_matches_the_lab_per_fly_colours():
     for slot, name in lt.FLY_COLORS.items():
         r, g, b = (int(round(v * 255)) for v in to_rgb(name))
         assert T.SLOT_COLORS_BGR[slot] == (b, g, r)
+
+
+def test_warmup_never_exceeds_the_batch_size(video):
+    """A dynamic TensorRT engine rejects any batch above its profile; the warm-up must be chunked too."""
+    seen = []
+
+    def counting_predict(images, conf):
+        seen.append(len(images))
+        return fake_predict(images, conf)
+
+    T.track_video(video, _info(video), predict_fn=counting_predict, id_to_label=id_to_label_map(NAMES),
+                  settings=_settings(), gcfg=GeometrySettings(warmup_frames=25, annotated_video=False),
+                  max_frames=30, batch_size=7)
+    assert seen and max(seen) <= 7, f"a predict call exceeded the batch size: {seen}"
