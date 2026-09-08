@@ -333,7 +333,14 @@ def _md_table(df: pd.DataFrame, max_rows: int = 40) -> str:
     d = df.head(max_rows).copy()
     for c in d.columns:
         if d[c].dtype.kind == "f":
-            d[c] = d[c].map(lambda v: "" if pd.isna(v) else (f"{v:.3g}" if abs(v) < 0.01 else f"{v:.3f}"))
+            vals = d[c].to_numpy(float)
+            finite = vals[np.isfinite(vals)]
+            if finite.size and np.all(np.mod(finite, 1) == 0) and c in ("fly_number", "n", "n_trials", "n_flies", "n_both", "trial_index"):
+                d[c] = d[c].map(lambda v: "" if pd.isna(v) else str(int(v)))
+            else:
+                d[c] = d[c].map(lambda v: "" if pd.isna(v) else (f"{v:.3g}" if abs(v) < 0.01 else f"{v:.3f}"))
+        else:
+            d[c] = d[c].map(lambda v: "" if (v is None or (isinstance(v, float) and pd.isna(v))) else v)
     lines = ["| " + " | ".join(map(str, d.columns)) + " |", "|" + "---|" * len(d.columns)]
     lines += ["| " + " | ".join(str(v) for v in row) + " |" for row in d.itertuples(index=False)]
     if len(df) > max_rows:
