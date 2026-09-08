@@ -78,20 +78,52 @@ def worker_shard() -> Tuple[int, int]:
     return n, int(os.getenv("WORKER_INDEX", "0")) % n
 
 
+def effective_batch_size(settings: Settings, is_engine: bool) -> int:
+    """Production's rule: a TensorRT engine only takes batches when it was exported
+    dynamic (``yolo.engine_supports_batch: true``); otherwise it runs frame by frame."""
+    if is_engine and not settings.engine_supports_batch:
+        return 1
+    return max(1, int(settings.inference_batch_size))
+
+
+def _cap_cpu_threads(n_workers: int) -> None:
+    """N workers must not each grab every core (see scripts/pipeline/parallel_yolo.py)."""
+    if n_workers <= 1:
+        return
+    threads = max(1, (os.cpu_count() or n_workers) // n_workers)
+    try:
+        import cv2
+        cv2.setNumThreads(threads)
+    except Exception:
+        pass
+    try:
+        import torch
+        torch.set_num_threads(threads)
+    except Exception:
+        pass
+
+
 def run_track(settings: Settings, gcfg: GeometrySettings, *, force: bool = False,
               only_trial: Optional[str] = None, max_frames: Optional[int] = None) -> dict:
     """Detect + assemble + measure every live trial video; skips trials whose meta JSON exists."""
     import ultralytics
-    from .detect import id_to_label_map, load_model, make_predict_fn, model_sha1
+    from .detect import id_to_label_map, is_engine_path, load_model, make_predict_fn, model_sha1, resolve_model_path
     from .track import track_video
 
-    model = load_model(settings.model_path)
+    model_path = resolve_model_path(Path(settings.model_path), gcfg.prefer_engine)
+    is_engine = is_engine_path(model_path)
+    model = load_model(model_path)
     id_to_label = id_to_label_map(model.names)
-    predict_fn = make_predict_fn(model, imgsz=gcfg.imgsz, iou=gcfg.iou, allow_cpu=settings.allow_cpu)
-    sha = model_sha1(Path(settings.model_path))
+    predict_fn = make_predict_fn(model, imgsz=gcfg.imgsz, iou=gcfg.iou, allow_cpu=settings.allow_cpu,
+                                 is_engine=is_engine)
+    batch_size = effective_batch_size(settings, is_engine)
+    sha = model_sha1(model_path)
     class_map = {label: cid for cid, label in id_to_label.items()}
-    print(f"[GEOMETRY] model {settings.model_path} (sha1 {sha[:10]}) classes {class_map} ultralytics {ultralytics.__version__}")
     n_workers, worker = worker_shard()
+    _cap_cpu_threads(n_workers)
+    print(f"[GEOMETRY] model {model_path} ({'TensorRT engine' if is_engine else 'PyTorch'}, sha1 {sha[:10]}) "
+          f"classes {class_map} ultralytics {ultralytics.__version__} batch {batch_size} "
+          f"worker {worker + 1}/{n_workers}")
     job = -1
     done = skipped = 0
     for batch_dir, dataset, _ in iter_batches(settings):
@@ -111,11 +143,12 @@ def run_track(settings: Settings, gcfg: GeometrySettings, *, force: bool = False
             t0 = time.time()
             annotated = C.annotated_video_path(out_dir, name) if gcfg.annotated_video else None
             result = track_video(video, info, predict_fn=predict_fn, id_to_label=id_to_label, settings=settings,
-                                 gcfg=gcfg, max_frames=max_frames, annotated_path=annotated)
+                                 gcfg=gcfg, max_frames=max_frames, annotated_path=annotated, batch_size=batch_size)
             for slot, df in result.tables.items():
                 C.write_table_fmt(df, C.geometry_table_path(out_dir, name, slot, gcfg.table_format), gcfg.table_format)
-            meta = dict(result.meta, model_path=str(settings.model_path), model_sha1=sha,
-                        ultralytics_version=ultralytics.__version__, class_map=class_map, dataset=dataset)
+            meta = dict(result.meta, model_path=str(model_path), model_is_engine=is_engine, model_sha1=sha,
+                        batch_size=batch_size, ultralytics_version=ultralytics.__version__, class_map=class_map,
+                        dataset=dataset)
             C.meta_path(out_dir, name).write_text(json.dumps(meta, indent=2, default=str), encoding="utf-8")
             print(f"[GEOMETRY] {video.name}: {len(result.tables)} slot(s), {result.meta['n_frames_processed']} frames "
                   f"in {time.time() - t0:.1f}s -> {out_dir}")

@@ -286,7 +286,8 @@ def _open(video_path: Path) -> cv2.VideoCapture:
 
 def track_video(video_path: Path, info: TrialInfo, *, predict_fn: Callable[[list, float], list],
                 id_to_label: Mapping[int, str], settings: Settings, gcfg: GeometrySettings,
-                max_frames: Optional[int] = None, annotated_path: Optional[Path] = None) -> TrackResult:
+                max_frames: Optional[int] = None, annotated_path: Optional[Path] = None,
+                batch_size: Optional[int] = None) -> TrackResult:
     """Track one trial video: warm-up -> frozen slots -> per-frame rows per slot."""
     t0 = time.time()
     video_path = Path(video_path)
@@ -349,7 +350,7 @@ def track_video(video_path: Path, info: TrialInfo, *, predict_fn: Callable[[list
     counts = {fz.slot: {"proboscis": 0, "abdomen": 0, "abdomen_tip": 0} for fz in frozen}
     cap = _open(video_path)
     idx = 0
-    batch_size = max(1, int(settings.inference_batch_size))
+    batch_size = max(1, int(batch_size if batch_size is not None else settings.inference_batch_size))
     while True:
         batch: List[np.ndarray] = []
         while len(batch) < batch_size and (max_frames is None or idx + len(batch) < max_frames):

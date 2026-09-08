@@ -24,9 +24,10 @@ fps_default: 40.0
 
 yolo:
   conf_thres: 0.25
-  inference_batch_size: 16
+  inference_batch_size: 16     # frames per predict call (dynamic engine: must be <= its max batch)
+  engine_supports_batch: true  # true only for a dynamic-batch .engine (export_tensorrt.py --dynamic --batch N)
   max_flies: 5
-  num_workers: 1
+  num_workers: 1               # track-step worker processes (3 = measured sweet spot on the 16-core / RTX 3090 box)
   zero_iou_epsilon: 1.0e-08
 
 geometry:
@@ -44,6 +45,7 @@ geometry:
   rest_min_samples: 200
   limits: {}                   # optional FlyGeometryLimits overrides, e.g. {d_eye_abd_max: 8.0}
   annotated_video: true
+  prefer_engine: true          # use best.engine next to best.pt when it exists (production behaviour)
   wide_out_dir: /home/ramanlab/Documents/cole/Data/CSVs-New-Opto-Flys/Abdomen-Geometry
   figures_out_dir: /home/ramanlab/Documents/cole/Results/New-Opto-Fly-Figures/Abdomen-Geometry
   trace_max_s: 90.0

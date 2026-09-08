@@ -38,6 +38,7 @@ class GeometrySettings:
     rest_min_samples: int = 200
     limits: FlyGeometryLimits = field(default_factory=lambda: DEFAULT_LIMITS)
     annotated_video: bool = True
+    prefer_engine: bool = True
     wide_out_dir: str = ""
     figures_out_dir: str = ""
     trace_max_s: float = 90.0
@@ -83,6 +84,7 @@ def parse_geometry_block(raw: Optional[Mapping[str, Any]]) -> GeometrySettings:
         rest_min_samples=int(_num(raw, "rest_min_samples", 200, minimum=1, integer=True)),
         limits=limits,
         annotated_video=bool(raw.get("annotated_video", True)),
+        prefer_engine=bool(raw.get("prefer_engine", True)),
         wide_out_dir=str(raw.get("wide_out_dir", "") or ""),
         figures_out_dir=str(raw.get("figures_out_dir", "") or ""),
         trace_max_s=_num(raw, "trace_max_s", 90.0, minimum=0.0, strict=True),

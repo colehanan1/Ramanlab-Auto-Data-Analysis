@@ -47,6 +47,21 @@ def id_to_label_map(names: Union[Mapping[int, str], Sequence[str]]) -> Dict[int,
     return {cid: label for label, cid in class_map_by_name(names).items()}
 
 
+def is_engine_path(path: Path) -> bool:
+    return str(path).lower().endswith(".engine")
+
+
+def resolve_model_path(model_path: Path, prefer_engine: bool) -> Path:
+    """Production behaviour: a ``best.engine`` next to ``best.pt`` wins when it exists.
+    Export one with ``scripts/convert/export_tensorrt.py --model-path best.pt --dynamic --batch N``."""
+    p = Path(model_path)
+    if prefer_engine and not is_engine_path(p):
+        engine = p.with_suffix(".engine")
+        if engine.is_file():
+            return engine
+    return p
+
+
 def model_sha1(path: Path) -> str:
     h = hashlib.sha1()
     with open(path, "rb") as fh:
@@ -81,8 +96,11 @@ class PredictProxy:
         return self.model.predict(images, **kw)
 
 
-def make_predict_fn(model: Any, *, imgsz: int, iou: float, allow_cpu: bool) -> Callable[[list, float], list]:
-    """``fn(images, conf) -> results`` with production's CUDA OOM sub-batch backoff."""
+def make_predict_fn(model: Any, *, imgsz: int, iou: float, allow_cpu: bool,
+                    is_engine: bool = False) -> Callable[[list, float], list]:
+    """``fn(images, conf) -> results`` with production's CUDA OOM sub-batch backoff.
+    TensorRT engines are bound to the GPU they were built for and reject ``.to()``;
+    their device is supplied per call, exactly as ``yolo_infer`` does."""
     import logging
     import torch
     from ..steps.yolo_infer import _make_batched_predict_fn
@@ -94,7 +112,7 @@ def make_predict_fn(model: Any, *, imgsz: int, iou: float, allow_cpu: bool) -> C
     if not cuda and not allow_cpu:
         raise RuntimeError("CUDA is not available. Set allow_cpu: true only for smoke tests.")
     device = {"cur": "cuda" if cuda and not allow_cpu else "cpu"}
-    if hasattr(model, "to"):
+    if hasattr(model, "to") and not is_engine:
         model.to(device["cur"])
     proxy = PredictProxy(model, imgsz, iou)
     return _make_batched_predict_fn(
