@@ -15,6 +15,7 @@ new live batch).
 from __future__ import annotations
 
 import argparse
+import os
 import shutil
 import subprocess
 import sys
@@ -49,18 +50,30 @@ def build_rsync_command(src_dir: Path, dst_dir: Path, *, dry_run: bool, overwrit
     return cmd
 
 
+def _canonical(path: Path) -> str:
+    """Absolute path with ``~``, ``..`` and symlinks in every EXISTING prefix resolved,
+    so the check sees the same location rsync will write to (a not-yet-existing
+    tail cannot hide a traversal)."""
+    return os.path.realpath(os.path.expanduser(str(path)))
+
+
+def _under(path: str, prefix: str) -> bool:
+    prefix = prefix.rstrip("/")
+    return path == prefix or path.startswith(prefix + "/")
+
+
 def validate_paths(src_dir: Path, dst_dir: Path) -> None:
     src_dir, dst_dir = Path(src_dir), Path(dst_dir)
     if not src_dir.is_dir():
         raise FileNotFoundError(f"source batch does not exist: {src_dir}")
     if not any(src_dir.glob("output_*.mp4")):
         raise FileNotFoundError(f"source batch holds no output_*.mp4: {src_dir}")
-    dst_str = str(dst_dir.resolve() if dst_dir.exists() else dst_dir)
+    dst_str = _canonical(dst_dir)
     for prefix in FORBIDDEN_DEST_PREFIXES:
-        if dst_str == prefix or dst_str.startswith(prefix.rstrip("/") + "/"):
+        if _under(dst_str, prefix) or _under(dst_str, _canonical(Path(prefix))):
             raise ValueError(f"refusing destination under {prefix}: {dst_dir}")
-    src_dataset = src_dir.resolve().parent
-    if dst_str.startswith(str(src_dataset) + "/"):
+    src_dataset = _canonical(src_dir.parent)
+    if _under(dst_str, src_dataset):
         raise ValueError(f"refusing destination inside the source dataset {src_dataset}: {dst_dir}")
 
 

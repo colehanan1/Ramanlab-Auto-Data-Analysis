@@ -58,6 +58,13 @@ def test_validate_paths_refuses_source_trees_as_destinations(tmp_path):
         MC.validate_paths(src, Path("/home/ramanlab/Documents/cole/Data/flys_New/x/y_copy"))
     with pytest.raises(FileNotFoundError):
         MC.validate_paths(tmp_path / "missing", tmp_path / "flys_Abdomen" / "x")
+    # traversal and symlinks are resolved before the check, even for a not-yet-existing tail
+    with pytest.raises(ValueError):
+        MC.validate_paths(src, tmp_path / "flys_Abdomen" / ".." / "secured" / "Hex-Sensitivity-24-0.1" / "b_copy")
+    link = tmp_path / "link_to_secured_dataset"
+    link.symlink_to(src.parent)
+    with pytest.raises(ValueError):
+        MC.validate_paths(src, link / "new_copy")
 
 
 @pytest.mark.skipif(subprocess.run(["which", "rsync"], capture_output=True).returncode != 0, reason="rsync missing")

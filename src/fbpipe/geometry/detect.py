@@ -83,9 +83,13 @@ class PredictProxy:
 
 def make_predict_fn(model: Any, *, imgsz: int, iou: float, allow_cpu: bool) -> Callable[[list, float], list]:
     """``fn(images, conf) -> results`` with production's CUDA OOM sub-batch backoff."""
+    import logging
     import torch
     from ..steps.yolo_infer import _make_batched_predict_fn
 
+    # ultralytics >= 8.4 prints "'half' is deprecated" on EVERY predict call the
+    # production backoff makes; that is thousands of lines per batch. Errors still show.
+    logging.getLogger("ultralytics").setLevel(logging.ERROR)
     cuda = torch.cuda.is_available()
     if not cuda and not allow_cpu:
         raise RuntimeError("CUDA is not available. Set allow_cpu: true only for smoke tests.")
