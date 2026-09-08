@@ -134,3 +134,17 @@ def run_normalize(settings: Settings, gcfg: GeometrySettings, *, force: bool = F
             summary[str(batch_dir)] = result["slots"]
     print(f"[GEOMETRY] normalize done: {len(summary)} batch(es)")
     return summary
+
+
+def run_wide(settings: Settings, gcfg: GeometrySettings) -> dict:
+    """Wide tables over every batch (frozen ones included, marked) -> geometry.wide_out_dir."""
+    from .wide import WIDE_MEASURES, batch_wide_rows, build_wide_tables, write_wide_tables
+    merged = {m: [] for m in WIDE_MEASURES}
+    for batch_dir, dataset, frozen in iter_batches(settings, live_only=False):
+        for measure, rows in batch_wide_rows(batch_dir, dataset, frozen, gcfg).items():
+            merged[measure].extend(rows)
+    tables = build_wide_tables(merged)
+    files = write_wide_tables(tables, Path(gcfg.wide_out_dir), gcfg.table_format)
+    for measure, path in files.items():
+        print(f"[GEOMETRY] wide {measure}: {len(tables[measure])} row(s) -> {path}")
+    return {"files": files, "rows": {m: len(t) for m, t in tables.items()}}
