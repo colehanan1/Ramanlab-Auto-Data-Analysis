@@ -122,3 +122,15 @@ def run_track(settings: Settings, gcfg: GeometrySettings, *, force: bool = False
             done += 1
     print(f"[GEOMETRY] track done: {done} trial(s) tracked, {skipped} skipped")
     return {"tracked": done, "skipped": skipped}
+
+
+def run_normalize(settings: Settings, gcfg: GeometrySettings, *, force: bool = False) -> dict:
+    """Per-fly stats + % columns for every live batch. Always recomputed (cheap, idempotent)."""
+    from .normalize import normalize_batch
+    summary = {}
+    for batch_dir, dataset, _ in iter_batches(settings):
+        result = normalize_batch(batch_dir, settings, gcfg)
+        if result["n_trials"]:
+            summary[str(batch_dir)] = result["slots"]
+    print(f"[GEOMETRY] normalize done: {len(summary)} batch(es)")
+    return summary
