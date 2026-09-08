@@ -84,15 +84,20 @@ def load_model(model_path: Path):
 
 
 class PredictProxy:
-    """Wraps a model so every ``predict`` call carries ``imgsz`` and ``iou``.
-    ``yolo_infer._make_batched_predict_fn`` passes neither."""
+    """Wraps a model so every ``predict`` call carries ``imgsz`` and ``iou``
+    (``yolo_infer._make_batched_predict_fn`` passes neither) and, for TensorRT
+    engines, drops the deprecated ``half`` flag: ultralytics >= 8.4 rebuilds the
+    engine's execution context on every call that carries it (measured: +7.5 GB and
+    ~0.3 s per call), and an exported engine is already FP16."""
 
-    def __init__(self, model: Any, imgsz: int, iou: float) -> None:
-        self.model, self.imgsz, self.iou = model, int(imgsz), float(iou)
+    def __init__(self, model: Any, imgsz: int, iou: float, is_engine: bool = False) -> None:
+        self.model, self.imgsz, self.iou, self.is_engine = model, int(imgsz), float(iou), bool(is_engine)
 
     def predict(self, images, **kw):
         kw.setdefault("imgsz", self.imgsz)
         kw.setdefault("iou", self.iou)
+        if self.is_engine:
+            kw.pop("half", None)
         return self.model.predict(images, **kw)
 
 
@@ -114,7 +119,7 @@ def make_predict_fn(model: Any, *, imgsz: int, iou: float, allow_cpu: bool,
     device = {"cur": "cuda" if cuda and not allow_cpu else "cpu"}
     if hasattr(model, "to") and not is_engine:
         model.to(device["cur"])
-    proxy = PredictProxy(model, imgsz, iou)
+    proxy = PredictProxy(model, imgsz, iou, is_engine=is_engine)
     return _make_batched_predict_fn(
         proxy,
         get_device=lambda: device["cur"],

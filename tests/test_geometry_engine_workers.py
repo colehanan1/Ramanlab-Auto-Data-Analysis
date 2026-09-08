@@ -88,3 +88,19 @@ def test_main_fans_out_track_when_workers_configured(monkeypatch, tmp_path):
     ran.clear()
     assert GP.main(["--config", "c.yaml", "--no-fan-out", "track"]) == 0
     assert ran == ["track"]
+
+
+def test_predict_proxy_drops_half_for_engines():
+    """ultralytics >= 8.4 rebuilds a TensorRT execution context on EVERY call that passes
+    the deprecated ``half`` flag (7.5 GB and ~0.3 s each time); an engine is already FP16."""
+    seen = []
+
+    class FakeModel:
+        def predict(self, images, **kw):
+            seen.append(dict(kw))
+            return ["r"] * len(images)
+
+    D.PredictProxy(FakeModel(), imgsz=1088, iou=0.7, is_engine=True).predict([1], conf=0.25, half=True, device="cuda")
+    assert "half" not in seen[-1] and seen[-1]["device"] == "cuda"
+    D.PredictProxy(FakeModel(), imgsz=1088, iou=0.7).predict([1], conf=0.25, half=True)
+    assert seen[-1]["half"] is True
