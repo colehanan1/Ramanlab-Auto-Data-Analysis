@@ -105,8 +105,19 @@ def _panel_title(ax, info: TrialInfo, trained: Optional[str]) -> None:
 Series = Callable[[TrialPanel], Tuple[Tuple[np.ndarray, str, str], ...]]
 
 
+def _y_top(panels: Sequence[TrialPanel], series: Series, floor: float = 100.0, cap: float = 250.0) -> float:
+    """Upper axis limit for percentages that may exceed 100 (box size vs rest): the 99.5th
+    percentile of the data rounded up to the next 10, never below ``floor`` nor above ``cap``."""
+    vals = np.concatenate([np.asarray(arr, dtype=float).ravel() for p in panels for arr, _, _ in series(p)] or [np.array([])])
+    vals = vals[np.isfinite(vals)]
+    if not vals.size:
+        return floor
+    return float(min(cap, max(floor, 10.0 * np.ceil(np.percentile(vals, 99.5) / 10.0))))
+
+
 def _stacked(panels: Sequence[TrialPanel], slot: int, dataset: str, batch_name: str, out_path: Path, *,
-             trace_max_s: float, trained: Optional[str], series: Series, ylabel: str, title: str) -> Path:
+             trace_max_s: float, trained: Optional[str], series: Series, ylabel: str, title: str,
+             y_top: float = 100.0) -> Path:
     n = max(1, len(panels))
     header_in = 1.25
     fig_h = max(3.4, n * 1.6 + header_in + 0.35)
@@ -126,8 +137,8 @@ def _stacked(panels: Sequence[TrialPanel], slot: int, dataset: str, batch_name: 
             ax.text(0.99, 0.88, f"{', '.join(missing)}: not trackable ({_dominant_status(panel.status)[:60]})",
                     transform=ax.transAxes, ha="right", va="top", fontsize=7, color=TEXT_SECONDARY)
         _panel_title(ax, panel.info, trained)
-        ax.set_ylim(0, 100)
-        ax.set_yticks([0, 50, 100])
+        ax.set_ylim(0, y_top)
+        ax.set_yticks([0, 50, 100] if y_top <= 100 else [0, 50, 100, y_top])
         ax.set_xlim(0, trace_max_s)
         ax.xaxis.set_major_locator(MultipleLocator(TIME_TICK_S if trace_max_s > 30 else max(trace_max_s / 3, 0.5)))
         ax.grid(alpha=0.2)
@@ -159,7 +170,7 @@ def plot_size_traces(panels, slot, dataset, batch_name, out_path, *, trace_max_s
         return ((p.length, LENGTH_COLOR, "abdomen length % of rest"), (p.width, WIDTH_COLOR, "abdomen width % of rest"))
     return _stacked(panels, slot, dataset, batch_name, Path(out_path), trace_max_s=trace_max_s, trained=trained,
                     series=series, ylabel="Abdomen box size, % of pre-odor resting median",
-                    title="Abdomen box size across trials")
+                    title="Abdomen box size across trials", y_top=_y_top(panels, series))
 
 
 _trapezoid = getattr(np, "trapezoid", None) or np.trapz   # numpy 2 renamed trapz
