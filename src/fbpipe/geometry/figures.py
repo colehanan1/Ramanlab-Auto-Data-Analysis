@@ -180,7 +180,7 @@ def _window_metrics(t: np.ndarray, y: np.ndarray, window) -> dict:
     if window is None:
         return {"max": np.nan, "auc": np.nan, "mean": np.nan}
     on, off = window
-    m = (t >= on) & (t <= off) & np.isfinite(y)
+    m = (t >= on) & (t < off) & np.isfinite(y)     # [on, off): the off frame is already odor-off
     if not m.any():
         return {"max": np.nan, "auc": np.nan, "mean": np.nan}
     auc = float(_trapezoid(y[m], t[m])) if m.sum() > 1 else 0.0
