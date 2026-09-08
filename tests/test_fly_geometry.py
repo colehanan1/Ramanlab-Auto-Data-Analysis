@@ -363,3 +363,47 @@ def test_limits_are_overridable_without_touching_the_module():
 
 def test_empty_input_is_safe():
     assert assemble([], 1080, 1080) == []
+
+
+# --------------------------------------------------------------------------- #
+# geometry-pipeline extensions: chirality prior and tip-less fallback
+# --------------------------------------------------------------------------- #
+def test_prior_chirality_gates_a_single_fly_frame():
+    """One fly alone cannot vote on handedness; the frozen prior must decide."""
+    mirrored = normal_fly(chirality=+1.0)
+    assert assemble(mirrored, 1080, 1080)[0].abdomen is not None
+    assert assemble(mirrored, 1080, 1080, prior_chirality=+1.0)[0].abdomen is not None
+    assert assemble(mirrored, 1080, 1080, prior_chirality=-1.0)[0].abdomen is None
+
+
+def test_abdomen_only_fallback_records_the_box_without_a_tip():
+    parts = [p for p in normal_fly() if p.label != ABDOMEN_TIP]
+    strict = assemble(parts, 1080, 1080)[0]
+    assert strict.abdomen is None and not strict.abdomen_only
+    fly = assemble(parts, 1080, 1080, abdomen_only_fallback=True)[0]
+    assert fly.abdomen is not None
+    assert fly.abdomen_only
+    assert fly.tip is None
+    assert not fly.trackable
+    assert fly.rejected, "the reason for the missing pair must still be recorded"
+
+
+def test_abdomen_only_fallback_skips_clipped_and_claimed_abdomens():
+    # clipped: the fly3 fixture -- the box runs past the frame bottom
+    scale = 49.0
+    eye_c = np.array([634.0, 878.0])
+    clipped = [
+        Part(EYE, box(eye_c, scale)),
+        Part(PROBOSCIS, box(eye_c + np.array([-40.0, 46.0]), 0.58 * scale)),
+        Part(ABDOMEN, box(eye_c + np.array([163.0, 140.0]), 3.2 * scale, 2.8 * scale)),
+    ]
+    fly = assemble(clipped, 1080, 1080, abdomen_only_fallback=True)[0]
+    assert fly.abdomen is None and not fly.abdomen_only
+
+    # claimed: the upper fly's tip-paired abdomen must not be handed to the lower fly
+    upper = normal_fly(eye_c=(300.0, 300.0))
+    lower = [p for p in normal_fly(eye_c=(360.0, 480.0)) if p.label != ABDOMEN_TIP]
+    flies = assemble(upper + lower, 1080, 1080, abdomen_only_fallback=True)
+    assert flies[0].abdomen is not None and not flies[0].abdomen_only
+    assert flies[1].abdomen is not None and flies[1].abdomen_only
+    assert flies[0].abdomen is not flies[1].abdomen

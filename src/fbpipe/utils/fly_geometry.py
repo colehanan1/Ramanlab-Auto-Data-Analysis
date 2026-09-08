@@ -85,6 +85,7 @@ class FlyGeometryLimits:
 
 
 DEFAULT_LIMITS = FlyGeometryLimits()
+_MEDIAN_D_EYE_ABD = 4.96      # eye->abdomen distance of the median labelled fly, eye_scale units
 
 
 # --------------------------------------------------------------------------- #
@@ -186,6 +187,7 @@ class Fly:
     tip_margin: Optional[float] = None      # predicted-tip clearance, eye_scale units
     eye_ok: bool = True                     # False once the eye itself fails a gate
     rejected: List[str] = field(default_factory=list)
+    abdomen_only: bool = False              # accepted by the tip-less fallback; angle not measurable
 
     @property
     def has_abdomen(self) -> bool:
@@ -311,6 +313,33 @@ def estimate_chirality(triples: Iterable[Tuple[np.ndarray, np.ndarray, np.ndarra
 # --------------------------------------------------------------------------- #
 # whole-frame assembly
 # --------------------------------------------------------------------------- #
+def _abdomen_gate(fly: Fly, abd: Part, axis: Optional[np.ndarray], chirality: float,
+                  limits: FlyGeometryLimits) -> Optional[Tuple[float, float, np.ndarray]]:
+    """Distance / direction / size / proboscis-angle / handedness gates for one
+    (fly, abdomen) pair, shared by the tip-paired and the tip-less paths.
+    Returns ``(d, ang_axis, v)`` in eye-scale units / degrees / px, or None."""
+    v = abd.centroid - fly.eye.centroid
+    n_v = float(np.linalg.norm(v))
+    if n_v <= 0:
+        return None
+    d = n_v / fly.scale
+    if not (limits.d_eye_abd_min <= d <= limits.d_eye_abd_max):
+        return None
+    ang_axis = angle_between(v, axis) if axis is not None else 0.0
+    if ang_axis > limits.dir_tol_deg:
+        return None
+    if not (limits.abd_size_min <= np.sqrt(abd.area) / fly.scale <= limits.abd_size_max):
+        return None
+    if fly.proboscis is not None:
+        vp = fly.proboscis.centroid - fly.eye.centroid
+        ang_pa = angle_between(vp, v)
+        if not (limits.ang_pro_abd_min <= ang_pa <= limits.ang_pro_abd_max):
+            return None
+        if chirality and np.sign(np.cross(_unit(vp), _unit(v))) != chirality:
+            return None      # wrong-handed: the rig does not mount flies this way
+    return d, ang_axis, v
+
+
 def _candidate_triples(flies: List[Fly], abdomens: List[Part], tips: List[Part],
                        axis: Optional[np.ndarray], chirality: float,
                        limits: FlyGeometryLimits) -> List[Tuple[float, int, int, int]]:
@@ -320,25 +349,11 @@ def _candidate_triples(flies: List[Fly], abdomens: List[Part], tips: List[Part],
         if not fly.eye_ok or fly.scale <= 0:
             continue
         for j, abd in enumerate(abdomens):
-            v = abd.centroid - fly.eye.centroid
+            gate = _abdomen_gate(fly, abd, axis, chirality, limits)
+            if gate is None:
+                continue
+            d, ang_axis, v = gate
             n_v = float(np.linalg.norm(v))
-            if n_v <= 0:
-                continue
-            d = n_v / fly.scale
-            if not (limits.d_eye_abd_min <= d <= limits.d_eye_abd_max):
-                continue
-            ang_axis = angle_between(v, axis) if axis is not None else 0.0
-            if ang_axis > limits.dir_tol_deg:
-                continue
-            if not (limits.abd_size_min <= np.sqrt(abd.area) / fly.scale <= limits.abd_size_max):
-                continue
-            if fly.proboscis is not None:
-                vp = fly.proboscis.centroid - fly.eye.centroid
-                ang_pa = angle_between(vp, v)
-                if not (limits.ang_pro_abd_min <= ang_pa <= limits.ang_pro_abd_max):
-                    continue
-                if chirality and np.sign(np.cross(_unit(vp), _unit(v))) != chirality:
-                    continue      # wrong-handed: the rig does not mount flies this way
             for k, tip in enumerate(tips):
                 v_t = tip.centroid - fly.eye.centroid
                 n_t = float(np.linalg.norm(v_t))
@@ -357,21 +372,63 @@ def _candidate_triples(flies: List[Fly], abdomens: List[Part], tips: List[Part],
                 if angle_between(v_t, v) > limits.tip_axis_tol_deg:
                     continue
                 cost = ((0.0 if abd.contains(tip.centroid) else 1.0)
-                        + abs(d - 4.96) + ang_axis / 90.0)
+                        + abs(d - _MEDIAN_D_EYE_ABD) + ang_axis / 90.0)
                 out.append((cost, i, j, k))
     out.sort()
     return out
 
 
+def assign_abdomen_only(flies: List[Fly], abdomens: List[Part], width: int, height: int,
+                        axis: Optional[np.ndarray], chirality: float,
+                        limits: FlyGeometryLimits = DEFAULT_LIMITS) -> int:
+    """Tip-less fallback: give each fly still without an abdomen the best unclaimed
+    abdomen that passes every abdomen gate and is not clipped by the frame border.
+    The angle stays unmeasurable (``Fly.tip`` is None); ``Fly.abdomen_only`` marks
+    the row so downstream code can tell the two provenances apart. Returns the
+    number of flies that received an abdomen."""
+    claimed = {id(f.abdomen) for f in flies if f.abdomen is not None}
+    cands: List[Tuple[float, int, int]] = []
+    for i, fly in enumerate(flies):
+        if fly.abdomen is not None or not fly.eye_ok or fly.scale <= 0:
+            continue
+        for j, abd in enumerate(abdomens):
+            if id(abd) in claimed or touches_border(abd, width, height):
+                continue
+            gate = _abdomen_gate(fly, abd, axis, chirality, limits)
+            if gate is None:
+                continue
+            d, ang_axis, _ = gate
+            cands.append((abs(d - _MEDIAN_D_EYE_ABD) + ang_axis / 90.0, i, j))
+    cands.sort()
+    used_f: set = set()
+    used_a: set = set()
+    n = 0
+    for _, i, j in cands:
+        if i in used_f or j in used_a:
+            continue
+        used_f.add(i)
+        used_a.add(j)
+        flies[i].abdomen = abdomens[j]
+        flies[i].abdomen_only = True
+        n += 1
+    return n
+
+
 def assemble(parts: Iterable[Part], width: int, height: int,
              limits: FlyGeometryLimits = DEFAULT_LIMITS,
-             prior_axis: Optional[np.ndarray] = None) -> List[Fly]:
+             prior_axis: Optional[np.ndarray] = None,
+             prior_chirality: float = 0.0,
+             abdomen_only_fallback: bool = False) -> List[Fly]:
     """Group detections into flies, withholding parts that fail the geometry.
 
     Works with whatever classes are present: given only eyes and proboscises
     (the current two-class pipeline) it applies the eye and proboscis gates and
     leaves ``abdomen``/``tip`` as ``None``. Nothing is fabricated or moved --
     a part that fails is dropped, and ``Fly.rejected`` says why.
+
+    ``prior_chirality`` seeds the handedness gate when a frame cannot vote on
+    it (a single fly); ``abdomen_only_fallback`` records a gated, border-clear
+    abdomen box for flies whose tip was not found (``Fly.abdomen_only``).
     """
     parts = list(parts)
     eyes = [p for p in parts if p.label == EYE]
@@ -417,7 +474,7 @@ def assemble(parts: Iterable[Part], width: int, height: int,
     # that matter. Pass 2 applies the gate using an axis measured from what
     # pass 1 accepted, which is self-consistent.
     axis = None if prior_axis is None else _unit(np.asarray(prior_axis, dtype=float))
-    chirality = 0.0
+    chirality = float(prior_chirality)
     for pass_no in range(2):
         for fly in flies:
             fly.abdomen = fly.tip = None
@@ -432,9 +489,10 @@ def assemble(parts: Iterable[Part], width: int, height: int,
             if not accepted:
                 break                      # nothing to learn from; keep pass-1 result
             axis = estimate_posterior_axis(accepted, prior=prior_axis, limits=limits)
-            chirality = estimate_chirality(
+            vote = estimate_chirality(
                 (f.eye.centroid, f.proboscis.centroid, f.abdomen.centroid)
                 for f in flies if f.abdomen is not None and f.proboscis is not None)
+            chirality = vote if vote else float(prior_chirality)
 
     # Visibility: could this fly's tip be in frame at all? A fly whose predicted
     # tip falls outside the image is a half-fly and must not be tracked.
@@ -466,6 +524,8 @@ def assemble(parts: Iterable[Part], width: int, height: int,
                     "abdomen not fully visible")
             else:
                 fly.rejected.append("no (abdomen, tip) pair passed the geometry gates")
+    if abdomen_only_fallback and abds:
+        assign_abdomen_only(flies, abds, width, height, axis, chirality, limits)
     return flies
 
 
