@@ -22,6 +22,7 @@ config/*
 !config/example.env
 !config/example.yaml
 !config/environment.yml
+!config/example_abdomen.yaml
 
 # Data, outputs
 cache/
@@ -121,3 +122,7 @@ docs/
 CLAUDE.md
 
 debug_yolo_july17/ 
+# Model-evaluation outputs: annotated QC videos and per-frame detection dumps.
+# The folder's scripts stay tracked -- only the heavy artefacts are ignored.
+test_analysis/*
+!test_analysis/*.py
