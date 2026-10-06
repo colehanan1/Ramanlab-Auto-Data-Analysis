@@ -139,9 +139,13 @@ def main(cfg: Settings) -> None:
             fly_flagged = 0
 
             for csv_path, token, _ in iter_fly_distance_csvs(rms_dir, recursive=False):
-                # Skip if already processed (has acceleration column)
+                # Skip if already processed (has acceleration column), or if it
+                # cannot be processed: angle_multiplier is written only by
+                # compose_videos_rms, so most RMS tables lack it. Decided from the
+                # schema so those tables are never read in full.
                 try:
-                    if "acceleration_pct_per_frame" in read_schema_columns(csv_path):
+                    cols = read_schema_columns(csv_path)
+                    if "acceleration_pct_per_frame" in cols or ANGLE_MULT_COL not in cols:
                         continue
                 except Exception:
                     pass
