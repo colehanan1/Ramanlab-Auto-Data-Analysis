@@ -2557,6 +2557,74 @@ def _run_pipeline(
         raise subprocess.CalledProcessError(rc, cmd)
 
 
+#: What the pre-checks count as a video (matched case-insensitively): yolo_infer's
+#: own .mp4/.avi, the rigs' raw .h264 the secure cleanup prunes with .mp4, and
+#: every container the per-trial move_videos step relocates. Wider only ever
+#: means more launches; tests/test_yolo_launch_precheck.py pins the coverage.
+_PRECHECK_VIDEO_SUFFIXES = (".mp4", ".avi", ".h264", ".mov", ".mkv", ".mpg", ".mpeg", ".m4v")
+
+
+def _tree_has_video(root: str | Path) -> bool:
+    """True if any entry anywhere under *root* has a video suffix.
+
+    A deliberately wide SUPERSET of yolo_infer.main's discovery (a video
+    directly inside a live batch dir): folder freeze, depth and entry type are
+    ignored, symlinked dirs are followed (iter_live_batch_dirs keeps them too)
+    and an unlistable dir reads as "may hold a video". A pending video this
+    missed would be copied to secured storage and deleted by the secure
+    cleanup without ever being inferred, so it may only err towards launching.
+    A missing root has nothing to launch for -- yolo_infer skips it as well.
+    """
+    start = Path(root)
+    if not start.is_dir():
+        return False
+    seen: set[tuple[int, int]] = set()
+    stack = [start]
+    while stack:
+        current = stack.pop()
+        try:
+            st = current.stat()
+            if (st.st_dev, st.st_ino) in seen:  # symlink loop
+                continue
+            seen.add((st.st_dev, st.st_ino))
+            with os.scandir(current) as entries:
+                for entry in entries:
+                    if entry.name.lower().endswith(_PRECHECK_VIDEO_SUFFIXES):
+                        return True
+                    if entry.is_dir():
+                        stack.append(Path(entry.path))
+        except OSError:
+            return True
+    return False
+
+
+def _pipeline_run_walks_beyond_root(settings, root: str | Path) -> bool:
+    """Whether the ``fbpipe.pipeline`` run ``_run_pipeline`` starts for *root*
+    walks anything but *root* itself, so that *root* cannot show it has nothing
+    to do.
+
+    The worker reads MAIN_DIRECTORIES ahead of the MAIN_DIRECTORY it is handed,
+    splits and strips that value (config._parse_env_paths, so a root with a
+    comma, an os.pathsep or edge whitespace arrives as other paths), and
+    get_main_directories appends every auto-discovered flagged dir to each run.
+    """
+    from fbpipe.config import _parse_env_paths
+
+    if os.environ.get("MAIN_DIRECTORIES") is not None:
+        return True
+    if _parse_env_paths(str(root)) != str(root):
+        return True
+    flagged_root = getattr(settings, "flagged_root", "")
+    if flagged_root and getattr(settings, "auto_discover_flagged", True):
+        return bool(discover_flagged_directories(flagged_root))
+    return False
+
+
+def _yolo_may_have_work(settings, root: str | Path) -> bool:
+    """False only when a YOLO launch for *root* certainly finds no video."""
+    return _pipeline_run_walks_beyond_root(settings, root) or _tree_has_video(root)
+
+
 def _build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -2799,14 +2867,18 @@ def main(argv: Sequence[str] | None = None) -> None:
                 if not skip_pipeline:
                     pipeline_targets.append((resolved, dict(pipeline_expectation)))
 
-            if yolo_targets:
-                for resolved in yolo_targets:
-                    _run_pipeline(
-                        config_path,
-                        main_directory=resolved,
-                        steps=("yolo",),
-                        num_workers=settings.yolo_num_workers,
-                    )
+            for resolved in yolo_targets:
+                # Checked at the launch's own slot, not up front, so a video
+                # landing mid-run is seen exactly when today's launch would.
+                if not _yolo_may_have_work(settings, resolved):
+                    print(f"[analysis] yolo → no video files under {resolved}; skipping the worker launch.")
+                    continue
+                _run_pipeline(
+                    config_path,
+                    main_directory=resolved,
+                    steps=("yolo",),
+                    num_workers=settings.yolo_num_workers,
+                )
 
             if pipeline_targets:
                 for resolved, expected in pipeline_targets:
