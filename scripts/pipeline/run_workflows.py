@@ -3213,6 +3213,32 @@ def _as_genotype_list(value: Any) -> list[str]:
     return [str(v).strip() for v in value if str(v).strip()]
 
 
+def _datasets_not_on_disk(
+    config_path: Path | None, names: Sequence[str]
+) -> set[str]:
+    """The *names* whose folder exists under neither dataset base.
+
+    Same rule (and defaults) as the config loader's "Skipping datasets not yet
+    on disk" line in ``fbpipe.config._expand_datasets``: a dataset is on disk
+    when ``dataset_bases.data/<name>`` OR ``dataset_bases.secured/<name>`` is a
+    directory. Without a readable config there are no bases to check, so
+    nothing is reported missing -- a redundant command beats a dropped one.
+    """
+    if config_path is None or not names:
+        return set()
+    try:
+        raw = yaml.safe_load(Path(config_path).read_text(encoding="utf-8")) or {}
+    except (OSError, yaml.YAMLError):
+        return set()
+    bases = raw.get("dataset_bases") or {}
+    data_base = bases.get("data", "/home/ramanlab/Documents/cole/Data/flys_New")
+    secured_base = bases.get("secured", "/securedstorage/DATAsec/cole/Data-secured-New")
+    return {
+        name for name in names
+        if not Path(data_base, name).is_dir() and not Path(secured_base, name).is_dir()
+    }
+
+
 def _dataset_mean_traces_commands(
     analysis_cfg: Mapping[str, Any] | None,
     settings: Any,
@@ -3343,6 +3369,24 @@ def _dataset_mean_traces_commands(
         str(d).strip() for d in (cfg.get("phase_cohorts") or [])
         if str(d).strip() and str(d).strip() not in frozen_figures
     ]
+
+    # A dataset listed before its folder lands (EB-Sensitivity-24-1) has no
+    # rows, so its command could only exit 1 ("No usable ... traces") every
+    # run. That failure writes nothing, so dropping the command changes no
+    # figure. The command list is the cache key, so the step re-runs once the
+    # folder appears.
+    missing = _datasets_not_on_disk(
+        config_path,
+        sorted(set(phase_cohorts) | {d for t, c, _o, _b in entries for d in (t, c)}),
+    )
+    if missing:
+        print(
+            "[analysis] dataset_mean_traces: skipping datasets not yet on disk: "
+            + ", ".join(sorted(missing))
+        )
+        phase_cohorts = [d for d in phase_cohorts if d not in missing]
+        entries = [e for e in entries if e[0] not in missing and e[1] not in missing]
+
     if pretest_wide and phase_cohorts:
         for dataset in phase_cohorts:
             phase_out = Path(out_root) / dataset / "Pre-Test_vs_Post-Training"
