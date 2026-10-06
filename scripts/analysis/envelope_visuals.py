@@ -24,15 +24,18 @@ Usage examples::
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import json
 import logging
 import math
+import multiprocessing
 import re
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence, Tuple
 
+import matplotlib
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
@@ -2190,6 +2193,12 @@ class EnvelopePlotConfig:
     dataset_overrides: Mapping[str, Any] | None = None
     thawed: Sequence[str] = ()
     thaw_all: bool = False
+    # Forked worker processes that render this call's per-fly figures. 1 (the
+    # default) is the serial loop, unchanged; N > 1 forks N workers that split
+    # the (fly, fly_number) groups round-robin (_render_fly_groups_forked). The
+    # PNGs are byte-identical either way. Stays serial when max_flies is set or
+    # pyplot runs a GUI backend.
+    render_workers: int = 1
 
 
 def _envelope_ylabel(cfg: EnvelopePlotConfig) -> str:
@@ -2315,6 +2324,117 @@ _PHASE_LABELS = {"training": "Training", "testing": "Testing", "pretest": "Pre-T
 def _phase_label(trial_type: str) -> str:
     """Title-case phase name for the figure heading."""
     return _PHASE_LABELS.get(str(trial_type).strip().lower(), "Testing")
+
+
+# ---------------------------------------------------------------------------
+# Forked per-fly rendering (EnvelopePlotConfig.render_workers > 1)
+# ---------------------------------------------------------------------------
+# The workers MUST be forked. The per-fly body reads the registries the
+# pipeline driver fills in this process at runtime (_MODEL_SCORES,
+# _LIGHT_CHECKS, _ACTIVE_PROTOCOL, _DATASET_LIGHT_WINDOWS, _DATASET_ODOR_REMAP).
+# A spawned or loky worker (fbpipe.utils.parallel.parallel_map) re-imports this
+# module and finds them empty, so its figures silently lose every "Score:" and
+# light-check note and fall back to the legacy odor rules. The start method is
+# named because Python 3.14 stops defaulting to fork on Linux.
+_RENDER_START_METHOD = "fork"
+# Backends with no GUI event loop. Forking a process that holds a Qt/Tk/GTK
+# display connection shares that connection with every child, so any other
+# backend renders serially.
+_NON_GUI_BACKENDS = frozenset({"agg", "cairo", "pdf", "pgf", "ps", "svg", "template"})
+# (render_fly, groups, abort_event): set in the parent just before the pool
+# forks, so every worker inherits it, and cleared once the pool is done.
+_FORKED_RENDER: tuple[Any, list, Any] | None = None
+
+
+def _render_worker_count(value: object) -> int:
+    try:
+        return max(int(value), 1)
+    except (TypeError, ValueError):
+        return 1
+
+
+def _init_render_worker() -> None:
+    """Line-buffer the worker's stdout: one write per line, so lines from
+    different workers never split in a redirected (block-buffered) log."""
+    reconfigure = getattr(sys.stdout, "reconfigure", None)
+    if reconfigure is not None:
+        try:
+            reconfigure(line_buffering=True)
+        except (OSError, ValueError):
+            pass
+
+
+def _render_fly_share(share: Sequence[int]) -> dict[str, int]:
+    """Worker side: render this worker's groups; return counts per status."""
+    render_fly, groups, abort = _FORKED_RENDER
+    counts: dict[str, int] = {}
+    for position in share:
+        # A sibling failed: stop at the next fly, as the serial loop would.
+        if abort.is_set():
+            break
+        (fly, fly_number), fly_df = groups[position]
+        try:
+            status = render_fly(fly, fly_number, fly_df)
+        except BaseException:
+            abort.set()
+            raise
+        counts[status] = counts.get(status, 0) + 1
+    return counts
+
+
+def _render_fly_groups_forked(render_fly: Any, fly_groups: Any, workers: int) -> bool:
+    """Render every (fly, fly_number) group across *workers* forked processes.
+
+    Returns False, having rendered nothing, when forking is unsafe or
+    pointless; the caller then runs the serial loop. A worker's exception is
+    re-raised here, and a worker that dies (OOM kill) raises BrokenProcessPool
+    instead of hanging the run.
+    """
+    global _FORKED_RENDER
+    backend = str(matplotlib.get_backend()).strip().lower()
+    if backend not in _NON_GUI_BACKENDS:
+        print(
+            f"[envelope_plots] render_workers={workers} ignored: matplotlib backend "
+            f"{backend!r} is a GUI backend and a fork would share its display "
+            "connection; rendering serially (MPLBACKEND=Agg renders in parallel)."
+        )
+        return False
+    try:
+        context = multiprocessing.get_context(_RENDER_START_METHOD)
+    except ValueError:
+        print(
+            f"[envelope_plots] render_workers={workers} ignored: this platform "
+            "cannot fork; rendering serially."
+        )
+        return False
+    # The serial loop's groups, in its order. Each fly_df is a view into the
+    # one sorted copy pandas makes, which the workers share copy-on-write.
+    groups = list(fly_groups)
+    workers = min(workers, len(groups))
+    if workers <= 1:
+        return False
+    # Round-robin: groups arrive clustered by dataset, so this deals every
+    # worker the same mix of frozen (cheap) and live (rendered) flies.
+    shares = [list(range(start, len(groups), workers)) for start in range(workers)]
+    _FORKED_RENDER = (render_fly, groups, context.Event())
+    counts: dict[str, int] = {}
+    try:
+        with concurrent.futures.ProcessPoolExecutor(
+            max_workers=workers, mp_context=context, initializer=_init_render_worker
+        ) as pool:
+            futures = [pool.submit(_render_fly_share, share) for share in shares]
+            for future in futures:
+                for status, n in future.result().items():
+                    counts[status] = counts.get(status, 0) + n
+    finally:
+        _FORKED_RENDER = None
+    print(
+        f"[envelope_plots] {workers} fork workers: {len(groups)} fly groups -> "
+        f"{counts.get('rendered', 0)} rendered, {counts.get('frozen', 0)} frozen, "
+        f"{counts.get('exists', 0)} already on disk, "
+        f"{counts.get('empty', 0)} without plottable trials."
+    )
+    return True
 
 
 def generate_envelope_plots(cfg: EnvelopePlotConfig) -> None:
@@ -2467,10 +2587,8 @@ def generate_envelope_plots(cfg: EnvelopePlotConfig) -> None:
         if str(name).strip()
     }
 
-    flies_rendered = 0
-    for (fly, fly_number), fly_df in df.groupby(["fly", "fly_number"], sort=False):
-        if max_flies is not None and flies_rendered >= max_flies:
-            break
+    def _render_fly(fly: str, fly_number: str, fly_df: pd.DataFrame) -> str:
+        """Draw one fly's figure; returns rendered / frozen / exists / empty."""
         fly_df = _select_trial_rows(fly_df)
         fly_df = fly_df.sort_values("trial_label", key=lambda s: s.map(_trial_num))
         indices = fly_df.index.to_numpy()
@@ -2503,9 +2621,9 @@ def generate_envelope_plots(cfg: EnvelopePlotConfig) -> None:
         )
         if should_skip_frozen_figure(cfg, dataset_candidates, thawed=cfg.thawed, thaw_all=cfg.thaw_all):
             print(f"[FROZEN] Skipping figure (all contributors frozen): {out_path}")
-            continue
+            return "frozen"
         if out_path.exists() and not cfg.overwrite:
-            continue
+            return "exists"
 
         for idx in indices:
             env = _extract_env_row(
@@ -2646,7 +2764,7 @@ def generate_envelope_plots(cfg: EnvelopePlotConfig) -> None:
             )
 
         if not trial_curves:
-            continue
+            return "empty"
 
         plt.rcParams.update(
             {
@@ -3013,11 +3131,32 @@ def generate_envelope_plots(cfg: EnvelopePlotConfig) -> None:
             tight_layout_kwargs["h_pad"] = float(cfg.tight_h_pad)
         fig.tight_layout(**tight_layout_kwargs)
 
+        status = "exists"
         if should_write(out_path, cfg.overwrite):
             fig.savefig(out_path, dpi=300, bbox_inches="tight")
-            flies_rendered += 1
+            status = "rendered"
 
         plt.close(fig)
+        return status
+
+    fly_groups = df.groupby(["fly", "fly_number"], sort=False)
+    render_workers = _render_worker_count(cfg.render_workers)
+    if render_workers > 1:
+        if max_flies is not None:
+            # The cap counts figures across the whole call; keep it exact.
+            print(
+                f"[envelope_plots] render_workers={render_workers} ignored: "
+                "max_flies is set; rendering serially."
+            )
+        elif _render_fly_groups_forked(_render_fly, fly_groups, render_workers):
+            return
+
+    flies_rendered = 0
+    for (fly, fly_number), fly_df in fly_groups:
+        if max_flies is not None and flies_rendered >= max_flies:
+            break
+        if _render_fly(fly, fly_number, fly_df) == "rendered":
+            flies_rendered += 1
 
 
 # ---------------------------------------------------------------------------
