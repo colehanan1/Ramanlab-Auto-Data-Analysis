@@ -2625,6 +2625,195 @@ def _yolo_may_have_work(settings, root: str | Path) -> bool:
     return _pipeline_run_walks_beyond_root(settings, root) or _tree_has_video(root)
 
 
+def _freeze_cache_blocks(combined_cfg, settings) -> list[tuple[str, frozenset[str], dict]]:
+    """``(wide_block, dataset names, fingerprint kwargs)`` for every
+    ``_resolve_frozen_slices`` call ``_run_combined`` will make.
+
+    Derived from the config the way ``_run_combined`` derives them, so the
+    dataset loop can tell before any per-trial work whether build_wide_csv will
+    splice a data-frozen dataset's cached rows or rebuild them from its
+    per-trial files. Not for --folder runs, whose combined step differs.
+    tests/test_frozen_dataset_skip.py pins this against the calls a real
+    ``_run_combined`` makes -- change the two together.
+    """
+    cfg = combined_cfg if isinstance(combined_cfg, Mapping) else {}
+    limits = (settings.class2_min, settings.class2_max)
+    flagged_names = (
+        [d.name for d in discover_flagged_directories(settings.flagged_root)]
+        if settings.flagged_root
+        else []
+    )
+
+    def _root_names(roots_cfg, field: str) -> list[str]:
+        if isinstance(roots_cfg, Sequence) and not isinstance(roots_cfg, (str, bytes, Path)):
+            roots_iter = list(roots_cfg)
+        else:
+            roots_iter = [roots_cfg]
+        return [_ensure_path(root, field).name for root in roots_iter]
+
+    def _with_flagged(names: list[str]) -> list[str]:
+        present = {name.lower() for name in names}
+        return names + [n for n in flagged_names if n.lower() not in present]
+
+    def _kw(measure_cols, fps_fallback, use_per_trial_baseline, threshold_rule, trial_type_filter):
+        return dict(
+            measure_cols=measure_cols,
+            fps_fallback=fps_fallback,
+            distance_limits=limits,
+            non_reactive_threshold=settings.non_reactive_span_px,
+            low_max_threshold_px=LOW_MAX_FLAG_THRESHOLD_PX,
+            use_per_trial_baseline=use_per_trial_baseline,
+            threshold_rule=threshold_rule,
+            trial_type_filter=trial_type_filter,
+        )
+
+    blocks: list[tuple[str, frozenset[str], dict]] = []
+    wide_cfg = cfg.get("wide")
+    wide_threshold_rule = ThresholdRule.from_mapping(wide_cfg or {})
+    wide_names: list[str] = []
+    wide_measure_cols: Sequence[str] = ["envelope_of_rms"]
+    wide_fps_fallback = 40.0
+    use_per_trial_baseline = False
+    if wide_cfg:
+        if not wide_cfg.get("roots", []):
+            raise ValueError("combined.wide.roots must list at least one directory.")
+        wide_names = _with_flagged(_root_names(wide_cfg.get("roots"), "roots"))
+        wide_measure_cols = wide_cfg.get("measure_cols") or ["envelope_of_rms"]
+        wide_fps_fallback = float(wide_cfg.get("fps_fallback", 40.0))
+        use_per_trial_baseline = wide_cfg.get("use_per_trial_baseline", False)
+        blocks.append((
+            "wide",
+            frozenset(wide_names),
+            _kw(wide_measure_cols, wide_fps_fallback, use_per_trial_baseline,
+                wide_threshold_rule, wide_cfg.get("trial_type_filter")),
+        ))
+
+    for base_key, default_cols in (
+        ("combined_base", ["combined_pct", "combined_base"]),
+        ("distance_base", ["distance_percentage"]),
+    ):
+        base_cfg = cfg.get(base_key)
+        base_wide_cfg = base_cfg.get("wide") if base_cfg else None
+        if not base_wide_cfg:
+            continue
+        if base_wide_cfg.get("roots"):
+            names = _root_names(base_wide_cfg.get("roots"), f"{base_key}.wide.roots")
+        elif wide_names:
+            names = list(wide_names)
+        else:
+            raise ValueError(f"combined.{base_key}.wide.roots must list at least one directory.")
+        trial_type_filter = base_wide_cfg.get("trial_type_filter")
+        if trial_type_filter is None and wide_cfg:
+            trial_type_filter = wide_cfg.get("trial_type_filter")
+        blocks.append((
+            base_key,
+            frozenset(_with_flagged(names)),
+            _kw(
+                base_wide_cfg.get("measure_cols") or list(default_cols),
+                float(base_wide_cfg.get("fps_fallback", wide_fps_fallback)),
+                bool(base_wide_cfg.get("use_per_trial_baseline", use_per_trial_baseline)),
+                ThresholdRule.from_mapping({**(wide_cfg or {}), **base_wide_cfg}),
+                trial_type_filter,
+            ),
+        ))
+
+    pair_groups_cfg = cfg.get("pair_groups") or []
+    if pair_groups_cfg:
+        if not wide_names:
+            raise ValueError("combined.pair_groups requires combined.wide.roots to be configured.")
+        # pair_groups resolve their datasets among the wide AND combine roots.
+        known = set(wide_names)
+        combine_cfg = cfg.get("combine")
+        if combine_cfg:
+            if combine_cfg.get("roots"):
+                combine_names = _root_names(combine_cfg.get("roots"), "combine.root")
+            elif combine_cfg.get("root") is not None:
+                combine_names = _root_names([combine_cfg.get("root")], "combine.root")
+            else:
+                raise ValueError("combined.combine requires 'root' or 'roots'.")
+            by_lower = {name.lower(): name for name in combine_names + flagged_names}
+            known.update(by_lower.values())
+        entries = (
+            pair_groups_cfg
+            if isinstance(pair_groups_cfg, Sequence) and not isinstance(pair_groups_cfg, (str, bytes))
+            else [pair_groups_cfg]
+        )
+        for entry in entries:
+            if not isinstance(entry, Mapping) or not entry.get("datasets"):
+                raise ValueError("combined.pair_groups entries must be mappings with 'datasets'.")
+            datasets_cfg = entry.get("datasets")
+            if isinstance(datasets_cfg, Sequence) and not isinstance(datasets_cfg, (str, bytes, Path)):
+                names = [Path(str(ds)).name for ds in datasets_cfg]
+            else:
+                names = [Path(str(datasets_cfg)).name]
+            missing = [name for name in names if name not in known]
+            if missing:
+                raise ValueError(f"combined.pair_groups datasets not found among combined.wide.roots: {missing}")
+            blocks.append((
+                "pair_groups",
+                frozenset(names),
+                _kw(wide_measure_cols, wide_fps_fallback, use_per_trial_baseline,
+                    wide_threshold_rule, entry.get("trial_type_filter")),
+            ))
+    return blocks
+
+
+def _skip_frozen_dataset(settings, root: str, blocks, *, thawed, thaw_all) -> bool:
+    """True when *root*'s YOLO launch and per-trial steps can sit out tonight.
+
+    Only a data-frozen dataset (``--thaw`` / ``--thaw-all`` honoured) holding no
+    video at all, whose run walks nothing beyond its own root, and for which
+    every freeze-cache slice the combined step will consult loads under the
+    current fingerprint: build_wide_csv then splices its rows and never reads
+    the per-trial files the steps would rewrite with identical bytes. A
+    missing or stale slice means a one-night rebuild FROM those files, so they
+    are derived first, as today. Says why for every data-frozen dataset.
+    """
+    from fbpipe import freeze as _freeze
+
+    dataset = Path(root).name
+    freeze_data, _ = _freeze.freeze_flags(settings, dataset, thawed=thawed, thaw_all=thaw_all)
+    if not freeze_data:
+        return False
+    if _pipeline_run_walks_beyond_root(settings, root):
+        print(
+            f"[FROZEN] {dataset}: data-frozen, but its pipeline run walks more than "
+            f"its root (MAIN_DIRECTORIES, flagged dirs or a split path) - running "
+            f"YOLO + per-trial steps as usual."
+        )
+        return False
+    if _tree_has_video(root):
+        print(
+            f"[FROZEN] {dataset}: data-frozen but holds video files - "
+            f"running YOLO + per-trial steps as usual."
+        )
+        return False
+    consulted = [(block, kw) for block, names, kw in blocks if dataset in names]
+    if not consulted:
+        print(
+            f"[FROZEN] {dataset}: data-frozen but no wide table caches it - "
+            f"running per-trial steps as usual."
+        )
+        return False
+    for block, kw in consulted:
+        try:
+            valid = _freeze.load_slice(
+                settings.cache_dir, block, dataset,
+                _freeze_fingerprint(settings, dataset, **kw),
+            ) is not None
+        except Exception:  # never skip on doubt; the combined step reports it
+            valid = False
+        if not valid:
+            print(
+                f"[FROZEN] {dataset}: data-frozen but its {block} freeze cache is "
+                f"missing or stale - running per-trial steps so the rebuild reads "
+                f"freshly derived files."
+            )
+            return False
+    print(f"[FROZEN] {dataset}: data-frozen, no videos, cache valid - skipping YOLO + per-trial steps")
+    return True
+
+
 def _build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -2840,7 +3029,21 @@ def main(argv: Sequence[str] | None = None) -> None:
             remaining_steps = [step.name for step in ORDERED_STEPS if step.name != "yolo"]
 
             yolo_targets: list[str] = []
-            pipeline_targets: list[tuple[str, dict[str, Any]]] = []
+            # Per-trial runs in root order; held_back marks a data-frozen dataset
+            # skipped below, which runs only if a video turns up by its YOLO slot.
+            planned_runs: list[tuple[str, dict[str, Any], bool]] = []
+
+            # Data-frozen datasets whose rows will splice from a valid freeze
+            # cache sit out YOLO + the per-trial steps (_skip_frozen_dataset).
+            # Explicit --folder keeps today's force-everything behaviour.
+            freeze_blocks = None
+            if not folder_filter:
+                try:
+                    freeze_blocks = _freeze_cache_blocks(
+                        (data.get("analysis") or {}).get("combined"), settings
+                    )
+                except Exception as exc:  # the combined step reports it properly
+                    print(f"[FROZEN] Cannot predict the freeze-cache splice ({exc}); no dataset skips its steps.")
 
             for root in pipeline_dataset_roots:
                 resolved = str(Path(root).expanduser())
@@ -2849,6 +3052,18 @@ def main(argv: Sequence[str] | None = None) -> None:
                 pipeline_expectation = _pipeline_expectation(
                     settings, Path(resolved)
                 )
+                if freeze_blocks is not None and _skip_frozen_dataset(
+                    settings,
+                    resolved,
+                    freeze_blocks,
+                    thawed=args.thaw or (),
+                    thaw_all=args.thaw_all,
+                ):
+                    # Still a YOLO target: its slot re-checks for a video just
+                    # before the launch would have happened, as the launch would.
+                    yolo_targets.append(resolved)
+                    planned_runs.append((resolved, dict(pipeline_expectation), True))
+                    continue
                 skip_pipeline = _should_skip_with_manifest(
                     settings,
                     category="pipeline",
@@ -2865,21 +3080,35 @@ def main(argv: Sequence[str] | None = None) -> None:
                     yolo_targets.append(resolved)
 
                 if not skip_pipeline:
-                    pipeline_targets.append((resolved, dict(pipeline_expectation)))
+                    planned_runs.append((resolved, dict(pipeline_expectation), False))
 
+            held_back = {resolved for resolved, _, held in planned_runs if held}
+            launched: set[str] = set()
             for resolved in yolo_targets:
                 # Checked at the launch's own slot, not up front, so a video
                 # landing mid-run is seen exactly when today's launch would.
                 if not _yolo_may_have_work(settings, resolved):
-                    print(f"[analysis] yolo → no video files under {resolved}; skipping the worker launch.")
+                    if resolved not in held_back:
+                        print(f"[analysis] yolo → no video files under {resolved}; skipping the worker launch.")
                     continue
+                if resolved in held_back:
+                    print(
+                        f"[FROZEN] {Path(resolved).name}: a video appeared after the start "
+                        f"of the run - running YOLO + per-trial steps after all."
+                    )
                 _run_pipeline(
                     config_path,
                     main_directory=resolved,
                     steps=("yolo",),
                     num_workers=settings.yolo_num_workers,
                 )
+                launched.add(resolved)
 
+            pipeline_targets = [
+                (resolved, expected)
+                for resolved, expected, held in planned_runs
+                if not held or resolved in launched
+            ]
             if pipeline_targets:
                 for resolved, expected in pipeline_targets:
                     _run_pipeline(config_path, main_directory=resolved, steps=remaining_steps)
