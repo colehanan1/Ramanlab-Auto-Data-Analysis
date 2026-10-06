@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import argparse
 import concurrent.futures
+import gc
 import json
 import logging
 import math
@@ -2354,8 +2355,15 @@ def _render_worker_count(value: object) -> int:
 
 
 def _init_render_worker() -> None:
-    """Line-buffer the worker's stdout: one write per line, so lines from
-    different workers never split in a redirected (block-buffered) log."""
+    """Prepare a freshly forked render worker.
+
+    Freezes every object inherited from the parent so this worker's GC never
+    walks them; a collection writes to each object it visits, which would
+    copy (~70 MB of) parent pages per worker. Then line-buffers stdout: one
+    write per line, so lines from different workers never split in a
+    redirected (block-buffered) log.
+    """
+    gc.freeze()
     reconfigure = getattr(sys.stdout, "reconfigure", None)
     if reconfigure is not None:
         try:

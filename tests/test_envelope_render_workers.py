@@ -309,6 +309,29 @@ def test_forked_render_counts_existing_figures(tmp_path, wide_table, capfd, no_h
     assert {p: p.stat().st_mtime_ns for p in out_dir.rglob("*.png")} == before
 
 
+def test_workers_freeze_inherited_objects_parent_gc_untouched(tmp_path, wide_table, monkeypatch, no_hang):
+    """Each worker freezes what it inherited, so its GC never walks (and so
+    copy-on-write copies) the parent's objects; the parent's GC is untouched."""
+    import gc
+
+    real = ev._select_trial_rows
+    seen = tmp_path / "freeze_counts"
+    seen.mkdir()
+
+    def _recording(fly_df):
+        (seen / f"{os.getpid()}.txt").write_text(str(gc.get_freeze_count()))
+        return real(fly_df)
+
+    monkeypatch.setattr(ev, "_select_trial_rows", _recording)
+    _install(_registries())
+    before = gc.get_freeze_count()  # CPython itself parks a few hundred tuples here
+    ev.generate_envelope_plots(_cfg(wide_table, tmp_path / "out", render_workers=2))
+
+    counts = [int(p.read_text()) for p in seen.glob("*.txt")]
+    assert len(counts) == 2 and all(n > before + 10_000 for n in counts), (before, counts)
+    assert gc.get_freeze_count() == before
+
+
 # ---------------------------------------------------------------------------
 # Failures surface in the parent
 # ---------------------------------------------------------------------------
