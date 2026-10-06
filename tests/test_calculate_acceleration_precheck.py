@@ -17,7 +17,9 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from fbpipe.config import ForceSettings, ParallelSettings, Settings
+from fbpipe.config import ForceSettings, ParallelSettings, Settings, get_main_directories
+from fbpipe.utils.fly_files import iter_fly_distance_csvs
+from fbpipe.utils.frozen_folders import iter_live_batch_dirs
 from fbpipe.utils.tables import read_schema_columns, read_table, write_table
 
 BATCH = "october_05_batch_2"
@@ -125,6 +127,71 @@ def test_tables_with_angle_multiplier_are_processed_as_before(module_name, tmp_p
     np.testing.assert_allclose(out["acceleration_pct_per_frame"], expected, rtol=1e-5, atol=1e-4, equal_nan=True)
     assert out["acceleration_flag"].tolist() == (np.abs(expected) > module.ACCELERATION_THRESHOLD).tolist()
     assert "acceleration_pct_per_frame" in read_schema_columns(files["angle"])
+
+
+def _reference_main(module, cfg: Settings) -> None:
+    """Both modules' RMS loop as it was before the pre-check (verbatim, with
+    the per-file calculation, which did not change, taken from the module)."""
+    if module.__name__.endswith("_gpu"):
+        processor = module.get_default_processor(force_cpu=getattr(cfg, "allow_cpu", False))
+
+        def calc(path):
+            return module.calculate_acceleration_for_csv_gpu(path, processor)
+    else:
+        calc = module.calculate_acceleration_for_csv
+    for root in get_main_directories(cfg):
+        for fly_dir in iter_live_batch_dirs(cfg, root):
+            rms_dir = fly_dir / "RMS_calculations"
+            if not rms_dir.is_dir():
+                continue
+            for csv_path, token, _ in iter_fly_distance_csvs(rms_dir, recursive=False):
+                try:
+                    if "acceleration_pct_per_frame" in read_schema_columns(csv_path):
+                        continue
+                except Exception:
+                    pass
+                df = calc(csv_path)
+                if df is None:
+                    continue
+                write_table(df, csv_path)
+
+
+def _build_with_legacy_csvs(root: Path) -> None:
+    _build(root)
+    rdir = root / BATCH / "RMS_calculations"
+    # Legacy .csv RMS tables: the schema pre-check reads their header line.
+    _rms_df(angle=False).to_csv(rdir / f"updated_{BATCH}_testing_4_fly1_distances.csv", index=False)
+    _rms_df(angle=True).to_csv(rdir / f"updated_{BATCH}_testing_4_fly2_distances.csv", index=False)
+    # A second batch without an RMS dir.
+    (root / "october_05_batch_3").mkdir()
+
+
+def _tree_bytes(root: Path) -> dict[str, bytes]:
+    return {str(p.relative_to(root)): p.read_bytes() for p in sorted(root.rglob("*")) if p.is_file()}
+
+
+@pytest.mark.parametrize("module_name", _MODULES)
+def test_output_matches_the_old_loop_byte_for_byte(module_name, tmp_path):
+    import importlib
+
+    module = importlib.import_module(module_name)
+    ref_root = tmp_path / "ref" / "Hex-HexTest-Training-24-1"
+    new_root = tmp_path / "new" / "Hex-HexTest-Training-24-1"
+    _build_with_legacy_csvs(ref_root)
+    _build_with_legacy_csvs(new_root)
+
+    _reference_main(module, _cfg(ref_root))
+    module.main(_cfg(new_root))
+
+    ref, new = _tree_bytes(ref_root), _tree_bytes(new_root)
+    assert sorted(ref) == sorted(new)
+    assert [k for k in ref if ref[k] != new[k]] == []
+    rdir = new_root / BATCH / "RMS_calculations"
+    # The angle-carrying legacy csv was processed (rewritten as parquet, the
+    # csv retired); the one without angle_multiplier was left untouched.
+    assert (rdir / f"updated_{BATCH}_testing_4_fly2_distances.parquet").is_file()
+    assert not (rdir / f"updated_{BATCH}_testing_4_fly2_distances.csv").exists()
+    assert (rdir / f"updated_{BATCH}_testing_4_fly1_distances.csv").is_file()
 
 
 def test_step_stays_in_the_pipeline():
