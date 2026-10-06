@@ -9,7 +9,9 @@ although rms_copy_filter overwrites those copies from their sources right after.
 The helper takes an explicit ``exclude_dirs``. Its DEFAULT is unchanged
 (recursive, nothing excluded -- ``tests/test_tables.py::
 test_recursive_finds_parquet_in_subdir`` pins that), and only the per-trial
-steps that walk a whole batch dir opt in.
+steps that walk a whole batch dir opt in. rms_copy_filter keeps the default:
+it already skips its own copies before reading them, and excluding would stop
+it re-copying a nested batch's copies (the ``flagged/`` layout below).
 """
 
 from __future__ import annotations
@@ -93,6 +95,29 @@ def _build_batch(root: Path) -> Path:
         index=False,
     )
     return batch
+
+
+def _build_flagged_layout(root: Path) -> tuple[Path, Path]:
+    """Hex-Control-24-0.01's real ``flagged/`` folder: a whole batch moved one
+    level down. The steps take ``flagged`` itself for a batch dir, so that
+    batch's own RMS copies sit one level deeper than ``flagged/RMS_calculations``.
+
+    Returns ``(flagged_dir, nested_rms_copy)``.
+    """
+    flagged = root / "flagged"
+    nested = flagged / "may_20_batch_2"
+    trial = nested / TRIAL
+    trial.mkdir(parents=True)
+    write_table(_source_df(), trial / f"{TRIAL}_fly1_distances.parquet")
+    (flagged / "fly1_global_distance_stats_class_0.json").write_text(
+        json.dumps({"global_min": 40.0, "global_max": 42.0, "fly_max_distance": 42.0,
+                    "effective_max_threshold": 95.0}),
+        encoding="utf-8",
+    )
+    nested_copy = write_table(
+        _rms_copy_df(), nested / "RMS_calculations" / f"updated_{TRIAL}_fly1_distances.parquet"
+    )
+    return flagged, nested_copy
 
 
 def _cfg(root: Path, *, force: bool = True) -> Settings:
@@ -319,3 +344,59 @@ def test_rms_copy_filter_still_copies_every_source(tmp_path):
     assert read_table(batch / "RMS_calculations" / copies[0]).loc[7, "x_class1"] == pytest.approx(541.0)
     # No second-generation copy of a copy.
     assert not list((batch / "RMS_calculations").rglob("updated_updated_*"))
+
+
+@pytest.mark.parametrize(
+    "module_name",
+    [
+        "fbpipe.steps.reject_bad_proboscis",
+        "fbpipe.steps.distance_stats",
+        "fbpipe.steps.distance_normalize",
+        "fbpipe.steps.distance_normalize_gpu",
+        "fbpipe.steps.distance_normalize_ultra",
+        "fbpipe.steps.detect_dropped_frames",
+    ],
+)
+def test_steps_leave_a_nested_batchs_rms_copies_alone(module_name, tmp_path, monkeypatch):
+    """The exclusion applies at any depth, so the copies one level down in the
+    ``flagged/`` layout are skipped too (the old scan read them, and reject
+    would have blanked the planted 400 px point)."""
+    import fbpipe.utils.distance_sanity as distance_sanity
+
+    module = importlib.import_module(module_name)
+    root = tmp_path / "Hex-Control-24-0.01"
+    flagged, nested_copy = _build_flagged_layout(root)
+    before = nested_copy.read_bytes()
+    seen = _spy_reads(monkeypatch, module, distance_sanity)
+
+    module.main(_cfg(root))
+
+    source = flagged / "may_20_batch_2" / TRIAL / f"{TRIAL}_fly1_distances.parquet"
+    assert any(p.resolve() == source.resolve() for p in seen), "step never read its source table"
+    assert [p for p in seen if _in_derived_dir(p)] == []
+    assert nested_copy.read_bytes() == before
+    assert list(nested_copy.parent.glob("*_dropped_frames.txt")) == []
+
+
+def test_rms_copy_filter_keeps_copying_a_nested_batchs_rms_copies(tmp_path):
+    """rms_copy_filter keeps the default scan, so in the ``flagged/`` layout it
+    still writes ``updated_updated_*`` from the nested batch's own copies, as
+    it always has (the real flagged/RMS_calculations holds 45 of them)."""
+    from fbpipe.steps import rms_copy_filter
+
+    root = tmp_path / "Hex-Control-24-0.01"
+    flagged, nested_copy = _build_flagged_layout(root)
+
+    rms_copy_filter.main(_cfg(root, force=True))
+
+    dest = flagged / "RMS_calculations"
+    assert sorted(p.name for p in dest.glob("*.parquet")) == sorted([
+        f"updated_{TRIAL}_fly1_distances.parquet",
+        f"updated_updated_{TRIAL}_fly1_distances.parquet",
+    ])
+    # The second-generation copy is the nested copy, column-filtered (it
+    # already holds only the curated columns, so nothing is dropped).
+    pd.testing.assert_frame_equal(
+        read_table(dest / f"updated_updated_{TRIAL}_fly1_distances.parquet"),
+        read_table(nested_copy),
+    )
