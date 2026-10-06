@@ -197,9 +197,32 @@ def _load_state(settings: Settings, category: str, key: str) -> dict[str, Any] |
         return None
 
 
-def _write_state(settings: Settings, category: str, key: str, payload: dict[str, Any]) -> None:
-    """Write state with file manifest for relevant categories."""
+def _write_state(
+    settings: Settings,
+    category: str,
+    key: str,
+    payload: dict[str, Any],
+    *,
+    build_manifest: bool = True,
+) -> None:
+    """Write state with file manifest for relevant categories.
+
+    ``build_manifest=False`` is for a FORCED run of a manifest category
+    (pipeline / combined): its check returns before it ever loads the state,
+    and hashing every tracked table for it cost ~45 s (pipeline) and ~50 s
+    (combined) a night. Without a manifest the state could vouch for nothing,
+    so none is kept -- an older one is removed -- and a later non-force run
+    finds no state and recomputes. An empty manifest is no safe stand-in: a
+    dataset that has since lost every tracked table would compare {} with {}
+    and read as unchanged.
+    """
     state_path = _state_path(settings, category, key)
+    if not build_manifest and category in ("pipeline", "combined"):
+        state_path.unlink(missing_ok=True)
+        # INFO, not DEBUG: this timestamped line replaces "Built file manifest
+        # for <dataset>" as the per-dataset marker in the nightly log.
+        LOGGER.info(f"Forced {category} run for {Path(key).name}: no file manifest built, no state kept")
+        return
     state_path.parent.mkdir(parents=True, exist_ok=True)
     data = dict(payload)
     data.setdefault("version", STATE_VERSION)
@@ -3114,7 +3137,11 @@ def main(argv: Sequence[str] | None = None) -> None:
                     _run_pipeline(config_path, main_directory=resolved, steps=remaining_steps)
                     payload = dict(expected)
                     payload["version"] = STATE_VERSION
-                    _write_state(settings, "pipeline", resolved, payload)
+                    # A forced check never reads this state: skip the manifest.
+                    _write_state(
+                        settings, "pipeline", resolved, payload,
+                        build_manifest=not settings.force.pipeline,
+                    )
             elif not yolo_targets:
                 print("[analysis] pipeline skipped for all datasets (cached).")
         else:
@@ -3241,7 +3268,11 @@ def main(argv: Sequence[str] | None = None) -> None:
             if not folder_filter:
                 payload = dict(combined_expected)
                 payload["version"] = STATE_VERSION
-                _write_state(settings, "combined", "analysis", payload)
+                # A forced check never reads this state: skip the manifest.
+                _write_state(
+                    settings, "combined", "analysis", payload,
+                    build_manifest=not settings.force.combined,
+                )
             else:
                 LOGGER.info(
                     "Single-folder mode: skipping combined cache write so next full run recomputes."
