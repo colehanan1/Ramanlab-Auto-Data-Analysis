@@ -11,8 +11,10 @@ tests pin that:
     windows, odor remap). A spawned/loky worker re-imports the module and sees
     those registries empty, which is why the start method must be ``fork``;
   * frozen datasets stay skipped and thawed ones redraw, exactly as serially;
+  * the parent ends with the rcParams the serial loop leaves behind;
   * a failing or dying worker raises in the parent instead of hanging;
-  * ``max_flies`` and GUI matplotlib backends fall back to the serial loop;
+  * ``max_flies``, GUI matplotlib backends and a CUDA context in the parent
+    fall back to the serial loop;
   * the knob reaches the renderer from a YAML envelope entry.
 """
 
@@ -23,16 +25,20 @@ import faulthandler
 import hashlib
 import os
 import re
+import sys
+import types
 from pathlib import Path
 
 import matplotlib
-import matplotlib.pyplot as plt
-import numpy as np
-import pandas as pd
-import pytest
 
-from fbpipe.config import DatasetOverride
-from scripts.analysis import envelope_visuals as ev
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt  # noqa: E402
+import numpy as np  # noqa: E402
+import pandas as pd  # noqa: E402
+import pytest  # noqa: E402
+
+from fbpipe.config import DatasetOverride  # noqa: E402
+from scripts.analysis import envelope_visuals as ev  # noqa: E402
 
 # The test process carries native BLAS threads, so Python 3.12 warns on every
 # fork. The production fork is deliberate (see envelope_visuals); keep the
@@ -128,19 +134,6 @@ def _isolate_registries():
         ev.set_model_scores(saved[0])
         ev.set_light_check_fractions(saved[1])
         ev.set_dataset_light_windows(saved[2])
-
-
-@pytest.fixture(autouse=True)
-def agg_backend():
-    """Render under Agg: forking only ever happens under a non-GUI backend (the
-    GUI fallback test fakes the backend name), and no test here should open a
-    Qt display connection."""
-    previous = matplotlib.get_backend()
-    plt.switch_backend("agg")
-    try:
-        yield
-    finally:
-        plt.switch_backend(previous)
 
 
 @pytest.fixture
@@ -309,6 +302,36 @@ def test_forked_render_counts_existing_figures(tmp_path, wide_table, capfd, no_h
     assert {p: p.stat().st_mtime_ns for p in out_dir.rglob("*.png")} == before
 
 
+@pytest.mark.parametrize("also_frozen", [(), (LIVE, LIGHT_ONLY)], ids=["drawn", "all-frozen"])
+def test_forked_render_leaves_parent_rcparams_as_serial_does(
+    tmp_path, wide_table, also_frozen, no_hang
+):
+    """The per-fly body styles pyplot's global rcParams before it draws, so a
+    serial render leaves them styled for whatever this process draws next.
+    Forked workers style only their own copies: the parent must end in the
+    same state -- styled iff some figure was drawn."""
+    overrides = {ds: DatasetOverride(freeze_figures=True) for ds in (FROZEN, *also_frozen)}
+    after = {}
+    for workers in (1, 2):
+        _install(_registries())
+        with plt.rc_context():
+            before = plt.rcParams["font.size"]
+            ev.generate_envelope_plots(
+                _cfg(
+                    wide_table,
+                    tmp_path / f"workers_{workers}",
+                    style_scale=1.37,
+                    dataset_overrides=overrides,
+                    render_workers=workers,
+                )
+            )
+            after[workers] = dict(plt.rcParams)
+    assert after[2] == after[1]
+    # Not vacuous: drawing really restyles (font.size = 10 * style_scale).
+    expected = before if also_frozen else pytest.approx(13.7)
+    assert after[1]["font.size"] == expected
+
+
 def test_workers_freeze_inherited_objects_parent_gc_untouched(tmp_path, wide_table, monkeypatch, no_hang):
     """Each worker freezes what it inherited, so its GC never walks (and so
     copy-on-write copies) the parent's objects; the parent's GC is untouched."""
@@ -386,6 +409,43 @@ def test_gui_backend_renders_serially(tmp_path, wide_table, monkeypatch, capfd):
     ev.generate_envelope_plots(_cfg(wide_table, tmp_path / "out", render_workers=4))
     assert len(_digests(tmp_path / "out")) == 5
     assert re.search(r"render_workers=4 ignored: matplotlib backend 'qtagg'", capfd.readouterr().out)
+
+
+def _fake_torch(is_initialized) -> types.SimpleNamespace:
+    return types.SimpleNamespace(cuda=types.SimpleNamespace(is_initialized=is_initialized))
+
+
+def _unreadable() -> bool:
+    raise RuntimeError("torch is half-imported")
+
+
+@pytest.mark.parametrize("is_initialized", [lambda: True, _unreadable], ids=["context", "unreadable"])
+def test_cuda_context_in_parent_renders_serially(
+    tmp_path, wide_table, monkeypatch, capfd, is_initialized
+):
+    """A fork must never copy a live CUDA context into the workers; when torch
+    cannot say whether this process holds one, assume it does."""
+    monkeypatch.setitem(sys.modules, "torch", _fake_torch(is_initialized))
+    _forbid_pool(monkeypatch)
+    _install(_registries())
+    capfd.readouterr()
+    ev.generate_envelope_plots(_cfg(wide_table, tmp_path / "out", render_workers=4))
+    assert len(_digests(tmp_path / "out")) == 5
+    assert "render_workers=4 ignored: this process may hold a CUDA context" in capfd.readouterr().out
+
+
+def test_cuda_driver_without_context_still_forks(tmp_path, wide_table, monkeypatch, no_hang):
+    """The driver's real state: importing fbpipe.pipeline runs
+    torch.cuda.is_available(), which loads the CUDA driver but creates no
+    context (torch.cuda.is_initialized() stays False). That alone must not cost
+    the nightly its parallel render."""
+    monkeypatch.setitem(sys.modules, "torch", _fake_torch(lambda: False))
+    spy = _PoolSpy(concurrent.futures.ProcessPoolExecutor)
+    monkeypatch.setattr(concurrent.futures, "ProcessPoolExecutor", spy)
+    _install(_registries())
+    ev.generate_envelope_plots(_cfg(wide_table, tmp_path / "out", render_workers=2))
+    assert spy.start_methods == ["fork"]
+    assert len(_digests(tmp_path / "out")) == 5
 
 
 def test_more_workers_than_groups_is_fine(tmp_path, wide_table, no_hang):

@@ -2198,8 +2198,8 @@ class EnvelopePlotConfig:
     # Forked worker processes that render this call's per-fly figures. 1 (the
     # default) is the serial loop, unchanged; N > 1 forks N workers that split
     # the (fly, fly_number) groups round-robin (_render_fly_groups_forked). The
-    # PNGs are byte-identical either way. Stays serial when max_flies is set or
-    # pyplot runs a GUI backend.
+    # PNGs are byte-identical either way. Stays serial when max_flies is set,
+    # pyplot runs a GUI backend, or torch has initialised CUDA in this process.
     render_workers: int = 1
 
 
@@ -2337,7 +2337,11 @@ def _phase_label(trial_type: str) -> str:
 # A spawned or loky worker (fbpipe.utils.parallel.parallel_map) re-imports this
 # module and finds them empty, so its figures silently lose every "Score:" and
 # light-check note and fall back to the legacy odor rules. The start method is
-# named because Python 3.14 stops defaulting to fork on Linux.
+# named because Python 3.14 stops defaulting to fork on Linux. The workers never
+# touch CUDA, and the driver holds no CUDA context: importing fbpipe.pipeline
+# runs torch.cuda.is_available(), which loads the driver library but leaves
+# torch.cuda.is_initialized() False. Should a context ever exist here, the
+# render stays serial (_may_hold_cuda_context).
 _RENDER_START_METHOD = "fork"
 # Backends with no GUI event loop. Forking a process that holds a Qt/Tk/GTK
 # display connection shares that connection with every child, so any other
@@ -2353,6 +2357,20 @@ def _render_worker_count(value: object) -> int:
         return max(int(value), 1)
     except (TypeError, ValueError):
         return 1
+
+
+def _may_hold_cuda_context() -> bool:
+    """Whether torch, if this process imported it, has initialised CUDA.
+
+    Never imports torch. A torch that cannot answer counts as initialised.
+    """
+    torch = sys.modules.get("torch")
+    if torch is None:
+        return False
+    try:
+        return bool(torch.cuda.is_initialized())
+    except Exception:  # noqa: BLE001 -- cannot tell, so do not fork
+        return True
 
 
 def _init_render_worker() -> None:
@@ -2391,13 +2409,15 @@ def _render_fly_share(share: Sequence[int]) -> dict[str, int]:
     return counts
 
 
-def _render_fly_groups_forked(render_fly: Any, fly_groups: Any, workers: int) -> bool:
+def _render_fly_groups_forked(
+    render_fly: Any, fly_groups: Any, workers: int
+) -> dict[str, int] | None:
     """Render every (fly, fly_number) group across *workers* forked processes.
 
-    Returns False, having rendered nothing, when forking is unsafe or
-    pointless; the caller then runs the serial loop. A worker's exception is
-    re-raised here, and a worker that dies (OOM kill) raises BrokenProcessPool
-    instead of hanging the run.
+    Returns the groups counted per status. Returns None, having rendered
+    nothing, when forking is unsafe or pointless; the caller then runs the
+    serial loop. A worker's exception is re-raised here, and a worker that
+    dies (OOM kill) raises BrokenProcessPool instead of hanging the run.
     """
     global _FORKED_RENDER
     backend = str(matplotlib.get_backend()).strip().lower()
@@ -2407,7 +2427,14 @@ def _render_fly_groups_forked(render_fly: Any, fly_groups: Any, workers: int) ->
             f"{backend!r} is a GUI backend and a fork would share its display "
             "connection; rendering serially (MPLBACKEND=Agg renders in parallel)."
         )
-        return False
+        return None
+    if _may_hold_cuda_context():
+        print(
+            f"[envelope_plots] render_workers={workers} ignored: this process may hold a "
+            "CUDA context (torch.cuda is initialised), which forked workers must not "
+            "inherit; rendering serially."
+        )
+        return None
     try:
         context = multiprocessing.get_context(_RENDER_START_METHOD)
     except ValueError:
@@ -2415,14 +2442,14 @@ def _render_fly_groups_forked(render_fly: Any, fly_groups: Any, workers: int) ->
             f"[envelope_plots] render_workers={workers} ignored: this platform "
             "cannot fork; rendering serially."
         )
-        return False
+        return None
     # The serial loop's groups, in its order. Each fly_df is a view (into df,
     # or the one sorted copy of it pandas makes), shared copy-on-write.
     groups = list(fly_groups)
     # Never more workers than CPUs: each one peaks near 1 GB while rendering.
     workers = min(workers, len(groups), os.cpu_count() or 1)
     if workers <= 1:
-        return False
+        return None
     # Round-robin: groups arrive clustered by dataset, so this deals every
     # worker the same mix of frozen (cheap) and live (rendered) flies.
     shares = [list(range(start, len(groups), workers)) for start in range(workers)]
@@ -2444,7 +2471,7 @@ def _render_fly_groups_forked(render_fly: Any, fly_groups: Any, workers: int) ->
         f"{counts.get('exists', 0)} already on disk, "
         f"{counts.get('empty', 0)} without plottable trials."
     )
-    return True
+    return counts
 
 
 def generate_envelope_plots(cfg: EnvelopePlotConfig) -> None:
@@ -2595,6 +2622,29 @@ def generate_envelope_plots(cfg: EnvelopePlotConfig) -> None:
         str(name).strip().casefold()
         for name in (cfg.exclude_odors or ())
         if str(name).strip()
+    }
+
+    # pyplot's global styling, applied before every figure is drawn; it stays
+    # applied afterwards, which the forked path reproduces in this process.
+    fly_rc_params = {
+        "figure.dpi": 300,
+        "savefig.dpi": 300,
+        "axes.spines.top": False,
+        "axes.spines.right": False,
+        "axes.linewidth": axes_linewidth,
+        "xtick.direction": "out",
+        "ytick.direction": "out",
+        "font.family": "Arial",
+        "font.sans-serif": ["Arial"],
+        "font.size": base_font,
+        "xtick.major.width": tick_width,
+        "ytick.major.width": tick_width,
+        "xtick.minor.width": tick_width,
+        "ytick.minor.width": tick_width,
+        "xtick.major.size": tick_length,
+        "ytick.major.size": tick_length,
+        "xtick.minor.size": tick_length * 0.7,
+        "ytick.minor.size": tick_length * 0.7,
     }
 
     def _render_fly(fly: str, fly_number: str, fly_df: pd.DataFrame) -> str:
@@ -2776,28 +2826,7 @@ def generate_envelope_plots(cfg: EnvelopePlotConfig) -> None:
         if not trial_curves:
             return "empty"
 
-        plt.rcParams.update(
-            {
-                "figure.dpi": 300,
-                "savefig.dpi": 300,
-                "axes.spines.top": False,
-                "axes.spines.right": False,
-                "axes.linewidth": axes_linewidth,
-                "xtick.direction": "out",
-                "ytick.direction": "out",
-                "font.family": "Arial",
-                "font.sans-serif": ["Arial"],
-                "font.size": base_font,
-                "xtick.major.width": tick_width,
-                "ytick.major.width": tick_width,
-                "xtick.minor.width": tick_width,
-                "ytick.minor.width": tick_width,
-                "xtick.major.size": tick_length,
-                "ytick.major.size": tick_length,
-                "xtick.minor.size": tick_length * 0.7,
-                "ytick.minor.size": tick_length * 0.7,
-            }
-        )
+        plt.rcParams.update(fly_rc_params)
 
         n_rows = len(trial_curves)
         fig_h = max(3.0, n_rows * 1.6 * plot_size_scale + 1.5)
@@ -3158,8 +3187,13 @@ def generate_envelope_plots(cfg: EnvelopePlotConfig) -> None:
                 f"[envelope_plots] render_workers={render_workers} ignored: "
                 "max_flies is set; rendering serially."
             )
-        elif _render_fly_groups_forked(_render_fly, fly_groups, render_workers):
-            return
+        else:
+            counts = _render_fly_groups_forked(_render_fly, fly_groups, render_workers)
+            if counts is not None:
+                if counts.get("rendered"):
+                    # The workers styled only their own copies.
+                    plt.rcParams.update(fly_rc_params)
+                return
 
     flies_rendered = 0
     for (fly, fly_number), fly_df in fly_groups:
