@@ -11,6 +11,13 @@ _FLY_SLOT_REGEX = re.compile(
     r"(fly(\d+)_distances)\.(csv|parquet)$", re.IGNORECASE
 )
 
+# Batch subdirectories that hold DERIVED tables, never per-trial sources:
+# rms_copy_filter's ``updated_*_flyN_distances`` copies (which match the slot
+# pattern) and combine's envelope CSVs. Per-trial steps that walk a whole batch
+# dir pass this as ``exclude_dirs`` so they do not re-read the copies that
+# rms_copy_filter overwrites from their sources anyway.
+DERIVED_TABLE_DIRS: Tuple[str, ...] = ("RMS_calculations", "angle_distance_rms_envelope")
+
 
 def fly_slot_from_name(name: str) -> Optional[Tuple[str, int]]:
     """Return the fly slot token and index from a CSV or Parquet file name.
@@ -37,7 +44,7 @@ def fly_slot_from_name(name: str) -> Optional[Tuple[str, int]]:
 
 
 def iter_fly_distance_csvs(
-    base: Path, *, recursive: bool = True
+    base: Path, *, recursive: bool = True, exclude_dirs: Iterable[str] = ()
 ) -> Iterator[Tuple[Path, str, int]]:
     """Yield per-fly distance files (CSV or Parquet) under ``base``.
 
@@ -51,9 +58,15 @@ def iter_fly_distance_csvs(
     recursive:
         When ``True`` (default) search using ``rglob``; otherwise only inspect
         the immediate directory.
+    exclude_dirs:
+        Directory names whose files are skipped wherever they sit BELOW
+        ``base`` (exact name match, any depth). ``base`` itself is never
+        excluded, so a caller can still scan an ``RMS_calculations`` dir
+        directly. Default: nothing is excluded.
     """
 
     base = base.expanduser().resolve()
+    excluded = frozenset(exclude_dirs)
     print(
         f"[FLYFILES] Scanning {base} for flyN_distances CSV/Parquet files "
         f"(recursive={recursive})."
@@ -67,6 +80,12 @@ def iter_fly_distance_csvs(
             candidates.extend(base.rglob(pattern))
         else:
             candidates.extend(base.glob(pattern))
+    if excluded:
+        # Filter the glob results (rather than re-implementing the walk) so the
+        # order and symlink behaviour of what remains are exactly the default's.
+        # Only the directory parts below base count.
+        depth = len(base.parts)
+        candidates = [p for p in candidates if excluded.isdisjoint(p.parts[depth:-1])]
 
     # Deduplicate by (resolved_parent, stem), preferring .parquet over .csv.
     # We key/dedup on the RESOLVED path (so symlinks collapse correctly) but

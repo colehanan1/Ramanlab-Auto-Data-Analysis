@@ -12,7 +12,7 @@ from ..utils.columns import (
     find_proboscis_distance_percentage_column,
     find_proboscis_xy_columns,
 )
-from ..utils.fly_files import iter_fly_distance_csvs
+from ..utils.fly_files import DERIVED_TABLE_DIRS, iter_fly_distance_csvs
 from ..utils.parallel import parallel_map
 from ..utils.tables import read_table, table_path, write_table
 
@@ -31,7 +31,9 @@ def _process_fly_dir(fly_dir: Path, cfg: Settings) -> None:
     force_recompute = bool(getattr(getattr(cfg, "force", None), "pipeline", False))
     dest = fly_dir / "RMS_calculations"
     dest.mkdir(exist_ok=True)
-    for csv_path, _, _ in iter_fly_distance_csvs(fly_dir, recursive=True):
+    for csv_path, _, _ in iter_fly_distance_csvs(
+        fly_dir, recursive=True, exclude_dirs=DERIVED_TABLE_DIRS
+    ):
         if dest in csv_path.parents:
             continue
 

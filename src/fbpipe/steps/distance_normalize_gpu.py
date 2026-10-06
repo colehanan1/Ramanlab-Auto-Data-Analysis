@@ -42,7 +42,7 @@ from ..utils.distance_sanity import (
     csv_requires_three_fly_distance_sanitization,
     sanitize_three_fly_distance_dataframe,
 )
-from ..utils.fly_files import iter_fly_distance_csvs
+from ..utils.fly_files import DERIVED_TABLE_DIRS, iter_fly_distance_csvs
 from ..utils.gpu_accelerated import get_default_processor
 from ..utils.tables import read_table, read_schema_columns, write_table
 
@@ -117,7 +117,9 @@ def main(cfg: Settings) -> None:
         for fly_dir in iter_live_batch_dirs(cfg, root):
             print(f"[NORM-GPU] Processing fly directory: {fly_dir.name}")
 
-            for csv_path, token, _ in iter_fly_distance_csvs(fly_dir, recursive=True):
+            for csv_path, token, _ in iter_fly_distance_csvs(
+                fly_dir, recursive=True, exclude_dirs=DERIVED_TABLE_DIRS
+            ):
                 # Find stats JSON
                 slot_label = token.replace("_distances", "")
                 stats_candidates = [

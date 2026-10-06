@@ -37,7 +37,7 @@ from ..utils.distance_sanity import (
     csv_requires_three_fly_distance_sanitization,
     sanitize_three_fly_distance_dataframe,
 )
-from ..utils.fly_files import iter_fly_distance_csvs
+from ..utils.fly_files import DERIVED_TABLE_DIRS, iter_fly_distance_csvs
 from ..utils.gpu_batch_optimizer import BatchFileProcessor, estimate_optimal_batch_size
 from ..utils.rig_gates import apply_rig_gate_overrides
 from ..utils.tables import read_table, read_schema_columns, write_table
@@ -116,7 +116,9 @@ def main(cfg: Settings) -> None:
             batch_stats: List[Tuple[float, float, float]] = []
             batch_dist_cols: Dict[Path, str] = {}
 
-            for csv_path, token, _ in iter_fly_distance_csvs(fly_dir, recursive=True):
+            for csv_path, token, _ in iter_fly_distance_csvs(
+                fly_dir, recursive=True, exclude_dirs=DERIVED_TABLE_DIRS
+            ):
                 # Find stats JSON
                 slot_label = token.replace("_distances", "")
                 stats_candidates = [

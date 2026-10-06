@@ -14,7 +14,7 @@ from ..utils.distance_sanity import (
     csv_requires_three_fly_distance_sanitization,
     sanitize_three_fly_distance_dataframe,
 )
-from ..utils.fly_files import iter_fly_distance_csvs
+from ..utils.fly_files import DERIVED_TABLE_DIRS, iter_fly_distance_csvs
 from ..utils.parallel import parallel_map
 from ..utils.rig_gates import apply_rig_gate_overrides
 from ..utils.tables import read_schema_columns, read_table, write_table
@@ -46,7 +46,9 @@ def _process_fly_dir(fly_dir: Path, cfg: Settings) -> None:
     force_recompute = bool(getattr(getattr(cfg, "force", None), "pipeline", False))
 
     print(f"[DIST] Inspecting fly directory: {fly_dir.name}")
-    entries = list(iter_fly_distance_csvs(fly_dir, recursive=True))
+    entries = list(
+        iter_fly_distance_csvs(fly_dir, recursive=True, exclude_dirs=DERIVED_TABLE_DIRS)
+    )
     if not entries:
         return
 

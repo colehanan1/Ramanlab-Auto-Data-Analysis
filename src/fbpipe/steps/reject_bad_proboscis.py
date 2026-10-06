@@ -28,7 +28,7 @@ import pandas as pd
 from ..config import Settings, get_main_directories
 from ..utils.frozen_folders import iter_live_batch_dirs
 from ..utils.distance_sanity import sanitize_proboscis_dataframe
-from ..utils.fly_files import iter_fly_distance_csvs
+from ..utils.fly_files import DERIVED_TABLE_DIRS, iter_fly_distance_csvs
 from ..utils.parallel import parallel_map
 from ..utils.rig_gates import apply_rig_gate_overrides
 from ..utils.tables import read_table, write_table
@@ -55,7 +55,9 @@ def _process_fly_dir(fly_dir: Path, cfg: Settings) -> Tuple[int, int, int]:
     files_modified = 0
     geo_total = 0
     vel_total = 0
-    for csv_path, token, _ in iter_fly_distance_csvs(fly_dir, recursive=True):
+    for csv_path, token, _ in iter_fly_distance_csvs(
+        fly_dir, recursive=True, exclude_dirs=DERIVED_TABLE_DIRS
+    ):
         try:
             df = read_table(csv_path)
         except Exception as exc:

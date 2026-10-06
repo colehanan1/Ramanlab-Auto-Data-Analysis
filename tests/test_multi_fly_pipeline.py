@@ -135,7 +135,10 @@ def test_iter_fly_distance_csvs_detects_slot(tmp_path):
 def test_distance_pipeline_creates_stats_and_normalizes(tmp_path):
     root = tmp_path / "experiment"
     fly_dir = root / "october_07_session"
-    csv_path = fly_dir / "RMS_calculations" / "october_07_fly_1_testing_2_fly1_distances.csv"
+    # Per-fly tables live in their trial folder, where yolo_infer writes them.
+    # RMS_calculations/ only ever holds rms_copy_filter's derived copies, which
+    # the per-trial steps skip (fly_files.DERIVED_TABLE_DIRS).
+    csv_path = fly_dir / "october_07_fly_1_testing_2" / "october_07_fly_1_testing_2_fly1_distances.csv"
     _write_dummy_csv(csv_path)
 
     settings = Settings(
@@ -235,12 +238,14 @@ def test_collect_and_convert_capture_fly_number(tmp_path):
 def test_recalculation_sanitizes_existing_three_fly_overlimit_distances(tmp_path):
     root = tmp_path / "experiment"
     fly_dir = root / "october_07_session"
-    rms_dir = fly_dir / "RMS_calculations"
     trial_prefix = "october_07_fly_1_testing_2"
+    # The trial folder, as yolo_infer lays it out (RMS_calculations/ holds only
+    # derived copies, which the per-trial steps skip).
+    trial_dir = fly_dir / trial_prefix
 
-    fly1_csv = rms_dir / f"{trial_prefix}_fly1_distances.csv"
-    fly2_csv = rms_dir / f"{trial_prefix}_fly2_distances.csv"
-    fly3_csv = rms_dir / f"{trial_prefix}_fly3_distances.csv"
+    fly1_csv = trial_dir / f"{trial_prefix}_fly1_distances.csv"
+    fly2_csv = trial_dir / f"{trial_prefix}_fly2_distances.csv"
+    fly3_csv = trial_dir / f"{trial_prefix}_fly3_distances.csv"
 
     _write_existing_processed_csv(fly1_csv, [100.0, 200.0, 170.0])
     _write_existing_processed_csv(fly2_csv, [110.0, 120.0, 130.0])

@@ -9,7 +9,7 @@ import pandas as pd
 from ..config import Settings, get_main_directories
 from ..utils.frozen_folders import iter_live_batch_dirs
 from ..utils.columns import find_proboscis_distance_column
-from ..utils.fly_files import iter_fly_distance_csvs
+from ..utils.fly_files import DERIVED_TABLE_DIRS, iter_fly_distance_csvs
 from ..utils.parallel import parallel_map
 from ..utils.tables import read_table, resolve_existing
 
@@ -41,7 +41,9 @@ def _process_fly_dir(fly_dir: Path, cfg: Settings) -> None:
     """
     force_recompute = bool(getattr(getattr(cfg, "force", None), "pipeline", False))
     print(f"[DROP] Checking fly directory: {fly_dir.name}")
-    for csv_path, _, _ in iter_fly_distance_csvs(fly_dir, recursive=True):
+    for csv_path, _, _ in iter_fly_distance_csvs(
+        fly_dir, recursive=True, exclude_dirs=DERIVED_TABLE_DIRS
+    ):
         out_path = Path(csv_path.with_suffix("").as_posix() + "_dropped_frames.txt")
         actual_input = resolve_existing(csv_path) or csv_path
         if (
