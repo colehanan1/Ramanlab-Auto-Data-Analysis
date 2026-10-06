@@ -395,6 +395,15 @@ def test_more_workers_than_groups_is_fine(tmp_path, wide_table, no_hang):
     assert _digests(tmp_path / "forked") == _digests(tmp_path / "serial")
 
 
+def test_worker_count_is_capped_at_cpu_count(tmp_path, wide_table, monkeypatch, capfd, no_hang):
+    """A typo such as render_workers: 60 must not fork 60 ~1 GB workers."""
+    monkeypatch.setattr(ev.os, "cpu_count", lambda: 2)
+    _install(_registries())
+    capfd.readouterr()
+    ev.generate_envelope_plots(_cfg(wide_table, tmp_path / "out", render_workers=60))
+    assert "[envelope_plots] 2 fork workers: 7 fly groups" in capfd.readouterr().out
+
+
 # ---------------------------------------------------------------------------
 # Plumbing: YAML envelope entry -> EnvelopePlotConfig -> renderer
 # ---------------------------------------------------------------------------

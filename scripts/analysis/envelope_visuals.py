@@ -30,6 +30,7 @@ import json
 import logging
 import math
 import multiprocessing
+import os
 import re
 import sys
 from dataclasses import dataclass, field
@@ -2418,7 +2419,8 @@ def _render_fly_groups_forked(render_fly: Any, fly_groups: Any, workers: int) ->
     # The serial loop's groups, in its order. Each fly_df is a view into the
     # one sorted copy pandas makes, which the workers share copy-on-write.
     groups = list(fly_groups)
-    workers = min(workers, len(groups))
+    # Never more workers than CPUs: each one peaks near 1 GB while rendering.
+    workers = min(workers, len(groups), os.cpu_count() or 1)
     if workers <= 1:
         return False
     # Round-robin: groups arrive clustered by dataset, so this deals every
