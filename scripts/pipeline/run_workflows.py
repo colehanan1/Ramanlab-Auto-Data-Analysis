@@ -72,8 +72,10 @@ from scripts.analysis.envelope_combined import (
     LOW_MAX_FLAG_THRESHOLD_PX,
     build_wide_csv,
     combine_distance_angle,
+    combine_parallel_jobs,
     mirror_directory,
     overlay_sources,
+    run_combine_plan,
     secure_copy_and_cleanup,
     wide_to_matrix,
 )
@@ -1388,6 +1390,13 @@ def _run_combined(
         # Append flagged directories so they are processed identically.
         roots_iter.extend(str(d) for d in flagged_dirs)
 
+        # parallel.enabled: the loop below only records, in order, what it
+        # would print and run, and run_combine_plan replays that with every
+        # root's batches spread over one worker pool -- same files, same log.
+        # Disabled (the default), the loop runs combine itself as before.
+        combine_jobs = combine_parallel_jobs(settings)
+        combine_plan: list[str | CombineConfig] = []
+
         for entry in roots_iter:
             entry_path = _ensure_path(entry, "combine.root")
             # In single-folder mode, skip combine for non-target folders.
@@ -1422,7 +1431,11 @@ def _run_combined(
                 # it) -- so recomputing those per-trial files here is pure
                 # waste. This mirrors build_wide_csv's own "never walk a
                 # frozen root" skip (envelope_combined.py:2676).
-                print(f"[FROZEN] combined.combine → skipping recompute for {config.root}")
+                line = f"[FROZEN] combined.combine → skipping recompute for {config.root}"
+                if combine_jobs > 1:
+                    combine_plan.append(line)
+                else:
+                    print(line)
             else:
                 # Per-FOLDER freeze inside a still-live dataset: leave each
                 # retired batch's derived CSVs as they are (the dataset-level
@@ -1437,9 +1450,21 @@ def _run_combined(
                 )
                 if _skip:
                     config = dc_replace(config, skip_folders=frozenset(_skip))
-                print(f"[analysis] combined.combine → {config.root}")
-                combine_distance_angle(config)
+                line = f"[analysis] combined.combine → {config.root}"
+                if combine_jobs > 1:
+                    combine_plan += [line, config]
+                else:
+                    print(line)
+                    combine_distance_angle(config)
             combine_roots[config.root.name.lower()] = config.root
+
+        if combine_plan:
+            LOGGER.info(
+                "[analysis] combined.combine → batches over up to %d worker processes "
+                "(parallel.enabled)",
+                combine_jobs,
+            )
+            run_combine_plan(combine_plan, n_jobs=combine_jobs)
 
     wide_cfg = cfg.get("wide")
     #: theta for the AUC-* columns of every wide table built below. Read once so

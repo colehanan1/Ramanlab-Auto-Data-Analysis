@@ -53,6 +53,10 @@ parallel:
 or per-run: `PARALLEL_ENABLED=true PARALLEL_N_JOBS=8 python -m fbpipe.pipeline ...`.
 Note: parallelism helps on **large** datasets; on small per-fly files the process
 startup overhead cancels the gain (hence opt-in). The big wins are Parquet + the cache.
+The same switch fans out `run_workflows`' `combined.combine` step: every live
+(dataset, batch) dir goes to one pool of `n_jobs` workers
+(`envelope_combined.run_combine_plan`), each started with the driver's module state,
+and the files and log match the serial run's.
 
 ### Get a CSV back for Excel / external tools
 ```bash

@@ -17,17 +17,22 @@ run efficiently.
 from __future__ import annotations
 
 import argparse
+import contextlib
+import io
 import json
 import math
 import os
+import pickle
 import re
 import shutil
+import stat
 import sys
+import traceback
 from collections import Counter
 from itertools import groupby
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, Iterator, Mapping, MutableMapping, Optional, Sequence
+from typing import Callable, Iterable, Iterator, Mapping, MutableMapping, Optional, Sequence
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -482,9 +487,20 @@ def _read_trial_table(
     """
     p = resolve_existing(path) or Path(path)
     if p.suffix.lower() == ".parquet":
-        df = pd.read_parquet(
-            p, engine="pyarrow", columns=list(columns) if columns is not None else None
-        )
+        if columns is None and _READ_MEMO is not None:
+            # combine's header sniff: the same whole-file read as below, shared
+            # with the batch's other reads of this file (see _TableReadMemo).
+            # Not a schema-only read -- that would accept a parquet whose
+            # footer is intact but whose rows do not decode.
+            df = _READ_MEMO.read(
+                p,
+                lambda: pd.read_parquet(p, engine="pyarrow", columns=None),
+                head=None if nrows is None else max(0, int(nrows)),
+            )
+        else:
+            df = pd.read_parquet(
+                p, engine="pyarrow", columns=list(columns) if columns is not None else None
+            )
         if nrows is not None:
             df = df.iloc[: max(0, int(nrows))]
         if dtype:
@@ -1608,6 +1624,104 @@ def _compute_angle_deg(
     return pd.Series(angles, index=df.index, name="angle_ARB_deg")
 
 
+# ---------------------------------------------------------------------------
+# Per-batch table-read memo (combine_distance_angle only)
+# ---------------------------------------------------------------------------
+# Combining one batch used to decode every per-trial table six or seven times:
+# _ensure_angle_percentages three times (reference angle, fly max, write pass),
+# the two _locate_trials header sniffs once each, and pass 1 once as "distance"
+# and once as "angle" -- usually the same file. That was 1,113 parquet decodes
+# for 84 trials on the 2026-10-05 nightly. Inside _batch_read_memo() each file
+# is decoded once and every caller gets its own copy. An entry is reused only
+# while the file's stat signature is unchanged, and each write combine makes
+# drops its entry explicitly too: two writes inside one timestamp tick can leave
+# the stat unchanged, so correctness never rests on mtime granularity.
+
+
+def _stat_signature(st: os.stat_result) -> object:
+    return (st.st_mtime_ns, st.st_ctime_ns, st.st_size, st.st_ino)
+
+
+class _TableReadMemo:
+    """Decoded tables of one batch, keyed on the resolved path."""
+
+    def __init__(self) -> None:
+        self._frames: dict[Path, tuple[object, pd.DataFrame]] = {}
+
+    def __len__(self) -> int:
+        return len(self._frames)
+
+    def __contains__(self, path: object) -> bool:
+        return Path(path).resolve() in self._frames  # type: ignore[arg-type]
+
+    def read(
+        self,
+        path: Path | str,
+        load: Callable[[], pd.DataFrame],
+        *,
+        head: int | None = None,
+    ) -> pd.DataFrame:
+        """A private copy of ``path``'s table (its first ``head`` rows if given).
+
+        ``load`` decodes the file on a miss. Anything that is not an existing
+        regular file goes straight to ``load``, so its error -- or read_table's
+        sibling resolution and log line -- is exactly an uncached read's.
+        """
+        try:
+            st = os.stat(path)
+        except OSError:
+            return load()
+        if not stat.S_ISREG(st.st_mode):
+            return load()
+        key = Path(path).resolve()
+        signature = _stat_signature(st)
+        cached = self._frames.get(key)
+        if cached is None or cached[0] != signature:
+            cached = (signature, load())
+            self._frames[key] = cached
+        frame = cached[1]
+        return (frame if head is None else frame.iloc[:head]).copy()
+
+    def invalidate(self, path: Path | str) -> None:
+        self._frames.pop(Path(path).resolve(), None)
+
+    def clear(self) -> None:
+        self._frames.clear()
+
+
+_READ_MEMO: _TableReadMemo | None = None
+
+
+@contextlib.contextmanager
+def _batch_read_memo() -> Iterator[_TableReadMemo]:
+    """Give one batch its own read memo; it is emptied when the batch ends."""
+
+    global _READ_MEMO
+    previous = _READ_MEMO
+    memo = _READ_MEMO = _TableReadMemo()
+    try:
+        yield memo
+    finally:
+        memo.clear()
+        _READ_MEMO = previous
+
+
+def _read_full_table(path: Path | str) -> pd.DataFrame:
+    """``read_table(path)``, served from the batch memo while one is active."""
+
+    memo = _READ_MEMO
+    if memo is None:
+        return read_table(path)
+    return memo.read(path, lambda: read_table(path))
+
+
+def _forget_table(path: Path | str) -> None:
+    """Drop ``path`` from the batch memo. Call it around every write to it."""
+
+    if _READ_MEMO is not None:
+        _READ_MEMO.invalidate(path)
+
+
 def _trial_csv_candidates(fly_dir: Path, suffix_globs: Iterable[str] | str) -> list[Path]:
     patterns = [suffix_globs] if isinstance(suffix_globs, str) else list(suffix_globs)
     candidates: list[Path] = []
@@ -1642,7 +1756,7 @@ def _find_reference_angle(
     best: tuple[int, float, float] | None = None
     for path in csv_paths:
         try:
-            df = read_table(path)
+            df = _read_full_table(path)
             angles = _compute_angle_deg(df, anchor).to_numpy(dtype=float)
         except Exception:
             continue
@@ -1690,7 +1804,7 @@ def _fly_max_centered(
     max_abs = 0.0
     for path in csv_paths:
         try:
-            df = read_table(path)
+            df = _read_full_table(path)
             angles = _compute_angle_deg(df, anchor).to_numpy(dtype=float)
         except Exception:
             continue
@@ -1745,7 +1859,7 @@ def _ensure_angle_percentages(fly_dir: Path, suffix_globs: Iterable[str] | str) 
     updates = 0
     for path in csv_paths:
         try:
-            df = read_table(path)
+            df = _read_full_table(path)
             angles = _compute_angle_deg(df, anchor)
         except Exception:
             continue
@@ -1791,6 +1905,10 @@ def _ensure_angle_percentages(fly_dir: Path, suffix_globs: Iterable[str] | str) 
                 print(f"[angle] {fly_dir.name}: augmented {path.name} with centered angle columns.")
             except Exception as exc:
                 print(f"[WARN] Failed to persist centered angle columns for {path}: {exc}")
+            finally:
+                # Written (or half written, if it failed): the batch memo's
+                # frame for this file is stale either way.
+                _forget_table(path)
 
     if updates:
         print(f"[{fly_dir.name}] centered angle normalisation applied to {updates} file(s).")
@@ -2243,11 +2361,16 @@ class CombineConfig:
         return max(int(round(self.window_sec * self.fps_default)), 1)
 
 
-def combine_distance_angle(cfg: CombineConfig) -> None:
+def _print_combine_banner(cfg: CombineConfig) -> None:
     print(
         "[DEBUG] combine_distance_angle → root=%s, fps_default=%.3f, window_frames=%d, save_trial_plots=%s"
         % (cfg.root, cfg.fps_default, cfg.window_frames, cfg.save_trial_plots)
     )
+
+
+def _trial_plot_odor_window(cfg: CombineConfig) -> tuple[float, float]:
+    """Odor on/off marker times (s) for the optional per-trial plots."""
+
     odor_latency = max(cfg.odor_latency_s, 0.0)
     odor_on_cmd = cfg.odor_on_s
     odor_off_cmd = cfg.odor_off_s
@@ -2256,342 +2379,599 @@ def combine_distance_angle(cfg: CombineConfig) -> None:
     # ("legacy") drew the trial-plot odor markers at the latency-shifted time,
     # so reproduce that under the legacy protocol (figure markers only).
     if _is_legacy(cfg.root):
-        odor_on_effective = odor_on_cmd + odor_latency
-        odor_off_effective = odor_off_cmd + odor_latency
-    else:
-        odor_on_effective = odor_on_cmd
-        odor_off_effective = odor_off_cmd
-    dataset_canon = _canon_dataset(cfg.root.name)
+        return odor_on_cmd + odor_latency, odor_off_cmd + odor_latency
+    return odor_on_cmd, odor_off_cmd
+
+
+def _combine_batch_dirs(cfg: CombineConfig) -> list[tuple[Path, bool]]:
+    """``cfg.root``'s batch dirs in processing order, each with its frozen flag."""
 
     skip_folders = frozenset(str(n) for n in (cfg.skip_folders or ()))
-    for fly_dir in sorted(p for p in cfg.root.iterdir() if p.is_dir()):
-        fly_name = fly_dir.name
-        if fly_name in skip_folders:
+    return [
+        (fly_dir, fly_dir.name in skip_folders)
+        for fly_dir in sorted(p for p in cfg.root.iterdir() if p.is_dir())
+    ]
+
+
+def combine_distance_angle(cfg: CombineConfig) -> None:
+    _print_combine_banner(cfg)
+    for fly_dir, frozen in _combine_batch_dirs(cfg):
+        if frozen:
             # Frozen: leave the existing derived CSVs exactly as they are.
-            print(f"[FROZEN] combine → skipping recompute for {fly_name}")
+            print(f"[FROZEN] combine → skipping recompute for {fly_dir.name}")
             continue
-        print(f"\n[DEBUG] Processing fly: {fly_name} ({fly_dir})")
-        _ensure_angle_percentages(fly_dir, cfg.angle_suffixes)
-        angle_entries = _locate_trials(fly_dir, cfg.angle_suffixes, ANGLE_COLS)
-        distance_entries = _locate_trials(fly_dir, cfg.distance_suffixes, DIST_COLS)
+        with _batch_read_memo():
+            _combine_fly_dir(cfg, fly_dir)
 
-        include_training = _has_training_trials(angle_entries, distance_entries)
 
-        if not distance_entries:
-            print(f"[{fly_name}] No distance trials found — skipping.")
+def _combine_fly_dir(cfg: CombineConfig, fly_dir: Path) -> None:
+    """Combine one batch dir -- the body of combine_distance_angle's loop.
+
+    A function of its own so run_combine_plan's worker processes run exactly
+    what the serial loop runs. The caller supplies the batch's read memo.
+    """
+
+    fly_name = fly_dir.name
+    odor_on_effective, odor_off_effective = _trial_plot_odor_window(cfg)
+    print(f"\n[DEBUG] Processing fly: {fly_name} ({fly_dir})")
+    _ensure_angle_percentages(fly_dir, cfg.angle_suffixes)
+    angle_entries = _locate_trials(fly_dir, cfg.angle_suffixes, ANGLE_COLS)
+    distance_entries = _locate_trials(fly_dir, cfg.distance_suffixes, DIST_COLS)
+
+    include_training = _has_training_trials(angle_entries, distance_entries)
+
+    if not distance_entries:
+        print(f"[{fly_name}] No distance trials found — skipping.")
+        return
+
+    trial_configs = _build_trial_configs(angle_entries, distance_entries)
+
+    angle_idx_map: dict[str, dict[str, Path]] = {}
+    angle_fallback_map: dict[str, dict[str, Path]] = {}
+    for trial_type, regex in TRIAL_TYPE_REGEXES:
+        idx, fallback = _index_trials(angle_entries, regex, trial_type)
+        angle_idx_map[trial_type] = idx
+        angle_fallback_map[trial_type] = fallback
+
+    out_csv_dir = fly_dir / "angle_distance_rms_envelope"
+    out_csv_dir.mkdir(parents=True, exist_ok=True)
+    out_fig_dir: Optional[Path] = None
+    if cfg.save_trial_plots:
+        out_fig_dir = out_csv_dir / "plots"
+        out_fig_dir.mkdir(parents=True, exist_ok=True)
+
+    # ── PASS 1: compute d_px_weighted for all trials, find per-fly-number weighted bounds ──
+    fly_weighted_min_by_number: dict[str, float] = {}
+    fly_weighted_max_by_number: dict[str, float] = {}
+    trial_data_cache: list[dict] = []
+    pass1_skipped = 0
+
+    for trial_type, regex in trial_configs:
+        dist_idx = _collect_distance_entries(distance_entries, regex, trial_type)
+        if not dist_idx:
+            if trial_type == "training" and include_training:
+                print(f"[{fly_name}] No {trial_type} distance trials found.")
             continue
 
-        trial_configs = _build_trial_configs(angle_entries, distance_entries)
-
-        angle_idx_map: dict[str, dict[str, Path]] = {}
-        angle_fallback_map: dict[str, dict[str, Path]] = {}
-        for trial_type, regex in TRIAL_TYPE_REGEXES:
-            idx, fallback = _index_trials(angle_entries, regex, trial_type)
-            angle_idx_map[trial_type] = idx
-            angle_fallback_map[trial_type] = fallback
-
-        out_csv_dir = fly_dir / "angle_distance_rms_envelope"
-        out_csv_dir.mkdir(parents=True, exist_ok=True)
-        out_fig_dir: Optional[Path] = None
-        if cfg.save_trial_plots:
-            out_fig_dir = out_csv_dir / "plots"
-            out_fig_dir.mkdir(parents=True, exist_ok=True)
-
-        # ── PASS 1: compute d_px_weighted for all trials, find per-fly-number weighted bounds ──
-        fly_weighted_min_by_number: dict[str, float] = {}
-        fly_weighted_max_by_number: dict[str, float] = {}
-        trial_data_cache: list[dict] = []
-        pass1_skipped = 0
-
-        for trial_type, regex in trial_configs:
-            dist_idx = _collect_distance_entries(distance_entries, regex, trial_type)
-            if not dist_idx:
-                if trial_type == "training" and include_training:
-                    print(f"[{fly_name}] No {trial_type} distance trials found.")
+        for key, (dist_path, base_key, slot_label) in sorted(dist_idx.items()):
+            lookup_keys = [key, base_key]
+            angle_path: Optional[Path] = None
+            for candidate in lookup_keys:
+                angle_path = angle_idx_map[trial_type].get(candidate)
+                if angle_path:
+                    break
+            if angle_path is None:
+                angle_path = angle_fallback_map[trial_type].get(dist_path.stem.lower())
+            if angle_path is None:
+                print(
+                    f"[WARN] {fly_name} {trial_type} {key}: no matching angle file — skipped."
+                )
+                pass1_skipped += 1
                 continue
 
-            for key, (dist_path, base_key, slot_label) in sorted(dist_idx.items()):
-                lookup_keys = [key, base_key]
-                angle_path: Optional[Path] = None
-                for candidate in lookup_keys:
-                    angle_path = angle_idx_map[trial_type].get(candidate)
-                    if angle_path:
-                        break
-                if angle_path is None:
-                    angle_path = angle_fallback_map[trial_type].get(dist_path.stem.lower())
-                if angle_path is None:
-                    print(
-                        f"[WARN] {fly_name} {trial_type} {key}: no matching angle file — skipped."
-                    )
-                    pass1_skipped += 1
-                    continue
-
-                fly_number = _extract_fly_number(slot_label, dist_path.stem, fly_dir.name)
-                fly_number_label = str(fly_number) if fly_number is not None else "UNKNOWN"
-                if fly_number is None:
-                    print(
-                        f"[WARN] {fly_name} {dist_path.name}: unable to infer fly number token; defaulting to 'UNKNOWN'"
-                    )
-                else:
-                    print(
-                        f"[DEBUG] {fly_name}: parsed fly number {fly_number_label} from slot={slot_label} stem={dist_path.stem}"
-                    )
-
+            fly_number = _extract_fly_number(slot_label, dist_path.stem, fly_dir.name)
+            fly_number_label = str(fly_number) if fly_number is not None else "UNKNOWN"
+            if fly_number is None:
                 print(
-                    f"[DEBUG] {fly_name} {trial_type}: pairing distance={dist_path.name} with angle={angle_path.name}; slot_label={slot_label}"
-                )
-
-                try:
-                    dist_df = read_table(dist_path)
-
-                    # Read raw pixel distance for combining
-                    raw_dist_col = find_proboscis_distance_column(dist_df)
-                    if raw_dist_col:
-                        d_px = pd.to_numeric(
-                            dist_df[raw_dist_col], errors="coerce"
-                        ).to_numpy(dtype=float)
-                    else:
-                        # Fallback: compute from eye/proboscis coordinate columns
-                        d_px = _d_px_from_coords(dist_df)
-                        if d_px is None:
-                            raise ValueError(
-                                f"missing raw distance column ({PROBOSCIS_DISTANCE_COL} or alias) "
-                                "and no coordinate columns found to compute it"
-                            )
-                        raw_dist_col = "(computed from coords)"
-
-                    # Also read distance_pct for standalone output (NaN-based, no clipping)
-                    pct_col = _pick_column(dist_df, DIST_COLS)
-                    dist_pct = (
-                        pd.to_numeric(dist_df[pct_col], errors="coerce").to_numpy(dtype=float)
-                        if pct_col
-                        else np.full_like(d_px, np.nan)
-                    )
-
-                    # Invalid = NaN raw distance
-                    invalid_frames = ~np.isfinite(d_px)
-
-                    print(
-                        f"[DEBUG] {fly_name}: distance columns={list(dist_df.columns)} "
-                        f"raw={raw_dist_col} pct={pct_col}"
-                    )
-
-                    time_dist = _time_axis(dist_df, cfg.fps_default)
-
-                    angle_df = read_table(angle_path)
-                    angle_col = _pick_column(angle_df, ANGLE_COLS)
-                    if not angle_col:
-                        raise ValueError("missing angle column")
-                    print(
-                        f"[DEBUG] {fly_name}: angle columns={list(angle_df.columns)} selected={angle_col}"
-                    )
-                    time_ang = _time_axis(angle_df, cfg.fps_default)
-                    angle_vals = pd.to_numeric(angle_df[angle_col], errors="coerce").to_numpy(dtype=float)
-
-                    order = np.argsort(time_ang)
-                    time_ang = time_ang[order]
-                    angle_vals = angle_vals[order]
-                    mask = np.isfinite(time_ang) & np.isfinite(angle_vals)
-                    if not np.any(mask):
-                        raise ValueError("angle series has no finite values")
-                    time_ang = time_ang[mask]
-                    angle_vals = angle_vals[mask]
-
-                    interp_angle = np.interp(
-                        time_dist, time_ang, angle_vals, left=angle_vals[0], right=angle_vals[-1]
-                    )
-                    angle_clipped = np.clip(interp_angle, -100.0, 100.0)
-                    clip_mask = (
-                        np.isfinite(interp_angle)
-                        & np.isfinite(angle_clipped)
-                        & ~np.isclose(angle_clipped, interp_angle)
-                    )
-                    if np.any(clip_mask):
-                        clipped_count = int(np.sum(clip_mask))
-                        print(
-                            f"[WARN] {fly_name} {base_key}: clipped {clipped_count} angle_pct samples to [-100, 100]"
-                        )
-                    multiplier = _angle_multiplier(angle_clipped)
-
-                    # Apply multiplier in pixel domain (NaN propagates naturally)
-                    d_px_weighted = d_px * multiplier
-
-                    # Track per-fly-number weighted min and max
-                    finite_dpw = d_px_weighted[np.isfinite(d_px_weighted)]
-                    if finite_dpw.size > 0:
-                        local_min = float(np.min(finite_dpw))
-                        local_max = float(np.max(finite_dpw))
-                        current_min = fly_weighted_min_by_number.get(
-                            fly_number_label, np.inf
-                        )
-                        if local_min < current_min:
-                            fly_weighted_min_by_number[fly_number_label] = local_min
-                        current_max = fly_weighted_max_by_number.get(
-                            fly_number_label, -np.inf
-                        )
-                        if local_max > current_max:
-                            fly_weighted_max_by_number[fly_number_label] = local_max
-
-                    # Generate long-form filename: testing_8_fly1_distances_fly1_angle_distance_rms_envelope.csv
-                    # base_key from regex may be "testing_8" or "testing_8_fly1_distances"
-                    slot_suffix = ""
-                    bk = base_key.lower()
-                    if slot_label:
-                        if f"_{slot_label}_distances" in bk:
-                            slot_suffix = f"_{slot_label}"
-                        else:
-                            slot_suffix = f"_{slot_label}_distances_{slot_label}"
-                    elif fly_number is not None and "distances" not in bk:
-                        slot_suffix = f"_fly{fly_number}_distances_fly{fly_number}"
-                    elif fly_number is not None and bk.endswith("_distances"):
-                        slot_suffix = f"_fly{fly_number}"
-
-                    trial_id = f"{base_key}{slot_suffix}".replace("__", "_")
-
-                    trial_data_cache.append({
-                        "trial_type": trial_type,
-                        "trial_id": trial_id,
-                        "base_key": base_key,
-                        "time_dist": time_dist,
-                        "d_px": d_px,
-                        "dist_pct": dist_pct,
-                        "angle_clipped": angle_clipped,
-                        "multiplier": multiplier,
-                        "d_px_weighted": d_px_weighted,
-                        "invalid_frames": invalid_frames,
-                        "fly_number_label": fly_number_label,
-                    })
-                except Exception as exc:
-                    print(f"[WARN] {fly_name} {trial_type} {base_key} → {exc}")
-                    pass1_skipped += 1
-
-        if not fly_weighted_max_by_number:
-            print(f"[WARN] {fly_name}: no per-fly weighted stats found; cannot normalize — skipping.")
-            continue
-
-        # Compute effective max per fly number
-        fly_effective_max_by_number: dict[str, float] = {}
-        for fn_label in fly_weighted_max_by_number:
-            wgmax = fly_weighted_max_by_number[fn_label]
-            fly_effective_max_by_number[fn_label] = max(wgmax, WEIGHTED_EFFECTIVE_MAX_FLOOR)
-
-        bounds_summary = ", ".join(
-            f"{k}: min={fly_weighted_min_by_number.get(k, 'N/A'):.4f} "
-            f"max={fly_weighted_max_by_number.get(k, 'N/A'):.4f} "
-            f"eff_max={fly_effective_max_by_number.get(k, 'N/A'):.4f}"
-            for k in sorted(fly_weighted_max_by_number)
-        )
-        print(f"[DEBUG] {fly_name}: weighted bounds {{ {bounds_summary} }}")
-
-        # Write per-fly normalization metadata sidecar
-        norm_meta = {
-            "fly_name": fly_name,
-            "fly_weighted_min_by_number": fly_weighted_min_by_number,
-            "fly_weighted_max_by_number": fly_weighted_max_by_number,
-            "fly_effective_max_by_number": fly_effective_max_by_number,
-            "weighted_effective_max_floor": WEIGHTED_EFFECTIVE_MAX_FLOOR,
-        }
-        norm_meta_path = out_csv_dir / "fly_norm_metadata.json"
-        with norm_meta_path.open("w") as _f:
-            json.dump(norm_meta, _f, indent=2)
-
-        # ── PASS 2: normalize by per-fly weighted bounds, compute RMS/envelope, write outputs ──
-        totals: dict[str, tuple[int, int]] = {}
-        for data in trial_data_cache:
-            trial_type = data["trial_type"]
-            trial_id = data["trial_id"]
-
-            # Normalize using per-fly-number weighted gmin/gmax
-            fly_number_label = str(data.get("fly_number_label", "UNKNOWN"))
-            weighted_gmin = fly_weighted_min_by_number.get(fly_number_label, np.nan)
-            weighted_gmax = fly_weighted_max_by_number.get(fly_number_label, np.nan)
-
-            if not (np.isfinite(weighted_gmin) and np.isfinite(weighted_gmax)):
-                print(
-                    f"[WARN] {fly_name} {trial_id}: non-finite per-fly weighted bounds for "
-                    f"fly_number={fly_number_label}; skipping normalization."
-                )
-                continue
-
-            effective_max_weighted = fly_effective_max_by_number.get(
-                fly_number_label, max(weighted_gmax, WEIGHTED_EFFECTIVE_MAX_FLOOR)
-            )
-            d_px_weighted = data["d_px_weighted"]
-
-            if effective_max_weighted != weighted_gmin:
-                combined_pct = 100.0 * (d_px_weighted - weighted_gmin) / (
-                    effective_max_weighted - weighted_gmin
+                    f"[WARN] {fly_name} {dist_path.name}: unable to infer fly number token; defaulting to 'UNKNOWN'"
                 )
             else:
-                combined_pct = np.where(np.isfinite(d_px_weighted), 0.0, np.nan)
+                print(
+                    f"[DEBUG] {fly_name}: parsed fly number {fly_number_label} from slot={slot_label} stem={dist_path.stem}"
+                )
 
-            combined_rms = _rolling_rms(combined_pct, cfg.window_frames)
-            envelope = _hilbert_envelope(combined_rms, cfg.window_frames)
-
-            out_df = pd.DataFrame(
-                {
-                    "time_s": data["time_dist"],
-                    "angle_centered_pct_interp": data["angle_clipped"],
-                    "distance_percentage": data["dist_pct"],
-                    "d_px": data["d_px"],
-                    "multiplier": data["multiplier"],
-                    "d_px_weighted": data["d_px_weighted"],
-                    "weighted_gmin": weighted_gmin,
-                    "weighted_gmax": weighted_gmax,
-                    "effective_max_weighted": effective_max_weighted,
-                    "combined_pct": combined_pct,
-                    "rolling_rms": combined_rms,
-                    "envelope_of_rms": envelope,
-                    "invalid_distance_flag": data["invalid_frames"],
-                    "fly_number": data["fly_number_label"],
-                }
-            )
-            out_csv = out_csv_dir / f"{trial_id}_angle_distance_rms_envelope.csv"
-            out_df.to_csv(out_csv, index=False)
             print(
-                f"[DEBUG] {fly_name}: wrote {out_csv.name} rows={len(out_df)} fly_number={data['fly_number_label']}"
+                f"[DEBUG] {fly_name} {trial_type}: pairing distance={dist_path.name} with angle={angle_path.name}; slot_label={slot_label}"
             )
 
-            out_png: Optional[Path] = None
-            if cfg.save_trial_plots and out_fig_dir is not None:
-                plt.figure(figsize=(12, 4))
-                plt.plot(data["time_dist"], envelope, linewidth=1.5)
-                plt.axvline(odor_on_effective, color="black", linewidth=1.2, linestyle="--")
-                plt.axvline(odor_off_effective, color="black", linewidth=1.2, linestyle="--")
-                plt.title(
-                    f"{fly_name} — {trial_id}: Envelope(RMS(distance × angle-mult))"
-                )
-                plt.xlabel("Time (s)")
-                plt.ylabel("Combined Metric (%)")
-                plt.margins(x=0)
-                plt.grid(True, alpha=0.3)
-                out_png = out_fig_dir / f"{fly_name}_{trial_id}_env_rms_angle_distance.png"
-                plt.savefig(out_png, dpi=300, bbox_inches="tight")
-                plt.close()
+            try:
+                dist_df = _read_full_table(dist_path)
 
-            if out_png is not None:
+                # Read raw pixel distance for combining
+                raw_dist_col = find_proboscis_distance_column(dist_df)
+                if raw_dist_col:
+                    d_px = pd.to_numeric(
+                        dist_df[raw_dist_col], errors="coerce"
+                    ).to_numpy(dtype=float)
+                else:
+                    # Fallback: compute from eye/proboscis coordinate columns
+                    d_px = _d_px_from_coords(dist_df)
+                    if d_px is None:
+                        raise ValueError(
+                            f"missing raw distance column ({PROBOSCIS_DISTANCE_COL} or alias) "
+                            "and no coordinate columns found to compute it"
+                        )
+                    raw_dist_col = "(computed from coords)"
+
+                # Also read distance_pct for standalone output (NaN-based, no clipping)
+                pct_col = _pick_column(dist_df, DIST_COLS)
+                dist_pct = (
+                    pd.to_numeric(dist_df[pct_col], errors="coerce").to_numpy(dtype=float)
+                    if pct_col
+                    else np.full_like(d_px, np.nan)
+                )
+
+                # Invalid = NaN raw distance
+                invalid_frames = ~np.isfinite(d_px)
+
                 print(
-                    f"[OK] {fly_name} {trial_id} → CSV: {out_csv.name} | FIG: {out_png.name}"
+                    f"[DEBUG] {fly_name}: distance columns={list(dist_df.columns)} "
+                    f"raw={raw_dist_col} pct={pct_col}"
                 )
-            else:
-                print(f"[OK] {fly_name} {trial_id} → CSV: {out_csv.name}")
-            done, missed = totals.get(trial_type, (0, 0))
-            totals[trial_type] = (done + 1, missed)
 
-        # Account for skipped trials
-        for trial_type, _ in trial_configs:
-            if trial_type not in totals:
-                totals[trial_type] = (0, 0)
+                time_dist = _time_axis(dist_df, cfg.fps_default)
 
-        if include_training and totals:
-            for trial_type, (completed, skipped) in totals.items():
-                print(f"[{fly_name}] {trial_type} completed: {completed}, skipped: {skipped}")
-            total_completed = sum(done for done, _ in totals.values())
-            total_skipped = pass1_skipped
-            print(f"[{fly_name}] combined completed: {total_completed}, skipped: {total_skipped}")
+                angle_df = _read_full_table(angle_path)
+                angle_col = _pick_column(angle_df, ANGLE_COLS)
+                if not angle_col:
+                    raise ValueError("missing angle column")
+                print(
+                    f"[DEBUG] {fly_name}: angle columns={list(angle_df.columns)} selected={angle_col}"
+                )
+                time_ang = _time_axis(angle_df, cfg.fps_default)
+                angle_vals = pd.to_numeric(angle_df[angle_col], errors="coerce").to_numpy(dtype=float)
+
+                order = np.argsort(time_ang)
+                time_ang = time_ang[order]
+                angle_vals = angle_vals[order]
+                mask = np.isfinite(time_ang) & np.isfinite(angle_vals)
+                if not np.any(mask):
+                    raise ValueError("angle series has no finite values")
+                time_ang = time_ang[mask]
+                angle_vals = angle_vals[mask]
+
+                interp_angle = np.interp(
+                    time_dist, time_ang, angle_vals, left=angle_vals[0], right=angle_vals[-1]
+                )
+                angle_clipped = np.clip(interp_angle, -100.0, 100.0)
+                clip_mask = (
+                    np.isfinite(interp_angle)
+                    & np.isfinite(angle_clipped)
+                    & ~np.isclose(angle_clipped, interp_angle)
+                )
+                if np.any(clip_mask):
+                    clipped_count = int(np.sum(clip_mask))
+                    print(
+                        f"[WARN] {fly_name} {base_key}: clipped {clipped_count} angle_pct samples to [-100, 100]"
+                    )
+                multiplier = _angle_multiplier(angle_clipped)
+
+                # Apply multiplier in pixel domain (NaN propagates naturally)
+                d_px_weighted = d_px * multiplier
+
+                # Track per-fly-number weighted min and max
+                finite_dpw = d_px_weighted[np.isfinite(d_px_weighted)]
+                if finite_dpw.size > 0:
+                    local_min = float(np.min(finite_dpw))
+                    local_max = float(np.max(finite_dpw))
+                    current_min = fly_weighted_min_by_number.get(
+                        fly_number_label, np.inf
+                    )
+                    if local_min < current_min:
+                        fly_weighted_min_by_number[fly_number_label] = local_min
+                    current_max = fly_weighted_max_by_number.get(
+                        fly_number_label, -np.inf
+                    )
+                    if local_max > current_max:
+                        fly_weighted_max_by_number[fly_number_label] = local_max
+
+                # Generate long-form filename: testing_8_fly1_distances_fly1_angle_distance_rms_envelope.csv
+                # base_key from regex may be "testing_8" or "testing_8_fly1_distances"
+                slot_suffix = ""
+                bk = base_key.lower()
+                if slot_label:
+                    if f"_{slot_label}_distances" in bk:
+                        slot_suffix = f"_{slot_label}"
+                    else:
+                        slot_suffix = f"_{slot_label}_distances_{slot_label}"
+                elif fly_number is not None and "distances" not in bk:
+                    slot_suffix = f"_fly{fly_number}_distances_fly{fly_number}"
+                elif fly_number is not None and bk.endswith("_distances"):
+                    slot_suffix = f"_fly{fly_number}"
+
+                trial_id = f"{base_key}{slot_suffix}".replace("__", "_")
+
+                trial_data_cache.append({
+                    "trial_type": trial_type,
+                    "trial_id": trial_id,
+                    "base_key": base_key,
+                    "time_dist": time_dist,
+                    "d_px": d_px,
+                    "dist_pct": dist_pct,
+                    "angle_clipped": angle_clipped,
+                    "multiplier": multiplier,
+                    "d_px_weighted": d_px_weighted,
+                    "invalid_frames": invalid_frames,
+                    "fly_number_label": fly_number_label,
+                })
+            except Exception as exc:
+                print(f"[WARN] {fly_name} {trial_type} {base_key} → {exc}")
+                pass1_skipped += 1
+
+    if not fly_weighted_max_by_number:
+        print(f"[WARN] {fly_name}: no per-fly weighted stats found; cannot normalize — skipping.")
+        return
+
+    # Compute effective max per fly number
+    fly_effective_max_by_number: dict[str, float] = {}
+    for fn_label in fly_weighted_max_by_number:
+        wgmax = fly_weighted_max_by_number[fn_label]
+        fly_effective_max_by_number[fn_label] = max(wgmax, WEIGHTED_EFFECTIVE_MAX_FLOOR)
+
+    bounds_summary = ", ".join(
+        f"{k}: min={fly_weighted_min_by_number.get(k, 'N/A'):.4f} "
+        f"max={fly_weighted_max_by_number.get(k, 'N/A'):.4f} "
+        f"eff_max={fly_effective_max_by_number.get(k, 'N/A'):.4f}"
+        for k in sorted(fly_weighted_max_by_number)
+    )
+    print(f"[DEBUG] {fly_name}: weighted bounds {{ {bounds_summary} }}")
+
+    # Write per-fly normalization metadata sidecar
+    norm_meta = {
+        "fly_name": fly_name,
+        "fly_weighted_min_by_number": fly_weighted_min_by_number,
+        "fly_weighted_max_by_number": fly_weighted_max_by_number,
+        "fly_effective_max_by_number": fly_effective_max_by_number,
+        "weighted_effective_max_floor": WEIGHTED_EFFECTIVE_MAX_FLOOR,
+    }
+    norm_meta_path = out_csv_dir / "fly_norm_metadata.json"
+    with norm_meta_path.open("w") as _f:
+        json.dump(norm_meta, _f, indent=2)
+
+    # ── PASS 2: normalize by per-fly weighted bounds, compute RMS/envelope, write outputs ──
+    totals: dict[str, tuple[int, int]] = {}
+    for data in trial_data_cache:
+        trial_type = data["trial_type"]
+        trial_id = data["trial_id"]
+
+        # Normalize using per-fly-number weighted gmin/gmax
+        fly_number_label = str(data.get("fly_number_label", "UNKNOWN"))
+        weighted_gmin = fly_weighted_min_by_number.get(fly_number_label, np.nan)
+        weighted_gmax = fly_weighted_max_by_number.get(fly_number_label, np.nan)
+
+        if not (np.isfinite(weighted_gmin) and np.isfinite(weighted_gmax)):
+            print(
+                f"[WARN] {fly_name} {trial_id}: non-finite per-fly weighted bounds for "
+                f"fly_number={fly_number_label}; skipping normalization."
+            )
+            continue
+
+        effective_max_weighted = fly_effective_max_by_number.get(
+            fly_number_label, max(weighted_gmax, WEIGHTED_EFFECTIVE_MAX_FLOOR)
+        )
+        d_px_weighted = data["d_px_weighted"]
+
+        if effective_max_weighted != weighted_gmin:
+            combined_pct = 100.0 * (d_px_weighted - weighted_gmin) / (
+                effective_max_weighted - weighted_gmin
+            )
         else:
-            completed, skipped = totals.get("testing", (0, 0))
-            print(f"[{fly_name}] completed: {completed}, skipped: {skipped + pass1_skipped}")
+            combined_pct = np.where(np.isfinite(d_px_weighted), 0.0, np.nan)
+
+        combined_rms = _rolling_rms(combined_pct, cfg.window_frames)
+        envelope = _hilbert_envelope(combined_rms, cfg.window_frames)
+
+        out_df = pd.DataFrame(
+            {
+                "time_s": data["time_dist"],
+                "angle_centered_pct_interp": data["angle_clipped"],
+                "distance_percentage": data["dist_pct"],
+                "d_px": data["d_px"],
+                "multiplier": data["multiplier"],
+                "d_px_weighted": data["d_px_weighted"],
+                "weighted_gmin": weighted_gmin,
+                "weighted_gmax": weighted_gmax,
+                "effective_max_weighted": effective_max_weighted,
+                "combined_pct": combined_pct,
+                "rolling_rms": combined_rms,
+                "envelope_of_rms": envelope,
+                "invalid_distance_flag": data["invalid_frames"],
+                "fly_number": data["fly_number_label"],
+            }
+        )
+        out_csv = out_csv_dir / f"{trial_id}_angle_distance_rms_envelope.csv"
+        out_df.to_csv(out_csv, index=False)
+        _forget_table(out_csv)  # every table write invalidates (see _TableReadMemo)
+        print(
+            f"[DEBUG] {fly_name}: wrote {out_csv.name} rows={len(out_df)} fly_number={data['fly_number_label']}"
+        )
+
+        out_png: Optional[Path] = None
+        if cfg.save_trial_plots and out_fig_dir is not None:
+            plt.figure(figsize=(12, 4))
+            plt.plot(data["time_dist"], envelope, linewidth=1.5)
+            plt.axvline(odor_on_effective, color="black", linewidth=1.2, linestyle="--")
+            plt.axvline(odor_off_effective, color="black", linewidth=1.2, linestyle="--")
+            plt.title(
+                f"{fly_name} — {trial_id}: Envelope(RMS(distance × angle-mult))"
+            )
+            plt.xlabel("Time (s)")
+            plt.ylabel("Combined Metric (%)")
+            plt.margins(x=0)
+            plt.grid(True, alpha=0.3)
+            out_png = out_fig_dir / f"{fly_name}_{trial_id}_env_rms_angle_distance.png"
+            plt.savefig(out_png, dpi=300, bbox_inches="tight")
+            plt.close()
+
+        if out_png is not None:
+            print(
+                f"[OK] {fly_name} {trial_id} → CSV: {out_csv.name} | FIG: {out_png.name}"
+            )
+        else:
+            print(f"[OK] {fly_name} {trial_id} → CSV: {out_csv.name}")
+        done, missed = totals.get(trial_type, (0, 0))
+        totals[trial_type] = (done + 1, missed)
+
+    # Account for skipped trials
+    for trial_type, _ in trial_configs:
+        if trial_type not in totals:
+            totals[trial_type] = (0, 0)
+
+    if include_training and totals:
+        for trial_type, (completed, skipped) in totals.items():
+            print(f"[{fly_name}] {trial_type} completed: {completed}, skipped: {skipped}")
+        total_completed = sum(done for done, _ in totals.values())
+        total_skipped = pass1_skipped
+        print(f"[{fly_name}] combined completed: {total_completed}, skipped: {total_skipped}")
+    else:
+        completed, skipped = totals.get("testing", (0, 0))
+        print(f"[{fly_name}] completed: {completed}, skipped: {skipped + pass1_skipped}")
+
+
+# ---------------------------------------------------------------------------
+# combined.combine over worker processes (run_workflows, parallel.enabled)
+# ---------------------------------------------------------------------------
+# Batches are independent -- each reads and writes only inside its own
+# directory -- so every (dataset, batch) pair of a run can go to its own worker.
+# The catch is module state. run_workflows configures the analysis modules once,
+# in its own process, and a fresh worker starts from their import-time
+# defaults: protocol "legacy", no settings. A plain parallel_map therefore wrote
+# different files on the 2026-10-05 audit (envelope names without the odor
+# token). Every module global the driver sets is listed here, snapshotted in the
+# parent and installed in each worker before it runs anything.
+# tests/test_combine_parallel.py fails when run_workflows calls a setter whose
+# state this list does not carry.
+_DRIVER_STATE: tuple[tuple[str, str], ...] = (
+    ("scripts.analysis.envelope_visuals", "_ACTIVE_PROTOCOL"),  # set_protocol
+    ("scripts.analysis.envelope_visuals", "_DATASET_LIGHT_WINDOWS"),  # set_dataset_light_windows
+    ("scripts.analysis.envelope_visuals", "_DATASET_ODOR_REMAP"),  # set_dataset_odor_remap
+    ("scripts.analysis.envelope_visuals", "_LIGHT_CHECKS"),  # set_light_check_fractions
+    ("scripts.analysis.envelope_visuals", "_MODEL_SCORES"),  # set_model_scores
+    ("scripts.analysis.envelope_combined", "_RUNTIME_SETTINGS"),  # set_runtime_settings
+    ("scripts.analysis.envelope_exports", "_RUNTIME_SETTINGS"),  # set_runtime_settings
+)
+
+
+def _capture_driver_state() -> dict[str, object]:
+    """Snapshot the driver-set module globals (``_DRIVER_STATE``) of this process."""
+
+    values: dict[tuple[str, str], object] = {}
+    for module_name, attr in _DRIVER_STATE:
+        module = sys.modules.get(module_name)
+        if module is not None and hasattr(module, attr):
+            values[(module_name, attr)] = getattr(module, attr)
+    figure_export = sys.modules.get("fbpipe.figure_export")
+    return {
+        "globals": values,
+        # run_workflows --svg patches Figure.savefig (save_trial_plots PNGs)
+        "svg_sidecar": bool(getattr(figure_export, "_INSTALLED", False)),
+        # Styling the parent's imports applied (fbpipe.steps.compose_videos_rms
+        # restyles at import), which save_trial_plots renders with. The backend
+        # is left to each process; PNG output does not depend on it.
+        "rcparams": {
+            k: v
+            for k, v in plt.rcParams.items()
+            if k not in ("backend", "backend_fallback")
+        },
+    }
+
+
+def _combine_worker_init(state: Mapping[str, object]) -> None:
+    """Install a ``_capture_driver_state`` snapshot in this process."""
+
+    import importlib
+
+    for (module_name, attr), value in dict(state.get("globals") or {}).items():
+        module = importlib.import_module(module_name)
+        current = getattr(module, attr, None)
+        if isinstance(current, dict) and isinstance(value, dict):
+            # the setters fill these registries in place; keep their identity
+            current.clear()
+            current.update(value)
+        else:
+            setattr(module, attr, value)
+    if state.get("svg_sidecar"):
+        from fbpipe.figure_export import install_svg_sidecar
+
+        install_svg_sidecar()
+    if state.get("rcparams"):
+        # last: the imports above may restyle on import, as they did in the parent
+        plt.rcParams.update(state["rcparams"])
+
+
+@contextlib.contextmanager
+def _combine_executor(n_workers: int, state: Mapping[str, object]):
+    """A process pool whose workers start with the driver's state installed.
+
+    loky (joblib's backend, already used by fbpipe.utils.parallel) starts clean
+    interpreters that do not re-import the driver's ``__main__`` -- which for
+    run_workflows means torch and ultralytics -- and runs ``initializer`` in
+    each. On a batch error the batches already handed to a worker finish (no
+    half-written files) and the caller cancels the rest; on anything else
+    (Ctrl-C) the workers are killed.
+    """
+
+    from joblib.externals.loky import ProcessPoolExecutor
+
+    pool = ProcessPoolExecutor(
+        max_workers=n_workers, initializer=_combine_worker_init, initargs=(state,)
+    )
+    try:
+        yield pool
+    except Exception:
+        pool.shutdown(wait=True)
+        raise
+    except BaseException:
+        pool.shutdown(wait=False, kill_workers=True)
+        raise
+    pool.shutdown(wait=True)
+
+
+class _WorkerTraceback(Exception):
+    """Where a replayed combine error was raised inside its worker."""
+
+
+def _combine_batch_task(cfg: CombineConfig, fly_dir: Path) -> tuple[str, str, object]:
+    """Worker side of run_combine_plan: combine one batch, capturing its log.
+
+    Returns ``(stdout, stderr, error)``; ``error`` is ``None`` or a picklable
+    ``(exception, traceback_text)`` pair for the parent to raise in plan order.
+    """
+
+    out, err = io.StringIO(), io.StringIO()
+    error: object = None
+    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+        try:
+            with _batch_read_memo():
+                _combine_fly_dir(cfg, fly_dir)
+        except Exception as exc:
+            tb = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
+            try:
+                # Round-trips our own exception object (nothing external) to
+                # see whether it can travel back to the parent as it is.
+                pickle.loads(pickle.dumps(exc))
+            except Exception:
+                exc = RuntimeError(f"{type(exc).__name__}: {exc}")
+            error = (exc, tb)
+    return out.getvalue(), err.getvalue(), error
+
+
+def _replay_batch_log(out: str, err: str) -> None:
+    if out:
+        sys.stdout.write(out)
+    if err:
+        sys.stdout.flush()
+        sys.stderr.write(err)
+
+
+def _dirs_overlap(a: Path, b: Path) -> bool:
+    """Whether two resolved dirs are the same or one contains the other."""
+
+    sa, sb = os.path.join(a, ""), os.path.join(b, "")  # trailing separator
+    return sa.startswith(sb) or sb.startswith(sa)
+
+
+def combine_parallel_jobs(settings: object) -> int:
+    """Worker count for combined.combine: ``parallel.n_jobs`` (0 = auto, see
+    ``resolve_n_jobs``) when ``parallel.enabled`` is set, else 1 -- the serial
+    loop, unchanged."""
+
+    parallel = getattr(settings, "parallel", None)
+    if parallel is None or not getattr(parallel, "enabled", False):
+        return 1
+    from fbpipe.utils.parallel import resolve_n_jobs
+
+    return resolve_n_jobs(int(getattr(parallel, "n_jobs", 0) or 0))
+
+
+def run_combine_plan(plan: Sequence[str | CombineConfig], *, n_jobs: int) -> None:
+    """Run combined.combine for a whole plan, its batches over ``n_jobs`` workers.
+
+    ``plan`` is what run_workflows' serial loop does, in order: a ``str`` is a
+    line it prints, a ``CombineConfig`` a ``combine_distance_angle`` call.
+    Every (root, batch) pair is submitted up front, then the plan is replayed
+    in order -- banner and frozen-folder lines from here, each batch's captured
+    log from its worker -- so the log reads as the serial run's and the first
+    error is raised at the same point, after the same output. A batch dir that
+    appears twice, or inside an earlier batch dir, starts only once every batch
+    before it has finished.
+    """
+
+    steps = list(plan)
+    listings: dict[int, list[tuple[Path, bool]]] = {}
+    unlistable: tuple[int, Exception] | None = None
+    for index, step in enumerate(steps):
+        if isinstance(step, str):
+            continue
+        try:
+            listings[index] = _combine_batch_dirs(step)
+        except Exception as exc:
+            # Raised at its turn below; nothing after it runs, as serially.
+            unlistable = (index, exc)
+            break
+    work = [
+        (step, fly_dir)
+        for index, step in enumerate(steps)
+        for fly_dir, frozen in listings.get(index, ())
+        if not frozen
+    ]
+    workers = max(1, min(int(n_jobs), len(work)))
+    if workers < 2:
+        for step in steps:
+            if isinstance(step, str):
+                print(step)
+            else:
+                combine_distance_angle(step)
+        return
+
+    with _combine_executor(workers, _capture_driver_state()) as pool:
+        futures: dict[int, object] = {}
+        earlier: list[Path] = []
+        for slot, (cfg, fly_dir) in enumerate(work):
+            real = fly_dir.resolve()
+            # The same dir again, or one nested in an earlier batch (a parent
+            # dir listed in roots next to its datasets), shares files with it:
+            # submitted only when the replay gets there, i.e. once every batch
+            # before it has finished, as serially.
+            if not any(_dirs_overlap(real, prev) for prev in earlier):
+                futures[slot] = pool.submit(_combine_batch_task, cfg, fly_dir)
+            earlier.append(real)
+        try:
+            slot = 0
+            for index, step in enumerate(steps):
+                if isinstance(step, str):
+                    print(step)
+                    continue
+                _print_combine_banner(step)
+                if unlistable is not None and unlistable[0] == index:
+                    raise unlistable[1]
+                for fly_dir, frozen in listings[index]:
+                    if frozen:
+                        print(f"[FROZEN] combine → skipping recompute for {fly_dir.name}")
+                        continue
+                    future = futures.pop(slot, None)
+                    if future is None:
+                        future = pool.submit(_combine_batch_task, step, fly_dir)
+                    out, err, error = future.result()
+                    slot += 1
+                    _replay_batch_log(out, err)
+                    if error is not None:
+                        exc, tb = error
+                        raise exc from _WorkerTraceback(tb)
+        except BaseException:
+            for future in futures.values():
+                future.cancel()
+            raise
 
 
 # ---------------------------------------------------------------------------
