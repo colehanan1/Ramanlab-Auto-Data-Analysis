@@ -634,3 +634,145 @@ def test_truncated_results_raises(monkeypatch):
 
     with pytest.raises(AssertionError):
         _run_edge(monkeypatch, n_frames=4, batch_size=4, predict_fn=short_predict)
+
+
+# ===========================================================================
+# Optical flow OFF: no per-frame grayscale conversion.
+#
+# The grayscale frame is read only by ``_flow_nudge``, which runs only when
+# ``use_optical_flow`` is on; otherwise it was computed every frame and then
+# just handed back as the next frame's prev_gray. config_new.yaml runs with
+# flow off, so the conversion is gated on the SETTING (the dataclass/loader
+# default is still True, and USE_OPTICAL_FLOW can override it). The flow-on
+# parity test above keeps the nudge path pinned.
+# ===========================================================================
+
+import dataclasses
+
+import cv2
+
+
+def _make_settings_flow_off() -> Settings:
+    # The parity fixture's settings with only the flow switch flipped.
+    return dataclasses.replace(_make_settings(), use_optical_flow=False)
+
+
+def _spy_cvtcolor(monkeypatch):
+    calls = []
+    real = cv2.cvtColor
+
+    def spy(*args, **kwargs):
+        calls.append(args[1] if len(args) > 1 else kwargs.get("code"))
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(yolo_infer.cv2, "cvtColor", spy)
+    return calls
+
+
+def _sequential_rows_and_frames(cfg: Settings, active_max_flies: int, thread_gray: bool):
+    """Loop _process_frame in order. ``thread_gray`` feeds a real grayscale of
+    the previous frame as prev_gray, which is what the old code passed along
+    whatever the flow setting."""
+    track_module.Track._next_id = 1
+    single_trackers, eye_mgr, cls8_tracker, pairer = _make_collaborators(cfg, active_max_flies)
+    rows, frames, prev_gray = [], [], None
+    for i in range(N_FRAMES):
+        frame, row, _ = _process_frame(
+            _make_frame(i), i, i / 30.0, single_trackers, prev_gray, (AX, AY),
+            cfg, CANNED[i], eye_mgr, cls8_tracker, pairer, active_max_flies,
+        )
+        if thread_gray:
+            prev_gray = cv2.cvtColor(_make_frame(i), cv2.COLOR_BGR2GRAY)
+        rows.append(row)
+        frames.append(frame.copy())
+    return rows, frames
+
+
+def test_flow_off_skips_grayscale_conversion(monkeypatch):
+    """Flow off: cvtColor is never called and _process_frame hands back no gray."""
+    _install_collect_detections(monkeypatch)
+    calls = _spy_cvtcolor(monkeypatch)
+    cfg = _make_settings_flow_off()
+
+    track_module.Track._next_id = 1
+    single_trackers, eye_mgr, cls8_tracker, pairer = _make_collaborators(cfg, 2)
+    _, _, gray = _process_frame(
+        _make_frame(0), 0, 0.0, single_trackers, None, (AX, AY),
+        cfg, CANNED[0], eye_mgr, cls8_tracker, pairer, 2,
+    )
+    assert gray is None
+
+    track_module.Track._next_id = 1
+    single_trackers, eye_mgr, cls8_tracker, pairer = _make_collaborators(cfg, 2)
+    rows = _run_chunked_inference(
+        _FakeVideoCapture(N_FRAMES), N_FRAMES - 1, (W, H), _CollectingWriter(), {}, 30.0,
+        (AX, AY), cfg, _batched_predict_stub, single_trackers, None,
+        eye_mgr, cls8_tracker, pairer, 2, 3,
+    )
+    assert len(rows) == N_FRAMES
+    assert calls == [], f"cvtColor ran {len(calls)} times with optical flow off"
+
+
+def test_flow_on_still_converts_every_frame(monkeypatch):
+    """Flow on: one BGR->gray conversion per frame, threaded as prev_gray."""
+    _install_collect_detections(monkeypatch)
+    calls = _spy_cvtcolor(monkeypatch)
+    cfg = _make_settings()  # use_optical_flow=True
+    track_module.Track._next_id = 1
+    single_trackers, eye_mgr, cls8_tracker, pairer = _make_collaborators(cfg, 2)
+    frame0 = _make_frame(0)
+    expected_gray = cv2.cvtColor(frame0, cv2.COLOR_BGR2GRAY)
+    calls.clear()
+    _, _, gray = _process_frame(
+        frame0, 0, 0.0, single_trackers, None, (AX, AY),
+        cfg, CANNED[0], eye_mgr, cls8_tracker, pairer, 2,
+    )
+    assert calls == [cv2.COLOR_BGR2GRAY]
+    assert np.array_equal(gray, expected_gray)
+
+    calls.clear()
+    track_module.Track._next_id = 1
+    single_trackers, eye_mgr, cls8_tracker, pairer = _make_collaborators(cfg, 2)
+    rows = _run_chunked_inference(
+        _FakeVideoCapture(N_FRAMES), N_FRAMES - 1, (W, H), _CollectingWriter(), {}, 30.0,
+        (AX, AY), cfg, _batched_predict_stub, single_trackers, None,
+        eye_mgr, cls8_tracker, pairer, 2, 3,
+    )
+    assert len(rows) == N_FRAMES
+    assert calls == [cv2.COLOR_BGR2GRAY] * N_FRAMES
+
+
+@pytest.mark.parametrize("batch_size", [1, 3, 8])
+def test_flow_off_rows_and_frames_match_gray_threading_reference(monkeypatch, batch_size):
+    """Flow off: rows AND annotated frames are bit-identical to a reference that
+    threads a real grayscale prev_gray (the pre-change behaviour), at every
+    batch size, so skipping the conversion cannot change any output."""
+    _install_collect_detections(monkeypatch)
+    cfg = _make_settings_flow_off()
+    ref_rows, ref_frames = _sequential_rows_and_frames(cfg, 2, thread_gray=True)
+
+    track_module.Track._next_id = 1
+    single_trackers, eye_mgr, cls8_tracker, pairer = _make_collaborators(cfg, 2)
+    writer = _CollectingWriter()
+    rows = _run_chunked_inference(
+        _FakeVideoCapture(N_FRAMES), N_FRAMES - 1, (W, H), writer, {}, 30.0,
+        (AX, AY), cfg, _batched_predict_stub, single_trackers, None,
+        eye_mgr, cls8_tracker, pairer, 2, batch_size,
+    )
+    assert len(rows) == len(ref_rows) == N_FRAMES
+    for i, (ref, got) in enumerate(zip(ref_rows, rows)):
+        assert _rows_equal(ref, got), f"row {i} diverged\n  ref={ref}\n  got={got}"
+    assert len(writer.frames) == N_FRAMES
+    for i, (ref, got) in enumerate(zip(ref_frames, writer.frames)):
+        assert np.array_equal(ref, got), f"annotated frame {i} diverged"
+
+
+def test_gray_threading_reference_is_sensitive_to_prev_gray(monkeypatch):
+    """Guard against a vacuous comparison above: with flow ON the same fixture
+    does depend on prev_gray (the coasting proboscis at MISSING_PROB_FRAME is
+    nudged), so a flow-off path that still read it would have been caught."""
+    _install_collect_detections(monkeypatch)
+    cfg = _make_settings()  # use_optical_flow=True
+    with_gray, _ = _sequential_rows_and_frames(cfg, 2, thread_gray=True)
+    without_gray, _ = _sequential_rows_and_frames(cfg, 2, thread_gray=False)
+    assert not _rows_equal(with_gray[MISSING_PROB_FRAME], without_gray[MISSING_PROB_FRAME])

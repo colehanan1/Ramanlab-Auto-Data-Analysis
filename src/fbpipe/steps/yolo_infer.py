@@ -194,7 +194,9 @@ def _process_frame(
 
     dets = collect_detections(result, ALL_TRACKED_CLASSES)
 
-    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    # Only the optical-flow nudge reads the grayscale frame (this frame's and,
+    # as prev_gray, the next one's), so skip the conversion when flow is off.
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY) if settings.use_optical_flow else None
 
     single_outputs: Dict[int, Dict[str, float]] = {}
     for cls_id in SINGLE_TRACK_CLASSES:
