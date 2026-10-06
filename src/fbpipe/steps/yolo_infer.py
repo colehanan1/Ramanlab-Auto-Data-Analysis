@@ -465,13 +465,20 @@ def _is_cuda_failure(exc: Exception) -> bool:
     return any(tok in msg for tok in ("cuda", "cudnn", "cublas", "expandable_segments", "device-side assert", "hip"))
 
 
-def _make_batched_predict_fn(model, get_device, set_device, allow_cpu, *, cuda_empty_cache=None):
+def _make_batched_predict_fn(model, get_device, set_device, allow_cpu, *, cuda_empty_cache=None,
+                             is_engine=False):
     """Build a batched YOLO predict fn with CUDA OOM sub-batch backoff and optional CPU fallback.
 
     get_device() -> current device string ('cuda'/'cpu'); set_device(target) switches it.
     On a CUDA failure: free VRAM, halve the sub-batch and retry the SAME frames; at batch=1,
     fall back to CPU if allow_cpu, else re-raise. Returns one Results per input image.
+
+    TensorRT engines get no ``half`` flag: ultralytics >= 8.4 rebuilds the predictor
+    (re-deserializing the engine and a fresh ~3.7 GB execution context) on every call
+    that carries it, and an exported engine is already FP16.
     """
+    precision = {} if is_engine else {"half": True}
+
     def batched_predict_fn(images, conf_thres):
         bs = len(images)
         while True:
@@ -479,7 +486,7 @@ def _make_batched_predict_fn(model, get_device, set_device, allow_cpu, *, cuda_e
                 out = []
                 for i in range(0, len(images), bs):
                     out.extend(model.predict(images[i:i+bs], conf=conf_thres,
-                                             verbose=False, device=get_device(), half=True))
+                                             verbose=False, device=get_device(), **precision))
                 return out
             except RuntimeError as exc:
                 if get_device() == "cuda" and _is_cuda_failure(exc):
@@ -562,6 +569,7 @@ def main(cfg: Settings):
         get_device=lambda: device_in_use,
         set_device=_set_device,
         allow_cpu=cfg.allow_cpu,
+        is_engine=is_engine,
     )
 
     def predict_fn(image, conf_thres):   # single-frame adapter for the warm-up scan

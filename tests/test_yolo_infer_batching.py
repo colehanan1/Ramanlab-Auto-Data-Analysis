@@ -110,6 +110,53 @@ def test_oom_reraises_at_batch1_without_cpu():
         fn([object()], conf_thres=0.5)
 
 
+# ---------------------------------------------------------------------------
+# Test 4: TensorRT engines never get the deprecated ``half`` flag
+# ---------------------------------------------------------------------------
+
+def _recording_model(calls):
+    class FakeModel:
+        def predict(self, images, **kw):
+            calls.append(kw)
+            return _make_results(len(images))
+    return FakeModel()
+
+
+def test_engine_predict_omits_half():
+    """ultralytics >= 8.4 maps ``half`` onto ``quantize`` inside the predictor but
+    compares the call's raw ``quantize`` (None) against it, so every call carrying
+    ``half`` rebuilds the predictor -- for an engine that is a full re-deserialize
+    plus a ~3.7 GB execution context per batch. An exported engine is already FP16."""
+    calls = []
+    fn = _make_batched_predict_fn(
+        _recording_model(calls),
+        get_device=lambda: "cuda",
+        set_device=lambda t: None,
+        allow_cpu=False,
+        cuda_empty_cache=lambda: None,
+        is_engine=True,
+    )
+    fn([object(), object()], conf_thres=0.4)
+    fn([object()], conf_thres=0.4)
+    assert len(calls) == 2
+    assert all("half" not in kw for kw in calls), calls
+    assert all(kw["device"] == "cuda" for kw in calls)
+
+
+def test_pt_model_predict_keeps_half_true():
+    """A .pt checkpoint keeps the original ``half=True`` CUDA call."""
+    calls = []
+    fn = _make_batched_predict_fn(
+        _recording_model(calls),
+        get_device=lambda: "cuda",
+        set_device=lambda t: None,
+        allow_cpu=False,
+        cuda_empty_cache=lambda: None,
+    )
+    fn([object()], conf_thres=0.4)
+    assert calls[0]["half"] is True
+
+
 # ===========================================================================
 # Task 5 Step 1: Parity test — chunked inference == sequential reference.
 #
