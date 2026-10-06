@@ -281,6 +281,30 @@ def test_detect_dropped_frames_writes_no_rms_side_reports(tmp_path, force):
     assert list((batch / "RMS_calculations").glob("*_dropped_frames.txt")) == []
 
 
+def test_distance_stats_non_force_skip_is_no_longer_defeated_by_rms_copies(tmp_path):
+    """RMS copies never carry ``distance_percentage``, so the recursive scan made
+    ``_needs_stats_refresh`` true for every slot with a copy and the non-force
+    skip never fired. Now a slot is skipped exactly when the step's own rule
+    says so (stats exist, sources normalized, no 3-fly over-limit rows).
+
+    NOTE for force.pipeline=false: this is also why a gate change no longer
+    re-derives stats by accident -- a config change must force the re-derive.
+    """
+    from fbpipe.steps import distance_normalize, distance_stats
+
+    root = tmp_path / "Hex-HexTest-Training-24-1"
+    batch = _build_batch(root)
+    cfg = _cfg(root, force=False)
+    distance_stats.main(cfg)
+    distance_normalize.main(cfg)
+    stats_json = batch / "fly1_global_distance_stats_class_0.json"
+    before = (stats_json.read_bytes(), stats_json.stat().st_mtime_ns)
+
+    distance_stats.main(cfg)
+
+    assert (stats_json.read_bytes(), stats_json.stat().st_mtime_ns) == before
+
+
 def test_rms_copy_filter_still_copies_every_source(tmp_path):
     from fbpipe.steps import rms_copy_filter
 
