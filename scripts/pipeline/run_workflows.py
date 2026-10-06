@@ -11,9 +11,11 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.request
 from dataclasses import replace as dc_replace
+from functools import partial
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
@@ -2226,7 +2228,234 @@ def _thaw_cli_args(settings: Settings) -> list[str]:
     return args
 
 
-def _run_reactions(settings: Settings, config_path: Path | None = None) -> None:
+# --------------------------------------------------------------------------- #
+# Figure subprocess pool
+# --------------------------------------------------------------------------- #
+
+#: Figure commands run at once by default. Memory sets it, not cores: a raster
+#: or mean-trace command peaks at 4.9-6.1 GB RSS on the 61 GB box.
+FIGURE_WORKERS_DEFAULT = 3
+
+
+def _figure_workers(analysis_cfg: Mapping[str, Any] | None) -> int:
+    """``analysis.figure_workers``: how many figure commands run at once.
+
+    1 runs them one at a time with live output, exactly as before the pool.
+    """
+    raw = (analysis_cfg or {}).get("figure_workers", FIGURE_WORKERS_DEFAULT)
+    try:
+        return max(1, int(raw))
+    except (TypeError, ValueError):
+        LOGGER.warning(
+            "[analysis] figure_workers=%r is not an integer; using %d.",
+            raw, FIGURE_WORKERS_DEFAULT,
+        )
+        return FIGURE_WORKERS_DEFAULT
+
+
+class _FigureJob:
+    """One figure command queued on a :class:`_FigurePool`."""
+
+    def __init__(self, cmd, env, announce, on_exit, after, check):
+        self.cmd = list(cmd)
+        self.env = env
+        self.announce = announce
+        self.on_exit = on_exit
+        self.after = after
+        self.check = check
+        self.index = -1  # position in the pool's submission order
+        self.returncode: int | None = None
+        self._proc: subprocess.Popen | None = None
+        self._out = None
+
+    def start(self) -> None:
+        # stdout+stderr into one file, so the block replays in the order the
+        # child wrote it -- what the nightly log (2>&1) showed before.
+        self._out = tempfile.TemporaryFile()
+        self._proc = subprocess.Popen(
+            self.cmd, env=self.env, stdout=self._out, stderr=subprocess.STDOUT
+        )
+
+    def poll(self) -> int | None:
+        if self.returncode is None and self._proc is not None:
+            self.returncode = self._proc.poll()
+        return self.returncode
+
+    def kill(self) -> None:
+        if self._proc is not None and self.poll() is None:
+            self._proc.kill()
+            self.returncode = self._proc.wait()
+
+    def replay(self) -> None:
+        """Header line, then the captured output, flushed as one block."""
+        if self.announce is not None:
+            self.announce()
+        if self._out is None:
+            return
+        self._out.seek(0)
+        data = self._out.read()
+        self._out.close()
+        self._out = None
+        sys.stdout.flush()
+        buffer = getattr(sys.stdout, "buffer", None)
+        if buffer is not None:
+            buffer.write(data)
+            buffer.flush()
+        else:  # a text-only stream (e.g. a test double)
+            sys.stdout.write(data.decode("utf-8", errors="replace"))
+            sys.stdout.flush()
+
+    def finish(self) -> None:
+        """The caller's exit handling, unchanged from the serial code."""
+        if self.check and self.returncode != 0:
+            raise subprocess.CalledProcessError(self.returncode, self.cmd)
+        if self.on_exit is not None:
+            self.on_exit(self.returncode)
+
+
+class _FigurePool:
+    """Run figure subprocesses up to ``max_workers`` at a time.
+
+    The commands are independent scripts that each read the wide tables /
+    predictions and write their own figure tree, so they can overlap; each
+    one's output is captured and replayed, with its header line and exit
+    handling, in SUBMISSION order -- the log reads like a serial run, one
+    whole block per command.
+
+    * ``after=`` holds a command until another has finished (two commands that
+      write the same file, or one that reads what another writes).
+    * ``check=True`` is ``subprocess.run(check=True)``: a non-zero exit raises
+      ``CalledProcessError``, and nothing submitted after the failing command
+      starts (everything before it still runs, as it did serially); commands
+      already running are waited for, never orphaned.
+    * ``call()`` queues a callback (a step's "complete" line or state write)
+      that runs once every command submitted before it has been reported.
+
+    Pooled, nothing starts until :meth:`join`, so a step can queue its
+    commands early yet have them run after a later inline step.
+    ``max_workers <= 1`` runs every submission inline, at submit, with live
+    output -- the pre-pool code path.
+    """
+
+    def __init__(self, max_workers: int = 1) -> None:
+        self.max_workers = max(1, int(max_workers))
+        self._items: list[Any] = []
+
+    def submit(
+        self,
+        cmd: Sequence[str],
+        *,
+        env: Mapping[str, str] | None = None,
+        announce: Callable[[], None] | None = None,
+        on_exit: Callable[[int], None] | None = None,
+        after: _FigureJob | None = None,
+        check: bool = False,
+    ) -> _FigureJob:
+        job = _FigureJob(cmd, env, announce, on_exit, after, check)
+        if self.max_workers <= 1:
+            # Serially, submission order already runs `after` first.
+            if announce is not None:
+                announce()
+            job.returncode = subprocess.run(job.cmd, env=env).returncode
+            job.finish()
+        else:
+            if after is not None and after not in self._items:
+                raise ValueError("after= must name a command queued earlier on this pool")
+            job.index = len(self._items)
+            self._items.append(job)
+        return job
+
+    def call(self, fn: Callable[[], None]) -> None:
+        if self.max_workers <= 1:
+            fn()
+        else:
+            self._items.append(fn)
+
+    def join(self) -> None:
+        items, self._items = self._items, []
+        jobs = [item for item in items if isinstance(item, _FigureJob)]
+        if not jobs:
+            for fn in items:
+                fn()
+            return
+
+        LOGGER.info(
+            "[analysis] figure pool: %d command(s), up to %d at a time",
+            len(jobs), self.max_workers,
+        )
+        started = time.monotonic()
+        waiting = list(jobs)  # not started yet, in submission order
+        running: list[_FigureJob] = []
+        error: BaseException | None = None
+        # Nothing at or after this submission index may start: a check=True
+        # command failed there (serially, nothing after it would have run).
+        stop_at = len(items)
+        head = 0  # next item to report
+        try:
+            while head < len(items) or running:
+                # Reap before launching, so a failure is recorded before
+                # anything queued behind it could start.
+                for job in list(running):
+                    if job.poll() is not None:
+                        running.remove(job)
+                        if job.check and job.returncode != 0:
+                            stop_at = min(stop_at, job.index + 1)
+                for job in list(waiting):
+                    if len(running) >= self.max_workers or job.index >= stop_at:
+                        break
+                    if job.after is not None and (
+                        job.after in waiting or job.after in running
+                    ):
+                        continue  # its dependency has not finished yet
+                    job.start()
+                    waiting.remove(job)
+                    running.append(job)
+                progressed = False
+                while head < len(items):
+                    item = items[head]
+                    if isinstance(item, _FigureJob):
+                        if item in waiting:
+                            if item.index < stop_at:
+                                break  # still to be started
+                            # never started: an earlier failure stopped the pool
+                        elif item.returncode is None:
+                            break  # still running
+                        else:
+                            item.replay()
+                            if error is None:
+                                try:
+                                    item.finish()
+                                except Exception as exc:
+                                    error = exc
+                                    stop_at = min(stop_at, head + 1)
+                    elif error is None:
+                        try:
+                            item()
+                        except Exception as exc:
+                            error = exc
+                            stop_at = min(stop_at, head + 1)
+                    head += 1
+                    progressed = True
+                if not progressed:
+                    time.sleep(0.05)
+        except BaseException:
+            # Interrupted: do not leave figure processes running behind us.
+            for job in running:
+                job.kill()
+            raise
+        LOGGER.info(
+            "[analysis] figure pool: done in %.1f s", time.monotonic() - started
+        )
+        if error is not None:
+            raise error
+
+
+def _run_reactions(
+    settings: Settings,
+    config_path: Path | None = None,
+    *,
+    figure_workers: int = 1,
+) -> None:
     reaction_cfg = settings.reaction_prediction
 
     required_pairs: list[tuple[str, str]] = []
@@ -2347,6 +2576,11 @@ def _run_reactions(settings: Settings, config_path: Path | None = None) -> None:
     pythonpath = env.get("PYTHONPATH")
     env["PYTHONPATH"] = os.pathsep.join(filter(None, [extra_path, pythonpath]))
 
+    # Figure commands below go through one pool (1 worker = one at a time,
+    # as before). The only ordering between them: train_vs_ctrl waits for the
+    # matrix (see there). Every command keeps check=True semantics.
+    pool = _FigurePool(figure_workers)
+
     if skip_matrix:
         print(
             "[analysis] reactions.matrix cached → skipping. Set force.reaction_matrix=true to recompute."
@@ -2390,8 +2624,10 @@ def _run_reactions(settings: Settings, config_path: Path | None = None) -> None:
         cmd.extend(["--protocol", str(settings.protocol)])
 
         cmd.extend(_thaw_cli_args(settings))
-        print("[analysis] reactions.matrix →", " ".join(cmd))
-        subprocess.run(cmd, check=True, env=env)
+        matrix_job = pool.submit(
+            cmd, env=env, check=True,
+            announce=partial(print, "[analysis] reactions.matrix →", " ".join(cmd)),
+        )
 
         # --- Publication figures, one per configured cohort x metric ---
         for pub_cmd in _pubfig_commands(
@@ -2400,8 +2636,10 @@ def _run_reactions(settings: Settings, config_path: Path | None = None) -> None:
             csv_path=csv_path.resolve(),
             config_path=config_path,
         ):
-            print("[analysis] publication_figures →", " ".join(pub_cmd))
-            subprocess.run(pub_cmd, check=True, env=env)
+            pool.submit(
+                pub_cmd, env=env, check=True,
+                announce=partial(print, "[analysis] publication_figures →", " ".join(pub_cmd)),
+            )
 
         # --- Training vs Control comparison plots ---
         train_vs_ctrl_script = REPO_ROOT / "scripts" / "analysis" / "reaction_matrix_training_vs_control.py"
@@ -2436,13 +2674,20 @@ def _run_reactions(settings: Settings, config_path: Path | None = None) -> None:
                 tvc_cmd.extend(["--config", str(config_path)])
             tvc_cmd.extend(["--protocol", str(settings.protocol)])
             tvc_cmd.extend(_thaw_cli_args(settings))
-            print("[analysis] reactions.train_vs_ctrl →", " ".join(tvc_cmd))
-            subprocess.run(tvc_cmd, check=True, env=env)
+            # After the matrix: it reads the binary_reactions_*_unordered.csv
+            # the matrix writes, and the matrix's all/ folder collects (rglob)
+            # the *unordered.png files this one writes into the same out_dir.
+            pool.submit(
+                tvc_cmd, env=env, check=True, after=matrix_job,
+                announce=partial(print, "[analysis] reactions.train_vs_ctrl →", " ".join(tvc_cmd)),
+            )
         else:
-            print("[analysis] reactions.train_vs_ctrl script not found, skipping.")
+            pool.call(partial(print, "[analysis] reactions.train_vs_ctrl script not found, skipping."))
 
         matrix_expected["version"] = STATE_VERSION
-        _write_state(settings, "reaction_matrix", "reaction_prediction", matrix_expected)
+        pool.call(partial(
+            _write_state, settings, "reaction_matrix", "reaction_prediction", matrix_expected
+        ))
 
     # --- Ordinal score summary plots (always runs when model_type=ordinal) ---
     if reaction_cfg.model_type == "ordinal" and csv_path.exists():
@@ -2464,8 +2709,10 @@ def _run_reactions(settings: Settings, config_path: Path | None = None) -> None:
                 score_cmd.extend(["--config", str(config_path)])
             score_cmd.extend(["--protocol", str(settings.protocol)])
             score_cmd.extend(_thaw_cli_args(settings))
-            print("[analysis] score_summary →", " ".join(score_cmd))
-            subprocess.run(score_cmd, check=True, env=env)
+            pool.submit(
+                score_cmd, env=env, check=True,
+                announce=partial(print, "[analysis] score_summary →", " ".join(score_cmd)),
+            )
 
             # --- RandomPanel per-odorant concentration comparison (KW/Holm) ---
             # Skips itself cleanly when the CSV isn't a RandomPanel run holding
@@ -2485,12 +2732,18 @@ def _run_reactions(settings: Settings, config_path: Path | None = None) -> None:
                 if config_path is not None:
                     conc_cmd.extend(["--config", str(config_path)])
                 conc_cmd.extend(_thaw_cli_args(settings))
-                print("[analysis] randompanel_conc_comparison →", " ".join(conc_cmd))
-                subprocess.run(conc_cmd, check=True, env=env)
+                # Same score_summary/ folder as score_summary.py, but disjoint
+                # file names and neither one prunes or globs it: no ordering.
+                pool.submit(
+                    conc_cmd, env=env, check=True,
+                    announce=partial(print, "[analysis] randompanel_conc_comparison →", " ".join(conc_cmd)),
+                )
             else:
-                print("[analysis] randompanel_conc_comparison script not found, skipping.")
+                pool.call(partial(print, "[analysis] randompanel_conc_comparison script not found, skipping."))
         else:
-            print("[analysis] score_summary script not found, skipping.")
+            pool.call(partial(print, "[analysis] score_summary script not found, skipping."))
+
+    pool.join()
 
 
 def _run_pipeline(
@@ -2992,7 +3245,8 @@ def main(argv: Sequence[str] | None = None) -> None:
     # -- light-only PER traces (per-fly figures, sorted by dataset) --
     _run_light_only_traces(analysis_cfg.get("light_only_traces"), settings=settings)
 
-    _run_reactions(settings, config_path=config_path)
+    figure_workers = _figure_workers(analysis_cfg)
+    _run_reactions(settings, config_path=config_path, figure_workers=figure_workers)
 
     # Reactions just wrote model_predictions.csv. Re-render every envelope-
     # trace site that fired earlier in the pipeline (Raw + RMS testing/training
@@ -3051,6 +3305,14 @@ def main(argv: Sequence[str] | None = None) -> None:
         payload = dict(dm_expected, version=STATE_VERSION)
         _write_state(settings, "dataset_means", "analysis", payload)
 
+    # Figure commands from here to cohort_figures share one pool
+    # (analysis.figure_workers; 1 = one at a time, in this order, as before).
+    # Pooled, nothing starts before join() below, so the mean traces and
+    # naive_vs_trained queued here run AFTER training_scores, which rewrites
+    # model_predictions_training.csv (pretest_score_bars reads it). Each step's
+    # state is written once its own commands are done.
+    figure_pool = _FigurePool(figure_workers)
+
     # -- per-odor trained-vs-control mean traces, one set per dataset pair --
     mt_expected = _dataset_mean_traces_expected(
         analysis_cfg, settings, config_path=config_path
@@ -3065,9 +3327,13 @@ def main(argv: Sequence[str] | None = None) -> None:
             "Set force.dataset_mean_traces=true to recompute."
         )
     else:
-        _run_dataset_mean_traces(analysis_cfg, settings, config_path=config_path)
+        _run_dataset_mean_traces(
+            analysis_cfg, settings, config_path=config_path, pool=figure_pool
+        )
         payload = dict(mt_expected, version=STATE_VERSION)
-        _write_state(settings, "dataset_mean_traces", "analysis", payload)
+        figure_pool.call(
+            partial(_write_state, settings, "dataset_mean_traces", "analysis", payload)
+        )
 
     # -- naive vs trained vs control; needs the predictions reactions wrote --
     if scores_csv.exists():
@@ -3084,9 +3350,13 @@ def main(argv: Sequence[str] | None = None) -> None:
                 "Set force.naive_vs_trained=true to recompute."
             )
         else:
-            _run_naive_vs_trained(analysis_cfg, settings, config_path=config_path)
+            _run_naive_vs_trained(
+                analysis_cfg, settings, config_path=config_path, pool=figure_pool
+            )
             payload = dict(nvt_expected, version=STATE_VERSION)
-            _write_state(settings, "naive_vs_trained", "analysis", payload)
+            figure_pool.call(
+                partial(_write_state, settings, "naive_vs_trained", "analysis", payload)
+            )
     else:
         LOGGER.info(
             "[analysis] naive_vs_trained skipped; no predictions CSV at %s",
@@ -3098,7 +3368,9 @@ def main(argv: Sequence[str] | None = None) -> None:
 
     # -- pre-test-baselined trial score bars; same predictions CSV --
     if scores_csv.exists():
-        _run_pretest_score_bars(analysis_cfg, settings, config_path=config_path)
+        _run_pretest_score_bars(
+            analysis_cfg, settings, config_path=config_path, pool=figure_pool
+        )
     else:
         LOGGER.info(
             "[analysis] pretest_score_bars skipped; no predictions CSV at %s",
@@ -3120,9 +3392,13 @@ def main(argv: Sequence[str] | None = None) -> None:
                 "Set force.pretest_vs_test=true to recompute."
             )
         else:
-            _run_pretest_vs_test(analysis_cfg, settings, config_path=config_path)
+            _run_pretest_vs_test(
+                analysis_cfg, settings, config_path=config_path, pool=figure_pool
+            )
             payload = dict(pvt_expected, version=STATE_VERSION)
-            _write_state(settings, "pretest_vs_test", "analysis", payload)
+            figure_pool.call(
+                partial(_write_state, settings, "pretest_vs_test", "analysis", payload)
+            )
     else:
         LOGGER.info(
             "[analysis] pretest_vs_test skipped; no predictions CSV at %s",
@@ -3144,14 +3420,20 @@ def main(argv: Sequence[str] | None = None) -> None:
                 "Set force.cohort_figures=true to recompute."
             )
         else:
-            _run_cohort_figures(analysis_cfg, settings, config_path=config_path)
+            _run_cohort_figures(
+                analysis_cfg, settings, config_path=config_path, pool=figure_pool
+            )
             payload = dict(cf_expected, version=STATE_VERSION)
-            _write_state(settings, "cohort_figures", "analysis", payload)
+            figure_pool.call(
+                partial(_write_state, settings, "cohort_figures", "analysis", payload)
+            )
     else:
         LOGGER.info(
             "[analysis] cohort_figures skipped; no predictions CSV at %s",
             scores_csv,
         )
+
+    figure_pool.join()
 
     # All figures are now rendered (combined, envelope_visuals, deferred
     # model-annotated re-renders, dataset_means). NOW copy local experiment data
@@ -3685,8 +3967,13 @@ def _run_cohort_figures(
     settings: Any,
     *,
     config_path: Path | None,
+    pool: _FigurePool | None = None,
 ) -> None:
-    """Binarised + graded PER rasters and training-AUC vs testing response."""
+    """Binarised + graded PER rasters and training-AUC vs testing response.
+
+    Commands go onto *pool* (run there, in its order); without one they run
+    here, one at a time.
+    """
     python_exec = getattr(
         getattr(settings, "reaction_prediction", None), "python", ""
     ) or sys.executable
@@ -3702,17 +3989,31 @@ def _run_cohort_figures(
     env["PYTHONPATH"] = os.pathsep.join(
         filter(None, [str(REPO_ROOT / "src"), env.get("PYTHONPATH")])
     )
+    pool = pool or _FigurePool()
+    auc_job: _FigureJob | None = None
     for cmd in cmds:
-        LOGGER.info("[analysis] cohort_figures → %s", " ".join(cmd))
-        result = subprocess.run(cmd, env=env, capture_output=False)
-        if result.returncode != 0:
-            # One cohort set failing must not abort the remaining figure sets or
-            # the SMB copy that follows -- same stance as naive_vs_trained.
-            LOGGER.warning(
-                "[analysis] cohort_figures command exited with code %d: %s",
-                result.returncode, " ".join(cmd),
-            )
-    LOGGER.info("[analysis] cohort_figures complete.")
+        def on_exit(returncode: int, cmd: list[str] = cmd) -> None:
+            if returncode != 0:
+                # One cohort set failing must not abort the remaining figure
+                # sets or the SMB copy that follows -- same stance as
+                # naive_vs_trained.
+                LOGGER.warning(
+                    "[analysis] cohort_figures command exited with code %d: %s",
+                    returncode, " ".join(cmd),
+                )
+
+        is_auc = Path(cmd[1]).name == "training_auc_vs_control_response.py"
+        job = pool.submit(
+            cmd, env=env, on_exit=on_exit,
+            announce=partial(LOGGER.info, "[analysis] cohort_figures → %s", " ".join(cmd)),
+            # The control and trained AUC runs both write the root
+            # training_auc_vs_control_response.json; last writer wins, so the
+            # trained run stays behind the control run, as it always ran.
+            after=auc_job if is_auc else None,
+        )
+        if is_auc:
+            auc_job = job
+    pool.call(partial(LOGGER.info, "[analysis] cohort_figures complete."))
 
 
 def _training_scores_command(
@@ -3843,6 +4144,7 @@ def _run_pretest_score_bars(
     settings: Any,
     *,
     config_path: Path | None,
+    pool: _FigurePool | None = None,
 ) -> None:
     python_exec = getattr(
         getattr(settings, "reaction_prediction", None), "python", ""
@@ -3858,12 +4160,17 @@ def _run_pretest_score_bars(
     env["PYTHONPATH"] = os.pathsep.join(
         filter(None, [str(REPO_ROOT / "src"), env.get("PYTHONPATH")])
     )
-    LOGGER.info("[analysis] pretest_score_bars → %s", " ".join(cmd))
-    result = subprocess.run(cmd, env=env, capture_output=False)
-    if result.returncode != 0:
-        LOGGER.warning(
-            "[analysis] pretest_score_bars exited with code %d", result.returncode
-        )
+
+    def on_exit(returncode: int) -> None:
+        if returncode != 0:
+            LOGGER.warning(
+                "[analysis] pretest_score_bars exited with code %d", returncode
+            )
+
+    (pool or _FigurePool()).submit(
+        cmd, env=env, on_exit=on_exit,
+        announce=partial(LOGGER.info, "[analysis] pretest_score_bars → %s", " ".join(cmd)),
+    )
 
 
 def _pretest_vs_test_command(
@@ -3945,6 +4252,7 @@ def _run_pretest_vs_test(
     settings: Any,
     *,
     config_path: Path | None,
+    pool: _FigurePool | None = None,
 ) -> None:
     """Pre-test vs post-test PER, paired within fly, per sensitivity cohort."""
     python_exec = getattr(
@@ -3962,16 +4270,21 @@ def _run_pretest_vs_test(
     env["PYTHONPATH"] = os.pathsep.join(
         filter(None, [str(REPO_ROOT / "src"), env.get("PYTHONPATH")])
     )
-    LOGGER.info("[analysis] pretest_vs_test → %s", " ".join(cmd))
-    result = subprocess.run(cmd, env=env, capture_output=False)
-    if result.returncode != 0:
-        # A cohort with no pre-test panel is normal, not fatal: only the
-        # *-Sensitivity-* datasets run one. Never abort the run over it.
-        LOGGER.warning(
-            "[analysis] pretest_vs_test exited with code %d", result.returncode
-        )
-    else:
-        LOGGER.info("[analysis] pretest_vs_test complete.")
+
+    def on_exit(returncode: int) -> None:
+        if returncode != 0:
+            # A cohort with no pre-test panel is normal, not fatal: only the
+            # *-Sensitivity-* datasets run one. Never abort the run over it.
+            LOGGER.warning(
+                "[analysis] pretest_vs_test exited with code %d", returncode
+            )
+        else:
+            LOGGER.info("[analysis] pretest_vs_test complete.")
+
+    (pool or _FigurePool()).submit(
+        cmd, env=env, on_exit=on_exit,
+        announce=partial(LOGGER.info, "[analysis] pretest_vs_test → %s", " ".join(cmd)),
+    )
 
 
 def _naive_vs_trained_expected(
@@ -3998,6 +4311,7 @@ def _run_naive_vs_trained(
     settings: Any,
     *,
     config_path: Path | None,
+    pool: _FigurePool | None = None,
 ) -> None:
     """Naive vs trained vs control, every cohort x odor x presentation."""
     python_exec = getattr(
@@ -4016,14 +4330,19 @@ def _run_naive_vs_trained(
     env["PYTHONPATH"] = os.pathsep.join(
         filter(None, [extra_path, env.get("PYTHONPATH")])
     )
-    LOGGER.info("[analysis] naive_vs_trained → %s", " ".join(cmd))
-    result = subprocess.run(cmd, env=env, capture_output=False)
-    if result.returncode != 0:
-        LOGGER.warning(
-            "[analysis] naive_vs_trained exited with code %d", result.returncode
-        )
-    else:
-        LOGGER.info("[analysis] naive_vs_trained complete.")
+
+    def on_exit(returncode: int) -> None:
+        if returncode != 0:
+            LOGGER.warning(
+                "[analysis] naive_vs_trained exited with code %d", returncode
+            )
+        else:
+            LOGGER.info("[analysis] naive_vs_trained complete.")
+
+    (pool or _FigurePool()).submit(
+        cmd, env=env, on_exit=on_exit,
+        announce=partial(LOGGER.info, "[analysis] naive_vs_trained → %s", " ".join(cmd)),
+    )
 
 
 def _dataset_mean_traces_expected(
@@ -4048,6 +4367,7 @@ def _run_dataset_mean_traces(
     settings: Any,
     *,
     config_path: Path | None,
+    pool: _FigurePool | None = None,
 ) -> None:
     """Per-odor trained-vs-control mean traces, one figure set per dataset."""
     python_exec = getattr(
@@ -4067,18 +4387,25 @@ def _run_dataset_mean_traces(
         filter(None, [extra_path, env.get("PYTHONPATH")])
     )
 
+    pool = pool or _FigurePool()
     for cmd in commands:
-        LOGGER.info("[analysis] dataset_mean_traces → %s", " ".join(cmd))
-        result = subprocess.run(cmd, env=env, capture_output=False)
-        if result.returncode != 0:
-            # One cohort with no usable traces (an arm that never ran testing,
-            # a fully flagged batch) must not take the rest of the run down.
-            LOGGER.warning(
-                "[analysis] dataset_mean_traces for %s exited with code %d",
-                cmd[cmd.index("--out-dir") + 1],
-                result.returncode,
-            )
-    LOGGER.info("[analysis] dataset_mean_traces complete.")
+        def on_exit(returncode: int, cmd: list[str] = cmd) -> None:
+            if returncode != 0:
+                # One cohort with no usable traces (an arm that never ran
+                # testing, a fully flagged batch) must not take the rest of
+                # the run down.
+                LOGGER.warning(
+                    "[analysis] dataset_mean_traces for %s exited with code %d",
+                    cmd[cmd.index("--out-dir") + 1],
+                    returncode,
+                )
+
+        # Each command writes (and prunes) only its own --out-dir.
+        pool.submit(
+            cmd, env=env, on_exit=on_exit,
+            announce=partial(LOGGER.info, "[analysis] dataset_mean_traces → %s", " ".join(cmd)),
+        )
+    pool.call(partial(LOGGER.info, "[analysis] dataset_mean_traces complete."))
 
 
 def _run_dataset_means(
