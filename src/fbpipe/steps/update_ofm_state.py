@@ -17,6 +17,30 @@ def _find_ofm_col(df: pd.DataFrame) -> str | None:
     return None
 
 
+def _find_ofm_output_csv(outs: list[Path]) -> Path | None:
+    """Heuristic: the first "output" CSV in *outs* with an OFM column."""
+    for o in outs:
+        try:
+            dfo = pd.read_csv(o, nrows=5)  # external rig output_*.csv; probe header only
+            if _find_ofm_col(dfo) is not None:
+                return o
+        except Exception:
+            continue
+    return None
+
+
+def _ofm_on_window(out_csv: Path) -> tuple[int, int] | None:
+    """(first_on, last_on) row of the OFM column, or None when it is never on."""
+    dfo = read_table(out_csv)  # external rig output_*.csv (Rule 2)
+    col = _find_ofm_col(dfo)
+    if col is None:
+        return None
+    on_idx = dfo.index[dfo[col].astype(str) != "off"].tolist()
+    if not on_idx:
+        return None
+    return min(on_idx), max(on_idx)
+
+
 def main(cfg: Settings):
     force_recompute = bool(getattr(getattr(cfg, "force", None), "pipeline", False))
     roots = get_main_directories(cfg)
@@ -37,20 +61,20 @@ def main(cfg: Settings):
                     continue
                 if p.stem not in _rms_by_stem or p.suffix == ".parquet":
                     _rms_by_stem[p.stem] = p
+            if not _rms_by_stem:
+                continue
+            # The OFM source and its window depend only on the batch, so they
+            # are found once per batch dir, not once per RMS table.
+            out_csv = _find_ofm_output_csv(outs)
+            if out_csv is None:
+                # graceful skip
+                continue
+            # Read lazily, on the first table that is not skipped: a batch that
+            # is already up to date never parses the rig CSV, so a malformed one
+            # cannot abort a non-force run.
+            window: tuple[int, int] | None = None
+            window_read = False
             for f in _rms_by_stem.values():
-                dfu = read_table(f)  # pipeline-produced RMS file (Rule 1)
-                # Heuristic: try to find an "output" CSV with an OFM column
-                out_csv = None
-                for o in outs:
-                    try:
-                        dfo = pd.read_csv(o, nrows=5)  # external rig output_*.csv; probe header only
-                        if _find_ofm_col(dfo) is not None:
-                            out_csv = o; break
-                    except Exception:
-                        continue
-                if out_csv is None:
-                    # graceful skip
-                    continue
                 if not force_recompute:
                     try:
                         # Rule 3/5: use read_schema_columns for column-existence check;
@@ -66,14 +90,13 @@ def main(cfg: Settings):
                             continue
                     except Exception:
                         pass
-                dfo = read_table(out_csv)  # external rig output_*.csv (Rule 2)
-                col = _find_ofm_col(dfo)
-                if col is None:
+                if not window_read:
+                    window = _ofm_on_window(out_csv)
+                    window_read = True
+                if window is None:
                     continue
-                on_idx = dfo.index[dfo[col].astype(str) != "off"].tolist()
-                if not on_idx:
-                    continue
-                first_on, last_on = min(on_idx), max(on_idx)
+                first_on, last_on = window
+                dfu = read_table(f)  # pipeline-produced RMS file (Rule 1)
                 if "Frame" in dfu.columns:
                     dfu["OFM_State"] = dfu["Frame"].apply(lambda x: "before" if x < first_on else ("during" if first_on <= x <= last_on else "after"))
                 elif "frame" in dfu.columns:
