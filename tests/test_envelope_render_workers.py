@@ -25,7 +25,10 @@ import faulthandler
 import hashlib
 import os
 import re
+import signal
+import subprocess
 import sys
+import time
 import types
 from pathlib import Path
 
@@ -386,6 +389,66 @@ def test_dead_worker_raises_instead_of_hanging(tmp_path, wide_table, monkeypatch
     _install(_registries())
     with pytest.raises(concurrent.futures.process.BrokenProcessPool):
         ev.generate_envelope_plots(_cfg(wide_table, tmp_path / "out", render_workers=3))
+
+
+def _running(pid: int) -> bool:
+    """Alive and not a zombie, per /proc (Linux)."""
+    try:
+        stat = Path(f"/proc/{pid}/stat").read_text()
+    except OSError:
+        return False
+    return stat.rsplit(")", 1)[1].split()[0] != "Z"
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="PR_SET_PDEATHSIG is Linux-only")
+def test_workers_die_with_a_killed_parent(tmp_path, wide_table):
+    """The parent holds the wide table, so it is the OOM killer's likeliest
+    victim. Its workers must not outlive it: blocked on the pool's call queue
+    (whose write end every forked sibling also holds), an orphan would sit on
+    its memory until someone found it."""
+    root = Path(__file__).resolve().parents[1]
+    marks = tmp_path / "marks"
+    marks.mkdir()
+    script = f"""
+import os, sys, time
+sys.path[:0] = [{str(root)!r}, {str(root / "src")!r}]
+import matplotlib
+matplotlib.use("Agg")
+from pathlib import Path
+from scripts.analysis import envelope_visuals as ev
+
+def _stuck(fly_df):
+    (Path({str(marks)!r}) / str(os.getpid())).touch()
+    time.sleep(300)
+
+ev._select_trial_rows = _stuck
+ev.generate_envelope_plots(ev.EnvelopePlotConfig(
+    matrix_npy=Path("/does/not/exist/m.npy"), codes_json=Path("/does/not/exist/c.json"),
+    out_dir=Path({str(tmp_path / "out")!r}), latency_sec=0.0,
+    wide_input=Path({str(wide_table)!r}), overwrite=True, render_workers=2))
+"""
+    parent = subprocess.Popen([sys.executable, "-c", script])
+    workers: list[int] = []
+    try:
+        deadline = time.monotonic() + 120
+        while len(list(marks.iterdir())) < 2:
+            assert parent.poll() is None, "the render parent exited early"
+            assert time.monotonic() < deadline, "the workers never reached a fly"
+            time.sleep(0.1)
+        workers = [int(p.name) for p in marks.iterdir()]
+        parent.kill()
+        parent.wait()
+        deadline = time.monotonic() + 20
+        while any(_running(pid) for pid in workers) and time.monotonic() < deadline:
+            time.sleep(0.1)
+        assert not [pid for pid in workers if _running(pid)], "orphaned workers outlived the parent"
+    finally:
+        if parent.poll() is None:
+            parent.kill()
+            parent.wait()
+        for pid in workers:
+            if _running(pid):
+                os.kill(pid, signal.SIGKILL)
 
 
 # ---------------------------------------------------------------------------

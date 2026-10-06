@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import argparse
 import concurrent.futures
+import ctypes
 import gc
 import json
 import logging
@@ -32,6 +33,7 @@ import math
 import multiprocessing
 import os
 import re
+import signal
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -2373,15 +2375,36 @@ def _may_hold_cuda_context() -> bool:
         return True
 
 
-def _init_render_worker() -> None:
+_PR_SET_PDEATHSIG = 1  # <linux/prctl.h>
+
+
+def _die_with_parent(parent_pid: int) -> None:
+    """Have the kernel SIGKILL this worker if the parent dies first (Linux).
+
+    Blocked on the pool's call queue, whose write end every forked sibling
+    also holds, an orphan would otherwise sit on its memory indefinitely --
+    and the parent, holding the wide table, is the OOM killer's likeliest
+    victim.
+    """
+    try:
+        ctypes.CDLL(None).prctl(_PR_SET_PDEATHSIG, signal.SIGKILL, 0, 0, 0)
+    except (AttributeError, OSError):  # no prctl: not Linux
+        return
+    if os.getppid() != parent_pid:  # the parent died before prctl took hold
+        os._exit(1)
+
+
+def _init_render_worker(parent_pid: int) -> None:
     """Prepare a freshly forked render worker.
 
-    Freezes every object inherited from the parent so this worker's GC never
-    walks them; a collection writes to each object it visits, which would
-    copy (~70 MB of) parent pages per worker. Then line-buffers stdout: one
-    write per line, so lines from different workers never split in a
-    redirected (block-buffered) log.
+    Ties its lifetime to the parent's (_die_with_parent). Freezes every
+    object inherited from the parent so this worker's GC never walks them; a
+    collection writes to each object it visits, which would copy (~70 MB of)
+    parent pages per worker. Then line-buffers stdout: one write per line, so
+    lines from different workers never split in a redirected (block-buffered)
+    log.
     """
+    _die_with_parent(parent_pid)
     gc.freeze()
     reconfigure = getattr(sys.stdout, "reconfigure", None)
     if reconfigure is not None:
@@ -2457,7 +2480,10 @@ def _render_fly_groups_forked(
     counts: dict[str, int] = {}
     try:
         with concurrent.futures.ProcessPoolExecutor(
-            max_workers=workers, mp_context=context, initializer=_init_render_worker
+            max_workers=workers,
+            mp_context=context,
+            initializer=_init_render_worker,
+            initargs=(os.getpid(),),
         ) as pool:
             futures = [pool.submit(_render_fly_share, share) for share in shares]
             for future in futures:
