@@ -2539,6 +2539,15 @@ def _run_pipeline(
         worker_env = dict(env)
         worker_env["NUM_WORKERS"] = str(n)
         worker_env["WORKER_INDEX"] = str(i)
+        # One BLAS thread per worker, stated outright. Until now the cap held
+        # only by accident: importing ultralytics here sets OMP_NUM_THREADS=1
+        # when it is unset, and OpenBLAS falls back to that. Without it (a
+        # preset OMP_NUM_THREADS, another ultralytics) numpy's 16-thread
+        # OpenBLAS pool spins at 100% CPU between the tracker's tiny per-frame
+        # np.linalg.inv calls. It has to be exactly 1: 2 still leaves a
+        # spinner. Outputs are identical. OMP/torch threads are left alone.
+        for var in ("OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS", "NUMEXPR_NUM_THREADS"):
+            worker_env[var] = "1"
         procs.append(subprocess.Popen(cmd, env=worker_env))
     return_codes = [p.wait() for p in procs]
     failed = [(i, rc) for i, rc in enumerate(return_codes) if rc != 0]
