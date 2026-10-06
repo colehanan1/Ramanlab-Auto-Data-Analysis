@@ -2416,8 +2416,8 @@ def _render_fly_groups_forked(render_fly: Any, fly_groups: Any, workers: int) ->
             "cannot fork; rendering serially."
         )
         return False
-    # The serial loop's groups, in its order. Each fly_df is a view into the
-    # one sorted copy pandas makes, which the workers share copy-on-write.
+    # The serial loop's groups, in its order. Each fly_df is a view (into df,
+    # or the one sorted copy of it pandas makes), shared copy-on-write.
     groups = list(fly_groups)
     # Never more workers than CPUs: each one peaks near 1 GB while rendering.
     workers = min(workers, len(groups), os.cpu_count() or 1)
