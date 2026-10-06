@@ -383,10 +383,14 @@ def _read_wide_for_light(csv_path) -> pd.DataFrame:
 
     These figures are per-fly, so a retired folder would otherwise still get its
     own light-trace figure rendered into the results tree.
+
+    Read through the CSV's fresh Parquet sibling when there is one: the same
+    frame ``pd.read_csv`` returns, without parsing 1.3 GB of text.
     """
     from fbpipe.utils.frozen_folders import drop_frozen
+    from fbpipe.utils.parquet_sibling import read_csv_via_parquet
 
-    df = pd.read_csv(csv_path)
+    df = read_csv_via_parquet(csv_path)
     before = len(df)
     df = drop_frozen(df)
     if len(df) != before:

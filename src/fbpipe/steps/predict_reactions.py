@@ -12,8 +12,8 @@ from typing import Iterable, Sequence, Set, Tuple
 import pandas as pd
 
 from ..config import Settings, load_flagged_fly_exclusions
+from ..utils.parquet_sibling import read_csv_via_parquet  # data_csv may be Parquet or CSV
 from ..utils.smb_copy import copy_to_smb
-from ..utils.tables import read_table  # data_csv input may be Parquet or CSV
 
 logger = logging.getLogger(__name__)
 
@@ -156,18 +156,22 @@ def _read_input_tables(
     tables are optional: a cohort that never ran a pre-test simply has none, and
     the file does not exist until a run produces it, so a missing extra is a
     skip with a note rather than a failure. The main table is still required.
+
+    A ``.csv`` is served from its fresh Parquet sibling (the same frame
+    ``pd.read_csv`` returns, in a fraction of the time); the temp CSV the
+    scorer CLI re-reads below is therefore byte-identical.
     """
 
     if not data_csv.exists():
         raise FileNotFoundError(f"Data CSV not found: {data_csv}")
 
-    frames = [read_table(data_csv)]
+    frames = [read_csv_via_parquet(data_csv)]
     for raw in extra_csvs:
         path = Path(raw).expanduser().resolve()
         if not path.exists():
             print(f"[REACTION] Extra data table not found, skipping: {path}")
             continue
-        extra = read_table(path)
+        extra = read_csv_via_parquet(path)
         if extra.empty:
             print(f"[REACTION] Extra data table is empty, skipping: {path}")
             continue
