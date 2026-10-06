@@ -103,6 +103,17 @@ GRID = "#e1e0d9"
 AXIS = "#c3c2b7"
 FIT_INK = "#52514e"
 
+#: One series per test presentation ("Hex 1", "Hex 2", ...): the validated
+#: 8-slot categorical palette in its fixed order -- the order is what keeps
+#: adjacent series apart (worst adjacent CVD dE 9.1, normal-vision dE 19.6 on
+#: white). Slots 3-5 sit below 3:1 on white; the direct endpoint labels are the
+#: relief. A series past slot 8 folds to MUTED instead of repeating a hue, which
+#: would claim two presentations are one.
+SERIES_COLORS = (
+    "#2a78d6", "#eb6834", "#1baf7a", "#eda100",
+    "#e87ba4", "#008300", "#4a3aa7", "#e34948",
+)
+
 #: Diverging ramp for Spearman rho: warm = positive, cool = negative, neutral
 #: gray at zero. Deliberately NOT the score ramp -- a rho of +0.5 must never
 #: read as "score 3".
@@ -1682,12 +1693,13 @@ def figure_trial_profile(
     labels = presentation_labels(table)
     kinds = [k for k in ("AUC", "Score", "PER")
              if any(c[1] == k for c in mat.rho.columns)]
-    # Categorical slots 1..2 — identity is the presentation, never its rank.
-    series_colors = {labels[0]: "#2a78d6"}
-    if len(labels) > 1:
-        series_colors[labels[1]] = "#eb6834"
-    for extra, hue in zip(labels[2:], ["#1baf7a", "#eda100"]):
-        series_colors[extra] = hue
+    # Categorical slots in fixed order — identity is the presentation, never
+    # its rank. A cohort can present its odor at any number of test positions
+    # (Hex-Sensitivity-24-0.1: six), so every label gets a slot.
+    series_colors = {
+        label: SERIES_COLORS[i] if i < len(SERIES_COLORS) else MUTED
+        for i, label in enumerate(labels)
+    }
 
     rows = [f"Train {t}" for t in trials]
     payload: list[dict] = []
