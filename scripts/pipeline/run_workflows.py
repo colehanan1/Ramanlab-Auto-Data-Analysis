@@ -2288,6 +2288,9 @@ class _FigureJob:
 
     def replay(self) -> None:
         """Header line, then the captured output, flushed as one block."""
+        # The driver's own buffered prints (e.g. a command builder's "skipping"
+        # note) belong before this header, not inside the block below it.
+        sys.stdout.flush()
         if self.announce is not None:
             self.announce()
         if self._out is None:
@@ -2448,6 +2451,19 @@ class _FigurePool:
         )
         if error is not None:
             raise error
+
+
+def _out_dir_key(cmd: Sequence[str]) -> str | None:
+    """The command's ``--out-dir``, normalised, or None when it has none.
+
+    The runners chain commands that write into the same folder (``after=``),
+    so they keep their serial order there while the rest overlap.
+    """
+    try:
+        raw = cmd[list(cmd).index("--out-dir") + 1]
+    except (ValueError, IndexError):
+        return None
+    return os.path.normpath(os.path.expanduser(str(raw)))
 
 
 def _run_reactions(
@@ -3990,7 +4006,12 @@ def _run_cohort_figures(
         filter(None, [str(REPO_ROOT / "src"), env.get("PYTHONPATH")])
     )
     pool = pool or _FigurePool()
-    auc_job: _FigureJob | None = None
+    # Commands sharing an --out-dir keep their serial order. The control and
+    # trained training-AUC runs both write the root
+    # training_auc_vs_control_response.json (last writer wins, so trained stays
+    # behind control), and a cohort listed in both arms would have both raster
+    # runs write its folder. The three sets never share a folder.
+    last_in_dir: dict[str, _FigureJob] = {}
     for cmd in cmds:
         def on_exit(returncode: int, cmd: list[str] = cmd) -> None:
             if returncode != 0:
@@ -4002,17 +4023,14 @@ def _run_cohort_figures(
                     returncode, " ".join(cmd),
                 )
 
-        is_auc = Path(cmd[1]).name == "training_auc_vs_control_response.py"
+        out_dir = _out_dir_key(cmd)
         job = pool.submit(
             cmd, env=env, on_exit=on_exit,
             announce=partial(LOGGER.info, "[analysis] cohort_figures → %s", " ".join(cmd)),
-            # The control and trained AUC runs both write the root
-            # training_auc_vs_control_response.json; last writer wins, so the
-            # trained run stays behind the control run, as it always ran.
-            after=auc_job if is_auc else None,
+            after=last_in_dir.get(out_dir) if out_dir else None,
         )
-        if is_auc:
-            auc_job = job
+        if out_dir:
+            last_in_dir[out_dir] = job
     pool.call(partial(LOGGER.info, "[analysis] cohort_figures complete."))
 
 
@@ -4388,6 +4406,12 @@ def _run_dataset_mean_traces(
     )
 
     pool = pool or _FigurePool()
+    # Each command writes (and prunes, non-recursively) only its own --out-dir;
+    # a nested one (a pair's folder holding a phase cohort's) is never touched
+    # by the outer command. Two commands configured onto the SAME folder keep
+    # their serial order -- the later one's prune would otherwise race the
+    # earlier one's figures.
+    last_in_dir: dict[str, _FigureJob] = {}
     for cmd in commands:
         def on_exit(returncode: int, cmd: list[str] = cmd) -> None:
             if returncode != 0:
@@ -4400,11 +4424,14 @@ def _run_dataset_mean_traces(
                     returncode,
                 )
 
-        # Each command writes (and prunes) only its own --out-dir.
-        pool.submit(
+        out_dir = _out_dir_key(cmd)
+        job = pool.submit(
             cmd, env=env, on_exit=on_exit,
             announce=partial(LOGGER.info, "[analysis] dataset_mean_traces → %s", " ".join(cmd)),
+            after=last_in_dir.get(out_dir) if out_dir else None,
         )
+        if out_dir:
+            last_in_dir[out_dir] = job
     pool.call(partial(LOGGER.info, "[analysis] dataset_mean_traces complete."))
 
 

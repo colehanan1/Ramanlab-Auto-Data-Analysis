@@ -321,6 +321,25 @@ def _when(events, name, what, args=""):
     return [t for t, n, w, a in events if n == name and w == what and args in a]
 
 
+def test_out_dir_key_normalises_and_tolerates_a_missing_flag():
+    assert rw._out_dir_key(["py", "s.py", "--out-dir", "/figs/x/"]) == "/figs/x"
+    assert rw._out_dir_key(["py", "s.py", "--out-dir", "/figs//x/../x"]) == "/figs/x"
+    assert rw._out_dir_key(["py", "s.py"]) is None
+    assert rw._out_dir_key(["py", "s.py", "--out-dir"]) is None
+
+
+def _cohort_cmds(raster: Path, auc: Path) -> list[list[str]]:
+    """The six cohort-figure commands in _cohort_figure_commands' order."""
+    return [
+        [PY, str(raster), "control", "--out-dir", "/figs/Binarized"],
+        [PY, str(raster), "control", "--out-dir", "/figs/Graded"],
+        [PY, str(auc), "control", "--out-dir", "/figs/AUC"],
+        [PY, str(raster), "trained", "--out-dir", "/figs/Binarized"],
+        [PY, str(raster), "trained", "--out-dir", "/figs/Graded"],
+        [PY, str(auc), "trained", "--out-dir", "/figs/AUC"],
+    ]
+
+
 def test_cohort_figures_keep_the_two_auc_runs_in_order(tmp_path, monkeypatch):
     """Both AUC runs write Training-AUC-vs-Testing-Response/
     training_auc_vs_control_response.json; last writer wins, so the trained
@@ -329,14 +348,7 @@ def test_cohort_figures_keep_the_two_auc_runs_in_order(tmp_path, monkeypatch):
     raster = _fake_script(tmp_path / "a", "binarized_per_rasters.py", log=log, sleep=0.2)
     auc = _fake_script(tmp_path / "b", "training_auc_vs_control_response.py",
                        log=log, sleep=0.5)
-    cmds = [
-        [PY, str(raster), "control-binary"],
-        [PY, str(raster), "control-graded"],
-        [PY, str(auc), "control"],
-        [PY, str(raster), "trained-binary"],
-        [PY, str(raster), "trained-graded"],
-        [PY, str(auc), "trained"],
-    ]
+    cmds = _cohort_cmds(raster, auc)
     monkeypatch.setattr(rw, "_cohort_figure_commands", lambda *a, **k: cmds)
     pool = rw._FigurePool(3)
     rw._run_cohort_figures({}, SimpleNamespace(), config_path=None, pool=pool)
@@ -349,6 +361,55 @@ def test_cohort_figures_keep_the_two_auc_runs_in_order(tmp_path, monkeypatch):
     [ctrl_start] = _when(ev, "training_auc_vs_control_response.py", "start", "control")
     raster_ends = _when(ev, "binarized_per_rasters.py", "end")
     assert any(ctrl_start < t < ctrl_end for t in raster_ends)
+
+
+def test_cohort_figures_sharing_a_folder_keep_their_serial_order(tmp_path, monkeypatch):
+    """A cohort listed in both arms would have both raster runs write its
+    folder; within one --out-dir the trained run waits for the control run,
+    while the three sets (three folders) still overlap."""
+    log = tmp_path / "log.txt"
+    raster = _fake_script(tmp_path / "a", "binarized_per_rasters.py", log=log, sleep=0.4)
+    auc = _fake_script(tmp_path / "b", "training_auc_vs_control_response.py",
+                       log=log, sleep=0.4)
+    cmds = _cohort_cmds(raster, auc)
+    monkeypatch.setattr(rw, "_cohort_figure_commands", lambda *a, **k: cmds)
+    # More workers than commands: only the folder rule can hold one back.
+    pool = rw._FigurePool(6)
+    rw._run_cohort_figures({}, SimpleNamespace(), config_path=None, pool=pool)
+    pool.join()
+    ev = _events(log)
+    for folder in ("/figs/Binarized", "/figs/Graded"):
+        [ctrl_end] = _when(ev, "binarized_per_rasters.py", "end", f"control --out-dir {folder}")
+        [trained_start] = _when(ev, "binarized_per_rasters.py", "start",
+                                f"trained --out-dir {folder}")
+        assert trained_start >= ctrl_end, folder
+    # The three control runs (three folders) started together.
+    starts = sorted(t for t, _n, w, a in ev if w == "start" and a.startswith("control"))
+    ends = sorted(t for t, _n, w, a in ev if w == "end" and a.startswith("control"))
+    assert len(starts) == 3 and starts[-1] < ends[0]
+
+
+def test_mean_traces_on_one_folder_keep_their_serial_order(tmp_path, monkeypatch):
+    """Two cohorts configured onto the SAME --out-dir: the later command's
+    prune would race the earlier one's figures, so it waits; a command with
+    its own folder still overlaps."""
+    log = tmp_path / "log.txt"
+    script = _fake_script(tmp_path / "a", "dataset_mean_traces_tvc.py", log=log, sleep=0.4)
+    cmds = [
+        [PY, str(script), "first", "--out-dir", "/figs/EB-24-1"],
+        [PY, str(script), "other", "--out-dir", "/figs/Hex-24-0.1"],
+        [PY, str(script), "second", "--out-dir", "/figs/EB-24-1/"],
+    ]
+    monkeypatch.setattr(rw, "_dataset_mean_traces_commands", lambda *a, **k: cmds)
+    pool = rw._FigurePool(6)
+    rw._run_dataset_mean_traces({}, SimpleNamespace(), config_path=None, pool=pool)
+    pool.join()
+    ev = _events(log)
+    [first_end] = _when(ev, "dataset_mean_traces_tvc.py", "end", "first")
+    [second_start] = _when(ev, "dataset_mean_traces_tvc.py", "start", "second")
+    [other_start] = _when(ev, "dataset_mean_traces_tvc.py", "start", "other")
+    assert second_start >= first_end
+    assert other_start < first_end
 
 
 def test_cohort_figures_failure_warns_and_the_rest_still_run(tmp_path, monkeypatch, caplog):
@@ -468,3 +529,35 @@ def test_reactions_matrix_failure_raises_like_check_true(tmp_path, monkeypatch, 
     assert not _when(ev, "reaction_matrix_training_vs_control.py", "start")
     # The matrix state is only written once its figures succeeded.
     assert not _state_file(tmp_path).exists()
+
+
+@pytest.mark.parametrize("workers", [1, 3])
+def test_reactions_figures_start_only_after_predictions_exist(tmp_path, monkeypatch, workers):
+    """Every reaction figure reads model_predictions.csv, which the inline
+    predict step writes first: no figure command may start before it."""
+    log = tmp_path / "log.txt"
+    _reaction_scripts(tmp_path, log)
+    monkeypatch.setattr(rw, "REPO_ROOT", tmp_path)
+    settings = _reaction_settings(tmp_path)
+    csv = Path(settings.reaction_prediction.output_csv)
+    csv.unlink()  # only predict creates it
+    for name in ("data.csv", "model.json"):
+        (tmp_path / name).write_text("x\n")
+    settings.reaction_prediction.run_prediction = True
+    settings.reaction_prediction.data_csv = str(tmp_path / "data.csv")
+    settings.reaction_prediction.model_path = str(tmp_path / "model.json")
+    settings.force.reaction_prediction = True
+
+    def fake_predict(_settings):
+        time.sleep(0.3)
+        csv.write_text("dataset,fly\n")
+        with open(log, "a") as fh:
+            fh.write(f"{time.monotonic():.6f} predict end -\n")
+
+    monkeypatch.setattr(rw.predict_reactions, "main", fake_predict)
+    rw._run_reactions(settings, figure_workers=workers)
+    ev = _events(log)
+    [predicted] = _when(ev, "predict", "end")
+    figure_starts = [t for t, n, w, _a in ev if w == "start"]
+    assert len(figure_starts) == 4  # matrix, train_vs_ctrl, score_summary, conc
+    assert min(figure_starts) > predicted
