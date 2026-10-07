@@ -2646,9 +2646,36 @@ def _pipeline_run_walks_beyond_root(settings, root: str | Path) -> bool:
     return False
 
 
+def _yolo_work_reason(settings, root: str | Path) -> str | None:
+    """Why the YOLO launch for *root* must go ahead; None only when it would
+    certainly run to completion without finding a video.
+
+    Mirrors what yolo_infer.main does before it looks for one: without CUDA
+    (allow_cpu off) it raises, and so does YOLO() when neither the .engine
+    sibling nor the model file exists. Today's launch then fails the night
+    loudly, even for an empty root. Skipped, the night would go on, and without
+    CUDA the per-trial steps would run their CPU variants (fbpipe.pipeline
+    picks them), whose outputs differ from the GPU path's. torch settles the
+    CUDA answer once per process, and fbpipe.pipeline's import has already
+    asked here: the check is free and reflects CUDA as the run started.
+    """
+    import torch
+
+    if not getattr(settings, "allow_cpu", False) and not torch.cuda.is_available():
+        return "CUDA is unavailable (allow_cpu off), so its YOLO launch must fail the run as today"
+    model = Path(settings.model_path)
+    if not model.with_suffix(".engine").exists() and not model.exists():
+        return f"its YOLO model {model} is missing, so its YOLO launch must fail the run as today"
+    if _pipeline_run_walks_beyond_root(settings, root):
+        return "its pipeline run walks more than its root (MAIN_DIRECTORIES, flagged dirs or a split path)"
+    if _tree_has_video(root):
+        return "it holds video files"
+    return None
+
+
 def _yolo_may_have_work(settings, root: str | Path) -> bool:
-    """False only when a YOLO launch for *root* certainly finds no video."""
-    return _pipeline_run_walks_beyond_root(settings, root) or _tree_has_video(root)
+    """False only when a YOLO launch for *root* is certainly a no-op."""
+    return _yolo_work_reason(settings, root) is not None
 
 
 def _freeze_cache_blocks(combined_cfg, settings) -> list[tuple[str, frozenset[str], dict]]:
@@ -2787,14 +2814,16 @@ def _freeze_cache_blocks(combined_cfg, settings) -> list[tuple[str, frozenset[st
 def _skip_frozen_dataset(settings, root: str, blocks, *, thawed, thaw_all) -> bool:
     """True when *root*'s YOLO launch and per-trial steps can sit out tonight.
 
-    Only a data-frozen dataset (``--thaw`` / ``--thaw-all`` honoured) holding no
-    video at all, whose run walks nothing beyond its own root, and for which
-    every freeze-cache slice the combined step will consult loads under the
-    current fingerprint: build_wide_csv then splices its rows and never walks
-    its root, combine skips it, and no other nightly step reads its per-trial
-    files, so re-deriving them changes no output. A missing or stale slice
-    means a one-night rebuild FROM those files, so they are derived first, as
-    today. Says why for every data-frozen dataset.
+    Only a data-frozen dataset (``--thaw`` / ``--thaw-all`` honoured) whose YOLO
+    launch would certainly be a no-op (_yolo_work_reason: no video at all, a
+    run that walks nothing beyond its own root, CUDA and the model file there)
+    and for which every freeze-cache slice the combined step will consult loads
+    under the current fingerprint: build_wide_csv then splices its rows and
+    never walks its root, combine skips it, and no other nightly step reads its
+    per-trial files, so re-deriving them changes no output. A missing or stale
+    slice means build_wide_csv rebuilds its rows tonight; the dataset then runs
+    exactly as today, so that rebuild and the slice it re-caches see exactly
+    today's inputs. Says why for every data-frozen dataset.
     """
     from fbpipe import freeze as _freeze
 
@@ -2802,18 +2831,9 @@ def _skip_frozen_dataset(settings, root: str, blocks, *, thawed, thaw_all) -> bo
     freeze_data, _ = _freeze.freeze_flags(settings, dataset, thawed=thawed, thaw_all=thaw_all)
     if not freeze_data:
         return False
-    if _pipeline_run_walks_beyond_root(settings, root):
-        print(
-            f"[FROZEN] {dataset}: data-frozen, but its pipeline run walks more than "
-            f"its root (MAIN_DIRECTORIES, flagged dirs or a split path) - running "
-            f"YOLO + per-trial steps as usual."
-        )
-        return False
-    if _tree_has_video(root):
-        print(
-            f"[FROZEN] {dataset}: data-frozen but holds video files - "
-            f"running YOLO + per-trial steps as usual."
-        )
+    why = _yolo_work_reason(settings, root)
+    if why is not None:
+        print(f"[FROZEN] {dataset}: data-frozen, but {why} - running YOLO + per-trial steps as usual.")
         return False
     consulted = [(block, kw) for block, names, kw in blocks if dataset in names]
     if not consulted:
@@ -2833,8 +2853,8 @@ def _skip_frozen_dataset(settings, root: str, blocks, *, thawed, thaw_all) -> bo
         if not valid:
             print(
                 f"[FROZEN] {dataset}: data-frozen but its {block} freeze cache is "
-                f"missing or stale - running per-trial steps so the rebuild reads "
-                f"freshly derived files."
+                f"missing or stale, so build_wide_csv rebuilds its rows tonight - "
+                f"running per-trial steps as usual."
             )
             return False
     print(f"[FROZEN] {dataset}: data-frozen, no videos, cache valid - skipping YOLO + per-trial steps")
@@ -3124,18 +3144,18 @@ def main(argv: Sequence[str] | None = None) -> None:
                 # Checked at the launch's own slot, not up front, so a video
                 # landing mid-run is seen exactly when today's launch would.
                 try:
-                    may_have_work = _yolo_may_have_work(settings, resolved)
+                    why = _yolo_work_reason(settings, resolved)
                 except Exception as exc:  # launch: the worker meets it as today
                     print(f"[analysis] yolo → video pre-check failed for {resolved} ({exc}); launching as usual.")
-                    may_have_work = True
-                if not may_have_work:
+                    why = f"its video pre-check failed: {exc}"
+                if why is None:
                     if resolved not in held_back:
                         print(f"[analysis] yolo → no video files under {resolved}; skipping the worker launch.")
                     continue
                 if resolved in held_back:
                     print(
-                        f"[FROZEN] {Path(resolved).name}: a video appeared after the start "
-                        f"of the run - running YOLO + per-trial steps after all."
+                        f"[FROZEN] {Path(resolved).name}: no longer skippable at its YOLO "
+                        f"slot ({why}) - running YOLO + per-trial steps after all."
                     )
                 _run_pipeline(
                     config_path,

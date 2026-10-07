@@ -5,6 +5,12 @@
 the combined step replaced by recorders, and stops the run right after the
 combined-state write (``_load_model_scores_for_envelopes`` is the next call),
 so no figure, cleanup, sync or notification code is ever reached.
+
+The YOLO pre-check keeps every launch when CUDA is missing (allow_cpu off) or
+the model file is not there, as today's launch would fail the night. So the
+harness gives each run a GPU (``torch.cuda.is_available`` patched, never the
+real device) and a model file that exists; tests about those two pass
+``cuda=False`` or delete the file.
 """
 
 from __future__ import annotations
@@ -47,7 +53,11 @@ def write_config(
     force_pipeline: bool = True,
     force_combined: bool = True,
     num_workers: int = 3,
+    **extra,
 ) -> Path:
+    """*extra* sets further top-level keys (e.g. ``allow_cpu=True``)."""
+    model = tmp_path / "model.pt"
+    model.write_bytes(b"stand-in weights")
     cfg = {
         "dataset_bases": {
             "data": str(tmp_path / "data"),
@@ -58,7 +68,7 @@ def write_config(
             ds: {"freeze": {"data": True, "figures": True}} for ds in frozen
         },
         "cache_dir": str(tmp_path / "cache"),
-        "model_path": str(tmp_path / "model.pt"),
+        "model_path": str(model),
         "force": {
             "pipeline": force_pipeline,
             "combined": force_combined,
@@ -86,6 +96,7 @@ def write_config(
                 },
             }
         },
+        **extra,
     }
     path = tmp_path / "config.yaml"
     path.write_text(yaml.safe_dump(cfg, sort_keys=False), encoding="utf-8")
@@ -103,16 +114,30 @@ def make_dataset(tmp_path: Path, name: str, files=()) -> Path:
     return root
 
 
-def isolate_env(monkeypatch) -> None:
+def isolate_env(monkeypatch, *, cuda: bool = True) -> None:
     for var in _ENV_OVERRIDES:
         monkeypatch.delenv(var, raising=False)
+    import torch
+
+    # What yolo_infer.main and fbpipe.pipeline ask too; never the real device,
+    # so these tests decide the same on a CPU-only machine.
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: cuda)
 
 
-def run_main(monkeypatch, config_path: Path, *argv: str, on_pipeline=None) -> dict:
+def run_main(
+    monkeypatch,
+    config_path: Path,
+    *argv: str,
+    on_pipeline=None,
+    cuda: bool = True,
+    expect=None,
+) -> dict:
     """Run main() up to the combined-state write; return what it launched.
 
     *on_pipeline*, if given, is called with ``(main_directory, steps)`` for
-    every recorded launch -- e.g. to drop a file mid-run.
+    every recorded launch -- e.g. to drop a file mid-run, or to raise as a
+    failing worker would. *expect* is the exception main() must end with
+    (default: the stop after the combined-state write).
     """
     calls: dict = {"pipeline": [], "combined": []}
 
@@ -130,7 +155,7 @@ def run_main(monkeypatch, config_path: Path, *argv: str, on_pipeline=None) -> di
     def _stop(settings):
         raise StopAfterCombined
 
-    isolate_env(monkeypatch)
+    isolate_env(monkeypatch, cuda=cuda)
     monkeypatch.setattr(rw, "_run_pipeline", _run_pipeline)
     monkeypatch.setattr(rw, "_run_combined", _run_combined)
     monkeypatch.setattr(rw, "_load_light_checks_for_envelopes", lambda: None)
@@ -144,7 +169,7 @@ def run_main(monkeypatch, config_path: Path, *argv: str, on_pipeline=None) -> di
     monkeypatch.setattr(envelope_combined, "set_runtime_settings", lambda cfg: None)
     monkeypatch.setattr(envelope_exports, "set_runtime_settings", lambda cfg: None)
 
-    with pytest.raises(StopAfterCombined):
+    with pytest.raises(expect or StopAfterCombined):
         rw.main(["--config", str(config_path), *argv])
     return calls
 

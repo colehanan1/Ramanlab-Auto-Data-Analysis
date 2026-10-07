@@ -8,11 +8,20 @@ be copied to secured storage and deleted by the secure cleanup without ever
 being inferred, silently losing the trial. So it counts any video-suffixed
 entry anywhere under the root -- ignoring folder freeze, depth and type -- and
 the superset property is pinned against yolo_infer.main's real discovery.
+
+A launch that would FAIL must happen too. Without CUDA (allow_cpu off), or
+with no model file, yolo_infer.main raises before it looks for a video, so
+today's launch stops the night loudly even for an empty root. Skipped, the
+night would go on and the per-trial steps would run their CPU variants, whose
+outputs differ from the GPU path's. The contract, pinned against the real
+worker below: a skipped launch is one that would have run to completion
+without opening a video or writing a file.
 """
 
 from __future__ import annotations
 
 import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -21,6 +30,8 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+
+import torch  # noqa: E402
 
 from fbpipe.config import DatasetOverride, Settings  # noqa: E402
 from fbpipe.utils.frozen_folders import FolderRule  # noqa: E402
@@ -55,6 +66,16 @@ LAYOUTS = [
     ("empty batch", []),
 ]
 NO_VIDEO = {"tables only", "video-like names that are not videos", "empty batch"}
+
+
+def _model(tmp_path: Path, name: str = "best.engine") -> Path:
+    """A stand-in for the live model, laid out like it (runs/obb/.../weights).
+    Ultralytics loads an engine lazily, at the first predict, so YOLO() on it
+    only needs the file to exist."""
+    path = tmp_path / "runs" / "obb" / "train" / "weights" / name
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b"stand-in engine")
+    return path
 
 
 def _build(tmp_path: Path, files) -> Path:
@@ -159,7 +180,7 @@ def test_loop_launches_when_the_precheck_itself_fails(tmp_path, monkeypatch, cap
     def _boom(settings, root):
         raise OSError("flagged root unreadable")
 
-    monkeypatch.setattr(rw, "_yolo_may_have_work", _boom)
+    monkeypatch.setattr(rw, "_yolo_work_reason", _boom)
     calls = run_main(monkeypatch, cfg)
     assert yolo_launches(calls) == ["Live-A"]
     assert per_trial_runs(calls) == ["Live-A"]
@@ -250,7 +271,7 @@ def test_main_directories_env_always_launches(tmp_path, monkeypatch):
     # handed, so the one root says nothing about what the launch would see.
     isolate_env(monkeypatch)
     root = _build(tmp_path, [])
-    settings = Settings(model_path="m.pt", main_directories=[str(root)])
+    settings = Settings(model_path=str(_model(tmp_path)), main_directories=[str(root)])
     assert rw._yolo_may_have_work(settings, str(root)) is False
     monkeypatch.setenv("MAIN_DIRECTORIES", str(tmp_path / "other"))
     assert rw._yolo_may_have_work(settings, str(root)) is True
@@ -267,7 +288,7 @@ def test_a_root_the_worker_would_not_read_as_given_always_launches(tmp_path, mon
     isolate_env(monkeypatch)
     root = tmp_path / name
     (root / BATCH).mkdir(parents=True)
-    settings = Settings(model_path="m.pt", main_directories=[str(root)])
+    settings = Settings(model_path=str(_model(tmp_path)), main_directories=[str(root)])
     assert rw._tree_has_video(root) is False
     assert rw._yolo_may_have_work(settings, str(root)) is True
 
@@ -279,14 +300,178 @@ def test_auto_discovered_flagged_dirs_always_launch(tmp_path, monkeypatch):
     flagged = tmp_path / "flagged_root"
     (flagged / "some_flagged_experiment").mkdir(parents=True)
     settings = Settings(
-        model_path="m.pt", main_directories=[str(root)], flagged_root=str(flagged)
+        model_path=str(_model(tmp_path)), main_directories=[str(root)], flagged_root=str(flagged)
     )
     assert rw._yolo_may_have_work(settings, str(root)) is True
     settings.auto_discover_flagged = False
     assert rw._yolo_may_have_work(settings, str(root)) is False
 
 
+# --- launches that would fail before they look for a video -------------------
+
+def test_no_cuda_keeps_the_launch_so_the_night_still_fails_loudly(tmp_path, monkeypatch):
+    isolate_env(monkeypatch)
+    root = _build(tmp_path, [])
+    settings = Settings(model_path=str(_model(tmp_path)), main_directories=[str(root)])
+    assert rw._yolo_may_have_work(settings, str(root)) is False
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    assert rw._yolo_may_have_work(settings, str(root)) is True
+    assert "CUDA is unavailable" in rw._yolo_work_reason(settings, str(root))
+    # allow_cpu (smoke tests only) runs YOLO on the CPU instead of raising, so
+    # an empty root is a no-op again.
+    settings.allow_cpu = True
+    assert rw._yolo_may_have_work(settings, str(root)) is False
+
+
+@pytest.mark.parametrize(
+    "present,model_name,must_launch",
+    [
+        ((), "best.engine", True),
+        (("best.engine",), "best.engine", False),  # the live layout
+        (("best.engine",), "best.pt", False),  # yolo_infer prefers the .engine sibling
+        (("best.pt",), "best.pt", False),  # ...and falls back to the .pt itself
+        (("other.engine",), "best.pt", True),  # nothing YOLO() would load
+    ],
+    ids=["nothing", "engine", "engine beside the .pt", ".pt only", "unrelated file"],
+)
+def test_a_missing_model_keeps_the_launch(tmp_path, monkeypatch, present, model_name, must_launch):
+    # YOLO() raises FileNotFoundError before discovery: today's launch fails.
+    isolate_env(monkeypatch)
+    root = _build(tmp_path, [])
+    weights = tmp_path / "weights"
+    weights.mkdir()
+    for name in present:
+        (weights / name).write_bytes(b"x")
+    settings = Settings(model_path=str(weights / model_name), main_directories=[str(root)])
+    assert rw._yolo_may_have_work(settings, str(root)) is must_launch
+    if must_launch:
+        assert "is missing" in rw._yolo_work_reason(settings, str(root))
+
+
+# (label, CUDA available, allow_cpu, model file present)
+WORKER_STATES = [
+    ("gpu", True, False, True),  # the nightly
+    ("no cuda", False, False, True),
+    ("no cuda, allow_cpu", False, True, True),
+    ("no model", True, False, False),
+    ("no model, allow_cpu", False, True, False),
+]
+
+
+def _real_yolo_main(monkeypatch, settings):
+    """Run yolo_infer.main as a launch would, with the REAL ultralytics YOLO
+    class; only cv2.VideoCapture is stubbed. Returns (exception, opened)."""
+    yolo_infer = pytest.importorskip("fbpipe.steps.yolo_infer")
+    opened: list[Path] = []
+
+    class _Capture:
+        def __init__(self, path):
+            opened.append(Path(path))
+
+        def isOpened(self):
+            return False
+
+    monkeypatch.delenv("NUM_WORKERS", raising=False)
+    monkeypatch.delenv("WORKER_INDEX", raising=False)
+    monkeypatch.setattr(yolo_infer.cv2, "VideoCapture", _Capture)
+    # yolo_infer.main sets these process-wide; have them put back afterwards.
+    monkeypatch.setattr(torch.backends.cudnn, "benchmark", torch.backends.cudnn.benchmark)
+    monkeypatch.setattr(torch.backends.cudnn, "allow_tf32", torch.backends.cudnn.allow_tf32)
+    monkeypatch.setattr(torch.backends.cuda.matmul, "allow_tf32", torch.backends.cuda.matmul.allow_tf32)
+    try:
+        yolo_infer.main(settings)
+    except Exception as exc:  # what a failing worker would exit with
+        return exc, opened
+    return None, opened
+
+
+def _worker_settings(tmp_path, monkeypatch, root, state):
+    _, cuda, allow_cpu, model_present = state
+    model = _model(tmp_path)
+    if not model_present:
+        model.unlink()
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: cuda)
+    return Settings(
+        model_path=str(model),
+        main_directories=[str(root)],
+        allow_cpu=allow_cpu,
+        dataset_overrides={DS: DatasetOverride(freeze_folders=(FolderRule("frozen_*"),))},
+    )
+
+
+@pytest.mark.parametrize("state", WORKER_STATES, ids=[s[0] for s in WORKER_STATES])
+@pytest.mark.parametrize("label,files", LAYOUTS, ids=[label for label, _ in LAYOUTS])
+def test_a_skipped_launch_is_one_that_would_have_succeeded_as_a_no_op(
+    tmp_path, monkeypatch, label, files, state
+):
+    isolate_env(monkeypatch)
+    root = _build(tmp_path, files)
+    settings = _worker_settings(tmp_path, monkeypatch, root, state)
+    # Decide BEFORE yolo_infer runs: it creates trial out_dirs as it goes.
+    skipped = not rw._yolo_may_have_work(settings, str(root))
+    before = _snapshot(tmp_path)
+    raised, opened = _real_yolo_main(monkeypatch, settings)
+    if skipped:
+        assert raised is None, f"{label}/{state[0]}: the skipped launch would have failed: {raised!r}"
+        assert opened == []
+        assert _snapshot(tmp_path) == before
+
+
+@pytest.mark.parametrize(
+    "state,error",
+    [(WORKER_STATES[1], RuntimeError), (WORKER_STATES[3], FileNotFoundError),
+     (WORKER_STATES[4], FileNotFoundError)],
+    ids=["no cuda", "no model", "no model, allow_cpu"],
+)
+def test_the_real_worker_fails_an_empty_root_in_those_states(tmp_path, monkeypatch, state, error):
+    """Sanity check on the harness above: these launches really do fail, so the
+    skip test cannot pass by never meeting a failing one."""
+    isolate_env(monkeypatch)
+    root = _build(tmp_path, [])
+    settings = _worker_settings(tmp_path, monkeypatch, root, state)
+    raised, opened = _real_yolo_main(monkeypatch, settings)
+    assert isinstance(raised, error)
+    assert opened == []
+    assert rw._yolo_may_have_work(settings, str(root)) is True
+
+
 # --- the dataset loop ---------------------------------------------------------
+
+def test_loop_without_cuda_launches_every_root_as_today(tmp_path, monkeypatch):
+    for name in ("Live-A", "Live-B"):
+        make_dataset(tmp_path, name, [f"{BATCH}/{STEM}.csv"])
+    cfg = write_config(tmp_path, ["Live-A", "Live-B"])
+    calls = run_main(monkeypatch, cfg, cuda=False)
+    assert yolo_launches(calls) == ["Live-A", "Live-B"]
+
+
+def test_loop_without_cuda_still_stops_at_the_first_failing_launch(tmp_path, monkeypatch):
+    # Today the first YOLO worker exits non-zero, _run_pipeline raises and the
+    # night ends there -- before any per-trial step could run on the CPU.
+    for name in ("Live-A", "Live-B"):
+        make_dataset(tmp_path, name, [f"{BATCH}/{STEM}.csv"])
+    cfg = write_config(tmp_path, ["Live-A", "Live-B"])
+
+    def _worker_fails(main_directory, steps):
+        if steps == ("yolo",):
+            raise subprocess.CalledProcessError(1, ["fbpipe.pipeline", "yolo"])
+
+    calls = run_main(
+        monkeypatch, cfg, cuda=False, on_pipeline=_worker_fails,
+        expect=subprocess.CalledProcessError,
+    )
+    assert yolo_launches(calls) == ["Live-A"]
+    assert per_trial_runs(calls) == []
+
+
+def test_loop_with_allow_cpu_skips_empty_launches_without_cuda(tmp_path, monkeypatch):
+    for name in ("Live-A", "Live-B"):
+        make_dataset(tmp_path, name, [f"{BATCH}/{STEM}.csv"])
+    cfg = write_config(tmp_path, ["Live-A", "Live-B"], allow_cpu=True)
+    calls = run_main(monkeypatch, cfg, cuda=False)
+    assert yolo_launches(calls) == []
+    assert per_trial_runs(calls) == ["Live-A", "Live-B"]
+
 
 def test_loop_launches_yolo_only_where_a_video_exists(tmp_path, monkeypatch, capsys):
     make_dataset(tmp_path, "Live-A", [f"{BATCH}/{STEM}.csv", f"{BATCH}/{STEM}.mp4"])

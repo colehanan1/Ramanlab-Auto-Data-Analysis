@@ -6,11 +6,14 @@ re-derived all of them (~6.5 min for 16 datasets). The dataset loop now skips
 BOTH its YOLO launch and its per-trial subprocess, but only when ALL hold:
 
   (a) it is data-frozen this run (``--thaw`` / ``--thaw-all`` honoured);
-  (b) it holds no video file at all (the YOLO pre-check's superset rule);
+  (b) its YOLO launch would certainly succeed without finding a video: no
+      video file at all (the YOLO pre-check's superset rule), and CUDA and the
+      model file are there -- without them today's launch fails the night;
   (c) every freeze-cache slice the combined step will consult for it exists
       and matches the current fingerprint -- i.e. build_wide_csv will splice
-      it. A missing/stale slice means a one-night rebuild FROM the per-trial
-      files, so those must be freshly derived first, exactly as today;
+      it. A missing/stale slice means build_wide_csv rebuilds the dataset's
+      rows tonight, so the dataset runs exactly as today and that rebuild (and
+      the slice it re-caches) sees exactly today's inputs;
   (d) not ``--folder`` mode, which keeps today's force-everything behaviour.
 
 A skipped dataset's pipeline state is left untouched. Its YOLO slot still
@@ -31,6 +34,10 @@ import yaml
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+
+import subprocess  # noqa: E402
+
+import torch  # noqa: E402
 
 from fbpipe import freeze as _freeze  # noqa: E402
 from fbpipe.config import load_settings  # noqa: E402
@@ -403,6 +410,22 @@ def test_main_directories_env_runs_the_steps(scene, monkeypatch):
     assert _decide(scene) is False
 
 
+def test_no_cuda_runs_the_steps(scene, monkeypatch, capsys):
+    # Today's YOLO launch for it fails the night without CUDA (allow_cpu off);
+    # that launch has to happen, not be skipped along with the steps.
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    assert _decide(scene) is False
+    assert f"[FROZEN] {FROZEN}: data-frozen, but CUDA is unavailable" in capsys.readouterr().out
+    scene["settings"].allow_cpu = True
+    assert _decide(scene) is True
+
+
+def test_a_missing_model_runs_the_steps(scene, capsys):
+    Path(scene["settings"].model_path).unlink()
+    assert _decide(scene) is False
+    assert "is missing" in capsys.readouterr().out
+
+
 # --- the dataset loop ---------------------------------------------------------
 
 def _state_file(tmp_path: Path, root: Path) -> Path:
@@ -429,10 +452,30 @@ def test_loop_skips_the_frozen_dataset_entirely(scene, monkeypatch, capsys):
 def test_loop_runs_a_frozen_dataset_whose_cache_is_stale(scene, monkeypatch):
     _drop_slice(scene)
     calls = run_main(monkeypatch, scene["cfg"])
-    # No video anywhere, so no YOLO launch -- but the per-trial steps run so the
-    # rebuild reads freshly derived files.
+    # No video anywhere, so no YOLO launch -- but on a rebuild night the
+    # dataset runs its per-trial steps exactly as today.
     assert yolo_launches(calls) == []
     assert per_trial_runs(calls) == [LIVE, FROZEN]
+
+
+def test_loop_without_cuda_runs_the_frozen_dataset_as_today(scene, monkeypatch, capsys):
+    calls = run_main(monkeypatch, scene["cfg"], cuda=False)
+    assert yolo_launches(calls) == [LIVE, FROZEN]
+    assert per_trial_runs(calls) == [LIVE, FROZEN]
+    assert "skipping YOLO + per-trial steps" not in capsys.readouterr().out
+
+
+def test_loop_without_cuda_fails_at_the_first_launch_as_today(scene, monkeypatch):
+    def _worker_fails(main_directory, steps):
+        if steps == ("yolo",):
+            raise subprocess.CalledProcessError(1, ["fbpipe.pipeline", "yolo"])
+
+    calls = run_main(
+        monkeypatch, scene["cfg"], cuda=False, on_pipeline=_worker_fails,
+        expect=subprocess.CalledProcessError,
+    )
+    assert yolo_launches(calls) == [LIVE]
+    assert per_trial_runs(calls) == []
 
 
 def test_loop_runs_a_frozen_dataset_when_the_decision_itself_fails(scene, monkeypatch, capsys):
@@ -457,7 +500,7 @@ def test_loop_folder_mode_keeps_todays_behaviour(scene, monkeypatch):
     assert per_trial_runs(calls) == [FROZEN]
 
 
-def test_video_landing_after_the_start_of_the_run_is_still_inferred(scene, monkeypatch):
+def test_video_landing_after_the_start_of_the_run_is_still_inferred(scene, monkeypatch, capsys):
     """The skip is provisional until the dataset's own YOLO slot: a video that
     appears before then is launched for, exactly as today's launch would."""
     (Path(scene["live_root"]) / BATCH / f"{STEM}.mp4").write_text("x\n", encoding="utf-8")
@@ -471,3 +514,30 @@ def test_video_landing_after_the_start_of_the_run_is_still_inferred(scene, monke
 
     assert yolo_launches(calls) == [LIVE, FROZEN]
     assert per_trial_runs(calls) == [LIVE, FROZEN]
+    assert (
+        f"[FROZEN] {FROZEN}: no longer skippable at its YOLO slot (it holds video files)"
+        in capsys.readouterr().out
+    )
+
+
+def test_a_held_back_dataset_whose_slot_check_fails_says_so(scene, monkeypatch, capsys):
+    # It runs as today -- and the log names the failed check, not a video.
+    real = rw._yolo_work_reason
+    frozen_checks = []
+
+    def _slot_check_fails(settings, root):
+        if Path(root).name == FROZEN:
+            frozen_checks.append(root)
+            if len(frozen_checks) > 1:  # the decision's check passed; the slot's fails
+                raise OSError("flagged root unreadable")
+        return real(settings, root)
+
+    monkeypatch.setattr(rw, "_yolo_work_reason", _slot_check_fails)
+    calls = run_main(monkeypatch, scene["cfg"])
+
+    assert yolo_launches(calls) == [FROZEN]
+    assert per_trial_runs(calls) == [LIVE, FROZEN]
+    out = capsys.readouterr().out
+    assert f"[FROZEN] {FROZEN}: no longer skippable at its YOLO slot" in out
+    assert "flagged root unreadable" in out
+    assert "video appeared" not in out
