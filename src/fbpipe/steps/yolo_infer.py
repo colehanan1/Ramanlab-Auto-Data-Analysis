@@ -583,8 +583,10 @@ def main(cfg: Settings):
     num_workers = max(1, int(os.getenv("NUM_WORKERS", "1")))
     worker_index = int(os.getenv("WORKER_INDEX", "0")) % num_workers
     if num_workers > 1:
-        # Cap OpenCV/torch CPU threads so N workers don't oversubscribe the cores
-        # (BLAS/OpenMP pools are capped via env in the driver, before import).
+        # Cap OpenCV/torch CPU threads so N workers don't oversubscribe the cores.
+        # BLAS pools are capped via env before numpy is imported, by the
+        # launchers: scripts/pipeline/parallel_yolo.py and run_workflows' YOLO
+        # fan-out set OPENBLAS/MKL/NUMEXPR_NUM_THREADS=1 for their workers.
         _t = max(1, (os.cpu_count() or num_workers) // num_workers)
         try:
             cv2.setNumThreads(_t)
