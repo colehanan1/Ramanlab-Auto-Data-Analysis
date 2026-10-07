@@ -136,6 +136,36 @@ def test_unreadable_dir_counts_as_maybe_video(tmp_path, monkeypatch):
     assert rw._tree_has_video(root) is True
 
 
+def test_a_root_that_cannot_be_stat_ed_counts_as_maybe_video(tmp_path, monkeypatch):
+    # Python 3.12's Path.is_dir() re-raises PermissionError. The pre-check must
+    # not crash main() over it: launching lets the worker meet the error exactly
+    # where today's launch would.
+    root = _build(tmp_path, [f"{BATCH}/{STEM}.csv"])
+    real_is_dir = Path.is_dir
+
+    def _is_dir(self):
+        if self == root:
+            raise PermissionError(str(self))
+        return real_is_dir(self)
+
+    monkeypatch.setattr(Path, "is_dir", _is_dir)
+    assert rw._tree_has_video(root) is True
+
+
+def test_loop_launches_when_the_precheck_itself_fails(tmp_path, monkeypatch, capsys):
+    make_dataset(tmp_path, "Live-A", [f"{BATCH}/{STEM}.csv"])
+    cfg = write_config(tmp_path, ["Live-A"])
+
+    def _boom(settings, root):
+        raise OSError("flagged root unreadable")
+
+    monkeypatch.setattr(rw, "_yolo_may_have_work", _boom)
+    calls = run_main(monkeypatch, cfg)
+    assert yolo_launches(calls) == ["Live-A"]
+    assert per_trial_runs(calls) == ["Live-A"]
+    assert "flagged root unreadable" in capsys.readouterr().out
+
+
 # --- superset of yolo_infer.main's own discovery ----------------------------
 
 def _yolo_discovery(monkeypatch, tmp_path, root: Path) -> list[Path]:

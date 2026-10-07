@@ -411,6 +411,18 @@ def test_loop_runs_a_frozen_dataset_whose_cache_is_stale(scene, monkeypatch):
     assert per_trial_runs(calls) == [LIVE, FROZEN]
 
 
+def test_loop_runs_a_frozen_dataset_when_the_decision_itself_fails(scene, monkeypatch, capsys):
+    # The skip is an optimisation: an error while deciding must neither kill
+    # the night nor skip the dataset -- it runs exactly as today.
+    def _boom(*a, **k):
+        raise OSError("cannot list the flagged root")
+
+    monkeypatch.setattr(rw, "_skip_frozen_dataset", _boom)
+    calls = run_main(monkeypatch, scene["cfg"])
+    assert per_trial_runs(calls) == [LIVE, FROZEN]
+    assert "cannot list the flagged root" in capsys.readouterr().out
+
+
 def test_loop_thaw_runs_the_frozen_dataset(scene, monkeypatch):
     calls = run_main(monkeypatch, scene["cfg"], "--thaw", FROZEN)
     assert per_trial_runs(calls) == [LIVE, FROZEN]

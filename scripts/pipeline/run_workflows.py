@@ -2599,8 +2599,11 @@ def _tree_has_video(root: str | Path) -> bool:
     A missing root has nothing to launch for -- yolo_infer skips it as well.
     """
     start = Path(root)
-    if not start.is_dir():
-        return False
+    try:
+        if not start.is_dir():
+            return False
+    except OSError:  # e.g. EACCES: let the worker meet it, as today's launch would
+        return True
     seen: set[tuple[int, int]] = set()
     stack = [start]
     while stack:
@@ -3075,13 +3078,22 @@ def main(argv: Sequence[str] | None = None) -> None:
                 pipeline_expectation = _pipeline_expectation(
                     settings, Path(resolved)
                 )
-                if freeze_blocks is not None and _skip_frozen_dataset(
-                    settings,
-                    resolved,
-                    freeze_blocks,
-                    thawed=args.thaw or (),
-                    thaw_all=args.thaw_all,
-                ):
+                skip_frozen = False
+                if freeze_blocks is not None:
+                    try:
+                        skip_frozen = _skip_frozen_dataset(
+                            settings,
+                            resolved,
+                            freeze_blocks,
+                            thawed=args.thaw or (),
+                            thaw_all=args.thaw_all,
+                        )
+                    except Exception as exc:  # an optimisation must never cost a dataset
+                        print(
+                            f"[FROZEN] {Path(resolved).name}: could not decide on a skip "
+                            f"({exc}) - running YOLO + per-trial steps as usual."
+                        )
+                if skip_frozen:
                     # Still a YOLO target: its slot re-checks for a video just
                     # before the launch would have happened, as the launch would.
                     yolo_targets.append(resolved)
@@ -3110,7 +3122,12 @@ def main(argv: Sequence[str] | None = None) -> None:
             for resolved in yolo_targets:
                 # Checked at the launch's own slot, not up front, so a video
                 # landing mid-run is seen exactly when today's launch would.
-                if not _yolo_may_have_work(settings, resolved):
+                try:
+                    may_have_work = _yolo_may_have_work(settings, resolved)
+                except Exception as exc:  # launch: the worker meets it as today
+                    print(f"[analysis] yolo → video pre-check failed for {resolved} ({exc}); launching as usual.")
+                    may_have_work = True
+                if not may_have_work:
                     if resolved not in held_back:
                         print(f"[analysis] yolo → no video files under {resolved}; skipping the worker launch.")
                     continue
