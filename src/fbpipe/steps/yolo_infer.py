@@ -678,6 +678,7 @@ def main(cfg: Settings):
 
     roots = get_main_directories(cfg)
     _job_idx = -1
+    force_libx264 = False  # set by an NVENC failure, for the rest of this process
     no_video_trials: List[str] = []
     for root in sorted(roots, key=str):
         if not root.is_dir():
@@ -812,7 +813,7 @@ def main(cfg: Settings):
                 # replaces the old write-then-re-encode flow: one encode instead
                 # of two (~half the CPU), and yuv420p/faststart keep the output
                 # broadly playable. Fall back to OpenCV mp4v if ffmpeg is absent.
-                if is_rerun:
+                if is_rerun or force_libx264:
                     writer = FFmpegFrameWriter(out_mp4, fps, out_w, out_h, crf=30, preset="medium",
                                                encoder="libx264")
                 else:
@@ -859,6 +860,11 @@ def main(cfg: Settings):
                 video_error = writer_unavailable or _annotated_video_failure(writer, out_mp4, len(rows))
                 if video_error and not (is_rerun or writer_unavailable):
                     _discard_failed_trial_outputs(out_dir, out_mp4, video_path.name, video_error)
+                    if getattr(writer, "encoder_used", None) == "h264_nvenc":
+                        # Running out of VRAM tends to last, so later trials skip NVENC
+                        # rather than each paying for a failed pass first.
+                        force_libx264 = True
+                        print("[YOLO] h264_nvenc failed; this process encodes its remaining annotated videos with libx264")
                     queue.appendleft((video_path, True, first_track_id))
                     continue
                 if video_error:

@@ -478,6 +478,7 @@ class _WriterDyingAfter:
     reports the exit status."""
 
     keep = 3
+    encoder_used = "libx264"  # the tests switch NVENC off
 
     def __init__(self, path, *a, **k):
         Path(path).write_bytes(b"\x00" * 4096)  # the partial mp4 ffmpeg leaves
@@ -666,6 +667,33 @@ def test_rerun_replays_track_ids_so_every_table_matches_a_clean_run(tmp_path, mo
     )
 
 
+class _NvencWriterDyingAfter(_WriterDyingAfter):
+    encoder_used = "h264_nvenc"
+
+
+def test_nvenc_failure_moves_the_rest_of_the_process_to_libx264(tmp_path, monkeypatch, capsys):
+    """NVENC dies when VRAM runs out, which tends to last: after one NVENC
+    failure the process's later trials go straight to libx264 instead of each
+    paying for a failed NVENC pass first."""
+    ffmpeg_bin = _real_ffmpeg_with_libx264()
+    constructed = []
+    monkeypatch.setattr(
+        yolo_infer, "FFmpegFrameWriter",
+        _writer_factory(constructed, fails=lambda t, e: e == "auto", dying=_NvencWriterDyingAfter),
+    )
+    out_dir, _ = _run_main(tmp_path, monkeypatch, ffmpeg_bin=ffmpeg_bin, videos=VIDEOS)
+    batch = out_dir.parent
+
+    assert constructed == [(TRIALS[0], "auto"), (TRIALS[0], "libx264"),
+                           (TRIALS[1], "libx264"), (TRIALS[2], "libx264")]
+    for trial in TRIALS:
+        assert (batch / trial / f"{trial}_distances_merged.parquet").exists()
+        assert _frame_count(batch / trial / f"{trial}_distance_annotated.mp4") == N_FRAMES
+    out = capsys.readouterr().out
+    assert out.count("h264_nvenc failed") == 1, out
+    assert NO_VIDEO_SUMMARY not in out
+
+
 class _WriterDyingBesideAStrayFile(_WriterDyingAfter):
     """...while something else lands in the trial folder, so it cannot be removed."""
 
@@ -692,7 +720,8 @@ def test_rerun_runs_even_when_the_trial_folder_could_not_be_removed(tmp_path, mo
 
 def test_rerun_keeps_the_worker_slice(tmp_path, monkeypatch, capsys):
     """NUM_WORKERS/WORKER_INDEX slicing counts each video once: re-running worker
-    0's first video must not shift which videos are worker 0's."""
+    0's first video must not shift which videos are worker 0's. (Its encoder
+    was libx264, not NVENC, so the next video still asks for the default.)"""
     ffmpeg_bin = _real_ffmpeg_with_libx264()
     constructed = []
     monkeypatch.setattr(
