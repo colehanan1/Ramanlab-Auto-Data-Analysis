@@ -27,6 +27,9 @@ def test_write_latches_dead_after_first_broken_pipe():
     writer.proc = _FakeProc()
     writer.encoder_used = "libx264"
     writer._dead = False
+    writer.frames_written = 0
+    writer.returncode = None
+    writer.error = None
 
     frame = np.zeros((4, 4, 3), dtype=np.uint8)
 
@@ -39,6 +42,10 @@ def test_write_latches_dead_after_first_broken_pipe():
     assert writer.write(frame) is False
     assert writer.write(frame) is False
     assert writer.proc.stdin.write_calls == 1
+
+    # ...and the failure is on record for the caller to act on.
+    assert writer.frames_written == 0
+    assert "Broken pipe" in writer.error
 
 
 def test_init_skips_ffmpeg_missing_both_encoders(monkeypatch):
