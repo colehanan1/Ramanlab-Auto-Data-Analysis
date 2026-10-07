@@ -220,6 +220,29 @@ def test_superset_covers_yolos_whole_batch_level_discovery(tmp_path, monkeypatch
     assert [p.parent.name for p in discovered] == [BATCH]
 
 
+def _snapshot(top: Path) -> dict:
+    return {
+        str(p.relative_to(top)): (p.is_dir(), p.stat().st_size, p.stat().st_mtime_ns)
+        for p in sorted(top.rglob("*"))
+    }
+
+
+@pytest.mark.parametrize(
+    "label,files",
+    [(label, files) for label, files in LAYOUTS if label in NO_VIDEO],
+    ids=[label for label, _ in LAYOUTS if label in NO_VIDEO],
+)
+def test_a_launch_the_precheck_skips_would_have_written_nothing(tmp_path, monkeypatch, label, files):
+    """Skipping a launch preserves outputs only while yolo_infer, given a root
+    with no video, creates or touches nothing. Should yolo_infer ever start to,
+    the skip has to be revisited."""
+    root = _build(tmp_path, files)
+    assert rw._tree_has_video(root) is False
+    before = _snapshot(tmp_path)
+    assert _yolo_discovery(monkeypatch, tmp_path, root) == []
+    assert _snapshot(tmp_path) == before
+
+
 # --- launches that walk more than the one root ------------------------------
 
 def test_main_directories_env_always_launches(tmp_path, monkeypatch):
