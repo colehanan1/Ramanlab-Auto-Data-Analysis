@@ -80,6 +80,8 @@ def _process_fly_dir(fly_dir: Path, cfg: Settings) -> None:
         if pct_col and pct_col not in cols:
             cols.append(pct_col)
 
+        # reject_bad_proboscis predicts this name to skip, in forced runs, the
+        # copies rewritten here (tests/test_fly_files_exclude_dirs.py pins both).
         out_path = dest / ("updated_" + csv_path.name)
         out_parquet = table_path(out_path)
         if (

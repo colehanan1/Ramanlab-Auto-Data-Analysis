@@ -46,6 +46,8 @@ def _process_fly_dir(fly_dir: Path, cfg: Settings) -> None:
     force_recompute = bool(getattr(getattr(cfg, "force", None), "pipeline", False))
 
     print(f"[DIST] Inspecting fly directory: {fly_dir.name}")
+    # Only the per-trial tables are read: the RMS copies hold no raw distance
+    # column, so they never added to a slot's range.
     entries = list(
         iter_fly_distance_csvs(fly_dir, recursive=True, exclude_dirs=DERIVED_TABLE_DIRS)
     )
@@ -56,7 +58,11 @@ def _process_fly_dir(fly_dir: Path, cfg: Settings) -> None:
     if force_recompute:
         tokens_to_refresh = {token for _, token, _ in entries}
     else:
-        for csv_path, token, _ in entries:
+        # Decided over the default scan, copies included, as it always was: a
+        # copy never has the exact "distance_percentage" column, so every slot
+        # with copies re-derives here, which is what brings the stats up to
+        # date after a gate change in a non-force run.
+        for csv_path, token, _ in iter_fly_distance_csvs(fly_dir, recursive=True):
             stats_path = _stats_path_for_token(fly_dir, token)
             if not stats_path.exists():
                 tokens_to_refresh.add(token)

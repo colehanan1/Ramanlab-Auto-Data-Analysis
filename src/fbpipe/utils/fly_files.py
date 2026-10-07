@@ -13,10 +13,10 @@ _FLY_SLOT_REGEX = re.compile(
 
 # Batch subdirectories that hold DERIVED tables, never per-trial sources:
 # rms_copy_filter's ``updated_*_flyN_distances`` copies (which match the slot
-# pattern) and combine's envelope CSVs. reject_bad_proboscis, distance_stats,
-# distance_normalize* and detect_dropped_frames pass this as ``exclude_dirs``
-# so they do not re-read the copies that rms_copy_filter overwrites from their
-# sources anyway (rms_copy_filter itself keeps the default scan).
+# pattern) and combine's envelope CSVs. The copies hold no raw distance column,
+# so distance_normalize* and detect_dropped_frames pass this as
+# ``exclude_dirs``, and distance_stats does for the tables it reads.
+# reject_bad_proboscis and rms_copy_filter keep the default scan.
 DERIVED_TABLE_DIRS: Tuple[str, ...] = ("RMS_calculations", "angle_distance_rms_envelope")
 
 

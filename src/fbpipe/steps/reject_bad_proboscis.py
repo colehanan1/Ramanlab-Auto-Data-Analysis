@@ -21,7 +21,7 @@ from __future__ import annotations
 import logging
 from functools import partial
 from pathlib import Path
-from typing import Tuple
+from typing import Dict, List, Tuple
 
 import pandas as pd
 
@@ -34,6 +34,32 @@ from ..utils.rig_gates import apply_rig_gate_overrides
 from ..utils.tables import read_table, write_table
 
 log = logging.getLogger("fbpipe.reject_proboscis")
+
+
+def _copies_rms_copy_filter_rewrites(fly_dir: Path, entries: List[Path]) -> Dict[Path, str]:
+    """RMS copies in *entries* that rms_copy_filter rewrites from a per-trial
+    source in *entries*, mapped to that source's stem.
+
+    rms_copy_filter writes every table it finds outside
+    ``<fly_dir>/RMS_calculations`` to ``<fly_dir>/RMS_calculations/updated_<stem>
+    .parquet``. Only that exact file of a source outside every
+    ``DERIVED_TABLE_DIRS`` dir is mapped; orphan copies, legacy .csv copies,
+    copies of copies and a nested batch's own copies (e.g. ``flagged/<batch>/
+    RMS_calculations``) are not. *entries* are paths as iter_fly_distance_csvs
+    yields them for *fly_dir*, i.e. below the resolved *fly_dir*.
+    """
+    base = fly_dir.expanduser().resolve()
+    depth = len(base.parts)
+    derived = frozenset(DERIVED_TABLE_DIRS)
+    sources = {p.stem for p in entries if derived.isdisjoint(p.parts[depth:-1])}
+    rms_dir = base / "RMS_calculations"
+    rewritten: Dict[Path, str] = {}
+    for p in entries:
+        if p.parent != rms_dir or p.suffix != ".parquet" or not p.stem.startswith("updated_"):
+            continue
+        if p.stem[len("updated_"):] in sources:
+            rewritten[p] = p.stem[len("updated_"):]
+    return rewritten
 
 
 def _process_fly_dir(fly_dir: Path, cfg: Settings) -> Tuple[int, int, int]:
@@ -51,18 +77,31 @@ def _process_fly_dir(fly_dir: Path, cfg: Settings) -> Tuple[int, int, int]:
     max_dist = float(pf.max_eye_prob_distance_px)
     max_jump = float(pf.max_jump_px)
     up_divisor = float(getattr(pf, "up_divisor", 4.0))
+    force_recompute = bool(getattr(getattr(cfg, "force", None), "pipeline", False))
+
+    entries = [p for p, _, _ in iter_fly_distance_csvs(fly_dir, recursive=True)]
+    # Forced, rms_copy_filter (later in the same run) rewrites the RMS copy of
+    # every source it can read, from that source as gated here, so gating the
+    # copy as well is wasted work: such copies go last and are skipped once
+    # their source has been read. Everything else is gated as before: orphan
+    # copies, a nested batch's copies, copies of copies, the copy of a source
+    # that does not read, and every copy in a non-force run (rms_copy_filter
+    # keeps a copy that is newer than its source).
+    rewritten = _copies_rms_copy_filter_rewrites(fly_dir, entries) if force_recompute else {}
+    read_stems: set[str] = set()
 
     files_modified = 0
     geo_total = 0
     vel_total = 0
-    for csv_path, token, _ in iter_fly_distance_csvs(
-        fly_dir, recursive=True, exclude_dirs=DERIVED_TABLE_DIRS
-    ):
+    for csv_path in [p for p in entries if p not in rewritten] + list(rewritten):
+        if rewritten.get(csv_path) in read_stems:
+            continue
         try:
             df = read_table(csv_path)
         except Exception as exc:
             log.warning("[PROB-FILTER] Failed to read %s: %s", csv_path, exc)
             continue
+        read_stems.add(csv_path.stem)
 
         cleaned, geo_count, vel_count = sanitize_proboscis_dataframe(
             df,

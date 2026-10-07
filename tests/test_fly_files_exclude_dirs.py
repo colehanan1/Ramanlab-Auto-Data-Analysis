@@ -8,10 +8,15 @@ although rms_copy_filter overwrites those copies from their sources right after.
 
 The helper takes an explicit ``exclude_dirs``. Its DEFAULT is unchanged
 (recursive, nothing excluded -- ``tests/test_tables.py::
-test_recursive_finds_parquet_in_subdir`` pins that), and only the per-trial
-steps that walk a whole batch dir opt in. rms_copy_filter keeps the default:
-it already skips its own copies before reading them, and excluding would stop
-it re-copying a nested batch's copies (the ``flagged/`` layout below).
+test_recursive_finds_parquet_in_subdir`` pins that). Only steps whose outputs
+never depend on the copies opt in: distance_normalize* and
+detect_dropped_frames (the copies hold no raw distance column, so neither step
+ever wrote one), and distance_stats for its READS (its non-force refresh rule
+still looks at the copies, below). reject_bad_proboscis keeps the default scan
+and skips a copy only in a forced run, and only when rms_copy_filter rewrites
+it later in that run from a source this scan read. rms_copy_filter keeps the
+default: it already skips its own copies before reading them, and excluding
+would stop it re-copying a nested batch's copies (the ``flagged/`` layout below).
 """
 
 from __future__ import annotations
@@ -20,6 +25,7 @@ import importlib
 import json
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -30,7 +36,7 @@ from fbpipe.config import (
     Settings,
 )
 from fbpipe.utils.fly_files import DERIVED_TABLE_DIRS, iter_fly_distance_csvs
-from fbpipe.utils.tables import read_table, write_table
+from fbpipe.utils.tables import read_table, resolve_existing, write_table
 
 TRIAL = "october_05_batch_2_testing_1"
 
@@ -247,19 +253,26 @@ def test_excluded_files_are_not_even_name_checked(tmp_path, capsys):
 # ---------------------------------------------------------------------------
 
 
+_NORMALIZE_AND_DROPPED = [
+    "fbpipe.steps.distance_normalize",
+    "fbpipe.steps.distance_normalize_gpu",
+    "fbpipe.steps.distance_normalize_ultra",
+    "fbpipe.steps.detect_dropped_frames",
+    "fbpipe.steps.rms_copy_filter",
+]
+
+
 @pytest.mark.parametrize(
-    "module_name",
+    "module_name,force",
     [
-        "fbpipe.steps.reject_bad_proboscis",
-        "fbpipe.steps.distance_stats",
-        "fbpipe.steps.distance_normalize",
-        "fbpipe.steps.distance_normalize_gpu",
-        "fbpipe.steps.distance_normalize_ultra",
-        "fbpipe.steps.detect_dropped_frames",
-        "fbpipe.steps.rms_copy_filter",
+        # Forced, reject skips a copy rms_copy_filter rewrites from its source
+        # later in the run, and distance_stats refreshes every slot anyway.
+        ("fbpipe.steps.reject_bad_proboscis", True),
+        ("fbpipe.steps.distance_stats", True),
+        *[(name, force) for name in _NORMALIZE_AND_DROPPED for force in (True, False)],
     ],
 )
-def test_step_never_reads_an_rms_copy(module_name, tmp_path, monkeypatch):
+def test_step_never_reads_an_rms_copy(module_name, force, tmp_path, monkeypatch):
     import fbpipe.utils.distance_sanity as distance_sanity
 
     module = importlib.import_module(module_name)
@@ -267,7 +280,7 @@ def test_step_never_reads_an_rms_copy(module_name, tmp_path, monkeypatch):
     batch = _build_batch(root)
     seen = _spy_reads(monkeypatch, module, distance_sanity)
 
-    module.main(_cfg(root))
+    module.main(_cfg(root, force=force))
 
     source = batch / TRIAL / f"{TRIAL}_fly1_distances.parquet"
     assert any(p.resolve() == source.resolve() for p in seen), "step never read its source table"
@@ -275,11 +288,11 @@ def test_step_never_reads_an_rms_copy(module_name, tmp_path, monkeypatch):
     assert leaked == [], f"{module_name} read derived copies: {leaked}"
 
 
-@pytest.mark.parametrize("force", [True, False])
-def test_reject_leaves_rms_copies_alone(tmp_path, force):
+def test_forced_reject_leaves_a_copy_rms_copy_filter_rewrites_alone(tmp_path):
     """The RMS copy has a 400 px proboscis: the old recursive scan blanked it.
-    rms_copy_filter re-derives every copy from its (sanitized) source, so the
-    copy is not reject's to touch."""
+    Forced, rms_copy_filter rewrites the copy of every source in the scan later
+    in the same run, from the source this step has just gated, so the copy is
+    not reject's to touch."""
     from fbpipe.steps import reject_bad_proboscis
 
     root = tmp_path / "Hex-HexTest-Training-24-1"
@@ -287,10 +300,141 @@ def test_reject_leaves_rms_copies_alone(tmp_path, force):
     rms_copy = batch / "RMS_calculations" / f"updated_{TRIAL}_fly1_distances.parquet"
     before = rms_copy.read_bytes()
 
-    reject_bad_proboscis.main(_cfg(root, force=force))
+    reject_bad_proboscis.main(_cfg(root, force=True))
 
     assert rms_copy.read_bytes() == before
     assert read_table(rms_copy).loc[7, "x_class1"] == pytest.approx(900.0)
+
+
+def test_non_forced_reject_still_gates_the_rms_copies(tmp_path):
+    """Not forced, rms_copy_filter keeps a copy that is newer than its source,
+    so reject gates the copies exactly as it always did."""
+    from fbpipe.steps import reject_bad_proboscis
+
+    root = tmp_path / "Hex-HexTest-Training-24-1"
+    batch = _build_batch(root)
+    rms_copy = batch / "RMS_calculations" / f"updated_{TRIAL}_fly1_distances.parquet"
+
+    reject_bad_proboscis.main(_cfg(root, force=False))
+
+    assert np.isnan(read_table(rms_copy).loc[7, "x_class1"])
+
+
+def _plant_copy(path: Path, *, csv: bool = False) -> Path:
+    """An RMS-style copy with the planted 400 px point at frame 7."""
+    if csv:
+        path = path.with_suffix(".csv")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        _rms_copy_df().to_csv(path, index=False)
+        return path
+    return write_table(_rms_copy_df(), path)
+
+
+@pytest.mark.parametrize("force", [True, False])
+def test_reject_gates_every_copy_rms_copy_filter_does_not_rewrite(tmp_path, force):
+    """rms_copy_filter rewrites exactly ``<batch>/RMS_calculations/updated_<stem
+    of a per-trial source>.parquet``. Every other copy, which combine may read,
+    keeps being gated, forced or not:
+
+    * an orphan copy whose source is gone (Hex-Control-24-0.01/may_18_batch_1
+      holds 80 of them);
+    * a nested batch's own copies (``flagged/may_20_batch_2/RMS_calculations``,
+      .csv and .parquet) and the copies of those copies (``updated_updated_*``),
+      which rms_copy_filter writes FROM the nested copies;
+    * a legacy .csv copy (rms_copy_filter writes a .parquet next to it and
+      deletes it, so it is not the file rms_copy_filter rewrites; it is gated
+      as before, which is what the old scan did too).
+    """
+    from fbpipe.steps import reject_bad_proboscis
+
+    root = tmp_path / "Hex-Control-24-0.01"
+    batch = _build_batch(root)
+    rewritten = batch / "RMS_calculations" / f"updated_{TRIAL}_fly1_distances.parquet"
+    rewritten_before = rewritten.read_bytes()
+    orphan = _plant_copy(batch / "RMS_calculations" / "updated_october_05_batch_2_testing_9_fly1_distances.parquet")
+    legacy_trial = "october_05_batch_2_testing_7"
+    write_table(_source_df(), batch / legacy_trial / f"{legacy_trial}_fly2_distances.parquet")
+    legacy = _plant_copy(batch / "RMS_calculations" / f"updated_{legacy_trial}_fly2_distances.csv", csv=True)
+    flagged, nested_parquet = _build_flagged_layout(root)
+    write_table(_source_df(), flagged / "may_20_batch_2" / TRIAL / f"{TRIAL}_fly2_distances.parquet")
+    nested_csv = _plant_copy(
+        flagged / "may_20_batch_2" / "RMS_calculations" / f"updated_{TRIAL}_fly2_distances.csv", csv=True
+    )
+    copy_of_copy = _plant_copy(flagged / "RMS_calculations" / f"updated_updated_{TRIAL}_fly1_distances.parquet")
+
+    reject_bad_proboscis.main(_cfg(root, force=force))
+
+    for gated in (orphan, legacy, nested_parquet, nested_csv, copy_of_copy):
+        out = resolve_existing(gated)  # a gated .csv is rewritten as .parquet
+        assert np.isnan(read_table(out).loc[7, "x_class1"]), gated
+    if force:
+        assert rewritten.read_bytes() == rewritten_before
+    else:
+        assert np.isnan(read_table(rewritten).loc[7, "x_class1"])
+
+
+def test_forced_reject_gates_the_copy_of_a_source_it_cannot_read(tmp_path):
+    """rms_copy_filter cannot rewrite a copy from a source that does not read, so
+    that copy is gated as before instead of keeping its old gate."""
+    from fbpipe.steps import reject_bad_proboscis
+
+    root = tmp_path / "Hex-HexTest-Training-24-1"
+    batch = _build_batch(root)
+    (batch / TRIAL / f"{TRIAL}_fly1_distances.parquet").write_bytes(b"not a parquet file")
+    rms_copy = batch / "RMS_calculations" / f"updated_{TRIAL}_fly1_distances.parquet"
+
+    reject_bad_proboscis.main(_cfg(root, force=True))
+
+    assert np.isnan(read_table(rms_copy).loc[7, "x_class1"])
+
+
+def test_reject_skips_exactly_the_copies_rms_copy_filter_rewrites(tmp_path, monkeypatch):
+    """reject's notion of "rms_copy_filter rewrites this copy" must stay in step
+    with rms_copy_filter itself. Spy on a forced rms_copy_filter run (it reads a
+    source, then writes its copy) over parquet and legacy .csv sources, a nested
+    batch and an orphan; the copies it wrote from a per-trial source -- and
+    nothing else -- are the ones reject skips."""
+    from fbpipe.steps import reject_bad_proboscis, rms_copy_filter
+
+    root = tmp_path / "Hex-Control-24-0.01"
+    batch = _build_batch(root)
+    legacy_trial = "october_05_batch_2_testing_3"
+    (batch / legacy_trial).mkdir()
+    _source_df().to_csv(batch / legacy_trial / f"{legacy_trial}_fly2_distances.csv", index=False)
+    _plant_copy(batch / "RMS_calculations" / "updated_october_05_batch_2_testing_9_fly1_distances.parquet")
+    flagged, _ = _build_flagged_layout(root)
+    cfg = _cfg(root, force=True)
+    rms_copy_filter.main(cfg)  # every copy exists before the spied run
+
+    events: list[tuple[str, Path]] = []
+    orig_read, orig_write = rms_copy_filter.read_table, rms_copy_filter.write_table
+
+    def spy_read(path, *args, **kwargs):
+        events.append(("read", Path(path)))
+        return orig_read(path, *args, **kwargs)
+
+    def spy_write(df, path, *args, **kwargs):
+        written = orig_write(df, path, *args, **kwargs)
+        events.append(("write", Path(written)))
+        return written
+
+    monkeypatch.setattr(rms_copy_filter, "read_table", spy_read)
+    monkeypatch.setattr(rms_copy_filter, "write_table", spy_write)
+    rms_copy_filter.main(cfg)
+    monkeypatch.undo()
+
+    for fly_dir in (batch, flagged):
+        base = fly_dir.resolve()
+        expected = {}
+        for (kind, src), (kind2, dst) in zip(events, events[1:]):
+            if kind != "read" or kind2 != "write" or not src.resolve().is_relative_to(base):
+                continue
+            if not _in_derived_dir(src.resolve().relative_to(base)):
+                expected[dst.resolve()] = src.stem
+        entries = [p for p, _, _ in iter_fly_distance_csvs(fly_dir, recursive=True)]
+        predicted = {p.resolve(): stem for p, stem in reject_bad_proboscis._copies_rms_copy_filter_rewrites(fly_dir, entries).items()}
+        assert predicted == expected, fly_dir.name
+        assert predicted, fly_dir.name
 
 
 @pytest.mark.parametrize("force", [True, False])
@@ -306,28 +450,38 @@ def test_detect_dropped_frames_writes_no_rms_side_reports(tmp_path, force):
     assert list((batch / "RMS_calculations").glob("*_dropped_frames.txt")) == []
 
 
-def test_distance_stats_non_force_skip_is_no_longer_defeated_by_rms_copies(tmp_path):
-    """RMS copies never carry ``distance_percentage``, so the recursive scan made
-    ``_needs_stats_refresh`` true for every slot with a copy and the non-force
-    skip never fired. Now a slot is skipped exactly when the step's own rule
-    says so (stats exist, sources normalized, no 3-fly over-limit rows).
-
-    NOTE for force.pipeline=false: this is also why a gate change no longer
-    re-derives stats by accident -- a config change must force the re-derive.
-    """
+def test_distance_stats_non_force_still_rederives_slots_that_have_rms_copies(tmp_path):
+    """The non-force refresh rule still looks at the RMS copies. A copy never
+    carries the exact ``distance_percentage`` column, so a slot with copies is
+    re-derived on every non-force run, and that is what brings the stats up to
+    date after a gate change (no gate is part of the rule). Skipping the copies
+    for READING must not change that."""
     from fbpipe.steps import distance_normalize, distance_stats
 
     root = tmp_path / "Hex-HexTest-Training-24-1"
     batch = _build_batch(root)
     cfg = _cfg(root, force=False)
     distance_stats.main(cfg)
-    distance_normalize.main(cfg)
+    distance_normalize.main(cfg)  # the source is normalized now
     stats_json = batch / "fly1_global_distance_stats_class_0.json"
-    before = (stats_json.read_bytes(), stats_json.stat().st_mtime_ns)
+    source = batch / TRIAL / f"{TRIAL}_fly1_distances.parquet"
+    assert "distance_percentage" in read_table(source).columns
 
+    def blank_the_farthest_points():  # what a tighter gate does to the source
+        df = read_table(source)
+        df.loc[df["distance_0_1"] == df["distance_0_1"].max(), "distance_0_1"] = np.nan
+        write_table(df, source)
+
+    blank_the_farthest_points()
     distance_stats.main(cfg)
+    assert json.loads(stats_json.read_text())["global_max"] == pytest.approx(41.0)
 
-    assert (stats_json.read_bytes(), stats_json.stat().st_mtime_ns) == before
+    # Control: without the copy nothing triggers a refresh (stats exist, the
+    # source is normalized, one slot so no 3-fly rule), and the run skips.
+    (batch / "RMS_calculations" / f"updated_{TRIAL}_fly1_distances.parquet").unlink()
+    blank_the_farthest_points()
+    distance_stats.main(cfg)
+    assert json.loads(stats_json.read_text())["global_max"] == pytest.approx(41.0)
 
 
 def test_rms_copy_filter_still_copies_every_source(tmp_path):
@@ -349,7 +503,6 @@ def test_rms_copy_filter_still_copies_every_source(tmp_path):
 @pytest.mark.parametrize(
     "module_name",
     [
-        "fbpipe.steps.reject_bad_proboscis",
         "fbpipe.steps.distance_stats",
         "fbpipe.steps.distance_normalize",
         "fbpipe.steps.distance_normalize_gpu",
@@ -359,8 +512,8 @@ def test_rms_copy_filter_still_copies_every_source(tmp_path):
 )
 def test_steps_leave_a_nested_batchs_rms_copies_alone(module_name, tmp_path, monkeypatch):
     """The exclusion applies at any depth, so the copies one level down in the
-    ``flagged/`` layout are skipped too (the old scan read them, and reject
-    would have blanked the planted 400 px point)."""
+    ``flagged/`` layout are skipped too. (reject is not in this list: it keeps
+    gating those copies, see above.)"""
     import fbpipe.utils.distance_sanity as distance_sanity
 
     module = importlib.import_module(module_name)
