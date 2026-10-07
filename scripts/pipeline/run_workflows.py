@@ -2790,10 +2790,11 @@ def _skip_frozen_dataset(settings, root: str, blocks, *, thawed, thaw_all) -> bo
     Only a data-frozen dataset (``--thaw`` / ``--thaw-all`` honoured) holding no
     video at all, whose run walks nothing beyond its own root, and for which
     every freeze-cache slice the combined step will consult loads under the
-    current fingerprint: build_wide_csv then splices its rows and never reads
-    the per-trial files the steps would rewrite with identical bytes. A
-    missing or stale slice means a one-night rebuild FROM those files, so they
-    are derived first, as today. Says why for every data-frozen dataset.
+    current fingerprint: build_wide_csv then splices its rows and never walks
+    its root, combine skips it, and no other nightly step reads its per-trial
+    files, so re-deriving them changes no output. A missing or stale slice
+    means a one-night rebuild FROM those files, so they are derived first, as
+    today. Says why for every data-frozen dataset.
     """
     from fbpipe import freeze as _freeze
 

@@ -2,7 +2,7 @@
 
 A ``freeze.data`` dataset's wide rows are spliced from the freeze cache, so its
 per-trial files are never read -- yet every night the forced per-trial steps
-rewrote all of them with identical bytes (~7.9 min). The dataset loop now skips
+re-derived all of them (~6.5 min for 16 datasets). The dataset loop now skips
 BOTH its YOLO launch and its per-trial subprocess, but only when ALL hold:
 
   (a) it is data-frozen this run (``--thaw`` / ``--thaw-all`` honoured);
