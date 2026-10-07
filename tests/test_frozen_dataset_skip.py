@@ -219,6 +219,30 @@ def test_blocks_match_with_flagged_dirs_riding_along(tmp_path, monkeypatch):
     assert predicted == real
 
 
+def test_a_base_blocks_own_trial_type_filter_beats_the_wide_one(tmp_path, monkeypatch):
+    # _process_base_block reads the block's own trial_type_filter and falls back
+    # to combined.wide's only when it sets none. Predicting the wide filter for
+    # every base block would check the slice under the wrong fingerprint.
+    isolate_env(monkeypatch)
+    roots = [str(make_dataset(tmp_path, n, _tables())) for n in (LIVE, FROZEN)]
+    cfg_path = write_config(tmp_path, [LIVE, FROZEN], frozen=[FROZEN])
+    settings, _ = _load(cfg_path)
+    combined_cfg = _full_combined_cfg(tmp_path, roots)
+    combined_cfg["combined_base"]["wide"]["trial_type_filter"] = "testing"
+
+    real = _real_resolve_calls(combined_cfg, settings, cfg_path)
+    predicted = [
+        (block, sorted(names), kw)
+        for block, names, kw in rw._freeze_cache_blocks(combined_cfg, settings)
+    ]
+    assert {b: kw["trial_type_filter"] for b, _, kw in real if b != "pair_groups"} == {
+        "wide": ["testing", "training"],
+        "combined_base": "testing",
+        "distance_base": ["testing", "training"],
+    }
+    assert predicted == real
+
+
 def test_live_config_shape_consults_combined_base_only(scene):
     blocks = rw._freeze_cache_blocks(scene["combined"], scene["settings"])
     assert [(b, sorted(n)) for b, n, _ in blocks] == [
