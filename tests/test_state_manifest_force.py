@@ -178,13 +178,20 @@ def test_a_damaged_state_is_a_miss_not_a_crash(tmp_path, bad):
 
 # --- wired into main() --------------------------------------------------------
 
-@pytest.mark.parametrize("forced", [True, False])
-def test_main_builds_manifests_only_when_not_forced(tmp_path, monkeypatch, forced):
+@pytest.mark.parametrize(
+    "force_pipeline,force_combined",
+    [(True, True), (False, False), (True, False), (False, True)],
+    ids=["both forced", "neither forced", "pipeline forced", "combined forced"],
+)
+def test_main_builds_manifests_only_when_not_forced(tmp_path, monkeypatch, force_pipeline, force_combined):
+    # The mixed cases pin each write to ITS OWN force flag.
     roots = [
         make_dataset(tmp_path, name, [f"{BATCH}/{STEM}.csv", f"{BATCH}/t/fly1_distances.csv"])
         for name in ("Live-A", "Live-B")
     ]
-    cfg = write_config(tmp_path, ["Live-A", "Live-B"], force_pipeline=forced, force_combined=forced)
+    cfg = write_config(
+        tmp_path, ["Live-A", "Live-B"], force_pipeline=force_pipeline, force_combined=force_combined
+    )
     settings = SimpleNamespace(cache_dir=str(tmp_path / "cache"))
 
     calls = run_main(monkeypatch, cfg)
@@ -192,12 +199,12 @@ def test_main_builds_manifests_only_when_not_forced(tmp_path, monkeypatch, force
     assert len(calls["combined"]) == 1
     for root in roots:
         state = rw._load_state(settings, "pipeline", str(root))
-        if forced:
+        if force_pipeline:
             assert state is None
         else:
             assert len(state["file_manifest"]) == 2
     combined = rw._load_state(settings, "combined", "analysis")
-    if forced:
+    if force_combined:
         assert combined is None
     else:
         assert len(combined["file_manifest"]) == 4
