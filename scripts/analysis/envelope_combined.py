@@ -130,7 +130,28 @@ _TRIAL_LABEL_FROM_NAME = re.compile(
 )
 
 
-def _resolve_trial_meta_for_csv(csv_path: Path | str, n_frames_hint: int | None = None) -> TrialMetadata:
+def _trial_dir_for_label(batch_dir: Path, trial_type: str, trial_index: int) -> Path | None:
+    """The per-trial folder of ``(trial_type, trial_index)`` in ``batch_dir``.
+
+    ``<batch>_<type>_<N>`` for a plain batch. A rig batch
+    (``august_28_batch_1_rig_3``) names its trial folders WITHOUT the rig
+    suffix (``august_28_batch_1_testing_1``), so fall back to the one folder
+    ending in ``_<type>_<N>``. ``None`` when there is none, or more than one.
+    """
+
+    inferred_dir = batch_dir / f"{batch_dir.name}_{trial_type}_{trial_index}"
+    if inferred_dir.is_dir():
+        return inferred_dir
+    matches = [p for p in batch_dir.glob(f"*_{trial_type}_{trial_index}") if p.is_dir()]
+    return matches[0] if len(matches) == 1 else None
+
+
+def _resolve_trial_meta_for_csv(
+    csv_path: Path | str,
+    n_frames_hint: int | None = None,
+    *,
+    memo: MutableMapping[tuple, object] | None = None,
+) -> TrialMetadata:
     """Return ``TrialMetadata`` for the trial that owns ``csv_path``.
 
     Handles two CSV layouts seen in the pipeline:
@@ -139,15 +160,22 @@ def _resolve_trial_meta_for_csv(csv_path: Path | str, n_frames_hint: int | None 
        Sidecar sits one level up in the batch folder.
     2. Per-fly envelope CSV — ``<batch>/angle_distance_rms_envelope/<label>_fly<N>_…envelope.csv``.
        Sidecar sits in the batch folder (two levels up). The trial folder
-       is inferred from the label parsed out of the CSV name.
+       is resolved from the label parsed out of the CSV name.
 
     Falls back to config defaults when no sidecar / ActiveOFM data can be
     found, so legacy datasets without sidecars continue to work.
+
+    ``memo`` (one dict per ``build_wide_csv`` call) skips the repeat lookups
+    for a trial resolved to its own folder: every fly slot of a trial resolves
+    to the same trial, and testing trials are resolved twice (baseline pass +
+    main loop). The key carries ``n_frames_hint``, so a hit returns exactly
+    what the call would have.
     """
 
     path = Path(csv_path).resolve()
     cfg = _RUNTIME_SETTINGS
     parent = path.parent
+    meta_key: tuple | None = None
     # Decide which directory is the batch folder vs the trial folder.
     if parent.name.lower() == "angle_distance_rms_envelope":
         batch_dir = parent.parent
@@ -155,12 +183,29 @@ def _resolve_trial_meta_for_csv(csv_path: Path | str, n_frames_hint: int | None 
         if m:
             trial_type = m.group("type").lower()
             trial_index = int(m.group("index"))
-            sidecar_pair = find_sidecar_by_label(batch_dir, trial_type, trial_index)
-            # Pick a stable trial_dir for the cache key; prefer the matching
-            # per-trial folder if it exists on disk, else fall back to a
-            # synthetic path under the batch.
-            inferred_dir = batch_dir / f"{batch_dir.name}_{trial_type}_{trial_index}"
-            trial_dir = inferred_dir if inferred_dir.is_dir() else parent
+            trial_key = (str(batch_dir), trial_type, trial_index)
+            located = memo.get(("trial", *trial_key)) if memo is not None else None
+            if located is None:
+                located = (
+                    find_sidecar_by_label(batch_dir, trial_type, trial_index),
+                    _trial_dir_for_label(batch_dir, trial_type, trial_index),
+                )
+                if memo is not None:
+                    memo[("trial", *trial_key)] = located
+            sidecar_pair, trial_folder = located
+            if trial_folder is not None:
+                # Its own folder keys the cache on this one trial.
+                trial_dir = trial_folder
+                meta_key = ("meta", *trial_key, n_frames_hint)
+            else:
+                # No folder of its own (synthetic layouts; one frozen batch):
+                # a synthetic path under the batch, as before. That cache file
+                # is shared by every trial of the batch and keyed only on the
+                # sidecar mtime, so a sidecar-less trial there still reads
+                # back whichever trial was cached last. Sidecar-less fixtures
+                # (tests/golden/v2, test_multi_fly_pipeline) pin those rows,
+                # so this path is left unchanged and unmemoised.
+                trial_dir = parent
         else:
             sidecar_pair = (None, None)
             trial_dir = parent
@@ -168,10 +213,12 @@ def _resolve_trial_meta_for_csv(csv_path: Path | str, n_frames_hint: int | None 
         trial_dir = parent
         sidecar_pair = None  # let load_trial_metadata discover via find_sidecar
 
+    if meta_key is not None and memo is not None and meta_key in memo:
+        return memo[meta_key]  # type: ignore[return-value]
     override: DatasetOverride | None = (
         get_dataset_override(cfg, trial_dir) if cfg is not None else None
     )
-    return load_trial_metadata(
+    meta = load_trial_metadata(
         trial_dir,
         fps_default=float(cfg.fps_default) if cfg is not None else 40.0,
         odor_on_s_default=float(cfg.odor_on_s) if cfg is not None else 30.0,
@@ -182,6 +229,9 @@ def _resolve_trial_meta_for_csv(csv_path: Path | str, n_frames_hint: int | None 
         use_cache=True,
         sidecar_pair=sidecar_pair,
     )
+    if meta_key is not None and memo is not None:
+        memo[meta_key] = meta
+    return meta
 DURING_END_FRAME = BEFORE_FRAMES + DURING_FRAMES
 
 from fbpipe.analysis.threshold import (
@@ -2999,6 +3049,9 @@ def build_wide_csv(
     for _frozen_rows, _own in frozen.values():
         max_len = max(max_len, int(_own))
 
+    # Trial metadata resolved once per (trial, n_frames hint) for THIS build
+    # only -- a sidecar edited between runs must reach the next build.
+    trial_meta_memo: dict[tuple, object] = {}
     fly_before_samples: dict[str, list[np.ndarray]] = {}
     baseline_types = trial_type_allow or {"testing"}
     for item in items:
@@ -3013,7 +3066,7 @@ def build_wide_csv(
             _before_nrows = BEFORE_FRAMES
         else:
             try:
-                _meta_pre = _resolve_trial_meta_for_csv(csv_path)
+                _meta_pre = _resolve_trial_meta_for_csv(csv_path, memo=trial_meta_memo)
                 _before_nrows = (
                     int(_meta_pre.odor_on_frame)
                     if _meta_pre.odor_on_frame is not None
@@ -3252,7 +3305,9 @@ def build_wide_csv(
                 meta = None
             else:
                 try:
-                    meta = _resolve_trial_meta_for_csv(csv_path, n_frames_hint=int(len(values)))
+                    meta = _resolve_trial_meta_for_csv(
+                        csv_path, n_frames_hint=int(len(values)), memo=trial_meta_memo
+                    )
                 except Exception as exc:  # pragma: no cover - defensive
                     print(f"[WARN] trial-meta load failed for {csv_path.name}: {exc}")
                     meta = None
