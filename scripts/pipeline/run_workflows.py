@@ -665,6 +665,68 @@ def _resolve_frozen_slices(
     return out
 
 
+def _read_wide_for_cache(csv_path: Path, *, use_sibling: bool = True) -> pd.DataFrame:
+    """``pd.read_csv(csv_path)``, served from its Parquet sibling when current.
+
+    build_wide_csv writes ``<stem>.parquet`` as ``pd.read_csv(<stem>.csv)``
+    right after the CSV, so the sibling holds the same frame (same dtypes) at a
+    fraction of the cost of re-parsing ~2 GB of CSV. That write is best-effort
+    (a warning on failure), so a missing, older or unreadable sibling falls
+    back to the CSV. Not ``fbpipe.analysis.traces.read_wide_table``: it drops
+    folder-frozen rows by default, and the cache must keep them.
+    """
+    try:
+        # Where build_wide_csv writes it: next to the resolved output path.
+        sibling = csv_path.expanduser().resolve().with_suffix(".parquet")
+        if (
+            use_sibling
+            and sibling.is_file()
+            and sibling.stat().st_mtime_ns >= csv_path.stat().st_mtime_ns
+        ):
+            return pd.read_parquet(sibling, engine="pyarrow")
+    except Exception as exc:
+        print(f"[FREEZE] Parquet sibling of {csv_path.name} unreadable ({exc}); reading the CSV.")
+    return pd.read_csv(csv_path)
+
+
+def _spliced_slice_unchanged(cache_dir, wide_block, dataset, group, fingerprint, cached) -> bool:
+    """True when saving ``group`` with ``fingerprint`` would write ``cached`` back as is.
+
+    A spliced dataset's rows came from its cache, but ``group`` is cut from the
+    whole re-read output: its dtypes are settled over EVERY dataset's rows and
+    its dir_val_* width is the run's global max. Both can move while the cached
+    slice stands still -- a live NaN turns an int column float64 (the next
+    splice then prints ``2.0``, not ``2``), a longer live trace widens every
+    row -- and a config number re-spelled ``30`` -> ``30.0`` still matches the
+    fingerprint yet rewrites meta.json. A re-save follows all of that, so only
+    an identical slice is skipped: same columns, dtypes and values, same
+    fingerprint text. Everything else in meta.json follows from the rows and
+    the slice's own path.
+    """
+    from fbpipe import freeze as _freeze
+
+    try:
+        old = cached[0]  # FrozenSlice.rows, or a (rows, own_max_len) tuple
+        if (
+            len(group) != len(old)
+            or list(group.columns) != list(old.columns)
+            or list(group.dtypes) != list(old.dtypes)
+        ):
+            return False
+        # equals() also compares the row labels: the slice was saved after
+        # reset_index(drop=True). Relabel a shallow copy -- frozen rows are
+        # most of the table, and reset_index would copy them all.
+        rows = group.copy(deep=False)
+        rows.index = old.index
+        if not rows.equals(old):
+            return False
+        meta_path = _freeze.slice_dir(cache_dir, wide_block, dataset) / "meta.json"
+        stored = json.loads(meta_path.read_text()).get("fingerprint")
+        return json.dumps(stored, sort_keys=True) == json.dumps(dict(fingerprint), sort_keys=True)
+    except Exception:  # anything unexpected: re-save, as before
+        return False
+
+
 def _write_freeze_cache(
     settings,
     wide_block: str,
@@ -672,6 +734,7 @@ def _write_freeze_cache(
     extra_export_paths,
     *,
     fingerprint_for,
+    spliced=None,
 ) -> None:
     """Cache each dataset's slice of a freshly written wide CSV.
 
@@ -681,6 +744,11 @@ def _write_freeze_cache(
     Reads the main output plus every extra trial export, so a slice holds ALL
     trial types -- the splice routes them back the same way live rows are.
 
+    ``spliced`` is the ``{dataset: slice}`` mapping build_wide_csv spliced from
+    this block's cache (``_resolve_frozen_slices``: fingerprint already
+    matched). Such a slice is not re-saved when the re-save would write it back
+    unchanged (``_spliced_slice_unchanged``); otherwise it is, as before.
+
     "A cache write must never fail the run" covers the whole function, not just
     the per-dataset loop: building ``allrows`` (the concat + groupby below) can
     itself raise -- e.g. mismatched columns across the main output and an extra
@@ -688,13 +756,20 @@ def _write_freeze_cache(
     """
     from fbpipe import freeze as _freeze
 
+    paths = [Path(str(path)) for path in [output_csv, *(extra_export_paths or [])]]
+    try:
+        # Two outputs with one stem (wide.csv, wide.txt) share one sibling,
+        # which holds only the rows of whichever was written last.
+        resolved = {p.expanduser().resolve() for p in paths}
+        use_siblings = len({r.with_suffix(".parquet") for r in resolved}) == len(resolved)
+    except Exception:
+        use_siblings = False
     frames = []
-    for path in [output_csv, *(extra_export_paths or [])]:
-        p = Path(str(path))
+    for p in paths:
         if not p.is_file():
             continue
         try:
-            frames.append(pd.read_csv(p))
+            frames.append(_read_wide_for_cache(p, use_sibling=use_siblings))
         except Exception as exc:
             print(f"[FREEZE] Skipping cache read of {p}: {exc}")
     if not frames:
@@ -709,12 +784,18 @@ def _write_freeze_cache(
         return
     for dataset, group in groups:
         try:
+            fingerprint = fingerprint_for(dataset)
+            cached = (spliced or {}).get(dataset)
+            if cached is not None and _spliced_slice_unchanged(
+                settings.cache_dir, wide_block, dataset, group, fingerprint, cached
+            ):
+                continue
             _freeze.save_slice(
                 settings.cache_dir,
                 wide_block,
                 dataset,
                 group.reset_index(drop=True),
-                fingerprint_for(dataset),
+                fingerprint,
             )
         except Exception as exc:  # a cache write must never fail the run
             print(f"[FREEZE] Could not cache {dataset}/{wide_block}: {exc}")
@@ -1628,6 +1709,7 @@ def _run_combined(
             str(output_csv),
             list(extra_exports.values()),
             fingerprint_for=lambda ds: _freeze_fingerprint(settings, ds, **_fp_kw),
+            spliced=_frozen,
         )
 
         for trial_key, matrix_dir in extra_matrix_dirs.items():
@@ -1792,6 +1874,7 @@ def _run_combined(
                 str(output_csv),
                 list(extra_exports.values()),
                 fingerprint_for=lambda ds: _freeze_fingerprint(settings, ds, **_fp_kw),
+                spliced=_frozen,
             )
 
             for trial_key, matrix_dir in extra_matrix_dirs.items():
@@ -1975,6 +2058,7 @@ def _run_combined(
                 str(pair_wide_csv),
                 list(extra_exports.values()),
                 fingerprint_for=lambda ds: _freeze_fingerprint(settings, ds, **_fp_kw),
+                spliced=_frozen,
             )
 
             print(f"[analysis] combined.pair_groups[{pair_name}].matrix → {pair_matrix_dir}")
