@@ -473,6 +473,20 @@ def test_loop_with_allow_cpu_skips_empty_launches_without_cuda(tmp_path, monkeyp
     assert per_trial_runs(calls) == ["Live-A", "Live-B"]
 
 
+def test_loop_decides_on_the_env_overrides_the_workers_inherit(tmp_path, monkeypatch):
+    # load_settings lets MODEL_PATH / ALLOW_CPU in the environment override the
+    # config, and every worker inherits the driver's environment. The pre-check
+    # has to see the same values the worker will act on.
+    for name in ("Live-A", "Live-B"):
+        make_dataset(tmp_path, name, [f"{BATCH}/{STEM}.csv"])
+    cfg = write_config(tmp_path, ["Live-A", "Live-B"])  # its model file exists
+    calls = run_main(monkeypatch, cfg, env={"MODEL_PATH": str(tmp_path / "gone.engine")})
+    assert yolo_launches(calls) == ["Live-A", "Live-B"]
+    calls = run_main(monkeypatch, cfg, cuda=False, env={"ALLOW_CPU": "true"})
+    assert yolo_launches(calls) == []
+    assert per_trial_runs(calls) == ["Live-A", "Live-B"]
+
+
 def test_loop_launches_yolo_only_where_a_video_exists(tmp_path, monkeypatch, capsys):
     make_dataset(tmp_path, "Live-A", [f"{BATCH}/{STEM}.csv", f"{BATCH}/{STEM}.mp4"])
     make_dataset(tmp_path, "Live-B", [f"{BATCH}/{STEM}.csv"])

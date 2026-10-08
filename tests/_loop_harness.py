@@ -36,6 +36,7 @@ _ENV_OVERRIDES = (
     "FLAGGED_SECURED_ROOT",
     "AUTO_DISCOVER_FLAGGED",
     "MODEL_PATH",
+    "ALLOW_CPU",
     "PARALLEL_ENABLED",
     "PARALLEL_N_JOBS",
 )
@@ -131,13 +132,15 @@ def run_main(
     on_pipeline=None,
     cuda: bool = True,
     expect=None,
+    env=None,
 ) -> dict:
     """Run main() up to the combined-state write; return what it launched.
 
     *on_pipeline*, if given, is called with ``(main_directory, steps)`` for
     every recorded launch -- e.g. to drop a file mid-run, or to raise as a
     failing worker would. *expect* is the exception main() must end with
-    (default: the stop after the combined-state write).
+    (default: the stop after the combined-state write). *env* is set after
+    the shell's overrides are cleared.
     """
     calls: dict = {"pipeline": [], "combined": []}
 
@@ -156,6 +159,8 @@ def run_main(
         raise StopAfterCombined
 
     isolate_env(monkeypatch, cuda=cuda)
+    for var, value in (env or {}).items():
+        monkeypatch.setenv(var, value)
     monkeypatch.setattr(rw, "_run_pipeline", _run_pipeline)
     monkeypatch.setattr(rw, "_run_combined", _run_combined)
     monkeypatch.setattr(rw, "_load_light_checks_for_envelopes", lambda: None)
