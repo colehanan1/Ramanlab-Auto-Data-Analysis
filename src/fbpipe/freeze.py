@@ -464,31 +464,37 @@ def figure_frozen_from_raw(
     to be a redundant figure, never a silently missing one.
 
     Inside a pipeline run the auto-freeze plan (``FBPIPE_FREEZE_PLAN``) answers
-    instead: a dataset's figures are held exactly when the plan holds them.
+    instead for every dataset it covers: a dataset's figures are held exactly
+    when the plan holds them. Datasets it does not cover keep the flags.
     """
     if thaw_all:
         return set()
     skip = {_freeze_key(n) for n in thawed}
-    from .autofreeze import active_figure_frozen
+    from .autofreeze import active_plan
 
-    planned = active_figure_frozen()
-    if planned is not None:
-        names = [n for n in planned if _freeze_key(n) not in skip]
-        frozen = set(names)
-        for name in names:
-            try:
-                from .odor_constants import canon_dataset
+    plan = active_plan()
+    planned_keys: set[str] = set()
+    frozen: set[str] = set()
+    if plan is not None:
+        for name, entry in (plan.get("datasets") or {}).items():
+            planned_keys.add(_freeze_key(name))
+            if _freeze_key(name) in skip or not isinstance(entry, Mapping):
+                continue
+            if entry.get("figures_frozen"):
+                frozen.add(str(name))
+                try:
+                    from .odor_constants import canon_dataset
 
-                frozen.add(canon_dataset(str(name)))
-            except Exception:  # noqa: BLE001
-                pass
-        return frozen
+                    frozen.add(canon_dataset(str(name)))
+                except Exception:  # noqa: BLE001
+                    pass
     overrides = (raw or {}).get("dataset_overrides") if isinstance(raw, Mapping) else None
     if not isinstance(overrides, Mapping):
-        return set()
-    frozen = set()
+        return frozen
     for name, block in overrides.items():
-        if _freeze_key(name) in skip or not isinstance(block, Mapping):
+        if _freeze_key(name) in skip or _freeze_key(name) in planned_keys:
+            continue
+        if not isinstance(block, Mapping):
             continue
         fz = block.get("freeze")
         if isinstance(fz, Mapping) and fz.get("figures") is True:

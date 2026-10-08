@@ -423,3 +423,16 @@ def test_the_plan_reaches_figure_subprocesses(world, monkeypatch):
     monkeypatch.setattr(rw, "_run_pipeline", lambda *a, **k: None)
     rw.main(["--config", str(world["cfg"])])
     assert {ADOPT, TRAIN, SENS} <= set(seen["frozen"])
+
+
+def test_freeze_status_previews_tonight_and_writes_nothing(world, monkeypatch, capsys):
+    isolate_env(monkeypatch)
+    cache = world["tmp"] / "cache"
+    before = {p: p.stat().st_mtime_ns for p in cache.rglob("*") if p.is_file()}
+    rw.main(["--config", str(world["cfg"]), "--freeze-status"])
+    out = capsys.readouterr().out
+    assert f"[FREEZE] {ADOPT}: FROZEN - adopted" in out
+    assert f"[FREEZE] {SENS}: THAWED - no freeze record yet" in out
+    after = {p: p.stat().st_mtime_ns for p in cache.rglob("*") if p.is_file()}
+    assert after == before
+    assert not (cache / "run_workflows.lock").exists()

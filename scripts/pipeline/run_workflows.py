@@ -3110,6 +3110,15 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--freeze-status",
+        action="store_true",
+        help=(
+            "Print what auto-freeze would decide for every dataset tonight "
+            "(frozen / rebuilt and why, cascade notices) and exit. Writes "
+            "nothing and takes no lock."
+        ),
+    )
+    parser.add_argument(
         "--include-frozen",
         action="store_true",
         help=(
@@ -3162,6 +3171,10 @@ def main(argv: Sequence[str] | None = None) -> None:
     # Fail fast on a typo'd --thaw name before any YOLO/pipeline work runs.
     _validate_thaw(args.thaw, datasets=getattr(settings, "datasets", ()))
 
+    if args.freeze_status:
+        _print_freeze_status(args, config_path, data, settings)
+        return
+
     # One pipeline run at a time (fbpipe.utils.run_lock): a daytime run and the
     # 00:00 nightly overlapped on 2026-10-05/06, both rewriting the same tables.
     # A second run waits for the first. The plan auto-freeze publishes for this
@@ -3173,6 +3186,32 @@ def main(argv: Sequence[str] | None = None) -> None:
             _main_locked(args, config_path, data, settings)
         finally:
             _autofreeze.set_active_plan(None)
+
+
+def _print_freeze_status(args: argparse.Namespace, config_path: Path, data: dict, settings: Settings) -> None:
+    """``--freeze-status``: tonight's auto-freeze decisions, computed read-only."""
+    from fbpipe import autofreeze as _autofreeze
+
+    roots = data.get("main_directories") or []
+    if isinstance(roots, str):
+        roots = [roots]
+    blocks = _freeze_cache_blocks((data.get("analysis") or {}).get("combined"), settings)
+    plan = _autofreeze.plan_run(
+        settings,
+        config_path=config_path,
+        roots=[str(Path(r).expanduser()) for r in roots],
+        blocks=blocks,
+        fingerprint=lambda ds, kw: _freeze_fingerprint(settings, ds, **kw),
+        thawed=args.thaw or (),
+        thaw_all=args.thaw_all,
+        folder=args.folder,
+        pairs=[(t, c) for t, c, _ in _mean_trace_cohorts(getattr(settings, "datasets", ()) or ())],
+        read_only=True,
+    )
+    if not getattr(settings, "auto_freeze", True):
+        print("[FREEZE] auto_freeze is disabled in this config: the explicit freeze: flags apply.")
+    for line in plan.summary_lines():
+        print(line)
 
 
 def _main_locked(args: argparse.Namespace, config_path: Path, data: dict, settings: Settings) -> None:

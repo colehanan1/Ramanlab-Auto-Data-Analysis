@@ -297,7 +297,7 @@ _CODE_SKIP = {
     "curate_yolo_dataset.py", "compose_videos_rms.py", "check_light_stimulus.py", "move_videos.py",
     "notify.py", "smb_copy.py", "data_secured_sync.py", "pseudolabel.py", "augmentation.py",
     "parallel.py", "video_writer.py", "frozen_folders.py", "yolo_discovery.py",
-    "gpu_batch_optimizer.py",
+    "gpu_batch_optimizer.py", "run_lock.py", "light_stimulus.py",
 }
 
 #: Settings fields the per-trial steps read.
@@ -1030,11 +1030,3 @@ def active_flags(dataset: str) -> Optional[tuple[bool, bool]]:
         return None
     return bool(entry.get("data_frozen")), bool(entry.get("figures_frozen"))
 
-
-def active_figure_frozen() -> Optional[list[str]]:
-    """Names (config spelling) whose figures the active plan holds, or None."""
-    data = active_plan()
-    if not data:
-        return None
-    return [name for name, e in (data.get("datasets") or {}).items()
-            if isinstance(e, Mapping) and e.get("figures_frozen")]
