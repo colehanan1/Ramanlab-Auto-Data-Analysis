@@ -3893,9 +3893,10 @@ def _main_locked(args: argparse.Namespace, config_path: Path, data: dict, settin
     # (with the inputs seen when the run started). A run that died before this
     # point left them ``thawing``, and the next run rebuilds them.
     if plan is not None:
-        for line in plan.commit(combined_ran=combined_ran):
+        committed = plan.commit(combined_ran=combined_ran)
+        for line in committed:
             print(line)
-        status = plan.write_status()
+        status = plan.write_status(committed)
         _RUN_SUMMARY = plan.short_summary()
         print(f"[FREEZE] {_RUN_SUMMARY} (status: {status})")
 
