@@ -436,3 +436,15 @@ def test_freeze_status_previews_tonight_and_writes_nothing(world, monkeypatch, c
     after = {p: p.stat().st_mtime_ns for p in cache.rglob("*") if p.is_file()}
     assert after == before
     assert not (cache / "run_workflows.lock").exists()
+
+
+def test_freeze_status_never_sends_the_end_of_run_notification():
+    """It is a read-only report: the script's __main__ must not ntfy
+    "Pipeline Complete" for it (checked on the source -- running __main__ would
+    post to the user's phone)."""
+    src = Path(rw.__file__).read_text(encoding="utf-8")
+    tail = src[src.index('if __name__ == "__main__"'):]
+    status_branch, rest = tail.split("elif __name__", 1)
+    assert '"--freeze-status" in sys.argv[1:]' in status_branch
+    assert "ntfy_notify" not in status_branch
+    assert "ntfy_notify(\"Pipeline Complete\"" in rest

@@ -4993,7 +4993,9 @@ def ntfy_notify(title, message, priority="default", tags=""):
     except Exception:
         pass
 
-if __name__ == "__main__":  # pragma: no cover
+if __name__ == "__main__" and "--freeze-status" in sys.argv[1:]:  # pragma: no cover
+    main()  # a read-only report: no run happened, nothing to notify about
+elif __name__ == "__main__":  # pragma: no cover
     try:
         main()
         _message = "Pipeline finished successfully."
