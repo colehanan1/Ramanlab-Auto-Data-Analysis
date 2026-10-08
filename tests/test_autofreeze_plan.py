@@ -323,6 +323,43 @@ def test_data_false_is_live_every_run(scene):
         scene.build_and_commit(plan)
 
 
+def test_a_live_dataset_is_logged_as_live_not_as_frozen(scene):
+    scene.overrides[LIVE] = {"freeze": {"data": False, "figures": False}}
+    scene.reload()
+    _settle(scene)
+    lines = scene.build_and_commit(scene.plan())
+    mine = [line for line in lines if f"{LIVE}:" in line]
+    assert len(mine) == 1
+    assert "stays live (freeze.data: false)" in mine[0]
+    assert "recorded frozen" not in mine[0]
+
+
+def test_removing_data_false_freezes_with_no_rebuild(scene):
+    """The live runs keep its record current: once the user drops the explicit
+    unfreeze, a dataset that got nothing new freezes on the very next run."""
+    scene.overrides[LIVE] = {"freeze": {"data": False, "figures": False}}
+    scene.reload()
+    _settle(scene)
+    scene.build_and_commit(scene.plan())
+    scene.overrides[LIVE] = {}
+    scene.reload()
+    d = scene.plan().decisions[LIVE]
+    assert d.decision == "frozen" and d.reasons == ["nothing new"]
+
+
+def test_removing_data_false_after_new_data_rebuilds_once(scene):
+    scene.overrides[LIVE] = {"freeze": {"data": False, "figures": False}}
+    scene.reload()
+    _settle(scene)
+    plan = scene.plan()
+    _batch(scene.root(LIVE), "august_15_batch_1_rig_2")  # arrives after this run's scan
+    scene.build_and_commit(plan)
+    scene.overrides[LIVE] = {}
+    scene.reload()
+    d = scene.plan().decisions[LIVE]
+    assert d.decision == "thawed" and "new data: +1 batch folder(s) (august_15_batch_1_rig_2)" in d.reasons[0]
+
+
 def test_thaw_rebuilds_one_dataset_and_refreezes_it(scene):
     _settle(scene)
     plan = scene.plan(thawed=[FROZEN])

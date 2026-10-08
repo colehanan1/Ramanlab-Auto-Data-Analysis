@@ -548,7 +548,13 @@ class Plan:
             change = ""
             if previous and previous != rows:
                 change = f" (rows {previous} -> {rows})"
-            lines.append(f"[FREEZE] {d.dataset}: recorded frozen after its rebuild{change}")
+            if d.decision == "live":
+                # Its record is kept current, so dropping the explicit unfreeze
+                # freezes it on the next run unless something new arrived.
+                lines.append(f"[FREEZE] {d.dataset}: stays live (freeze.data: false); record refreshed, so "
+                             f"removing data: false freezes it with no rebuild{change}")
+            else:
+                lines.append(f"[FREEZE] {d.dataset}: recorded frozen after its rebuild{change}")
         return lines
 
     # -- reporting -----------------------------------------------------------
