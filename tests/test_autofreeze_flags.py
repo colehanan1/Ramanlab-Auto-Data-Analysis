@@ -86,3 +86,60 @@ def test_an_unreadable_plan_file_falls_back_to_the_flags(tmp_path, monkeypatch):
     bad.write_text("{not json")
     monkeypatch.setenv(af.PLAN_ENV, str(bad))
     assert freeze_flags(CFG, "EB-Control-24-1") == (True, True)
+
+
+# --- run_workflows figure helpers under a plan --------------------------------
+
+
+def _pub_settings(tmp_path):
+    import yaml
+
+    from fbpipe.config import load_settings
+
+    cfg = {
+        "model_path": "/tmp/model.pt",
+        "main_directories": "/tmp/data",
+        "datasets": ["Hex-Training-24-0.1", "Hex-Control-24-0.1", "IAA-Sensitivity-24-1"],
+        "reaction_prediction": {"publication_figures": {"cohorts": [
+            {"train_dataset": "Hex-Training-24-0.1", "metrics": ["mean-score"]},
+        ]}},
+    }
+    path = tmp_path / "cfg.yaml"
+    path.write_text(yaml.safe_dump(cfg))
+    settings = load_settings(path)
+    settings._thawed, settings._thaw_all = (), False
+    return settings
+
+
+def _plan(tmp_path, monkeypatch, decisions):
+    af.set_active_plan(None)
+    path = tmp_path / "plan.json"
+    path.write_text(json.dumps({"schema": af.PLAN_SCHEMA, "run_id": "r", "config": "c", "datasets": {
+        ds: {"data_frozen": f, "figures_frozen": f, "decision": "frozen" if f else "thawed"}
+        for ds, f in decisions.items()
+    }}))
+    monkeypatch.setenv(af.PLAN_ENV, str(path))
+
+
+@pytest.mark.parametrize(
+    "train_frozen,control_frozen,drawn",
+    [(True, True, False), (True, False, True), (False, True, True), (False, False, True)],
+)
+def test_a_pubfig_redraws_when_either_auto_frozen_arm_thaws(tmp_path, monkeypatch, train_frozen, control_frozen, drawn):
+    from scripts.pipeline import run_workflows as rw
+
+    settings = _pub_settings(tmp_path)
+    _plan(tmp_path, monkeypatch, {"Hex-Training-24-0.1": train_frozen, "Hex-Control-24-0.1": control_frozen})
+    cmds = rw._pubfig_commands(settings, python_exec="python3", csv_path=tmp_path / "p.csv", config_path=None)
+    assert bool(cmds) is drawn
+    af.set_active_plan(None)
+
+
+def test_figure_frozen_datasets_covers_datasets_without_a_freeze_block(tmp_path, monkeypatch):
+    from scripts.pipeline import run_workflows as rw
+
+    settings = _pub_settings(tmp_path)
+    _plan(tmp_path, monkeypatch, {"IAA-Sensitivity-24-1": True, "Hex-Training-24-0.1": False})
+    assert "IAA-Sensitivity-24-1" in rw._figure_frozen_datasets(settings)
+    assert "Hex-Training-24-0.1" not in rw._figure_frozen_datasets(settings)
+    af.set_active_plan(None)
