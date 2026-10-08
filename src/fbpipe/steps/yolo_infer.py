@@ -4,6 +4,7 @@ import logging
 import math
 import os
 import time
+from collections import deque
 
 import cv2
 import numpy as np
@@ -24,7 +25,7 @@ from ..utils.video_writer import FFmpegFrameWriter
 from ..utils.distance_sanity import anisotropic_boundary_offsets
 from ..utils.rig_anchor import resolve_anchor
 from ..utils.rig_gates import apply_rig_gate_overrides
-from ..utils.track import MultiObjectTracker, SingleClassTracker
+from ..utils.track import MultiObjectTracker, SingleClassTracker, Track
 from ..utils.multi_fly import EyeAnchorManager, StablePairing, enforce_zero_iou_and_topk
 from ..utils.columns import (
     EYE_CLASS,
@@ -194,7 +195,9 @@ def _process_frame(
 
     dets = collect_detections(result, ALL_TRACKED_CLASSES)
 
-    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    # Only the optical-flow nudge reads the grayscale frame (this frame's and,
+    # as prev_gray, the next one's), so skip the conversion when flow is off.
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY) if settings.use_optical_flow else None
 
     single_outputs: Dict[int, Dict[str, float]] = {}
     for cls_id in SINGLE_TRACK_CLASSES:
@@ -395,6 +398,83 @@ def _discard_empty_trial_outputs(out_dir: Path, out_mp4: Path, video_name: str) 
         pass  # other files present — keep them
 
 
+def _annotated_video_failure(writer, out_mp4: Path, n_frames: int) -> Optional[str]:
+    """Why the annotated video is incomplete after ``writer.release()``, else None.
+
+    FFmpegFrameWriter accounts for itself (a failed pipe write, a non-zero
+    ffmpeg exit, fewer frames delivered than processed). OpenCV's VideoWriter
+    reports nothing -- ``write()`` returns None even when the disk is full -- so
+    for the mp4v fallback the frames that actually landed in the file are counted.
+    """
+    if hasattr(writer, "frames_written"):
+        if getattr(writer, "error", None):
+            return writer.error
+        if writer.frames_written != n_frames:
+            return f"wrote {writer.frames_written} of {n_frames} frames"
+        return None
+    probe = cv2.VideoCapture(str(out_mp4))
+    try:
+        landed = int(probe.get(cv2.CAP_PROP_FRAME_COUNT)) if probe.isOpened() else 0
+    finally:
+        probe.release()
+    if landed != n_frames:
+        return f"annotated video holds {landed} of {n_frames} frames"
+    return None
+
+
+def _discard_failed_trial_outputs(out_dir: Path, out_mp4: Path, video_name: str, reason: str) -> None:
+    """Remove the outputs of a trial whose annotated video failed, before main()
+    re-runs it once with libx264.
+
+    Inference can finish after the writer died (h264_nvenc exits 234 mid-stream
+    when VRAM runs out), which used to leave complete tables beside a truncated
+    review video: check_light_stimulus then preferred that video, and the
+    ``out_dir.exists()`` skip-guard treated the trial as processed for good.
+    This runs before any table is written, so the annotated mp4 is the only
+    file this run created; the directory is only removed when nothing else is
+    in it.
+    """
+    log.warning(
+        "%s: annotated video failed (%s); discarding its outputs and re-running "
+        "the trial once with libx264", video_name, reason,
+    )
+    print(f"[YOLO] {video_name}: annotated video FAILED ({reason}); re-running it with libx264")
+    out_mp4.unlink(missing_ok=True)
+    try:
+        out_dir.rmdir()
+    except OSError:
+        pass  # other files present — keep them
+
+
+def _drop_failed_annotated_video(out_mp4: Path, video_name: str, reason: str, *, retried: bool) -> None:
+    """Keep a trial whose annotated video cannot be completed, minus that video.
+
+    Reached when the libx264 re-run's video failed as well (``retried``) or no
+    writer would open at all. The tables never depended on the writer, and
+    secure cleanup prunes the mirrored raw video later in this same run, so
+    discarding the trial would lose it. Only the incomplete review video goes,
+    so check_light_stimulus falls back to the raw video while it is still here.
+    """
+    again = " again" if retried else ""
+    log.error(
+        "%s: annotated video failed%s (%s); keeping the trial's tables without an "
+        "annotated video (to redo the trial, delete its folder while the raw video "
+        "is in the batch folder)", video_name, again, reason,
+    )
+    print(f"[YOLO] ERROR: {video_name}: annotated video FAILED{again} ({reason}); tables kept, no annotated video")
+    out_mp4.unlink(missing_ok=True)
+
+
+class _NoAnnotatedVideo:
+    """Stands in for a video writer that would not open, so the tables are still made."""
+
+    def write(self, frame) -> bool:
+        return False
+
+    def release(self) -> None:
+        pass
+
+
 def _export_per_fly_csvs(
     df: pd.DataFrame,
     out_dir: Path,
@@ -581,8 +661,10 @@ def main(cfg: Settings):
     num_workers = max(1, int(os.getenv("NUM_WORKERS", "1")))
     worker_index = int(os.getenv("WORKER_INDEX", "0")) % num_workers
     if num_workers > 1:
-        # Cap OpenCV/torch CPU threads so N workers don't oversubscribe the cores
-        # (BLAS/OpenMP pools are capped via env in the driver, before import).
+        # Cap OpenCV/torch CPU threads so N workers don't oversubscribe the cores.
+        # BLAS pools are capped via env before numpy is imported, by the
+        # launchers: scripts/pipeline/parallel_yolo.py and run_workflows' YOLO
+        # fan-out set OPENBLAS/MKL/NUMEXPR_NUM_THREADS=1 for their workers.
         _t = max(1, (os.cpu_count() or num_workers) // num_workers)
         try:
             cv2.setNumThreads(_t)
@@ -596,6 +678,8 @@ def main(cfg: Settings):
 
     roots = get_main_directories(cfg)
     _job_idx = -1
+    force_libx264 = False  # set by an NVENC failure, for the rest of this process
+    no_video_trials: List[str] = []
     for root in sorted(roots, key=str):
         if not root.is_dir():
             print(f"[YOLO] main_directories entry does not exist: {root}")
@@ -609,10 +693,23 @@ def main(cfg: Settings):
             video_files = sorted(
                 (f for f in fly.iterdir() if f.suffix.lower() in (".mp4", ".avi")), key=str
             )
-            for video_path in video_files:
-                _job_idx += 1
-                if _job_idx % num_workers != worker_index:
-                    continue
+            # A trial whose annotated video failed is re-run once, right away, with
+            # libx264 (NVENC is what dies when VRAM runs out); when that video fails
+            # too, the trial keeps its tables without one. Secure cleanup prunes
+            # mirrored raw videos later in this same run, processed or not, so a
+            # retry left to the next run would usually find no video.
+            queue = deque((p, False, None) for p in video_files)
+            while queue:
+                video_path, is_rerun, first_track_id = queue.popleft()
+                if is_rerun:
+                    # Replay the failed attempt's track ids, so the re-run's tables
+                    # and every later trial's match a run that never failed.
+                    Track._next_id = first_track_id
+                else:  # a re-run keeps its slot in the worker slicing
+                    _job_idx += 1
+                    if _job_idx % num_workers != worker_index:
+                        continue
+                    first_track_id = Track._next_id
                 base = video_path.stem
                 # rig_3 is physically mirrored, so its anchor is on the other
                 # side. Resolved per video because one run can span both rigs.
@@ -621,7 +718,8 @@ def main(cfg: Settings):
                 parts = base.split("_")
                 folder_name = "_".join(parts[1:7]) if len(parts)>=7 else base
                 out_dir = fly / folder_name
-                if out_dir.exists():
+                # A re-run's folder survives the discard when something else is in it.
+                if out_dir.exists() and not is_rerun:
                     print(f"[YOLO] Skipping {video_path.name}: detected processed folder {out_dir.name}")
                     continue
                 out_dir.mkdir(exist_ok=True)
@@ -715,14 +813,20 @@ def main(cfg: Settings):
                 # replaces the old write-then-re-encode flow: one encode instead
                 # of two (~half the CPU), and yuv420p/faststart keep the output
                 # broadly playable. Fall back to OpenCV mp4v if ffmpeg is absent.
-                writer = FFmpegFrameWriter(out_mp4, fps, out_w, out_h, crf=30, preset="medium")
+                if is_rerun or force_libx264:
+                    writer = FFmpegFrameWriter(out_mp4, fps, out_w, out_h, crf=30, preset="medium",
+                                               encoder="libx264")
+                else:
+                    writer = FFmpegFrameWriter(out_mp4, fps, out_w, out_h, crf=30, preset="medium")
+                writer_unavailable = None
                 if not writer.ok:
                     log.warning("ffmpeg pipe unavailable; falling back to OpenCV mp4v writer")
                     fourcc = cv2.VideoWriter_fourcc(*"mp4v")
                     writer = cv2.VideoWriter(str(out_mp4), fourcc, fps, (out_w, out_h))
                     if not writer.isOpened():
-                        log.error(f"Failed to open VideoWriter for {out_mp4}, skipping video")
-                        continue
+                        # No annotated video at all; the tables are still made.
+                        writer_unavailable = f"could not open an mp4v VideoWriter for {out_mp4.name}"
+                        writer = _NoAnnotatedVideo()
 
                 single_trackers = {
                     cls: SingleClassTracker(
@@ -753,6 +857,20 @@ def main(cfg: Settings):
                     _discard_empty_trial_outputs(out_dir, out_mp4, video_path.name)
                     continue
 
+                video_error = writer_unavailable or _annotated_video_failure(writer, out_mp4, len(rows))
+                if video_error and not (is_rerun or writer_unavailable):
+                    _discard_failed_trial_outputs(out_dir, out_mp4, video_path.name, video_error)
+                    if getattr(writer, "encoder_used", None) == "h264_nvenc":
+                        # Running out of VRAM tends to last, so later trials skip NVENC
+                        # rather than each paying for a failed pass first.
+                        force_libx264 = True
+                        print("[YOLO] h264_nvenc failed; this process encodes its remaining annotated videos with libx264")
+                    queue.appendleft((video_path, True, first_track_id))
+                    continue
+                if video_error:
+                    _drop_failed_annotated_video(out_mp4, video_path.name, video_error, retried=is_rerun)
+                    no_video_trials.append(video_path.name)
+
                 if out_mp4.exists():
                     final_size = out_mp4.stat().st_size / (1024**2)
                     log.info(f"  Final output: {final_size:.1f} MB ({fps:.1f} fps)")
@@ -767,3 +885,7 @@ def main(cfg: Settings):
                 if per_fly_paths:
                     extra_msg = " (per-fly CSVs: " + ", ".join(p.name for p in per_fly_paths) + ")"
                 print(f"[YOLO] {video_path.name} → {out_dir} in {time.time()-t0:.1f}s{extra_msg}")
+
+    if no_video_trials:
+        print(f"[YOLO] ERROR: {len(no_video_trials)} trial(s) kept their tables without an annotated video: "
+              + ", ".join(no_video_trials))
