@@ -385,17 +385,6 @@ class Plan:
 
     # -- lookups ---------------------------------------------------------
 
-    def decision_for(self, dataset: str) -> Optional[Decision]:
-        from .freeze import _freeze_key
-
-        if dataset in self.decisions:
-            return self.decisions[dataset]
-        key = _freeze_key(dataset)
-        for name, decision in self.decisions.items():
-            if _freeze_key(name) == key:
-                return decision
-        return None
-
     def decision_for_root(self, root: str | Path) -> Optional[Decision]:
         return self.decisions.get(Path(str(root)).name)
 
