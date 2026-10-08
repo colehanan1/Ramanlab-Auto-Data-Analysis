@@ -894,10 +894,10 @@ def _cache_walked_rows(settings, wide_block, paths, fingerprint_for, spliced, na
             continue
         try:
             rows = group.reset_index(drop=True)
-            dup = _freeze._exact_duplicates(rows)
+            dup = _freeze._exact_duplicates(rows).to_numpy()
             if dup.any():
                 print(f"[FREEZE] {dataset}/{wide_block}: {int(dup.sum())} exact duplicate row(s) not cached")
-                rows = rows.loc[~dup].reset_index(drop=True)
+                rows = rows.iloc[(~dup).nonzero()[0]].reset_index(drop=True)
             _freeze.save_slice(settings.cache_dir, wide_block, dataset, rows, fingerprint_for(dataset))
         except Exception as exc:  # a cache write must never fail the run
             print(f"[FREEZE] Could not cache {dataset}/{wide_block}: {exc}")

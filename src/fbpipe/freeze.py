@@ -393,15 +393,20 @@ def _exact_duplicates(rows: pd.DataFrame) -> pd.Series:
     bytes in the CSV". Only rows sharing the trial key are compared cell by
     cell, so a slice with no repeated key costs one cheap pass.
     """
+    import numpy as np
+
     key = [c for c in ("dataset", "fly", "fly_number", "trial_type", "trial_label") if c in rows.columns]
-    if key:
-        candidates = rows.duplicated(subset=key, keep=False)
-        if not candidates.any():
-            return pd.Series(False, index=rows.index)
-        dup = pd.Series(False, index=rows.index)
-        dup[candidates] = rows[candidates].duplicated(keep="first")
-        return dup
-    return rows.duplicated(keep="first")
+    if not key:
+        return pd.Series(rows.duplicated(keep="first").to_numpy(), index=rows.index)
+    # Positional throughout: label alignment (and pandas 2's dtype upcast on a
+    # partial boolean assignment) must never decide which row is dropped.
+    candidates = rows.duplicated(subset=key, keep=False).to_numpy()
+    dup = np.zeros(len(rows), dtype=bool)
+    if candidates.any():
+        # An exact duplicate shares its trial key, and the subset keeps row
+        # order, so "first copy" means the same row as over the whole frame.
+        dup[candidates] = rows.iloc[np.flatnonzero(candidates)].duplicated(keep="first").to_numpy()
+    return pd.Series(dup, index=rows.index)
 
 
 def count_duplicate_rows(cache_dir: str | Path, wide_block: str, dataset: str) -> tuple[int, int]:
@@ -426,10 +431,10 @@ def dedupe_slice(cache_dir: str | Path, wide_block: str, dataset: str) -> tuple[
     if not rows_path.is_file() or not meta_path.is_file():
         return (0, 0)
     rows = pd.read_parquet(rows_path)
-    dup = _exact_duplicates(rows)
+    dup = _exact_duplicates(rows).to_numpy()
     if not dup.any():
         return (len(rows), len(rows))
-    kept = rows.loc[~dup].reset_index(drop=True)
+    kept = rows.iloc[(~dup).nonzero()[0]].reset_index(drop=True)
     fingerprint = json.loads(meta_path.read_text()).get("fingerprint") or {}
     save_slice(cache_dir, wide_block, dataset, kept, fingerprint)
     return (len(rows), len(kept))
