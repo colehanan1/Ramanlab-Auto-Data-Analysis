@@ -2862,6 +2862,42 @@ def _write_wide_frame(fh, frame: pd.DataFrame, n_meta: int, *, chunk_rows: int =
         fh.write("".join(parts))
 
 
+def _trial_read_columns(item: Mapping[str, object]) -> tuple[list[str], str | None, str | None]:
+    """``(read_cols, frame_col, ts_col)`` for one build_wide_csv trial item.
+
+    The measure plus any frame/timestamp column its cached header has, so the
+    table is read once for the trace and the FPS estimate together.
+    """
+
+    measure = str(item["measure_col"])
+    cached_cols = item.get("_header_cols") or []
+    _hdr = pd.DataFrame(columns=cached_cols)
+    frame_col = _pick_frame(_hdr) if cached_cols else None
+    ts_col = _pick_timestamp(_hdr) if cached_cols else None
+    read_cols = [measure]
+    if frame_col and frame_col not in read_cols:
+        read_cols.append(frame_col)
+    if ts_col and ts_col not in read_cols:
+        read_cols.append(ts_col)
+    return read_cols, frame_col, ts_col
+
+
+def _baseline_rows(full: pd.DataFrame, measure: str, nrows: int) -> pd.DataFrame | None:
+    """The first ``nrows`` rows of a whole-table read, standing in for an
+    ``nrows``-limited read of the same table -- or ``None`` if they might not.
+
+    They match when ``measure`` came back numeric: the parser converts each
+    token on its own, so the first ``nrows`` values are the ones a shorter read
+    gets (an int-only window that read infers int64 casts to the same floats).
+    An object column (a stray token anywhere) may parse differently once the
+    window is read alone, so it takes the ``nrows``-limited read, as before.
+    """
+
+    if measure not in full.columns or full[measure].dtype.kind not in "iuf":
+        return None
+    return full.iloc[: max(0, int(nrows))]
+
+
 def build_wide_csv(
     roots: Sequence[str],
     output_csv: str,
@@ -3052,6 +3088,9 @@ def build_wide_csv(
     # Trial metadata resolved once per (trial, n_frames hint) for THIS build
     # only -- a sidecar edited between runs must reach the next build.
     trial_meta_memo: dict[tuple, object] = {}
+    # Whole-table reads made by the baseline pass, handed to the main loop
+    # (which pops each one) instead of reading those tables a second time.
+    prefetched: dict[str, pd.DataFrame] = {}
     fly_before_samples: dict[str, list[np.ndarray]] = {}
     baseline_types = trial_type_allow or {"testing"}
     for item in items:
@@ -3074,13 +3113,24 @@ def build_wide_csv(
                 )
             except Exception:
                 _before_nrows = BEFORE_FRAMES
+        # The main loop's own read of this table, sampled here when its first
+        # rows are exactly what the nrows-limited read returns (_baseline_rows).
+        df_before = None
         try:
-            df_before = _read_trial_table(
-                csv_path, columns=[measure], nrows=max(1, _before_nrows)
-            )
-        except Exception as exc:
-            print(f"[WARN] build_wide_csv: failed to read before segment from {csv_path.name}: {exc}")
-            continue
+            _full = _read_trial_table(csv_path, columns=_trial_read_columns(item)[0])
+            df_before = _baseline_rows(_full, measure, max(1, _before_nrows))
+            if df_before is not None:
+                prefetched[str(csv_path)] = _full
+        except Exception:
+            df_before = None
+        if df_before is None:
+            try:
+                df_before = _read_trial_table(
+                    csv_path, columns=[measure], nrows=max(1, _before_nrows)
+                )
+            except Exception as exc:
+                print(f"[WARN] build_wide_csv: failed to read before segment from {csv_path.name}: {exc}")
+                continue
         series = pd.to_numeric(df_before[measure], errors="coerce").astype(float).to_numpy()
         if series.size == 0:
             continue
@@ -3255,24 +3305,17 @@ def build_wide_csv(
         for item in group_items:
             csv_path = Path(item["csv_path"])
             measure = str(item["measure_col"])
-            cached_cols = item.get("_header_cols") or []
-
-            # Resolve frame/timestamp columns from cached header columns
-            _hdr = pd.DataFrame(columns=cached_cols)
-            frame_col = _pick_frame(_hdr) if cached_cols else None
-            ts_col = _pick_timestamp(_hdr) if cached_cols else None
 
             # Single read: fetch measure + frame + timestamp columns together
-            read_cols = [measure]
-            if frame_col and frame_col not in read_cols:
-                read_cols.append(frame_col)
-            if ts_col and ts_col not in read_cols:
-                read_cols.append(ts_col)
-            try:
-                chunk = _read_trial_table(csv_path, columns=read_cols)
-            except Exception as exc:
-                print(f"[WARN] Read failed {csv_path}: {exc}")
-                continue
+            # (already done by the baseline pass for most testing tables).
+            read_cols, frame_col, ts_col = _trial_read_columns(item)
+            chunk = prefetched.pop(str(csv_path), None)
+            if chunk is None:
+                try:
+                    chunk = _read_trial_table(csv_path, columns=read_cols)
+                except Exception as exc:
+                    print(f"[WARN] Read failed {csv_path}: {exc}")
+                    continue
 
             values = pd.to_numeric(chunk[measure], errors="coerce").astype(float).to_numpy()
 
