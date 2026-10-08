@@ -2716,6 +2716,102 @@ def mirror_directory(source: str | os.PathLike[str], destination: str | os.PathL
 # ---------------------------------------------------------------------------
 
 
+def _wide_row_line(
+    meta_cells: Sequence[object],
+    values: object,
+    max_len: int,
+    columns: Sequence[str],
+) -> str:
+    """One wide-CSV line, byte-identical to the 1-row DataFrame writer.
+
+    That writer -- ``pd.DataFrame([row], columns=columns).to_csv(index=False,
+    header=False)`` with ``row`` = ``meta_cells`` + ``values`` NaN-padded or
+    truncated to ``max_len`` -- infers a dtype for each of ~12k columns of a
+    1-row object array, ~65 ms a row. Inference is per column, so the metadata
+    cells still go through that exact pandas call; a float64 ``values`` is
+    formatted the way pandas formats any float64 column for CSV
+    (``ndarray.astype(str)``, NaN -> ``na_rep=""``), and NaN padding is bare
+    commas. Any other ``values`` (an int trace prints ``5``, not ``5.0``) takes
+    the old path.
+    """
+
+    n_meta = len(meta_cells)
+    if not (
+        isinstance(values, np.ndarray)
+        and values.dtype == np.float64
+        and values.ndim == 1
+        and n_meta >= 2  # csv writes a lone empty field as '""'
+        and n_meta + max_len == len(columns)  # else raise or write as it did
+    ):
+        row = [*meta_cells, *list(values)]
+        if len(values) < max_len:
+            row.extend([np.nan] * (max_len - len(values)))
+        elif len(values) > max_len:
+            # The old writer kept len(metadata) + len(AUC_COLUMNS) + max_len
+            # cells: the header width, not len(meta_cells) + max_len.
+            row = row[: len(columns)]
+        return pd.DataFrame([row], columns=list(columns)).to_csv(index=False, header=False)
+
+    eol = os.linesep  # to_csv's default lineterminator
+    meta_txt = pd.DataFrame([list(meta_cells)], columns=list(columns[:n_meta])).to_csv(
+        index=False, header=False
+    )
+    if not max_len:
+        return meta_txt
+    head = values[:max_len]
+    if not head.size:
+        return meta_txt[: -len(eol)] + "," * max_len + eol
+    cells = head.astype(str)
+    cells[np.isnan(head)] = ""
+    return (
+        meta_txt[: -len(eol)] + "," + ",".join(cells.tolist()) + "," * (max_len - head.size) + eol
+    )
+
+
+def _write_wide_frame(fh, frame: pd.DataFrame, n_meta: int, *, chunk_rows: int = 256) -> None:
+    """Write ``frame.to_csv(index=False, header=False)`` to ``fh``, faster.
+
+    Used to splice cached frozen rows. The first ``n_meta`` columns go through
+    pandas unchanged. When every ``dir_val_*`` column after them is float64,
+    those are formatted the way pandas formats float64 for CSV (see
+    ``_wide_row_line``), up to each row's last non-NaN cell; the trailing NaN
+    padding (most of a row at the 12,204-frame global width) is bare commas.
+    Falls back to pandas for any other dtype, or when the metadata text does
+    not split into one line per row (a quoted embedded newline).
+    """
+
+    values = frame.iloc[:, n_meta:]
+    if n_meta < 2 or not all(dtype == np.float64 for dtype in values.dtypes):
+        fh.write(frame.to_csv(index=False, header=False))
+        return
+    eol = os.linesep
+    meta_lines = frame.iloc[:, :n_meta].to_csv(index=False, header=False).split(eol)
+    if meta_lines and meta_lines[-1] == "":
+        meta_lines.pop()
+    if len(meta_lines) != len(frame):
+        fh.write(frame.to_csv(index=False, header=False))
+        return
+    n_vals = values.shape[1]
+    if not n_vals:
+        fh.write("".join(line + eol for line in meta_lines))
+        return
+    for start in range(0, len(frame), chunk_rows):
+        block = values.iloc[start : start + chunk_rows].to_numpy(dtype=np.float64)
+        present = ~np.isnan(block)
+        # cells up to and including each row's last non-NaN; the rest is padding
+        kept = np.where(present.any(axis=1), n_vals - np.argmax(present[:, ::-1], axis=1), 0)
+        parts = []
+        for i, k in enumerate(kept.tolist()):
+            meta = meta_lines[start + i]
+            if not k:
+                parts.append(meta + "," * n_vals + eol)
+                continue
+            cells = block[i, :k].astype(str)
+            cells[~present[i, :k]] = ""
+            parts.append(meta + "," + ",".join(cells.tolist()) + "," * (n_vals - k) + eol)
+        fh.write("".join(parts))
+
+
 def build_wide_csv(
     roots: Sequence[str],
     output_csv: str,
@@ -3018,6 +3114,24 @@ def build_wide_csv(
             target.parent.mkdir(parents=True, exist_ok=True)
             header_df.to_csv(target, index=False)
             extra_paths[trial_key] = target
+
+    row_cols = metadata + list(AUC_COLUMNS) + value_cols
+    n_meta = len(metadata) + len(AUC_COLUMNS)
+    # One append handle per output for the whole build; rows used to reopen
+    # the file per row via to_csv(mode="a"). utf-8 + newline="" is how pandas
+    # opens a path for to_csv. Line-buffered, so every finished row is on disk
+    # as soon as it is written -- as it was with the per-row open/close --
+    # even if the build raises before the close below, which runs before the
+    # frozen-row sort reads the files back.
+    out_handles: dict[str, object] = {}
+
+    def _out(target: Path):
+        fh = out_handles.get(str(target))
+        if fh is None:
+            fh = out_handles[str(target)] = open(
+                target, "a", encoding="utf-8", newline="", buffering=1
+            )
+        return fh
 
     slot_stats_cache: dict[tuple[str, str], tuple[float, float] | None] = {}
     distance_trim_cache: dict[tuple[str, str], tuple[float, float, int] | None] = {}
@@ -3417,7 +3531,7 @@ def build_wide_csv(
                 if _is_legacy()
                 else [fly in frozen_dirs.get(dataset, ())]
             )
-            row = [
+            meta_cells = [
                 dataset,
                 fly,
                 fly_number_label,
@@ -3453,24 +3567,19 @@ def build_wide_csv(
                 result["metrics"]["AUC-After-Before-Ratio"],
                 result["metrics"]["TimeToPeak-During"],
                 result["metrics"]["Peak-Value"],
-                *list(values),
             ]
-            if len(values) < max_len:
-                row.extend([np.nan] * (max_len - len(values)))
-            elif len(values) > max_len:
-                row = row[: len(metadata) + len(AUC_COLUMNS) + max_len]
 
             trial_key = str(result["trial_type"]).strip().lower()
-            if trial_key in main_trial_allow:
-                pd.DataFrame([row], columns=metadata + list(AUC_COLUMNS) + value_cols).to_csv(
-                    out_path, index=False, mode="a", header=False
-                )
-                main_rows_written += 1
             extra_target = extra_paths.get(trial_key)
+            if trial_key not in main_trial_allow and extra_target is None:
+                continue
+            # values NaN-padded / truncated to max_len (the dir_val_* columns).
+            line = _wide_row_line(meta_cells, values, max_len, row_cols)
+            if trial_key in main_trial_allow:
+                _out(out_path).write(line)
+                main_rows_written += 1
             if extra_target is not None:
-                pd.DataFrame([row], columns=metadata + list(AUC_COLUMNS) + value_cols).to_csv(
-                    extra_target, index=False, mode="a", header=False
-                )
+                _out(extra_target).write(line)
 
     # Splice frozen rows. reindex(columns=...) IS pad-and-truncate: it inserts
     # NaN for dir_val_* columns the cache lacks and drops any beyond max_len --
@@ -3496,11 +3605,14 @@ def build_wide_csv(
             trial_keys = trial_keys[_keep]
         for trial_key, group in aligned.groupby(trial_keys):
             if trial_key in main_trial_allow:
-                group.to_csv(out_path, index=False, mode="a", header=False)
+                _write_wide_frame(_out(out_path), group, n_meta)
                 main_rows_written += len(group)
             extra_target = extra_paths.get(trial_key)
             if extra_target is not None:
-                group.to_csv(extra_target, index=False, mode="a", header=False)
+                _write_wide_frame(_out(extra_target), group, n_meta)
+
+    for _fh in out_handles.values():
+        _fh.close()
 
     if frozen:
         # Live rows were written in items_sorted order, i.e. sorted by
