@@ -168,7 +168,8 @@ def scan_inputs(root: str | Path, previous: Optional[Mapping[str, Any]] = None) 
         return {"dirs": dirs, "files": files}
     with os.scandir(base) as entries:
         batch_dirs = sorted(
-            (e for e in entries if e.is_dir()), key=lambda e: e.name
+            (e for e in entries if e.is_dir() and not e.name.startswith((".", "~"))),
+            key=lambda e: e.name,
         )
     for entry in batch_dirs:
         dirs.append(entry.name)

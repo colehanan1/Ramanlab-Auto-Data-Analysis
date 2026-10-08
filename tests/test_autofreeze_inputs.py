@@ -132,6 +132,7 @@ def test_an_mtime_preserving_replacement_is_caught(tmp_path):
         "october_06_batch_1/.~lock.output_x.csv#",
         "october_06_batch_1/~scratch.txt",
         "remux_20261006.log",  # directly in the dataset root
+        ".Trash-1000/files/x.csv",  # a hidden folder is no batch
     ],
 )
 def test_pipeline_writes_and_videos_are_never_new(tmp_path, rel):
