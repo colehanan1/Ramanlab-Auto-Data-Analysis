@@ -509,3 +509,16 @@ def test_a_read_only_plan_writes_nothing(scene):
     assert plan.decisions[FROZEN].deduped == {"combined_base": (2, 1)}
     after = {p: p.stat().st_mtime_ns for p in Path(scene.settings.cache_dir).rglob("*") if p.is_file()}
     assert after == before
+
+
+def test_a_dataset_no_wide_table_reads_freezes_after_one_build(scene):
+    """Nothing to splice, so frozen means only that its per-trial work, whose
+    inputs did not change, is skipped."""
+    scene.blocks = [(b, frozenset(n - {LIVE}), kw) for b, n, kw in scene.blocks]
+    plan = scene.plan()
+    assert plan.decisions[LIVE].decision == "thawed"
+    for ds in (FROZEN, PARTNER):
+        scene.seed_slice(ds)
+    plan.commit(combined_ran=True)
+    assert scene.record(LIVE)["state"] == "frozen"
+    assert scene.plan().decisions[LIVE].decision == "frozen"

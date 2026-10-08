@@ -753,11 +753,10 @@ def _auto_decision(plan: Plan, d: Decision, record: Optional[dict], inputs: dict
 
     settings = plan.settings
     # Every wide table the dataset feeds must splice it from a current slice.
+    # (A dataset no wide table reads has nothing to splice: freezing it only
+    # skips per-trial work whose inputs did not change.)
     slice_problem = ""
-    consulted = plan.consulted(d.dataset)
-    if not consulted:
-        slice_problem = "no wide table caches it"
-    for block, kw in consulted:
+    for block, kw in plan.consulted(d.dataset):
         fp = plan.fingerprint(d.dataset, kw)
         ok, why = _freeze.slice_status(settings.cache_dir, block, d.dataset, fp)
         if not ok and why.startswith("fingerprint drift"):
