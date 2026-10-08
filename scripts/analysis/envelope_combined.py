@@ -2649,8 +2649,31 @@ def combine_distance_angle(cfg: CombineConfig) -> None:
 # ---------------------------------------------------------------------------
 
 
-# Local video formats pruned during cleanup once their secured copy is confirmed.
+# Local video formats pruned during cleanup once their secured copy is confirmed
+# AND YOLO has fully processed their trial (_video_yolo_done).
 PRUNABLE_VIDEO_SUFFIXES = (".mp4", ".h264")
+
+
+def _video_yolo_done(item: Path, fly_folder: Path) -> tuple[bool, str]:
+    """Whether YOLO fully processed the trial a local video belongs to.
+
+    A raw video (or its ``.h264`` capture) sits directly in the batch folder and
+    belongs to the trial folder yolo_infer names after it; a derived video (the
+    annotated mp4) sits inside its trial folder. Either way the trial counts as
+    processed only once that folder holds the complete tables
+    (``fbpipe.utils.yolo_discovery.trial_tables_complete``). Deleting a video
+    YOLO never saw loses the trial for good: the cleanup runs after the YOLO
+    step, and nothing re-infers from the secured mirror.
+    """
+    from fbpipe.utils.yolo_discovery import trial_folder_name, trial_tables_complete
+
+    if item.parent == fly_folder:
+        name = trial_folder_name(item)
+        return trial_tables_complete(fly_folder / name, name)
+    trial = item.parent
+    while trial.parent != fly_folder and trial.parent != trial:
+        trial = trial.parent
+    return trial_tables_complete(trial, trial.name)
 
 
 def secure_copy_and_cleanup(
@@ -2697,9 +2720,12 @@ def secure_copy_and_cleanup(
                 print(f"Preserving non-month folder: {fly_folder}")
                 continue
             # Only prune video files (.mp4 / .h264) whose copy already exists in
-            # secured storage. .h264 raw captures are deleted from local once the
-            # secured copy is confirmed present, same as .mp4.
+            # secured storage AND whose trial YOLO has fully processed. .h264 raw
+            # captures follow their trial's .mp4: a lone .h264 still awaits its
+            # remux and inference. Unprocessed videos are kept in retired
+            # folders too -- a folder can be un-retired later.
             deleted_count = 0
+            kept_unprocessed = 0
             for item in fly_folder.rglob("*"):
                 if not item.is_file():
                     continue
@@ -2707,14 +2733,24 @@ def secure_copy_and_cleanup(
                     continue
                 relative = item.relative_to(source)
                 secured_copy = dest_mirror / relative
-                if secured_copy.is_file():
-                    item.unlink()
-                    deleted_count += 1
-                    print(f"Deleted video (secured copy exists): {item}")
-                else:
+                if not secured_copy.is_file():
                     print(f"Keeping video (no secured copy): {item}")
+                    continue
+                done, why = _video_yolo_done(item, fly_folder)
+                if not done:
+                    kept_unprocessed += 1
+                    print(f"Keeping video (YOLO has not processed it: {why}): {item}")
+                    continue
+                item.unlink()
+                deleted_count += 1
+                print(f"Deleted video (secured copy exists): {item}")
             if deleted_count:
                 print(f"  Pruned {deleted_count} video(s) from {fly_folder.name}")
+            if kept_unprocessed:
+                print(
+                    f"  Kept {kept_unprocessed} video(s) in {fly_folder.name} that YOLO "
+                    f"has not fully processed (secured copies exist)"
+                )
 
     print("\nCleanup completed successfully.")
 

@@ -19,6 +19,10 @@ BOTH its YOLO launch and its per-trial subprocess, but only when ALL hold:
 A skipped dataset's pipeline state is left untouched. Its YOLO slot still
 re-checks for videos just before the launch would have happened, so a video
 landing after the start of the run is inferred exactly as today.
+
+This is the explicit-flag path, used when auto-freeze is switched off
+(``auto_freeze: {enabled: false}``); the scenes here run it that way.
+Auto-freeze's own decisions are pinned in tests/test_autofreeze_*.py.
 """
 
 from __future__ import annotations
@@ -125,7 +129,7 @@ def scene(tmp_path, monkeypatch):
     isolate_env(monkeypatch)
     make_dataset(tmp_path, LIVE, _tables())
     make_dataset(tmp_path, FROZEN, _tables())
-    cfg_path = write_config(tmp_path, [LIVE, FROZEN], frozen=[FROZEN])
+    cfg_path = write_config(tmp_path, [LIVE, FROZEN], frozen=[FROZEN], auto_freeze={"enabled": False})
     settings, data = _load(cfg_path)
     combined_cfg = data["analysis"]["combined"]
     calls = _real_resolve_calls(combined_cfg, settings, cfg_path)
@@ -192,7 +196,7 @@ def _full_combined_cfg(tmp_path: Path, roots, *, pair_b_filter="testing") -> dic
 def test_blocks_match_every_resolve_call_run_combined_makes(tmp_path, monkeypatch):
     isolate_env(monkeypatch)
     roots = [str(make_dataset(tmp_path, n, _tables())) for n in (LIVE, FROZEN)]
-    cfg_path = write_config(tmp_path, [LIVE, FROZEN], frozen=[FROZEN])
+    cfg_path = write_config(tmp_path, [LIVE, FROZEN], frozen=[FROZEN], auto_freeze={"enabled": False})
     settings, _ = _load(cfg_path)
     combined_cfg = _full_combined_cfg(tmp_path, roots)
 
@@ -212,7 +216,7 @@ def test_blocks_match_with_flagged_dirs_riding_along(tmp_path, monkeypatch):
     roots = [str(make_dataset(tmp_path, n, _tables())) for n in (LIVE, FROZEN)]
     flagged = tmp_path / "flagged_root"
     (flagged / "Odd-Flagged-Experiment").mkdir(parents=True)
-    cfg_path = write_config(tmp_path, [LIVE, FROZEN], frozen=[FROZEN])
+    cfg_path = write_config(tmp_path, [LIVE, FROZEN], frozen=[FROZEN], auto_freeze={"enabled": False})
     settings, _ = _load(cfg_path)
     settings.flagged_root = str(flagged)
     combined_cfg = _full_combined_cfg(tmp_path, roots)
@@ -232,7 +236,7 @@ def test_a_base_blocks_own_trial_type_filter_beats_the_wide_one(tmp_path, monkey
     # every base block would check the slice under the wrong fingerprint.
     isolate_env(monkeypatch)
     roots = [str(make_dataset(tmp_path, n, _tables())) for n in (LIVE, FROZEN)]
-    cfg_path = write_config(tmp_path, [LIVE, FROZEN], frozen=[FROZEN])
+    cfg_path = write_config(tmp_path, [LIVE, FROZEN], frozen=[FROZEN], auto_freeze={"enabled": False})
     settings, _ = _load(cfg_path)
     combined_cfg = _full_combined_cfg(tmp_path, roots)
     combined_cfg["combined_base"]["wide"]["trial_type_filter"] = "testing"
@@ -365,7 +369,7 @@ def test_schema_bump_runs_the_steps(scene):
 def _multi_block_scene(tmp_path, monkeypatch, **cfg_kw):
     isolate_env(monkeypatch)
     roots = [str(make_dataset(tmp_path, n, _tables())) for n in (LIVE, FROZEN)]
-    cfg_path = write_config(tmp_path, [LIVE, FROZEN], frozen=[FROZEN])
+    cfg_path = write_config(tmp_path, [LIVE, FROZEN], frozen=[FROZEN], auto_freeze={"enabled": False})
     settings, _ = _load(cfg_path)
     combined_cfg = _full_combined_cfg(tmp_path, roots, **cfg_kw)
     calls = _real_resolve_calls(combined_cfg, settings, cfg_path)

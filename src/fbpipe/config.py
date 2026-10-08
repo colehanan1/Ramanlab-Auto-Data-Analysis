@@ -37,6 +37,53 @@ def _freeze_block(raw: object) -> dict:
     return fz if isinstance(fz, dict) else {}
 
 
+def _freeze_mode(value: object) -> str:
+    """``auto`` / ``live`` / ``hold`` from one raw ``freeze.data``/``figures`` value.
+
+    Auto-freeze (fbpipe.autofreeze) manages every dataset: an absent key, ``auto``
+    and the legacy ``true`` are AUTO for data. Only an explicit false is the
+    user's standing unfreeze (LIVE). ``hold`` is what an explicit true reads
+    as -- the caller decides whether that differs from AUTO.
+    """
+    if value is None:
+        return "auto"
+    if isinstance(value, str):
+        text = value.strip().lower()
+        if text in {"false", "no", "off", "live", "0"}:
+            return "live"
+        if text in {"true", "yes", "on", "1"}:
+            return "hold"
+        return "auto"
+    return "hold" if bool(value) else "live"
+
+
+def _freeze_flag(value: object) -> bool:
+    """The legacy boolean for ``freeze.data``/``figures``: an explicit true only.
+
+    ``bool("auto")`` is True, so a plain ``bool()`` would read ``data: auto`` as
+    a data freeze in legacy (auto-freeze disabled) mode.
+    """
+    return _freeze_mode(value) == "hold"
+
+
+def _cutoff_exempt_before(raw: object, dataset: str) -> Optional[_dt.date]:
+    """``freeze.cutoff_exempt_before`` as a date, or None when absent.
+
+    A typo must fail loudly: read as "no exemption", a rebuild would retire
+    every batch the exemption exists to keep.
+    """
+    value = _freeze_block(raw).get("cutoff_exempt_before")
+    if value is None:
+        return None
+    parsed = _coerce_iso_date(value)
+    if parsed is None:
+        raise ValueError(
+            f"dataset_overrides.{dataset}.freeze.cutoff_exempt_before must be an "
+            f"ISO date (YYYY-MM-DD), got {value!r}."
+        )
+    return parsed
+
+
 def _coerce_iso_date(raw: object) -> Optional[_dt.date]:
     """A ``datetime.date`` from a YAML date, datetime, or ISO string; else None."""
     if isinstance(raw, _dt.datetime):
@@ -658,9 +705,25 @@ class DatasetOverride:
     # name (``july_14_batch_2_rig_2``), an fnmatch glob (``*_rig_3``), or a glob
     # bounded by recording date (``{match: "*batch_2*", before: 2026-07-27}``).
     # Unioned with the top-level ``freeze_folders_before`` cutoff; see
-    # fbpipe.utils.frozen_folders. Never applies to a dataset with
-    # ``freeze_data`` set -- that root is never walked at all.
+    # fbpipe.utils.frozen_folders. Applied whenever the dataset is walked --
+    # thawed, live or rebuilt -- so a rebuild can never revive a retired folder.
     freeze_folders: Tuple["FolderRule", ...] = ()
+
+    # Auto-freeze modes (fbpipe.autofreeze), parsed from the same keys as the
+    # two legacy flags above: ``data_mode`` is "live" only for an explicit
+    # ``data: false`` (the user's standing unfreeze), else "auto";
+    # ``figures_mode`` is "live" for ``figures: false``, "hold" for ``true``,
+    # else "auto".
+    data_mode: str = "auto"
+    figures_mode: str = "auto"
+
+    # Batches recorded strictly before this date ignore the global
+    # ``freeze_folders_before`` cutoff (``freeze.cutoff_exempt_before``). For
+    # finished datasets recorded entirely before the cutoff: a rebuild under
+    # live folder rules would otherwise retire every one of their trials. Their
+    # own ``folders:`` rules and the born-date window still apply, and later
+    # batches follow the cutoff as usual -- the exemption is date-bounded.
+    cutoff_exempt_before: Optional[_dt.date] = None
 
 
 @dataclass(frozen=True)
@@ -771,6 +834,13 @@ class Settings:
     # each batch's own ``Born (approx):`` metadata line. None = no cohort rule.
     freeze_folders_born_on_or_after: Optional[_dt.date] = None
     keep_folders_born_on_or_after: Optional[_dt.date] = None
+
+    # Automatic dataset freezing (fbpipe.autofreeze): a dataset is rebuilt only
+    # when something new was added to it (or the user unfreezes it with
+    # ``freeze: {data: false}`` / ``--thaw``), and is frozen otherwise. False
+    # (``auto_freeze: {enabled: false}``) restores the explicit
+    # ``freeze: {data: true}`` behaviour. Folder retirements stay live either way.
+    auto_freeze: bool = True
 
 def _get(d: Dict[str, Any], key: str, default: Any):
     return d.get(key, default)
@@ -1186,9 +1256,14 @@ def load_settings(config_path: str | Path) -> Settings:
                 for k, v in (block.get("odor_remap") or {}).items()
                 if k is not None and v is not None
             },
-            freeze_data=bool(_freeze_block(block).get("data", False)),
-            freeze_figures=bool(_freeze_block(block).get("figures", False)),
+            freeze_data=_freeze_flag(_freeze_block(block).get("data")),
+            freeze_figures=_freeze_flag(_freeze_block(block).get("figures")),
             freeze_folders=_freeze_folders(block, str(ds_name)),
+            data_mode=(
+                "live" if _freeze_mode(_freeze_block(block).get("data")) == "live" else "auto"
+            ),
+            figures_mode=_freeze_mode(_freeze_block(block).get("figures")),
+            cutoff_exempt_before=_cutoff_exempt_before(block, str(ds_name)),
         )
 
     flagged_root = str(
@@ -1265,6 +1340,15 @@ def load_settings(config_path: str | Path) -> Settings:
             f"({freeze_folders_born_on_or_after}); otherwise the cohort window is "
             f"empty and no folder is born-frozen at all."
         )
+
+    # ``auto_freeze: {enabled: false}`` (or a bare ``auto_freeze: false``) is the
+    # kill switch back to explicit ``freeze: {data: true}``; absent means on.
+    _raw_auto_freeze = _get(data, "auto_freeze", None)
+    if isinstance(_raw_auto_freeze, dict):
+        _raw_auto_freeze = _raw_auto_freeze.get("enabled", True)
+    auto_freeze = _as_bool(
+        os.getenv("AUTO_FREEZE", _raw_auto_freeze), True
+    )
 
     rig_gate_overrides: list[RigGateOverride] = []
     for block in data.get("rig_gate_overrides") or []:
@@ -1343,4 +1427,5 @@ def load_settings(config_path: str | Path) -> Settings:
         freeze_folders_before=freeze_folders_before,
         freeze_folders_born_on_or_after=freeze_folders_born_on_or_after,
         keep_folders_born_on_or_after=keep_folders_born_on_or_after,
+        auto_freeze=auto_freeze,
     )

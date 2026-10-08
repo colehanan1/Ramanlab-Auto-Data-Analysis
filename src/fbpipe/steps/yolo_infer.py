@@ -21,6 +21,7 @@ from ..utils.tables import read_table, write_table, table_path
 from ..utils.timestamps import pick_timestamp_column, pick_frame_column, to_seconds_series
 from ..utils.vision import xyxy_to_cxcywh
 from ..utils.yolo_results import collect_detections
+from ..utils.yolo_discovery import latest_session, raw_videos, superseded_videos, trial_folder_name
 from ..utils.video_writer import FFmpegFrameWriter
 from ..utils.distance_sanity import anisotropic_boundary_offsets
 from ..utils.rig_anchor import resolve_anchor
@@ -690,9 +691,11 @@ def main(cfg: Settings):
         for fly in iter_live_batch_dirs(cfg, root):
             # Per-batch gate widening (drawn gate polygon + ≥3-fly pairing cap).
             fly_cfg = apply_rig_gate_overrides(cfg, fly)
-            video_files = sorted(
-                (f for f in fly.iterdir() if f.suffix.lower() in (".mp4", ".avi")), key=str
-            )
+            video_files = raw_videos(fly)
+            # A trial recorded more than once (a restarted session) names one
+            # trial folder from every attempt: only its latest session is real
+            # (utils/yolo_discovery). The earlier ones keep their job slots.
+            superseded = superseded_videos(video_files)
             # A trial whose annotated video failed is re-run once, right away, with
             # libx264 (NVENC is what dies when VRAM runs out); when that video fails
             # too, the trial keeps its tables without one. Secure cleanup prunes
@@ -711,12 +714,18 @@ def main(cfg: Settings):
                         continue
                     first_track_id = Track._next_id
                 base = video_path.stem
+                folder_name = trial_folder_name(video_path)
+                if video_path in superseded:
+                    print(
+                        f"[YOLO] Skipping {video_path.name}: superseded by "
+                        f"{latest_session(video_files, video_path).name} "
+                        f"(a later session of trial {folder_name})"
+                    )
+                    continue
                 # rig_3 is physically mirrored, so its anchor is on the other
                 # side. Resolved per video because one run can span both rigs.
                 AX, AY = resolve_anchor(video_path)
                 csv_file_path = fly / f"{base.replace('_preprocessed','')}.csv"
-                parts = base.split("_")
-                folder_name = "_".join(parts[1:7]) if len(parts)>=7 else base
                 out_dir = fly / folder_name
                 # A re-run's folder survives the discard when something else is in it.
                 if out_dir.exists() and not is_rerun:
