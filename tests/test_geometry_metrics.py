@@ -76,13 +76,36 @@ def test_velocity_gate_blanks_a_jump_but_keeps_the_reference():
 
 
 def test_proboscis_pct_matches_the_production_formula():
-    d = np.array([36.7, 50.0, 58.3, 100.0, 20.0, np.nan])
+    d = np.array([36.7, 50.0, 58.3, np.nan])
     out = M.proboscis_pct(d, gmin=36.7, gmax=58.3, floor=95.0)
-    # effective max is max(gmax, floor) = 95; out-of-range values are NaN
+    # effective max is max(gmax, floor) = 95
     assert out[0] == pytest.approx(0.0)
     assert out[1] == pytest.approx(100.0 * (50.0 - 36.7) / (95.0 - 36.7))
     assert out[2] == pytest.approx(100.0 * (58.3 - 36.7) / (95.0 - 36.7))
-    assert np.isnan(out[3]) and np.isnan(out[4]) and np.isnan(out[5])
+    assert np.isnan(out[3]), "a missing detection stays missing"
+
+
+def test_proboscis_pct_clamps_instead_of_blanking_out_of_range_values():
+    """Diverges from production's distance_normalize ON PURPOSE (user spec 2026-09-10).
+
+    Once gmin is a trimmed percentile, ~5 % of frames sit BELOW it by construction.
+    Production NaNs those, which would blank the resting baseline the trim exists to
+    stabilise, so here they clamp to 0 (and anything above the ceiling to 100).
+    """
+    d = np.array([10.0, 36.7, 200.0, np.nan])
+    out = M.proboscis_pct(d, gmin=36.7, gmax=120.0, floor=95.0)
+    assert out[0] == pytest.approx(0.0), "below the floor clamps to 0, not NaN"
+    assert out[1] == pytest.approx(0.0)
+    assert out[2] == pytest.approx(100.0), "above the ceiling clamps to 100, not NaN"
+    assert np.isnan(out[3]), "a missing detection is still missing, never 0"
+
+
+def test_proboscis_pct_never_exceeds_100_when_the_floor_raises_the_denominator():
+    """gmax below the 95 px floor: the real max maps below 100 and nothing overshoots."""
+    out = M.proboscis_pct(np.array([40.0, 58.3, 95.0, 120.0]), gmin=36.7, gmax=58.3, floor=95.0)
+    assert out[1] < 100.0
+    assert out[2] == pytest.approx(100.0)
+    assert out[3] == pytest.approx(100.0)
 
 
 def test_proboscis_pct_agrees_with_distance_normalize_numbers():
