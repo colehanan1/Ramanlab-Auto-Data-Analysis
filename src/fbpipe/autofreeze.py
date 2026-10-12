@@ -30,11 +30,14 @@ cached rows lose their byte-identical duplicate rows (lossless) once.
 Records live under ``<cache_dir>/frozen/_auto/<config scope>/``, one JSON file
 per dataset, written atomically. A rebuilt dataset is marked ``thawing`` before
 any work and recorded ``frozen`` -- with the inputs snapshotted at the START of
-the run -- only after the whole run (data and figures) finished; anything that
-arrives later is new to the next run. Cascades are reported, never acted on:
-a frozen pair arm whose partner got new data, and frozen datasets built under
-other per-trial code or settings, are listed with the command that rebuilds
-them.
+the run -- only after the whole run (data and figures) finished, and only from
+cached rows this run's walk wrote (``save_slice(built_by=run_id)``); anything
+that arrives later is new to the next run. Cascades are reported, never acted
+on: a frozen pair arm whose partner got new data, and frozen datasets built
+under other per-trial code or settings, are listed with the command that
+rebuilds them. So are trials recorded more than once, trials with rig files
+but no trial folder and no local video, and adopted rows whose folder marks
+today's rules would change on a rebuild.
 
 The plan is shared with figure subprocesses through ``FBPIPE_FREEZE_PLAN`` (a
 JSON file); ``fbpipe.freeze.freeze_flags`` and ``figure_frozen_from_raw`` consult

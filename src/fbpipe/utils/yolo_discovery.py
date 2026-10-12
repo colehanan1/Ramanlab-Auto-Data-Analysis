@@ -14,7 +14,10 @@ rules live here, free of torch/cv2 imports:
 * several videos of one batch can name the same trial folder -- a restarted
   session records the trial again -- and the LATEST one (last in sorted order:
   the stamp is in the name) is the real session, as the trial metadata
-  (``trial_metadata.find_sidecar``: most recent sidecar) already assumes;
+  (``trial_metadata.find_sidecar``: most recent sidecar) already assumes. A
+  folder YOLO built before this rule may hold an earlier attempt, so the
+  cleanup keeps every session's video and auto-freeze reports the trial
+  (``trial_sessions``, ``trial_report``);
 * a trial is fully processed once its folder holds the merged table and a
   per-fly table for every fly slot the merged table has eye data for --
   yolo_infer writes the merged table first and skips eyeless slots.
