@@ -69,6 +69,34 @@ tracking:
   max_missing_frames_pct_per_trial: 50.0  # Flag if >50% of trial frames lack detection
   apply_missing_frame_check: true  # Enable/disable tracking quality check
 
+# Per-frame eye-position QC (report-only: distances, angles and gates keep the
+# frozen eye anchor). Flags a trial whose live eye drifts off its anchor -- a fly
+# that came loose or a shifted mount -- or goes unmatched too often or too long
+# in a row (an eye that jumped past match_radius_px). Never excludes.
+eye_qc:
+  enabled: true
+  max_drift_px: 5.0       # flag when the median drift over sustain_s exceeds this
+  sustain_s: 0.5          # trailing-median window (a shift held just over half of it flags)
+  match_radius_px: 50.0   # per-frame eye detection must lie this close to its anchor
+  max_missing_frac: 0.2   # flag when the eye is unmatched in more than this fraction of frames ...
+  max_missing_run_s: 2.0  # ... or for longer than this many seconds in a row
+  draw_live_eye: true     # hollow non-red marker at the live eye in the annotated mp4
+  report_dir: ""          # "" -> <Results>/New-Opto-Fly-Figures/Eye-Tracking-QC (never Results/Figures)
+
+# Batch-level eye anchor template: one fly slot set for every trial in a batch,
+# so an edge-of-frame eye missed by one trial's warm-up scan cannot renumber
+# that trial's flies. enabled: false restores per-video sizing.
+eye_template:
+  enabled: true
+  min_trials: 2             # a slot needs this many trials' corroboration to exist
+  match_radius_px: 120.0    # slot -> this trial's own eye (NOT eye_qc.match_radius_px)
+  cluster_tol_min_px: 25.0  # detections this close across trials are one eye ...
+  cluster_tol_frac: 0.45    # ... growing to this fraction of the closest slot spacing
+  # An eye alone is not a measurable fly: june_03_batch_2's 4th eye sits 21 px
+  # from the bottom edge, was seen in 2 of 15 trials, and its proboscis never
+  # enters the frame (0 % paired). A slot must pair a proboscis to exist.
+  require_proboscis: true
+
 # YOLO Dataset Curation
 yolo_curation:
   enabled: true  # Enable/disable curation module (set to true to start curating)

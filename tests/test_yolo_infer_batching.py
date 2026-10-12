@@ -110,6 +110,53 @@ def test_oom_reraises_at_batch1_without_cpu():
         fn([object()], conf_thres=0.5)
 
 
+# ---------------------------------------------------------------------------
+# Test 4: TensorRT engines never get the deprecated ``half`` flag
+# ---------------------------------------------------------------------------
+
+def _recording_model(calls):
+    class FakeModel:
+        def predict(self, images, **kw):
+            calls.append(kw)
+            return _make_results(len(images))
+    return FakeModel()
+
+
+def test_engine_predict_omits_half():
+    """ultralytics >= 8.4 maps ``half`` onto ``quantize`` inside the predictor but
+    compares the call's raw ``quantize`` (None) against it, so every call carrying
+    ``half`` rebuilds the predictor -- for an engine that is a full re-deserialize
+    plus a ~3.7 GB execution context per batch. An exported engine is already FP16."""
+    calls = []
+    fn = _make_batched_predict_fn(
+        _recording_model(calls),
+        get_device=lambda: "cuda",
+        set_device=lambda t: None,
+        allow_cpu=False,
+        cuda_empty_cache=lambda: None,
+        is_engine=True,
+    )
+    fn([object(), object()], conf_thres=0.4)
+    fn([object()], conf_thres=0.4)
+    assert len(calls) == 2
+    assert all("half" not in kw for kw in calls), calls
+    assert all(kw["device"] == "cuda" for kw in calls)
+
+
+def test_pt_model_predict_keeps_half_true():
+    """A .pt checkpoint keeps the original ``half=True`` CUDA call."""
+    calls = []
+    fn = _make_batched_predict_fn(
+        _recording_model(calls),
+        get_device=lambda: "cuda",
+        set_device=lambda t: None,
+        allow_cpu=False,
+        cuda_empty_cache=lambda: None,
+    )
+    fn([object()], conf_thres=0.4)
+    assert calls[0]["half"] is True
+
+
 # ===========================================================================
 # Task 5 Step 1: Parity test — chunked inference == sequential reference.
 #
@@ -143,7 +190,7 @@ def test_oom_reraises_at_batch1_without_cpu():
 
 import numpy as np
 
-from fbpipe.config import Settings
+from fbpipe.config import ProboscisFilterSettings, Settings
 from fbpipe.steps import yolo_infer
 from fbpipe.steps.yolo_infer import (
     SINGLE_TRACK_CLASSES,
@@ -263,6 +310,10 @@ def _make_settings() -> Settings:
         # Optical flow ON so prev_gray is actually CONSUMED (via _flow_nudge on
         # the coasting proboscis track at MISSING_PROB_FRAME), not just threaded.
         use_optical_flow=True,
+        # The proboscis sits exactly 150 px beside eye0 -- the default gate's side
+        # reach -- so the coast-frame flow nudge would push it outside the pairing
+        # gate. This test is about batching parity, so keep the gate out of it.
+        proboscis_filter=ProboscisFilterSettings(max_eye_prob_distance_px=400.0),
     )
 
 
@@ -587,3 +638,35 @@ def test_truncated_results_raises(monkeypatch):
 
     with pytest.raises(AssertionError):
         _run_edge(monkeypatch, n_frames=4, batch_size=4, predict_fn=short_predict)
+
+
+# ===========================================================================
+# Per-frame (live) eye drift through the chunked path.
+#
+# The fixture's eyes drift 1 px per frame (eye0 right, eye1 left) while their
+# anchors stay frozen on frame 0, so frame i must record eye_{k}_drift_px == i
+# for both eyes -- through _run_chunked_inference exactly as sequentially (the
+# parity test above compares every other key, these included).
+# ===========================================================================
+
+def test_chunked_inference_records_the_per_frame_eye_drift(monkeypatch):
+    _install_collect_detections(monkeypatch)
+    cfg = _make_settings()
+    reference_rows = _build_reference_rows(cfg, 2)
+
+    track_module.Track._next_id = 1
+    single_trackers, eye_mgr, cls8_tracker, pairer = _make_collaborators(cfg, 2)
+    chunked_rows = _run_chunked_inference(
+        _FakeVideoCapture(N_FRAMES), N_FRAMES - 1, (W, H), _CollectingWriter(), {}, 30.0,
+        (AX, AY), cfg, _batched_predict_stub, single_trackers, None,
+        eye_mgr, cls8_tracker, pairer, 2, 3,
+    )
+
+    assert len(chunked_rows) == N_FRAMES
+    for i, (ref, got) in enumerate(zip(reference_rows, chunked_rows)):
+        for row in (ref, got):
+            assert (row["eye_0_x"], row["eye_1_x"]) == (105.0, 405.0)  # frozen on frame 0
+            assert (row["eye_0_live_x"], row["eye_1_live_x"]) == (105.0 + i, 405.0 - i)
+            assert (row["eye_0_live_y"], row["eye_1_live_y"]) == (105.0, 105.0)
+            assert row["eye_0_drift_px"] == pytest.approx(i)
+            assert row["eye_1_drift_px"] == pytest.approx(i)

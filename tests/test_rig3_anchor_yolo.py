@@ -21,6 +21,7 @@ which pass a substring/position check. Driving ``main()`` and recording what
 """
 from __future__ import annotations
 
+import numpy as np
 import pytest
 
 pytest.importorskip("ultralytics")
@@ -82,7 +83,13 @@ def test_main_resolves_anchor_per_video(tmp_path, monkeypatch):
     monkeypatch.setattr(yolo_infer.torch.cuda, "is_available", lambda: False)
     monkeypatch.setattr(yolo_infer.cv2, "VideoCapture", _FakeCap)
     monkeypatch.setattr(yolo_infer, "FFmpegFrameWriter", _FakeWriter)
-    monkeypatch.setattr(yolo_infer, "_scan_initial_fly_count", lambda *a, **k: 1)
+    # One eye per video. The batch eye template builds on these boxes, so the
+    # stub returns positions, not just a count.
+    monkeypatch.setattr(
+        yolo_infer,
+        "_scan_initial_eye_boxes",
+        lambda *a, **k: (np.array([[500.0, 500.0, 560.0, 552.0]], np.float32), [True]),
+    )
     monkeypatch.setattr(yolo_infer, "_export_per_fly_csvs", lambda *a, **k: [])
     monkeypatch.setattr(yolo_infer, "write_table", lambda *a, **k: None)
 
