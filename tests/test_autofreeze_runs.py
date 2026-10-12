@@ -355,6 +355,22 @@ def test_a_video_landing_before_its_yolo_slot_is_processed_that_night(world, mon
     assert Night(monkeypatch, world["cfg"]).per_trial() == []
 
 
+def test_a_corrupt_video_rebuilds_its_dataset_twice_then_freezes(world, monkeypatch):
+    """YOLO leaves a corrupt video unprocessed (0 frames decoded) and the
+    cleanup now keeps it: two nights try it, then nothing new was added and the
+    dataset freezes -- no YOLO launch at its slot either -- with a notice."""
+    Night(monkeypatch, world["cfg"])
+    stem = f"output_{_short(BATCH)}_testing_3_Hexanol_20260809_123000"
+    (world["data"] / SENS / BATCH / f"{stem}.mp4").write_bytes(b"corrupt")
+    for _ in range(2):
+        night = Night(monkeypatch, world["cfg"])  # YOLO "runs" and writes nothing
+        assert night.yolo() == [SENS] and SENS in night.per_trial()
+    night = Night(monkeypatch, world["cfg"])
+    assert night.yolo() == [] and night.per_trial() == []
+    status = (af.scope_dir(load_settings(world["cfg"]).cache_dir, world["cfg"]) / "status.txt").read_text()
+    assert f"{SENS}: 1 video(s) YOLO could not process in 2 attempts" in status
+
+
 def test_thaw_all_no_longer_scores_retired_folders(world, monkeypatch, capsys):
     Night(monkeypatch, world["cfg"], "--thaw-all")
     assert "Frozen experiment folders WILL be scored" not in capsys.readouterr().out

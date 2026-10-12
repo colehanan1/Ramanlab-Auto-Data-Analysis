@@ -308,6 +308,47 @@ def test_a_video_yolo_would_process_thaws(scene):
     assert d.decision == "thawed" and "1 video(s) YOLO has not processed" in d.reasons[0]
 
 
+def test_a_video_yolo_cannot_process_stops_thawing_after_two_attempts(scene):
+    """A corrupt video (YOLO decodes 0 frames and leaves the trial for the next
+    run -- IAA-Sensitivity-12-1 october_06_batch_1's mirror copies) is never
+    processed and, now, never deleted. Two attempts on the same bytes; after
+    that nothing new was added, so the dataset freezes and the video is
+    reported instead. A re-pushed (changed) file is new data again."""
+    _settle(scene)
+    video = scene.root(LIVE) / BATCH / f"{_stem(BATCH, 'testing_2', '20260809_121000')}.mp4"
+    video.write_bytes(b"corrupt")
+    for attempt in (1, 2):
+        plan = scene.plan()
+        d = plan.decisions[LIVE]
+        assert d.decision == "thawed" and "1 video(s) YOLO has not processed" in d.reasons[0]
+        scene.build_and_commit(plan)  # YOLO ran; the video is still unprocessed
+        rel = f"{BATCH}/{video.name}"
+        assert scene.record(LIVE)["yolo_attempts"][rel][2] == attempt
+    plan = scene.plan()
+    d = plan.decisions[LIVE]
+    assert d.decision == "frozen" and d.reasons == ["nothing new"]
+    notice = next(n for n in plan.notices if "could not process" in n)
+    assert notice.startswith(f"[FREEZE] {LIVE}: 1 video(s) YOLO could not process in 2 attempts")
+    assert video.name in notice
+    assert plan.pending_now(scene.root(LIVE)) == []  # its YOLO slot does not thaw it either
+    video.write_bytes(b"re-pushed, complete")
+    assert scene.plan().decisions[LIVE].decision == "thawed"
+
+
+def test_a_video_that_arrives_after_the_yolo_slot_is_not_an_attempt(scene):
+    """Videos YOLO never saw this run (they landed after its slot) keep a clean
+    count: the next run processes them as usual."""
+    _settle(scene)
+    plan = scene.plan()  # nothing pending: frozen
+    assert plan.decisions[LIVE].decision == "frozen"
+    _batch(scene.root(LIVE), "august_15_batch_1_rig_2")  # rebuild LIVE for a new batch ...
+    plan = scene.plan()
+    late = scene.root(LIVE) / BATCH / f"{_stem(BATCH, 'testing_3', '20260809_123000')}.mp4"
+    late.write_bytes(b"landed after the slot")  # ... and a video lands mid-run
+    scene.build_and_commit(plan)
+    assert not scene.record(LIVE).get("yolo_attempts")
+
+
 def test_a_processed_video_does_not_thaw(scene):
     """Its trial folder exists: YOLO skips it, the cleanup may delete it."""
     _settle(scene)

@@ -3476,11 +3476,10 @@ def _main_locked(args: argparse.Namespace, config_path: Path, data: dict, settin
                 if plan is not None and resolved in held_back:
                     # A frozen dataset's slot: a video YOLO would process that
                     # arrived after the plan thaws it now, so it is processed,
-                    # rebuilt and refrozen tonight rather than kept for tomorrow.
-                    from fbpipe.utils.yolo_discovery import pending_videos
-
+                    # rebuilt and refrozen tonight rather than kept for tomorrow
+                    # (a video YOLO already failed on twice does not).
                     try:
-                        pending = pending_videos(settings, resolved)
+                        pending = plan.pending_now(resolved)
                         why = None
                     except Exception as exc:  # doubt runs the dataset, as today
                         pending, why = [], f"its video check failed: {exc}"

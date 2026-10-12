@@ -60,6 +60,12 @@ RECORD_SCHEMA = 1
 PLAN_SCHEMA = 1
 PLAN_ENV = "FBPIPE_FREEZE_PLAN"
 
+#: YOLO runs on an unchanged video that still leaves it unprocessed (a corrupt
+#: file decodes 0 frames and yolo_infer leaves the trial for the next run).
+#: After this many, the video is no longer "something new": the dataset freezes
+#: and the video is reported. The secure cleanup keeps it either way.
+MAX_YOLO_ATTEMPTS = 2
+
 #: Video containers are never inputs (``yolo_discovery`` decides pending videos).
 _VIDEO_SUFFIXES = (".mp4", ".avi", ".h264", ".mov", ".mkv", ".mpg", ".mpeg", ".m4v")
 
@@ -260,6 +266,32 @@ def diff_inputs(old: Optional[Mapping[str, Any]], new: Mapping[str, Any]) -> Inp
     )
 
 
+def _video_key(root: Path, video: Path) -> tuple[str, int, int]:
+    st = video.stat()
+    return Path(os.path.relpath(video, root)).as_posix(), st.st_size, st.st_mtime_ns
+
+
+def _split_exhausted(root: str | Path, videos: Iterable[Path], attempts: Mapping[str, Any]) -> tuple[list, list]:
+    """``(still worth a YOLO run, unprocessable)`` of *videos*.
+
+    Unprocessable: YOLO already ran ``MAX_YOLO_ATTEMPTS`` times on these very
+    bytes (same size and mtime) and left the video unprocessed.
+    """
+    keep, exhausted = [], []
+    for video in videos:
+        try:
+            rel, size, mtime = _video_key(Path(root), Path(video))
+        except OSError:
+            keep.append(video)
+            continue
+        prev = attempts.get(rel) if isinstance(attempts, Mapping) else None
+        if prev and list(prev[:2]) == [size, mtime] and int(prev[2]) >= MAX_YOLO_ATTEMPTS:
+            exhausted.append(video)
+        else:
+            keep.append(video)
+    return keep, exhausted
+
+
 def processed_batches(root: str | Path) -> set[str]:
     """Batch folders holding at least one trial folder with a per-fly table.
 
@@ -365,6 +397,9 @@ class Decision:
     pending: int = 0
     figures_mode: str = "auto"
     record: Optional[dict] = None
+    #: Videos a YOLO launch sees this run (unprocessed when it is planned or
+    #: when its YOLO slot thaws it); counted at commit if they stay unprocessed.
+    attempted: list = dataclasses.field(default_factory=list)
 
     @property
     def data_frozen(self) -> bool:
@@ -394,6 +429,41 @@ class Plan:
 
     def decision_for_root(self, root: str | Path) -> Optional[Decision]:
         return self.decisions.get(Path(str(root)).name)
+
+    def pending_now(self, root: str | Path) -> list[Path]:
+        """The videos a YOLO launch for *root* would process now, minus the
+        ones it already failed on ``MAX_YOLO_ATTEMPTS`` times (unchanged)."""
+        from .utils.yolo_discovery import pending_videos
+
+        d = self.decision_for_root(root)
+        record = d.record if d is not None and isinstance(d.record, dict) else {}
+        keep, _ = _split_exhausted(Path(str(root)), pending_videos(self.settings, root),
+                                   record.get("yolo_attempts") or {})
+        return keep
+
+    def _yolo_attempts(self, d: Decision) -> dict:
+        """The commit's per-video count of YOLO runs that left it unprocessed.
+
+        Only videos YOLO saw this run count (``d.attempted``); one that landed
+        after its slot keeps the count it had. A changed file starts over.
+        """
+        from .utils.yolo_discovery import pending_videos
+
+        old = (d.record.get("yolo_attempts") or {}) if isinstance(d.record, dict) else {}
+        seen = set(d.attempted)
+        out: dict[str, list] = {}
+        for video in pending_videos(self.settings, d.root):
+            try:
+                rel, size, mtime = _video_key(Path(d.root), video)
+            except OSError:
+                continue
+            prev = old.get(rel)
+            same = bool(prev) and list(prev[:2]) == [size, mtime]
+            if str(video) in seen:
+                out[rel] = [size, mtime, int(prev[2]) + 1 if same else 1]
+            elif same:
+                out[rel] = list(prev)
+        return out
 
     def consulted(self, dataset: str) -> list[tuple[str, dict]]:
         return [(block, dict(kw)) for block, names, kw in self.blocks if dataset in names]
@@ -465,6 +535,7 @@ class Plan:
         d.decision = "thawed"
         d.reasons = [f"late: {len(pending)} video(s) YOLO has not processed arrived during the run"]
         d.pending = len(pending)
+        d.attempted = [str(p) for p in pending]
         d.commit = True
         d.figures_frozen = _figures_frozen(d)
         d.inputs = scan_inputs(d.root, (d.record or {}).get("inputs"))
@@ -562,6 +633,9 @@ class Plan:
                 "provenance": {"code": self.code, "settings": self.settings_prov},
                 "rows": rows,
             }
+            attempts = self._yolo_attempts(d)
+            if attempts:
+                record["yolo_attempts"] = attempts
             save_record(self.scope, d.dataset, record)
             change = ""
             if previous and previous != rows:
@@ -727,9 +801,10 @@ def plan_run(
         inputs = scan_inputs(root_path, old_inputs)
         d.inputs = inputs
         trials = trial_report(settings, root_path)
-        pending = trials.pending
+        attempts = (record.get("yolo_attempts") or {}) if isinstance(record, dict) else {}
+        pending, unprocessable = _split_exhausted(root_path, trials.pending, attempts)
         d.pending = len(pending)
-        _trial_notices(plan, dataset, trials)
+        _trial_notices(plan, dataset, root_path, trials, unprocessable)
         explicit = thaw_all or _freeze._freeze_key(dataset) in thawed_keys
 
         if folder_key is not None and dataset.lower() == folder_key:
@@ -757,6 +832,10 @@ def plan_run(
         d.figures_frozen = _figures_frozen(d)
         if d.decision != "frozen":
             d.inputs = inputs
+        if d.commit:
+            # yolo_infer processes every video without a trial folder,
+            # unprocessable ones included: each is one more attempt.
+            d.attempted = [str(p) for p in trials.pending]
     _cascade_notices(plan, pairs, config_path)
     _missing_root_notices(plan, settings)
     if not read_only:
@@ -1011,14 +1090,22 @@ def _examples(items: Sequence[str], n: int = 3) -> str:
     return ", ".join(items[:n]) + (", ..." if len(items) > n else "")
 
 
-def _trial_notices(plan: Plan, dataset: str, trials: Any) -> None:
+def _trial_notices(plan: Plan, dataset: str, root: Path, trials: Any, unprocessable: Sequence[Path] = ()) -> None:
     """Trials worth a line every run, whatever the dataset's decision.
 
-    Neither is a reason to rebuild: a collision is not resolved by a rebuild
-    (every attempt names one trial folder), and an untracked trial has nothing
-    left here that YOLO could process. A frozen dataset is never walked, so
-    without these lines nobody would notice either.
+    None is a reason to rebuild: a collision is not resolved by a rebuild
+    (every attempt names one trial folder), an untracked trial has nothing
+    left here that YOLO could process, and an unprocessable video already had
+    its attempts. A frozen dataset is never walked, so without these lines
+    nobody would notice any of them.
     """
+    if unprocessable:
+        items = [Path(os.path.relpath(v, root)).as_posix() for v in unprocessable]
+        plan.notices.append(
+            f"[FREEZE] {dataset}: {len(items)} video(s) YOLO could not process in {MAX_YOLO_ATTEMPTS} "
+            f"attempts (corrupt?): {_examples(items)}; kept locally and no longer a reason to rebuild "
+            f"-- re-push a good copy (a changed file is tried again) or move it aside"
+        )
     if trials.collisions:
         items = [f"{name} ({n} sessions)" for name, n in sorted(trials.collisions.items())]
         plan.notices.append(
