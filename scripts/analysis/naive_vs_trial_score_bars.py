@@ -50,6 +50,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import subprocess
 import sys
 import tempfile
@@ -228,12 +229,44 @@ PRETEST_COHORTS: dict[str, CohortSpec] = {
             naive_dataset=None,
             pretest_baseline=True,
         ),
+        # 1 h starved rather than 24 h; same odor and dose as
+        # 3Oct-Sensitivity-24-0.1.
+        CohortSpec(
+            dataset="3Oct-Sensitivity-1-0.1",
+            odor="3-Octanol",
+            concentration="0.1%",
+            naive_dataset=None,
+            pretest_baseline=True,
+        ),
         CohortSpec(
             dataset="EB-Sensitivity-24-1",
             odor="Ethyl Butyrate",
             concentration="1%",
             naive_dataset=None,
             pretest_baseline=True,
+        ),
+        # 40 h starved rather than 24 h; same odor and dose as
+        # IAA-Sensitivity-24-1. The dataset name is in every title and stem,
+        # so the two IAA cohorts never overwrite each other.
+        CohortSpec(
+            dataset="IAA-Sensitivity-40-1",
+            odor="Isoamyl Acetate",
+            concentration="1%",
+            naive_dataset=None,
+            pretest_baseline=True,
+        ),
+        # The IAA starvation series: same odor and dose, starved 1/6/12/18/30 h.
+        # Like the 40 h cohort, the dataset name in every title and stem keeps
+        # them from overwriting each other.
+        *(
+            CohortSpec(
+                dataset=f"IAA-Sensitivity-{hours}-1",
+                odor="Isoamyl Acetate",
+                concentration="1%",
+                naive_dataset=None,
+                pretest_baseline=True,
+            )
+            for hours in (1, 6, 12, 18, 30)
         ),
     )
 }
@@ -435,14 +468,44 @@ def _per_fly(frame: pd.DataFrame) -> list[float]:
     return [float(v) for v in out.sort_values(["fly", "fly_number"])["score"]]
 
 
+#: ~/odor_pins.txt's vial suffix (2026-10-06 on): "isoamylacetate-1".
+_VIAL_RE = re.compile(r"^(?P<odor>.+?)-(?P<conc>\d+(?:\.\d+)?)$")
+
+
+def _odor_key(display: object) -> tuple[str, float | None]:
+    """``(bare odor, vial %)`` for one ``odor_display`` value.
+
+    An odor_pins label reaches here raw ("isoamylacetate-1") because the display
+    table only knows the legacy spelling, so its suffix is split off and the
+    rest mapped like any other label. Legacy and remapped labels carry no vial.
+    """
+    text = str(display).strip()
+    m = _VIAL_RE.match(text)
+    if not m:
+        return base_odor(text).casefold(), None
+    return base_odor(_display_label_ci(m["odor"])).casefold(), float(m["conc"])
+
+
+def _percent(concentration: str | None) -> float | None:
+    try:
+        return float(str(concentration).strip().rstrip("%"))
+    except (TypeError, ValueError):
+        return None
+
+
 def _odor_rows(
-    frame: pd.DataFrame, dataset: str, odor: str, *, trial_type: str | None = None
+    frame: pd.DataFrame, dataset: str, odor: str, *, trial_type: str | None = None,
+    concentration: str | None = None,
 ) -> pd.DataFrame:
     """Rows of *dataset* whose odor is *odor*, matched on the base odorant name.
 
     A conditioned cohort tags the odorant with its concentration
     ("Hexanol (0.1%)") and the random panel does not, so both sides are stripped
     to the bare name before matching.
+
+    An odor_pins label names its vial; when it does and *concentration* is
+    given, the two must agree. Matching the bare name alone would pool the
+    hex-test panel's two hexanol vials into one bar.
     """
     sub = frame[frame["dataset_canon"].astype(str) == _canon_dataset(dataset)]
     # Opt-in, NOT defaulted: the training frame carries trial_type == "training"
@@ -454,8 +517,12 @@ def _odor_rows(
     if sub.empty:
         return sub
     target = base_odor(odor).casefold()
-    keep = sub["odor_display"].astype(str).map(lambda s: base_odor(s).casefold()) == target
-    return sub.loc[keep]
+    want = _percent(concentration)
+    keys = sub["odor_display"].map(_odor_key)
+    keep = keys.map(
+        lambda k: k[0] == target and (k[1] is None or want is None or k[1] == want)
+    )
+    return sub.loc[keep.astype(bool)]
 
 
 def _excluded(fly: str, dates: Sequence[str]) -> bool:
@@ -478,7 +545,8 @@ def _drop_excluded(frame: pd.DataFrame, spec: CohortSpec) -> pd.DataFrame:
 def naive_scores(scores: pd.DataFrame, spec: CohortSpec, *, exposure: int) -> pd.DataFrame:
     """Per-fly naive scores on exposure *exposure* of the cohort odorant."""
     if spec.pretest_baseline:
-        frame = _odor_rows(scores, spec.dataset, spec.odor, trial_type="pretest")
+        frame = _odor_rows(scores, spec.dataset, spec.odor, trial_type="pretest",
+                           concentration=spec.concentration)
         if frame.empty:
             return pd.DataFrame(columns=["fly", "fly_number", "score"])
         return (
@@ -489,7 +557,8 @@ def naive_scores(scores: pd.DataFrame, spec: CohortSpec, *, exposure: int) -> pd
         )
     if not spec.naive_dataset:
         return pd.DataFrame(columns=["fly", "fly_number", "score"])
-    frame = _odor_rows(scores, spec.naive_dataset, spec.odor)
+    frame = _odor_rows(scores, spec.naive_dataset, spec.odor,
+                       concentration=spec.concentration)
     if frame.empty:
         return pd.DataFrame(columns=["fly", "fly_number", "score"])
     if "occurrence" in frame.columns:
@@ -515,7 +584,8 @@ def testing_scores(scores: pd.DataFrame, spec: CohortSpec) -> list[Bar]:
     # Explicit for the pre-test variant, whose frame also carries pretest rows.
     frame = _drop_excluded(
         _odor_rows(scores, spec.dataset, spec.odor,
-                   trial_type="testing" if spec.pretest_baseline else None),
+                   trial_type="testing" if spec.pretest_baseline else None,
+                   concentration=spec.concentration),
         spec,
     )
     color = pal.odor_color(spec.odor) or pal.TRAIN_COLOR
@@ -540,7 +610,11 @@ def testing_scores(scores: pd.DataFrame, spec: CohortSpec) -> list[Bar]:
 
 def training_scores(training: pd.DataFrame, spec: CohortSpec) -> list[Bar]:
     """One bar per conditioning trial, 1..``spec.n_training``."""
-    frame = _drop_excluded(_odor_rows(training, spec.dataset, spec.odor), spec)
+    frame = _drop_excluded(
+        _odor_rows(training, spec.dataset, spec.odor,
+                   concentration=spec.concentration),
+        spec,
+    )
     color = pal.odor_color(spec.odor) or pal.TRAIN_COLOR
     bars: list[Bar] = []
     for index in range(1, spec.n_training + 1):

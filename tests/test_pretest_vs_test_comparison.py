@@ -7,7 +7,6 @@ paired (McNemar on responded/not, Wilcoxon signed-rank on the ordinal score),
 and n counts FLIES, because the fly is the unit that is paired.
 """
 
-from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -529,3 +528,59 @@ def test_flagging_lowers_the_reported_n(tmp_path):
     )
     assert set(full["n_flies"]) == {4}
     assert set(trimmed["n_flies"]) == {2}
+
+
+# ── response-rate test: McNemar by default, Fisher's exact on request ──────
+
+
+def _rate_preds(tmp_path):
+    # 6 flies; pre: 1 responder per odor, post: 5 responders per odor.
+    return _predictions(tmp_path, {
+        fn: {"pretest": [3 if fn == 1 else 0] * 3,
+             "testing": [0 if fn == 1 else 3] * 3}
+        for fn in range(1, 7)
+    })
+
+
+def test_rate_test_defaults_to_mcnemar(tmp_path):
+    """The pipeline never passes rate_test, so its figures keep McNemar."""
+    paired = pvt.load_paired_scores(_rate_preds(tmp_path))
+    summary = pvt.per_odor_summary(paired, binary_threshold=2)
+    odor = paired[paired["odor"] == summary["odor"].iloc[0]]
+    expected = pvt.mcnemar_p(odor["score_pre"] >= 2, odor["score_post"] >= 2)
+    assert summary["p_rate"].iloc[0] == pytest.approx(expected)
+
+
+def test_fisher_rate_test_compares_the_two_phases_as_a_2x2_table(tmp_path):
+    from scipy.stats import fisher_exact
+
+    paired = pvt.load_paired_scores(_rate_preds(tmp_path))
+    summary = pvt.per_odor_summary(paired, binary_threshold=2, rate_test="fisher")
+    # pre 1/6 responders, post 5/6.
+    expected = fisher_exact([[1, 5], [5, 1]]).pvalue
+    assert summary["p_rate"].tolist() == pytest.approx([expected] * 3)
+
+
+def test_fisher_p_is_none_on_empty_input():
+    assert pvt.fisher_p([], []) is None
+
+
+def test_unknown_rate_test_is_rejected(tmp_path):
+    with pytest.raises(ValueError):
+        pvt.per_odor_summary(pvt.load_paired_scores(_simple(tmp_path)), rate_test="chi2")
+
+
+def test_rate_test_flag_defaults_to_mcnemar_and_accepts_fisher():
+    base = ["--predictions-csv", "p.csv", "--out-root", "o"]
+    assert pvt._parse_args(base).rate_test == "mcnemar"
+    assert pvt._parse_args(base + ["--rate-test", "fisher"]).rate_test == "fisher"
+
+
+def test_render_cohort_with_fisher_writes_the_same_set(tmp_path):
+    written = pvt.render_cohort(
+        pvt.load_paired_scores(_rate_preds(tmp_path)),
+        cohort="Hex-Sensitivity-24-0.1", out_dir=tmp_path / "figs", rate_test="fisher",
+    )
+    stems = " ".join(p.stem for p in written)
+    for expected in ("score_bars", "rate_bars", "trained_odor"):
+        assert expected in stems, expected
