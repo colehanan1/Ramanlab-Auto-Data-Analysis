@@ -110,6 +110,32 @@ def test_an_incomplete_trial_keeps_its_video(tmp_path, capsys, build, reason):
     assert reason in capsys.readouterr().out
 
 
+def test_a_trial_recorded_more_than_once_keeps_every_session(tmp_path, capsys):
+    """A restarted session names one trial folder from every attempt, and that
+    folder may hold an ABORTED attempt: EB-Control-24-1 july_17_batch_1_rig_3
+    training_1 was built from its 09:39 attempt (no eyes detected) while the
+    real 11:51 session was never tracked. A complete folder therefore proves
+    nothing about which session YOLO saw, so every session's video is kept."""
+    source, dest, fly = _scene(tmp_path)
+    first = fly / "output_may_01_batch_1_testing_2_Hexanol-1_20260501_093939.mp4"
+    last = fly / "output_may_01_batch_1_testing_2_Hexanol-1_20260501_115131.mp4"
+    for video in (first, last):
+        video.write_bytes(b"video")
+    capture = last.with_suffix(".h264")
+    capture.write_bytes(b"raw")
+    _trial(fly, 2)  # complete tables
+    single = _video(fly, 1)
+    _trial(fly, 1)
+
+    ec.secure_copy_and_cleanup([str(source)], str(dest), perform_cleanup=True)
+
+    assert first.exists() and last.exists() and capture.exists()
+    assert not single.exists()  # one session: pruned as before
+    out = capsys.readouterr().out
+    assert "recorded more than once (2 sessions)" in out
+    assert (dest / "Hex-Training" / "may_01_batch_1" / first.name).is_file()
+
+
 def test_an_eyeless_trial_counts_as_processed(tmp_path):
     """yolo_infer writes no per-fly table for a slot with no eye data."""
     source, dest, fly = _scene(tmp_path)

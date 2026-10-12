@@ -2664,16 +2664,32 @@ def _video_yolo_done(item: Path, fly_folder: Path) -> tuple[bool, str]:
     (``fbpipe.utils.yolo_discovery.trial_tables_complete``). Deleting a video
     YOLO never saw loses the trial for good: the cleanup runs after the YOLO
     step, and nothing re-infers from the secured mirror.
+
+    A trial recorded more than once (a restarted session) names one trial
+    folder from every attempt, and a complete folder does not say which attempt
+    YOLO saw -- EB-Control-24-1 july_17_batch_1_rig_3 training_1 holds its
+    aborted 09:39 attempt while the real 11:51 session was never tracked -- so
+    every session's raw video is kept. Returns ``(done, why)``; *why* is the
+    reason a video is kept.
     """
-    from fbpipe.utils.yolo_discovery import trial_folder_name, trial_tables_complete
+    from fbpipe.utils.yolo_discovery import trial_folder_name, trial_sessions, trial_tables_complete
 
     if item.parent == fly_folder:
         name = trial_folder_name(item)
-        return trial_tables_complete(fly_folder / name, name)
-    trial = item.parent
-    while trial.parent != fly_folder and trial.parent != trial:
-        trial = trial.parent
-    return trial_tables_complete(trial, trial.name)
+        sessions = trial_sessions(fly_folder).get(name, ())
+        if len(sessions) > 1:
+            return False, (
+                f"trial {name} recorded more than once ({len(sessions)} sessions); its folder "
+                f"may hold an aborted one, so every session's video stays"
+            )
+        trial = fly_folder / name
+    else:
+        trial = item.parent
+        while trial.parent != fly_folder and trial.parent != trial:
+            trial = trial.parent
+        name = trial.name
+    done, why = trial_tables_complete(trial, name)
+    return done, (why if done else f"YOLO has not processed it: {why}")
 
 
 def secure_copy_and_cleanup(
@@ -2739,7 +2755,7 @@ def secure_copy_and_cleanup(
                 done, why = _video_yolo_done(item, fly_folder)
                 if not done:
                     kept_unprocessed += 1
-                    print(f"Keeping video (YOLO has not processed it: {why}): {item}")
+                    print(f"Keeping video ({why}): {item}")
                     continue
                 item.unlink()
                 deleted_count += 1
@@ -2748,8 +2764,8 @@ def secure_copy_and_cleanup(
                 print(f"  Pruned {deleted_count} video(s) from {fly_folder.name}")
             if kept_unprocessed:
                 print(
-                    f"  Kept {kept_unprocessed} video(s) in {fly_folder.name} that YOLO "
-                    f"has not fully processed (secured copies exist)"
+                    f"  Kept {kept_unprocessed} video(s) in {fly_folder.name} that YOLO has not "
+                    f"fully processed or whose trial was recorded more than once (secured copies exist)"
                 )
 
     print("\nCleanup completed successfully.")
@@ -2955,6 +2971,24 @@ def _baseline_rows(full: pd.DataFrame, measure: str, nrows: int) -> pd.DataFrame
     if measure not in full.columns or full[measure].dtype.kind not in "iuf":
         return None
     return full.iloc[: max(0, int(nrows))]
+
+
+def _flagged_from_rows(rows: pd.DataFrame, flagged_summary: dict) -> None:
+    """Add a spliced slice's non-reactive flies to *flagged_summary*.
+
+    Keyed exactly as the walk keys them -- ``(dataset, fly, fly_number label)``
+    -- with the row's ``trimmed_global_min``/``max``: the walk writes its
+    effective trimmed span into those cells, the same values it prints in the
+    flagged-fly list. Every row of one fly carries the same values.
+    """
+    cols = ["dataset", "fly", "fly_number", "trimmed_global_min", "trimmed_global_max"]
+    if rows is None or rows.empty or not set(cols + ["non_reactive_flag"]) <= set(rows.columns):
+        return
+    flagged = pd.to_numeric(rows["non_reactive_flag"], errors="coerce") == 1
+    for dataset, fly, fly_number, gmin, gmax in rows.loc[flagged, cols].itertuples(index=False, name=None):
+        if isinstance(fly_number, (float, np.floating)) and math.isfinite(fly_number) and float(fly_number).is_integer():
+            fly_number = int(fly_number)  # an int column read back as float64
+        flagged_summary.setdefault((str(dataset), str(fly), str(fly_number)), (float(gmin), float(gmax)))
 
 
 def build_wide_csv(
@@ -3749,12 +3783,18 @@ def build_wide_csv(
     target_cols = metadata + list(AUC_COLUMNS) + value_cols
     for _ds in sorted(frozen):
         _rows, _ = frozen[_ds]
+        # The walk lists its non-reactive flies as it goes; a spliced dataset
+        # is not walked, so its entries come back from the cached rows, which
+        # carry the very values the walk printed (trimmed_global_* hold the
+        # effective trimmed span). Without this the list would drop every
+        # spliced dataset -- under auto-freeze, nearly all of them most nights.
+        _flagged_from_rows(_rows, flagged_summary)
         aligned = _rows.reindex(columns=target_cols)
         # A slice cached before the `frozen` column existed reindexes to NaN.
         # NaN is not False, so without this every data-frozen dataset would read
-        # as ambiguous the first time this ships. A DATA-frozen dataset is never
-        # FOLDER-frozen (frozen_folders.folder_freeze_rules returns nothing for
-        # it), so False is not a guess -- it is the only correct value.
+        # as ambiguous the first time this ships. Such a slice predates folder
+        # freeze, so none of its folders was retired when it was cached: False
+        # is not a guess -- it is the only correct value.
         if "frozen" in aligned.columns:
             aligned["frozen"] = aligned["frozen"].fillna(False).astype(bool)
         trial_keys = aligned["trial_type"].astype(str).str.strip().str.lower()

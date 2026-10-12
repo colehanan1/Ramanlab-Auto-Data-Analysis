@@ -124,6 +124,11 @@ def test_an_mtime_preserving_replacement_is_caught(tmp_path):
         "october_06_batch_1/fly1_global_distance_stats_class_0.json",  # distance_stats
         "october_06_batch_1/global_distance_stats_class_2.json",
         "october_06_batch_1/batch_manifest.json",  # curate_yolo_dataset
+        # yolo_infer's batch eye template (main 0636c69) and its atomic-write
+        # temp: written the first time YOLO processes a batch, so counting it
+        # would rebuild every new batch a second, pointless time.
+        "october_06_batch_1/eye_anchor_template.json",
+        "october_06_batch_1/eye_anchor_template.json.4242.tmp",
         "october_06_batch_1/october_06_batch_1_testing_1/october_06_batch_1_testing_1_distances_merged.parquet",
         "october_06_batch_1/angle_distance_rms_envelope/testing_1_fly1.csv",
         "october_06_batch_1/RMS_calculations/updated_x.parquet",

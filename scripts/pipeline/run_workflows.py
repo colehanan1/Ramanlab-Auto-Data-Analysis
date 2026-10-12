@@ -874,21 +874,26 @@ def _cache_walked_rows(settings, wide_block, paths, fingerprint_for, spliced, na
 
     See ``_write_freeze_cache``. Exact duplicate rows are not cached (a fresh
     build emits each trial once; a repeat could only come from overlapping
-    outputs). A cache write must never fail the run.
+    outputs). Each slice carries this run's id -- the plan records a rebuilt
+    dataset frozen only from a slice its own run wrote -- and a walked dataset
+    that produced no rows gets an empty slice: no rows is then its truth. A
+    cache write must never fail the run.
     """
+    from fbpipe import autofreeze as _autofreeze
     from fbpipe import freeze as _freeze
 
+    run_id = (_autofreeze.active_plan() or {}).get("run_id")
     try:
         frames = _read_walked_rows(paths, names)
-        if not frames:
-            return
-        allrows = pd.concat(frames, ignore_index=True)
-        if "dataset" not in allrows.columns:
-            return
-        groups = list(allrows.groupby(allrows["dataset"].astype(str)))
+        allrows = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+        groups = (
+            list(allrows.groupby(allrows["dataset"].astype(str)))
+            if "dataset" in allrows.columns else []
+        )
     except Exception as exc:  # a cache write must never fail the run
         print(f"[FREEZE] Could not prepare rows to cache for {wide_block}: {exc}")
         return
+    cached: set[str] = set()
     for dataset, group in groups:
         if dataset in spliced:
             continue
@@ -898,7 +903,15 @@ def _cache_walked_rows(settings, wide_block, paths, fingerprint_for, spliced, na
             if dup.any():
                 print(f"[FREEZE] {dataset}/{wide_block}: {int(dup.sum())} exact duplicate row(s) not cached")
                 rows = rows.iloc[(~dup).nonzero()[0]].reset_index(drop=True)
-            _freeze.save_slice(settings.cache_dir, wide_block, dataset, rows, fingerprint_for(dataset))
+            _freeze.save_slice(settings.cache_dir, wide_block, dataset, rows, fingerprint_for(dataset),
+                               built_by=run_id)
+            cached.add(dataset)
+        except Exception as exc:  # a cache write must never fail the run
+            print(f"[FREEZE] Could not cache {dataset}/{wide_block}: {exc}")
+    for dataset in sorted(set(names or ()) - cached - set(spliced) - {d for d, _ in groups}):
+        try:
+            _freeze.save_slice(settings.cache_dir, wide_block, dataset, pd.DataFrame(),
+                               fingerprint_for(dataset), built_by=run_id)
         except Exception as exc:  # a cache write must never fail the run
             print(f"[FREEZE] Could not cache {dataset}/{wide_block}: {exc}")
 
@@ -4109,11 +4122,21 @@ def _dataset_mean_traces_commands(
                 phase_cmd += ["--config", str(config_path)]
             commands.append(phase_cmd)
 
+    # --with-naive also draws a naive arm: the random panel run at each odor's
+    # concentration (pubfig_naive_vs_trained.NAIVE_BY_CONC). It contributes to
+    # the figure like the two arms do.
+    with_naive = bool(cfg.get("with_naive", True))
+    naive_panels: tuple[str, ...] = ()
+    if with_naive:
+        from scripts.analysis.pubfig_naive_vs_trained import NAIVE_BY_CONC
+
+        naive_panels = tuple(NAIVE_BY_CONC.values())
     for train, control, out_dir, batch in entries:
-        if train in frozen_figures and control in frozen_figures:
-            # Both arms frozen for figures -> the pair is final. A frozen arm
-            # paired with a live one still redraws, or new flies in the live arm
-            # would never appear in the comparison.
+        if all(arm in frozen_figures for arm in (train, control, *naive_panels)):
+            # Every contributor frozen for figures -> the pair is final. A frozen
+            # arm paired with a live one still redraws, or new flies in the live
+            # arm would never appear in the comparison -- and so does a frozen
+            # pair whose naive panel changed (auto-freeze dedupes those rows).
             continue
         out_path = Path(out_dir)
         if not out_path.is_absolute():
@@ -4141,7 +4164,7 @@ def _dataset_mean_traces_commands(
         # The naive arm (black): the random panel run at each odor's own
         # concentration. Writes a second copy of every figure under
         # Trained_vs_Control_vs_Naive/, leaving the two-arm files untouched.
-        if bool(cfg.get("with_naive", True)):
+        if with_naive:
             cmd.append("--with-naive")
         if config_path is not None:
             # Carries dataset_overrides.odor_remap, so ACV reads

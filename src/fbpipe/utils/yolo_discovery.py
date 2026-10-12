@@ -22,12 +22,18 @@ rules live here, free of torch/cv2 imports:
 
 from __future__ import annotations
 
+import dataclasses
+import os
 from pathlib import Path
 from typing import Any, Iterable, Optional
 
 #: What yolo_infer.main infers (matched case-insensitively). A ``.h264`` needs a
 #: remux into ``.mp4`` first, so it is never a YOLO input.
 RAW_VIDEO_SUFFIXES = (".mp4", ".avi")
+
+#: Every file a recording session leaves directly in its batch folder that names
+#: it: the rig's ``output_*.csv`` and the videos, the ``.h264`` capture included.
+_SESSION_VIDEO_SUFFIXES = (".mp4", ".avi", ".h264")
 
 MERGED_SUFFIX = "_distances_merged"
 
@@ -76,12 +82,80 @@ def pending_videos(cfg: Any, root: str | Path) -> list[Path]:
     applied), raw videos in sorted order, a collision group counted once as
     its latest session, and a video whose trial folder exists left alone.
     """
+    return trial_report(cfg, root).pending
+
+
+def _session_stem(name: str) -> Optional[str]:
+    """The session a file directly in a batch folder belongs to, or None.
+
+    ``_preprocessed`` is dropped, as yolo_infer does when it looks up a video's
+    rig CSV; dot files (an AppleDouble ``._output_*.mp4``) are no session.
+    """
+    if name.startswith("."):
+        return None
+    lower = name.lower()
+    if lower.startswith("output_") and lower.endswith(".csv"):
+        stem = name[: -len(".csv")]
+    elif lower.endswith(_SESSION_VIDEO_SUFFIXES):
+        stem = name.rsplit(".", 1)[0]
+    else:
+        return None
+    return stem.replace("_preprocessed", "")
+
+
+def _trial_of_stem(stem: str) -> str:
+    # trial_folder_name without Path(): a stem may hold a dot ("Hexanol-0.1").
+    parts = stem.split("_")
+    return "_".join(parts[1:7]) if len(parts) >= 7 else stem
+
+
+def _session_groups(batch_dir: str | Path) -> dict[str, dict[str, Any]]:
+    groups: dict[str, dict[str, Any]] = {}
+    try:
+        names = os.listdir(batch_dir)
+    except OSError:
+        return groups
+    for name in names:
+        stem = _session_stem(name)
+        if stem is None:
+            continue
+        group = groups.setdefault(_trial_of_stem(stem), {"stems": set(), "csv": False, "video": False})
+        group["stems"].add(stem)
+        group["csv" if name.lower().endswith(".csv") else "video"] = True
+    return groups
+
+
+def trial_sessions(batch_dir: str | Path) -> dict[str, list[str]]:
+    """``{trial folder name: [session stem, ...]}`` for one batch folder.
+
+    More than one stem means the trial was recorded more than once (a restarted
+    session): every attempt names the same trial folder, and nothing on disk
+    says which attempt that folder was built from. Read from the rig CSVs as
+    well as the videos, so it still holds once the videos are deleted.
+    """
+    return {name: sorted(g["stems"]) for name, g in _session_groups(batch_dir).items()}
+
+
+@dataclasses.dataclass
+class TrialReport:
+    """One dataset root's trials, as one pass over its live batch folders sees them."""
+
+    pending: list[Path]
+    #: ``"<batch>/<trial>"`` -> how many sessions recorded it (only when > 1).
+    collisions: dict[str, int]
+    #: ``"<batch>/<trial>"`` with a rig CSV but no trial folder and no local
+    #: video: never tracked, and nothing here YOLO could still process.
+    untracked: list[str]
+
+
+def trial_report(cfg: Any, root: str | Path) -> TrialReport:
+    """:func:`pending_videos`, plus the trials auto-freeze reports, in one pass."""
     from .frozen_folders import iter_live_batch_dirs
 
+    report = TrialReport(pending=[], collisions={}, untracked=[])
     root_path = Path(root)
     if not root_path.is_dir():
-        return []
-    pending: list[Path] = []
+        return report
     for batch in iter_live_batch_dirs(cfg, root_path):
         videos = raw_videos(batch)
         skipped = superseded_videos(videos)
@@ -89,8 +163,13 @@ def pending_videos(cfg: Any, root: str | Path) -> list[Path]:
             if video in skipped:
                 continue
             if not (batch / trial_folder_name(video)).exists():
-                pending.append(video)
-    return pending
+                report.pending.append(video)
+        for name, group in sorted(_session_groups(batch).items()):
+            if len(group["stems"]) > 1:
+                report.collisions[f"{batch.name}/{name}"] = len(group["stems"])
+            if group["csv"] and not group["video"] and not (batch / name).exists():
+                report.untracked.append(f"{batch.name}/{name}")
+    return report
 
 
 def _existing_table(stem: Path) -> Optional[Path]:

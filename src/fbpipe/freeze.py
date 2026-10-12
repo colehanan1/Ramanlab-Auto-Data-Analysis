@@ -287,6 +287,8 @@ def save_slice(
     dataset: str,
     rows: pd.DataFrame,
     fingerprint: Mapping[str, Any],
+    *,
+    built_by: Optional[str] = None,
 ) -> None:
     """Persist *rows* as *dataset*'s slice of *wide_block*.
 
@@ -297,6 +299,11 @@ def save_slice(
     Each file is written to a temporary name and renamed into place, rows
     first: a crash leaves the old slice, or new rows under the old meta (whose
     row count and columns then disagree with them), never a torn file.
+
+    *built_by* is the auto-freeze run whose walk produced the rows
+    (``meta["built_by_run"]``): a rebuilt dataset is recorded frozen only from
+    a slice its own run wrote (:func:`slice_built_by`). Omitted, meta.json is
+    exactly what it always was.
     """
     target = slice_dir(cache_dir, wide_block, dataset)
     target.mkdir(parents=True, exist_ok=True)
@@ -312,9 +319,21 @@ def save_slice(
         "columns": [str(c) for c in rows.columns],
         "fingerprint": dict(fingerprint),
     }
+    if built_by is not None:
+        meta["built_by_run"] = str(built_by)
     tmp_meta = target / f".meta.json.{os.getpid()}.tmp"
     tmp_meta.write_text(json.dumps(meta, indent=2, sort_keys=True))
     os.replace(tmp_meta, target / "meta.json")
+
+
+def slice_built_by(cache_dir: str | Path, wide_block: str, dataset: str) -> Optional[str]:
+    """The run that wrote *dataset*'s slice (``save_slice(built_by=...)``), or None."""
+    try:
+        meta = json.loads((slice_dir(cache_dir, wide_block, dataset) / "meta.json").read_text())
+    except Exception:  # noqa: BLE001 -- unreadable: written by no run we can name
+        return None
+    value = meta.get("built_by_run") if isinstance(meta, dict) else None
+    return None if value is None else str(value)
 
 
 def load_slice(

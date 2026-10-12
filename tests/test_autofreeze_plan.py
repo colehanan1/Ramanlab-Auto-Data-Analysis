@@ -101,7 +101,8 @@ class Scene:
     def fingerprint(self, ds, kw):
         return rw._freeze_fingerprint(self.settings, ds, **kw)
 
-    def seed_slice(self, ds, rows=None, fingerprint=None):
+    def seed_slice(self, ds, rows=None, fingerprint=None, run=None):
+        """Cache *ds*'s rows; *run* stamps them as written by that run's walk."""
         if rows is None:
             rows = pd.DataFrame({"dataset": [ds], "fly": [BATCH], "fly_number": [1],
                                  "trial_type": ["testing"], "trial_label": ["testing_1_hexanol"],
@@ -110,7 +111,7 @@ class Scene:
         for block, names, kw in self.blocks:
             if ds in names:
                 _freeze.save_slice(self.settings.cache_dir, block, ds, rows,
-                                   fingerprint or self.fingerprint(ds, kw))
+                                   fingerprint or self.fingerprint(ds, kw), built_by=run)
 
     def plan(self, **kw):
         kw.setdefault("pairs", [(PARTNER, FROZEN)])
@@ -128,7 +129,7 @@ class Scene:
         dataset's rows, then commit at the end."""
         for ds, d in plan.decisions.items():
             if d.decision != "frozen" and (datasets is None or ds in datasets):
-                self.seed_slice(ds)
+                self.seed_slice(ds, run=plan.run_id)
         return plan.commit(combined_ran=True)
 
 
@@ -216,6 +217,24 @@ def test_adoption_removes_exact_duplicate_rows_losslessly(scene):
     plan.commit(combined_ran=True)
     assert "figures_pending" not in scene.record(FROZEN)
     assert scene.plan().decisions[FROZEN].figures_frozen is True
+
+
+def test_adoption_keeps_rows_whose_marks_the_folder_rules_disagree_with(scene):
+    """A data-frozen dataset's rows were built with the folder rules OFF, so its
+    slice can mark a folder live that today's always-live rules retire -- under
+    an unchanged fingerprint. Adopting keeps the rows exactly as they are (that
+    is what freezing means) and says so: its first rebuild would retire it."""
+    scene.overrides[FROZEN] = {"freeze": {"data": True, "figures": True, "folders": [BATCH]}}
+    scene.reload()
+    scene.seed_slice(FROZEN)  # BATCH marked frozen=False, current fingerprint
+    scene.seed_slice(PARTNER)
+    plan = scene.plan()
+    d = plan.decisions[FROZEN]
+    assert d.decision == "frozen" and d.adopted
+    notice = next(n for n in plan.notices if n.startswith(f"[FREEZE] {FROZEN}:") and "folder rules" in n)
+    assert f"would retire 1 folder(s) its rows show today ({BATCH})" in notice
+    rows = pd.read_parquet(_freeze.slice_dir(scene.settings.cache_dir, "combined_base", FROZEN) / "rows.parquet")
+    assert rows["frozen"].tolist() == [False]  # spliced as it is
 
 
 # --- steady state ------------------------------------------------------------------
@@ -425,6 +444,20 @@ def test_a_folder_policy_edit_that_flips_a_mark_rebuilds(scene):
     assert "the rules now mark 1 folder(s) differently" in d.reasons[0]
 
 
+def test_a_read_only_plan_says_what_it_would_restamp(scene):
+    """--freeze-status previews the re-stamp without writing it."""
+    _settle(scene)
+    scene.overrides[FROZEN]["freeze"]["cutoff_exempt_before"] = "2026-06-26"
+    scene.reload()
+    meta = _freeze.slice_dir(scene.settings.cache_dir, "combined_base", FROZEN) / "meta.json"
+    before = meta.read_bytes()
+    plan = scene.plan(read_only=True)
+    assert plan.decisions[FROZEN].decision == "frozen"
+    assert any("would be re-stamped" in n for n in plan.notices)
+    assert not any(n.endswith("marks no folder differently") and "would" not in n for n in plan.notices)
+    assert meta.read_bytes() == before
+
+
 # --- --folder ------------------------------------------------------------------------------
 
 
@@ -459,6 +492,23 @@ def test_commit_refuses_a_dataset_whose_rows_were_not_cached(scene):
     plan = scene.plan()
     lines = plan.commit(combined_ran=True)  # nothing cached LIVE's rows
     assert any(f"{LIVE}: NOT refrozen" in line for line in lines)
+    assert scene.record(LIVE)["state"] == "thawing"
+
+
+def test_commit_refuses_a_valid_slice_this_run_did_not_rewrite(scene):
+    """New data arrived but the rebuilt rows never reached the cache (a cache
+    write that failed). Yesterday's slice still validates under the same
+    fingerprint: recording it frozen would drop the new batch for good."""
+    _settle(scene)
+    _batch(scene.root(LIVE), "august_15_batch_1_rig_2")
+    plan = scene.plan()
+    assert plan.decisions[LIVE].decision == "thawed"
+    kw = next(kw for b, n, kw in scene.blocks if LIVE in n)
+    assert _freeze.slice_status(scene.settings.cache_dir, "combined_base", LIVE,
+                                scene.fingerprint(LIVE, kw)) == (True, "")
+    lines = plan.commit(combined_ran=True)  # nothing re-cached LIVE this run
+    line = next(line for line in lines if f"{LIVE}:" in line)
+    assert "NOT refrozen" in line and "not rewritten by this run" in line
     assert scene.record(LIVE)["state"] == "thawing"
 
 
@@ -519,6 +569,34 @@ def test_frozen_datasets_built_under_other_settings_are_reported(scene):
     plan = scene.plan()
     notice = next(n for n in plan.notices if "per-trial settings changed" in n)
     assert "proboscis_filter" in notice
+
+
+# --- trials the plan reports (never a reason to rebuild by themselves) -------------------------------
+
+
+def test_a_trial_recorded_more_than_once_is_reported(scene):
+    """EB-Control-24-1 july_17_batch_1_rig_3 training_1 was recorded three
+    times. YOLO processes only the latest session; the run says so every time."""
+    _settle(scene)
+    (scene.root(LIVE) / BATCH / f"{_stem(BATCH, 'testing_1', '20260809_093939')}.csv").write_text("frame\n0\n")
+    plan = scene.plan()
+    notice = next(n for n in plan.notices if "recorded more than once" in n)
+    assert notice.startswith(f"[FREEZE] {LIVE}: 1 trial(s) recorded more than once")
+    assert f"{BATCH}/august_09_batch_1_testing_1 (2 sessions)" in notice
+    assert "only the latest session" in notice
+
+
+def test_untracked_trials_are_reported_and_never_thaw(scene):
+    """Rig files, but no trial folder and no local video: the video was deleted
+    before YOLO saw it (Hex-Control-24-0.1 august_27_batch_2_rig_2 x8). There is
+    nothing YOLO could process, so it is no reason to rebuild -- only reported."""
+    (scene.root(LIVE) / BATCH / f"{_stem(BATCH, 'training_1', '20260809_110000')}.csv").write_text("frame\n0\n")
+    _settle(scene)
+    plan = scene.plan()
+    assert plan.decisions[LIVE].decision == "frozen"
+    notice = next(n for n in plan.notices if "never tracked" in n)
+    assert notice.startswith(f"[FREEZE] {LIVE}: 1 trial(s)")
+    assert f"{BATCH}/august_09_batch_1_training_1" in notice
 
 
 # --- isolation --------------------------------------------------------------------------------------

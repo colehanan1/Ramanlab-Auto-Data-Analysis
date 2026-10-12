@@ -332,3 +332,23 @@ def test_run_combined_passes_the_spliced_slices(tmp_path, monkeypatch):
     rw._run_combined(cfg, _Settings(tmp_path, {}, ["DS1"]), config_path=tmp_path / "c.yaml")
     assert len(captured) == len(returned) == 3
     assert all(c is r for c, r in zip(captured, returned))
+
+
+def test_auto_freeze_caches_the_walked_datasets_stamped_with_the_run(tmp_path, monkeypatch):
+    """Under an active auto-freeze plan only the datasets this run walked are
+    cached, each stamped with the run that wrote it -- the commit trusts no
+    other slice -- and a walked dataset that produced no rows gets an empty
+    slice (no rows IS its truth). A spliced dataset is never re-saved."""
+    from fbpipe import autofreeze as af
+
+    monkeypatch.setattr(af, "_ACTIVE", {"schema": af.PLAN_SCHEMA, "run_id": "R1", "datasets": {}})
+    main, train = _write_outputs(tmp_path)  # rows for LIVE and FROZEN only
+    s = _Settings(tmp_path, {}, ["LIVE", "FROZEN", "EMPTY"])
+    _run(s, main, train, spliced={"FROZEN": (_wide("FROZEN", 4), 6)}, walked={"LIVE", "FROZEN", "EMPTY"})
+
+    def _meta(ds):
+        return json.loads((freeze.slice_dir(s.cache_dir, "combined_base", ds) / "meta.json").read_text())
+
+    assert _meta("LIVE")["built_by_run"] == "R1" and _meta("LIVE")["row_count"] == 8
+    assert _meta("EMPTY")["built_by_run"] == "R1" and _meta("EMPTY")["row_count"] == 0
+    assert not freeze.slice_dir(s.cache_dir, "combined_base", "FROZEN").exists()

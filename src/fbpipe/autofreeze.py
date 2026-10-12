@@ -60,11 +60,15 @@ PLAN_ENV = "FBPIPE_FREEZE_PLAN"
 #: Video containers are never inputs (``yolo_discovery`` decides pending videos).
 _VIDEO_SUFFIXES = (".mp4", ".avi", ".h264", ".mov", ".mkv", ".mpg", ".mpeg", ".m4v")
 
-#: Names the pipeline itself writes directly inside a batch folder.
+#: Names the pipeline itself writes directly inside a batch folder. Besides
+#: distance_stats' per-fly JSON: yolo_infer's batch eye template (main, 0636c69)
+#: and its atomic-write temp, written the first time YOLO processes a batch --
+#: counted, every new batch would be rebuilt a second, pointless time.
 _PIPELINE_WRITTEN = re.compile(
     r"^(?:fly\d+_)?global_distance_stats_class_\d+\.json$"
     r"|^batch_manifest\.json$"
-    r"|^_trial_meta\.json$",
+    r"|^_trial_meta\.json$"
+    r"|^eye_anchor_template\.json(?:\.\d+\.tmp)?$",
     re.IGNORECASE,
 )
 
@@ -469,6 +473,14 @@ class Plan:
     # -- the end of a successful run ---------------------------------------------
 
     def _slices_current(self, dataset: str, root: str) -> tuple[bool, str]:
+        """Whether every wide table *dataset* feeds now caches THIS run's rows.
+
+        Valid under today's fingerprint is not enough: yesterday's slice of a
+        dataset that got new data still validates, and recording it frozen
+        when this run's rows never reached the cache (a failed cache write)
+        would drop the new batch for good. So the slice must carry this run's
+        stamp (``save_slice(built_by=...)``, written by the cache writer).
+        """
         from . import freeze as _freeze
 
         for block, kw in self.consulted(dataset):
@@ -480,10 +492,13 @@ class Plan:
                 # Without it an empty dataset would rebuild every night.
                 import pandas as pd
 
-                _freeze.save_slice(self.settings.cache_dir, block, dataset, pd.DataFrame(), fingerprint)
+                _freeze.save_slice(self.settings.cache_dir, block, dataset, pd.DataFrame(), fingerprint,
+                                   built_by=self.run_id)
                 continue
             if not ok:
                 return False, f"{block}: {why}"
+            if _freeze.slice_built_by(self.settings.cache_dir, block, dataset) != self.run_id:
+                return False, f"{block}: not rewritten by this run (its rebuilt rows never reached the cache)"
         return True, ""
 
     def _rows_by_type(self, dataset: str) -> dict:
@@ -615,24 +630,40 @@ def _policy_only_drift(stored: Mapping[str, Any], current: Mapping[str, Any]) ->
     return True
 
 
-def _marks_unchanged(settings: Any, dataset: str, root: Path, rows_path: Path) -> tuple[bool, str]:
-    """Whether today's folder rules mark exactly the folders the slice marks."""
+def _mark_flips(settings: Any, dataset: str, root: Path, rows_path: Path) -> tuple[list[str], list[str], str]:
+    """``(retire, revive, problem)``: how today's folder rules would re-mark a slice.
+
+    *retire*: folders the slice shows live that the rules retire; *revive*:
+    folders it marks frozen that the rules no longer retire; *problem*: why the
+    two cannot be compared (a folder marked both ways, or gone from disk).
+    """
     import pyarrow.parquet as pq
 
     from .utils.frozen_folders import frozen_folders_for_root
 
-    table = pq.read_table(rows_path, columns=["fly", "frozen"]).to_pandas()
     marked: dict[str, set[bool]] = {}
-    for fly, frozen in zip(table["fly"].astype(str), table["frozen"]):
-        marked.setdefault(fly, set()).add(str(frozen).strip().lower() in {"true", "1", "1.0"})
+    if {"fly", "frozen"} <= set(pq.read_schema(rows_path).names):  # an empty slice marks nothing
+        table = pq.read_table(rows_path, columns=["fly", "frozen"]).to_pandas()
+        for fly, frozen in zip(table["fly"].astype(str), table["frozen"]):
+            marked.setdefault(fly, set()).add(str(frozen).strip().lower() in {"true", "1", "1.0"})
     if any(len(v) > 1 for v in marked.values()):
-        return False, "a folder is marked both ways"
+        return [], [], "a folder is marked both ways"
     on_disk = {p.name for p in root.iterdir() if p.is_dir()} if root.is_dir() else set()
     gone = sorted(set(marked) - on_disk)
     if gone:
-        return False, f"folder(s) no longer on disk: {', '.join(gone[:3])}"
-    retired = frozen_folders_for_root(settings, root, dataset=dataset)
-    flipped = sorted(f for f, v in marked.items() if (f in retired) != next(iter(v)))
+        return [], [], f"folder(s) no longer on disk: {', '.join(gone[:3])}"
+    retired = frozen_folders_for_root(settings, root, dataset=dataset) if marked else set()
+    retire = sorted(f for f, v in marked.items() if f in retired and not next(iter(v)))
+    revive = sorted(f for f, v in marked.items() if f not in retired and next(iter(v)))
+    return retire, revive, ""
+
+
+def _marks_unchanged(settings: Any, dataset: str, root: Path, rows_path: Path) -> tuple[bool, str]:
+    """Whether today's folder rules mark exactly the folders the slice marks."""
+    retire, revive, problem = _mark_flips(settings, dataset, root, rows_path)
+    if problem:
+        return False, problem
+    flipped = sorted(retire + revive)
     if flipped:
         return False, f"the rules now mark {len(flipped)} folder(s) differently ({', '.join(flipped[:3])})"
     return True, ""
@@ -668,7 +699,7 @@ def plan_run(
     ``thawing`` marks of every dataset that is rebuilt.
     """
     from . import freeze as _freeze
-    from .utils.yolo_discovery import pending_videos
+    from .utils.yolo_discovery import trial_report
 
     scope = scope_dir(settings.cache_dir, config_path)
     run_id = run_id or (_dt.datetime.now().strftime("%Y%m%dT%H%M%S") + "-" + uuid.uuid4().hex[:6])
@@ -692,8 +723,10 @@ def plan_run(
         old_inputs = record.get("inputs") if isinstance(record, dict) else None
         inputs = scan_inputs(root_path, old_inputs)
         d.inputs = inputs
-        pending = pending_videos(settings, root_path)
+        trials = trial_report(settings, root_path)
+        pending = trials.pending
         d.pending = len(pending)
+        _trial_notices(plan, dataset, trials)
         explicit = thaw_all or _freeze._freeze_key(dataset) in thawed_keys
 
         if folder_key is not None and dataset.lower() == folder_key:
@@ -852,15 +885,51 @@ def _restamp_policy_drift(plan: Plan, d: Decision, block: str, fingerprint: dict
         meta["fingerprint"] = current
         _atomic_write_text(target / "meta.json", json.dumps(meta, indent=2, sort_keys=True))
     plan.notices.append(
-        f"[FREEZE] {d.dataset}: {block} cache re-stamped for a folder-policy edit that marks no folder differently"
+        f"[FREEZE] {d.dataset}: {block} cache {'would be ' if plan.read_only else ''}re-stamped for a "
+        f"folder-policy edit that marks no folder differently"
     )
     return True, ""
+
+
+def _adoption_mark_notice(plan: Plan, d: Decision) -> None:
+    """Say so when today's folder rules would re-mark an adopted dataset's rows.
+
+    A data-frozen dataset's rows were built with the folder rules switched off,
+    so its slice can disagree with the always-live rules under an unchanged
+    fingerprint. It is adopted with its rows exactly as they are -- freezing
+    keeps them -- but its first rebuild would apply the rules.
+    """
+    from . import freeze as _freeze
+
+    for block, _ in plan.consulted(d.dataset):
+        rows = _freeze.slice_dir(plan.settings.cache_dir, block, d.dataset) / "rows.parquet"
+        try:
+            retire, revive, problem = _mark_flips(plan.settings, d.dataset, Path(d.root), rows)
+        except Exception as exc:  # noqa: BLE001 -- a report must never stop the run
+            retire, revive, problem = [], [], f"its folder marks could not be checked ({exc})"
+        parts = []
+        if retire:
+            parts.append(f"its first rebuild would retire {len(retire)} folder(s) its rows show today "
+                         f"({_examples(retire)}) under today's folder rules")
+        if revive:
+            parts.append(f"its first rebuild would bring back {len(revive)} retired folder(s) "
+                         f"({_examples(revive)}) under today's folder rules")
+        if problem:
+            parts.append(f"its rows cannot be checked against today's folder rules: {problem}")
+        if parts:
+            plan.notices.append(
+                f"[FREEZE] {d.dataset}: adopted with its rows exactly as they are; {'; '.join(parts)} -- "
+                f"review dataset_overrides.{d.dataset}.freeze (folders / cutoff_exempt_before) before "
+                f"new data arrives"
+            )
+            return
 
 
 def _adopt(plan: Plan, d: Decision, inputs: dict) -> None:
     """Take a dataset frozen today into auto-freeze without rebuilding it."""
     from . import freeze as _freeze
 
+    _adoption_mark_notice(plan, d)
     for block, _ in plan.consulted(d.dataset):
         if plan.read_only:
             before, after = _freeze.count_duplicate_rows(plan.settings.cache_dir, block, d.dataset)
@@ -932,6 +1001,33 @@ def _cascade_notices(plan: Plan, pairs: Sequence[tuple[str, str]], config_path: 
             + " ".join(f"--thaw {n}" for n in names)
             + "  (--thaw re-runs the per-trial steps, combine and the wide build from the existing YOLO "
               "outputs; YOLO itself only re-runs for a trial whose folder is removed)"
+        )
+
+
+def _examples(items: Sequence[str], n: int = 3) -> str:
+    return ", ".join(items[:n]) + (", ..." if len(items) > n else "")
+
+
+def _trial_notices(plan: Plan, dataset: str, trials: Any) -> None:
+    """Trials worth a line every run, whatever the dataset's decision.
+
+    Neither is a reason to rebuild: a collision is not resolved by a rebuild
+    (every attempt names one trial folder), and an untracked trial has nothing
+    left here that YOLO could process. A frozen dataset is never walked, so
+    without these lines nobody would notice either.
+    """
+    if trials.collisions:
+        items = [f"{name} ({n} sessions)" for name, n in sorted(trials.collisions.items())]
+        plan.notices.append(
+            f"[FREEZE] {dataset}: {len(items)} trial(s) recorded more than once (a restarted session): "
+            f"{_examples(items)}; YOLO processes only the latest session of a new one, and the secure "
+            f"cleanup keeps every session's video -- move the aborted sessions' files aside to resolve"
+        )
+    if trials.untracked:
+        plan.notices.append(
+            f"[FREEZE] {dataset}: {len(trials.untracked)} trial(s) have rig files but were never tracked "
+            f"and have no local video: {_examples(trials.untracked)} (a video copied back from the "
+            f"secured mirror into its batch folder is new data, and is processed)"
         )
 
 
