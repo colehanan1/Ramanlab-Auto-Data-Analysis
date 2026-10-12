@@ -482,19 +482,24 @@ def fig_responsiveness(paired: pd.DataFrame, *, regression: pd.DataFrame | None)
             b.axvline(0, color=INK_MUTED, linewidth=1.0, zorder=1)
             b.set_yticks(range(len(odors)))
             b.set_yticklabels(odors)
-            b.set_xlim(-55, 100)
+            top = float(np.nanmax(100 * pre["q2"].to_numpy(float)))
+            b.set_xlim(-55, max(40.0, np.ceil((top + 10) / 10) * 10))
             b.set_xlabel("% of the differences predicted, beyond simply guessing the average\n"
                          "(0 = no better than the average; values below −50 drawn at −50)")
-            b.set_title("Predicting the pre-test score to each odor (Ridge, new batch held out)",
+            n_fly = int(pre.loc[pre["series"] == "single fly, from its other odors", "n"].max())
+            n_bat = int(pre.loc[pre["series"] == "batch average, from its other odors", "n"].max())
+            b.set_title(f"Predicting the pre-test score to each odor ({n_fly} flies, {n_bat} batches;\n"
+                        "Ridge, each batch predicted by a model that never saw it)",
                         loc="left", fontsize=10, color=INK)
-            b.legend(loc="lower right", frameon=False, fontsize=8)
+            b.legend(loc="lower left", frameon=False, fontsize=8)  # the left side is empty (Q2 < 0 is rare)
             _recessive_grid(b)
             fly = pre[pre["series"] == "single fly, from its other odors"]["q2"].median()
             bat = pre[pre["series"] == "batch average, from its other odors"]["q2"].median()
             stv = pre[pre["series"] == "single fly, from starvation time only"]["q2"].median()
-            answer += (f"\nThe other odors predict about {100 * fly:.0f}% of a single fly's differences and "
-                       f"{100 * bat:.0f}% of a batch's (median); starvation time alone predicts "
-                       f"{100 * stv:.0f}%.")
+            pct = lambda q: f"{round(100 * q) + 0:.0f}%"  # noqa: E731  (+0 turns -0 into 0)
+            answer += (f"\nThe other odors predict about {pct(fly)} of a single fly's differences and "
+                       f"{pct(bat)} of a batch's (median over odors); starvation time alone "
+                       f"predicts {pct(stv)}.")
         _finish(fig, "Does responding to some odors predict responding to others?", answer)
     return fig
 
