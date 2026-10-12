@@ -2862,6 +2862,29 @@ def _write_wide_frame(fh, frame: pd.DataFrame, n_meta: int, *, chunk_rows: int =
         fh.write("".join(parts))
 
 
+class _PandasAppend:
+    """Append handle for an output path pandas compresses (``.gz``, ``.bz2``,
+    ``.zip``, ...). ``to_csv(path, mode="a")`` wrote each row as its own
+    compressed member; a plain text handle would splice raw text into the
+    file. Each ``write`` goes through pandas' own handle in append mode
+    instead, so the file decompresses to exactly the plain-text output.
+    """
+
+    def __init__(self, target: Path) -> None:
+        self.target = str(target)
+
+    def write(self, text: str) -> None:
+        from pandas.io.common import get_handle
+
+        with get_handle(
+            self.target, "a", encoding="utf-8", errors="strict", compression="infer"
+        ) as handles:
+            handles.handle.write(text)
+
+    def close(self) -> None:
+        pass
+
+
 def _trial_read_columns(item: Mapping[str, object]) -> tuple[list[str], str | None, str | None]:
     """``(read_cols, frame_col, ts_col)`` for one build_wide_csv trial item.
 
@@ -3225,15 +3248,20 @@ def build_wide_csv(
     # opens a path for to_csv. Line-buffered, so every finished row is on disk
     # as soon as it is written -- as it was with the per-row open/close --
     # even if the build raises before the close below, which runs before the
-    # frozen-row sort reads the files back.
+    # frozen-row sort reads the files back. A path pandas would compress
+    # (.csv.gz, ...) appends through pandas instead (_PandasAppend).
     out_handles: dict[str, object] = {}
 
     def _out(target: Path):
         fh = out_handles.get(str(target))
         if fh is None:
-            fh = out_handles[str(target)] = open(
-                target, "a", encoding="utf-8", newline="", buffering=1
-            )
+            from pandas.io.common import infer_compression
+
+            if infer_compression(str(target), "infer") is not None:
+                fh = _PandasAppend(target)
+            else:
+                fh = open(target, "a", encoding="utf-8", newline="", buffering=1)
+            out_handles[str(target)] = fh
         return fh
 
     slot_stats_cache: dict[tuple[str, str], tuple[float, float] | None] = {}
