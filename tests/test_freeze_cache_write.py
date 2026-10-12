@@ -11,6 +11,7 @@ that cache back unchanged -- and only then.
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import shutil
 
@@ -207,7 +208,10 @@ def _slice_files(settings, ds):
     return {p.name: p.read_bytes() for p in sorted(d.iterdir())}
 
 
-@pytest.mark.parametrize("drift", ["none", "dtype", "width", "fingerprint_spelling", "meta_missing"])
+@pytest.mark.parametrize(
+    "drift",
+    ["none", "dtype", "width", "fingerprint_spelling", "meta_missing", "meta_stale", "meta_reformatted"],
+)
 def test_spliced_slice_is_skipped_only_when_a_re_save_would_rewrite_it_as_is(tmp_path, drift):
     """Night 1 primes the cache; night 2 splices FROZEN back from it.
 
@@ -215,9 +219,11 @@ def test_spliced_slice_is_skipped_only_when_a_re_save_would_rewrite_it_as_is(tmp
     differ from the cached one even though FROZEN's own rows did not change:
     a live NaN turns an int column float64 (the next splice would print 2.0,
     not 2), a longer live trace widens every row, and a config number spelled
-    30 -> 30.0 rewrites meta.json. Today every slice is re-saved. The skip must
-    leave exactly the bytes that re-save writes, and skip only when it would
-    have rewritten the slice unchanged.
+    30 -> 30.0 rewrites meta.json. A meta.json written by an older save_slice
+    (another own_max_len, other formatting) under the same fingerprint is
+    rewritten too. Today every slice is re-saved. The skip must leave exactly
+    the bytes that re-save writes, and skip only when it would have rewritten
+    the slice unchanged.
     """
     prime_fp = _fp_spelled(30) if drift == "fingerprint_spelling" else _fp
     night2_fp = _fp_spelled(30.0) if drift == "fingerprint_spelling" else _fp
@@ -237,6 +243,15 @@ def test_spliced_slice_is_skipped_only_when_a_re_save_would_rewrite_it_as_is(tmp
     elif drift == "meta_missing":
         for s in (new, ref):
             (freeze.slice_dir(s.cache_dir, "combined_base", "FROZEN") / "meta.json").unlink()
+    elif drift in ("meta_stale", "meta_reformatted"):
+        for s in (new, ref):
+            meta_path = freeze.slice_dir(s.cache_dir, "combined_base", "FROZEN") / "meta.json"
+            meta = json.loads(meta_path.read_text())
+            if drift == "meta_stale":
+                meta["own_max_len"] += 1  # what an older own_max_len may have stored
+                meta_path.write_text(json.dumps(meta, indent=2, sort_keys=True))
+            else:
+                meta_path.write_text(json.dumps(meta))  # same content, other layout
     frozen_dir = freeze.slice_dir(new.cache_dir, "combined_base", "FROZEN")
     for p in frozen_dir.iterdir():
         os.utime(p, ns=(0, 0))
