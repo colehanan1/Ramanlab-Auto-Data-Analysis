@@ -699,9 +699,10 @@ def _spliced_slice_unchanged(cache_dir, wide_block, dataset, group, fingerprint,
     splice then prints ``2.0``, not ``2``), a longer live trace widens every
     row -- and a config number re-spelled ``30`` -> ``30.0`` still matches the
     fingerprint yet rewrites meta.json. A re-save follows all of that, so only
-    an identical slice is skipped: same columns, dtypes and values, same
-    fingerprint text. Everything else in meta.json follows from the rows and
-    the slice's own path.
+    an identical slice is skipped: same columns, dtypes and values, and a
+    meta.json that reads exactly as the re-save would write it -- so one an
+    older save_slice wrote under the same fingerprint (another own_max_len,
+    another layout) is rewritten, as it always was.
     """
     from fbpipe import freeze as _freeze
 
@@ -720,9 +721,21 @@ def _spliced_slice_unchanged(cache_dir, wide_block, dataset, group, fingerprint,
         rows.index = old.index
         if not rows.equals(old):
             return False
+        # The meta.json fbpipe.freeze.save_slice writes for these rows: same
+        # keys, same own_max_len, same json.dumps call. A save_slice that
+        # writes more (a new key, another layout) no longer matches this, and
+        # its slices are simply re-saved every run until this follows suit.
+        meta = {
+            "schema_version": _freeze.FREEZE_SCHEMA_VERSION,
+            "dataset": str(dataset),
+            "wide_block": str(wide_block),
+            "own_max_len": _freeze.own_max_len(rows),
+            "row_count": int(len(rows)),
+            "columns": [str(c) for c in rows.columns],
+            "fingerprint": dict(fingerprint),
+        }
         meta_path = _freeze.slice_dir(cache_dir, wide_block, dataset) / "meta.json"
-        stored = json.loads(meta_path.read_text()).get("fingerprint")
-        return json.dumps(stored, sort_keys=True) == json.dumps(dict(fingerprint), sort_keys=True)
+        return meta_path.read_text() == json.dumps(meta, indent=2, sort_keys=True)
     except Exception:  # anything unexpected: re-save, as before
         return False
 

@@ -12,6 +12,8 @@ under both pandas versions the pipeline meets (nightly PYTHONNOUSERSITE=1 ->
 
 from __future__ import annotations
 
+import bz2
+import gzip
 import io
 
 import numpy as np
@@ -439,6 +441,31 @@ def test_rows_written_before_a_failure_are_on_disk(tmp_path, monkeypatch):
         assert got == want[: len(got)], name
         rows += len(got) - 1  # minus the header
     assert rows == 3
+
+
+def test_a_compressed_output_still_decompresses_to_the_plain_build(tmp_path):
+    """to_csv(path, mode="a") compresses every append when pandas infers a
+    compression from the path (.gz, .bz2, ...), so the per-row writer left a
+    valid multi-member file. The shared append handles must not write plain
+    text into such a file: each output decompresses to the plain build."""
+    ev.set_protocol("v2")
+    _make_live(tmp_path / "LIVE-DS")
+    built = {}
+    for ext in (".csv", ".csv.gz", ".csv.bz2"):
+        out = tmp_path / ext.lstrip(".").replace(".", "_")
+        out.mkdir()
+        ec.build_wide_csv(
+            [str(tmp_path / "LIVE-DS")],
+            str(out / f"w{ext}"),
+            measure_cols=["envelope_of_rms"],
+            extra_trial_exports={"training": str(out / f"t{ext}"), "pretest": str(out / f"p{ext}")},
+        )
+        built[ext] = out
+    for name in ("w", "t", "p"):
+        plain = (built[".csv"] / f"{name}.csv").read_bytes()
+        assert plain.count(b"\n") > 1, name  # rows, not just the header
+        assert gzip.decompress((built[".csv.gz"] / f"{name}.csv.gz").read_bytes()) == plain, name
+        assert bz2.decompress((built[".csv.bz2"] / f"{name}.csv.bz2").read_bytes()) == plain, name
 
 
 def _spy_to_csv(monkeypatch):
