@@ -204,7 +204,8 @@ def parse_abdomen_block(block: Mapping[str, Any], base: Settings) -> Tuple[Setti
     MODEL_PATH / INFERENCE_BATCH_SIZE / MAX_FLIES / CONF_THRES (...) env overrides can leak in.
     Everything else -- production roots, odor timing, freeze rules -- stays the base's. Pure: no
     filesystem access, and a key the block leaves out stays empty (never the base's value), so what
-    must be present and what must exist is load_geometry_config's business.
+    must be present and what must exist is load_geometry_config's business. The one default that
+    differs from a legacy config: ``geometry.annotated_video`` is False unless the block sets it.
     """
     if not isinstance(block, Mapping):
         raise ValueError("abdomen block must be a mapping")
@@ -230,8 +231,11 @@ def parse_abdomen_block(block: Mapping[str, Any], base: Settings) -> Tuple[Setti
         base, model_path=model_path, conf_thres=yolo["conf_thres"], inference_batch_size=yolo["inference_batch_size"],
         engine_supports_batch=yolo["engine_supports_batch"], max_flies=yolo["max_flies"],
         yolo_num_workers=yolo["num_workers"], zero_iou_epsilon=yolo["zero_iou_epsilon"])
+    # Annotated videos are opt-in here: off unless the block sets annotated_video or the run passes
+    # --annotated-video. (A legacy config keeps GeometrySettings' default of on.)
+    geometry = parse_geometry_block({"annotated_video": False, **(geometry_raw or {})})
     gcfg = dataclasses.replace(
-        parse_geometry_block(geometry_raw), out_base=out_base, video_bases=video_bases,
+        geometry, out_base=out_base, video_bases=video_bases,
         batch_date_from=_batch_date(block.get("batch_date_from")), datasets=datasets, slot_seeds=slot_seeds,
         seed_radius_frac=_num(block, "seed_radius_frac", 0.5, minimum=0.0, strict=True, scope="abdomen"))
     return settings, gcfg

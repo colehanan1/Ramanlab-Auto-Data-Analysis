@@ -45,6 +45,7 @@ class Rig:
     """A tmp production tree plus an extends-overlay whose ``abdomen:`` block is valid."""
 
     def __init__(self, tmp_path: Path):
+        self.root = tmp_path
         self.flys_new = tmp_path / "flys_New"
         for ds in DATASETS:
             (self.flys_new / ds / "october_07_batch_2").mkdir(parents=True)
@@ -68,6 +69,11 @@ class Rig:
         self.overlay = cfg / "config_new_abdomen.yaml"
         self.write()
 
+    def geometry(self, **overrides) -> dict:
+        """``abdomen.geometry`` as the template writes it (tables only), minus/plus the given keys."""
+        return _override({"table_format": "parquet", "annotated_video": False,
+                          "wide_out_dir": str(self.wide), "figures_out_dir": str(self.figs)}, overrides)
+
     def block(self, **overrides) -> dict:
         return _override({
             "enabled": True,
@@ -80,9 +86,17 @@ class Rig:
             "max_hours": 10,
             "yolo": {"conf_thres": 0.25, "inference_batch_size": 8, "engine_supports_batch": True,
                      "max_flies": 5, "num_workers": 3},
-            "geometry": {"table_format": "parquet", "annotated_video": False,
-                         "wide_out_dir": str(self.wide), "figures_out_dir": str(self.figs)},
+            "geometry": self.geometry(),
         }, overrides)
+
+    def legacy(self, **geometry) -> Path:
+        """A pre-overlay ``config_abdomen.yaml`` over the same tmp tree; ``geometry`` adds keys to its block."""
+        return _write(self.root / "config_abdomen.yaml", {
+            "protocol": "v2", "model_path": str(self.model),
+            "dataset_bases": {"data": str(self.flys_new), "secured": str(self.secured)},
+            "datasets": list(DATASETS), "cache_dir": str(self.root / "cache"),
+            "yolo": {"conf_thres": 0.3, "max_flies": 3},
+            "geometry": {"wide_out_dir": str(self.wide), "figures_out_dir": str(self.figs), **geometry}})
 
     def write(self, **overrides) -> Path:
         return _write(self.overlay, {"extends": "config_new.yaml", "abdomen": self.block(**overrides)})
@@ -108,6 +122,7 @@ def test_the_integrated_fields_default_to_legacy_behaviour():
     g = GeometrySettings()
     assert (g.out_base, g.video_bases, g.batch_date_from, g.datasets) == ("", (), None, ())
     assert (g.slot_seeds, g.seed_radius_frac) == ("warmup", 0.5)
+    assert g.annotated_video is True and GC.parse_geometry_block(None).annotated_video is True   # legacy: videos on
 
 
 def test_a_missing_yolo_block_takes_the_abdomen_defaults_not_the_per_values():
@@ -146,6 +161,13 @@ def test_the_abdomen_tree_fields_land_on_the_geometry_settings():
     assert g.datasets == ("IAA-X",) and g.slot_seeds == "production" and g.seed_radius_frac == 0.4
     assert g.batch_date_from == dt.date(2026, 10, 6)
     assert g.table_format == "parquet" and g.annotated_video is False
+
+
+def test_annotated_videos_are_off_in_integrated_mode_unless_the_geometry_block_sets_them():
+    assert _parse()[1].annotated_video is False                                          # no geometry block at all
+    assert _parse(geometry={"table_format": "parquet"})[1].annotated_video is False      # a block that omits the key
+    assert _parse(geometry={"annotated_video": False})[1].annotated_video is False
+    assert _parse(geometry={"annotated_video": True})[1].annotated_video is True         # an explicit true wins
 
 
 def test_every_documented_abdomen_key_is_accepted():
@@ -373,16 +395,29 @@ def test_a_plain_config_carrying_an_inline_abdomen_block_is_integrated_too(tmp_p
 
 def test_a_legacy_config_leaves_the_integrated_fields_at_their_defaults(tmp_path):
     rig = Rig(tmp_path)
-    legacy = _write(tmp_path / "config_abdomen.yaml", {
-        "protocol": "v2", "model_path": str(rig.model),
-        "dataset_bases": {"data": str(rig.flys_new), "secured": str(rig.secured)},
-        "datasets": list(DATASETS), "cache_dir": str(tmp_path / "cache"),
-        "yolo": {"conf_thres": 0.3, "max_flies": 3},
-        "geometry": {"wide_out_dir": str(rig.wide), "figures_out_dir": str(rig.figs)}})
-    settings, g = load_geometry_config(legacy)
+    settings, g = load_geometry_config(rig.legacy())
     assert settings.model_path == str(rig.model) and (settings.conf_thres, settings.max_flies) == (0.3, 3)
     assert (g.out_base, g.video_bases, g.batch_date_from, g.datasets, g.slot_seeds, g.seed_radius_frac) == \
         ("", (), None, (), "warmup", 0.5)
+
+
+def test_a_legacy_config_keeps_annotated_videos_on_by_default(tmp_path):
+    rig = Rig(tmp_path)
+    assert load_geometry_config(rig.legacy())[1].annotated_video is True
+    assert load_geometry_config(rig.legacy(annotated_video=False))[1].annotated_video is False
+
+
+def test_an_integrated_config_that_omits_annotated_video_writes_no_annotated_videos(tmp_path):
+    rig = Rig(tmp_path)
+    rig.write(geometry=rig.geometry(annotated_video=DROP))
+    assert "annotated_video" not in yaml.safe_load(rig.overlay.read_text())["abdomen"]["geometry"]
+    assert load_geometry_config(rig.overlay)[1].annotated_video is False
+
+
+def test_an_explicit_annotated_video_true_in_the_abdomen_geometry_block_still_wins(tmp_path):
+    rig = Rig(tmp_path)
+    rig.write(geometry=rig.geometry(annotated_video=True))
+    assert load_geometry_config(rig.overlay)[1].annotated_video is True
 
 
 def test_a_null_abdomen_block_in_the_overlay_is_refused(tmp_path):
@@ -481,6 +516,16 @@ def test_the_annotated_video_flag_overrides_the_overlay_for_the_steps(tmp_path, 
     assert GP.main(["--config", str(rig.overlay), "--annotated-video", "normalize"]) == 0
     assert [g.annotated_video for g in seen] == [False, True]
     assert seen[1] == dataclasses.replace(seen[0], annotated_video=True), "nothing but annotated_video changes"
+
+
+def test_the_annotated_video_flag_still_forces_videos_on_when_the_block_omits_the_key(tmp_path, monkeypatch):
+    rig = Rig(tmp_path)
+    rig.write(geometry=rig.geometry(annotated_video=DROP))
+    seen = []
+    monkeypatch.setattr(S, "run_normalize", lambda settings, gcfg, *, force=False: seen.append(gcfg))
+    assert GP.main(["--config", str(rig.overlay), "normalize"]) == 0                         # the nightly
+    assert GP.main(["--config", str(rig.overlay), "--annotated-video", "normalize"]) == 0    # the backfill
+    assert [g.annotated_video for g in seen] == [False, True]
 
 
 def test_worker_commands_forward_the_annotated_video_flag_to_every_worker(tmp_path):
