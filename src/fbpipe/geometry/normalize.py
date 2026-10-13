@@ -7,13 +7,15 @@
   curled, over every tip-paired frame of every trial (user spec 2026-09-08).
 * Abdomen length/width: % of the resting median over the pre-odor windows.
 
-Raw columns are never modified, so re-running is idempotent.
+Raw columns are never modified, so re-running is idempotent. Slot numbers are whatever the tables carry (production's
+fly numbers in integrated mode, so they may have gaps), and the stats of a slot no trial of the batch has any more --
+production renumbered, the trial was tracked again -- are deleted rather than left to be read as current.
 """
 from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Dict, List, Sequence, Tuple
+from typing import Dict, Iterable, List, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
@@ -137,6 +139,18 @@ def apply_slot_stats(df: pd.DataFrame, stats: dict, gcfg: GeometrySettings) -> p
     return out[C.PER_FRAME_COLUMNS + C.NORMALIZED_COLUMNS]
 
 
+def remove_ghost_stats(gdir: Path, live_slots: Iterable[int]) -> List[Path]:
+    """Delete every ``fly{N}_geometry_stats.json`` in ``gdir`` whose slot is not in ``live_slots``; returns the removed paths."""
+    live = set(live_slots)
+    removed = []
+    for path in sorted(Path(gdir).glob("fly*_geometry_stats.json")):
+        slot = C.fly_slot_from_stats_name(path.name)
+        if slot is not None and slot not in live:
+            path.unlink()
+            removed.append(path)
+    return removed
+
+
 def normalize_batch(batch_dir: Path, settings: Settings, gcfg: GeometrySettings) -> dict:
     entries = load_trial_entries(batch_dir, gcfg)
     by_slot: Dict[int, List[Tuple[TrialInfo, pd.DataFrame, Path, Path]]] = {}
@@ -144,6 +158,8 @@ def normalize_batch(batch_dir: Path, settings: Settings, gcfg: GeometrySettings)
         for slot, path in tables.items():
             by_slot.setdefault(slot, []).append((info, C.read_table_any(path), trial_dir, path))
     gdir = geometry_dir(batch_dir, gcfg)
+    for ghost in remove_ghost_stats(gdir, by_slot):
+        print(f"[GEOMETRY] {Path(batch_dir).name}: removed {ghost.name}, no trial has that fly any more")
     all_stats: Dict[int, dict] = {}
     for slot, items in sorted(by_slot.items()):
         stats = compute_slot_stats(slot, [(i, df) for i, df, _, _ in items], gcfg, settings)

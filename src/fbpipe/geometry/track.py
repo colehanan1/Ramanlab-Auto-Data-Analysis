@@ -11,10 +11,17 @@ the frozen eye is the eye ``Part`` in EVERY frame, so ``flies[i]`` is slot ``i``
 by construction and a dropped eye detection cannot hand a proboscis to a
 neighbour. The proboscis velocity gate runs online so the annotated video shows
 exactly what the table contains.
+
+Slot numbers are the warm-up's own (top -> bottom) unless the caller passes production's eye anchors
+(:func:`production_eye_seeds`): then slot N is production fly N, so these tables join the PER scores, and
+:func:`seed_digest` is what a trial's meta records to tell later that production renumbered it.
 """
 from __future__ import annotations
 
+import contextlib
 import dataclasses
+import hashlib
+import io
 import math
 import time
 from dataclasses import dataclass
@@ -28,8 +35,10 @@ import pandas as pd
 from ..config import Settings
 from ..utils import fly_geometry as FG
 from ..utils.fly_geometry import Fly, FlyGeometryLimits, Part
+from ..utils.fly_files import iter_fly_distance_csvs
 from ..utils.multi_fly import EyeAnchorManager
 from ..utils.rig_anchor import resolve_anchor
+from ..utils.tables import read_table
 from ..utils.video_writer import FFmpegFrameWriter
 from . import columns as C
 from . import metrics as M
@@ -45,6 +54,9 @@ PART_COLORS_BGR = {FG.EYE: (0, 255, 255), FG.PROBOSCIS: (255, 208, 0),
                    FG.ABDOMEN: (210, 77, 255), FG.ABDOMEN_TIP: (0, 252, 124)}
 _FONT = cv2.FONT_HERSHEY_SIMPLEX
 _PRO_REASON_PREFIXES = ("eye->proboscis", "proboscis size", "non-finite eye->proboscis")
+# Production's frozen eye anchor in every ``<trial>_fly{N}_distances`` row: constant per file, in the 1080x1080 frame
+# production resizes to -- the geometry MODEL space.
+SEED_COLUMNS = ["x_class0", "y_class0"]
 
 
 def model_frame_size(width: int, height: int) -> Tuple[int, int]:
@@ -86,7 +98,7 @@ class VideoGeometry:
 
 @dataclass
 class FrozenFly:
-    slot: int                 # 1-based, numbered top -> bottom
+    slot: int                 # numbered top -> bottom from 1, or the production fly number when seeded
     eye_model: Part           # frozen eye in model space (best warm-up detection)
     eye_report: Part          # the same corners in reporting space
     scale: float              # eye_scale in model space: the unit of every rule
@@ -116,8 +128,82 @@ def _feed(mgr: EyeAnchorManager, eyes: Sequence[Part]) -> None:
                                  np.array([_score(e) for e in eyes], dtype=np.float32))
 
 
+def _first_anchor(path: Path) -> Optional[Tuple[float, float]]:
+    """The eye anchor in the first row of a production fly table whose x and y are both finite; None when the table has
+    none, cannot be read, or has no such columns."""
+    try:
+        if path.suffix.lower() == ".parquet":
+            table = read_table(path, columns=SEED_COLUMNS)
+        else:
+            table = read_table(path, usecols=SEED_COLUMNS)
+    except (OSError, ValueError) as exc:                       # a torn write, another schema: no seed for this fly
+        print(f"[GEOMETRY] cannot read the production eye anchor in {path}: {type(exc).__name__}: {exc}")
+        return None
+    xy = table[SEED_COLUMNS].to_numpy(dtype=float)
+    finite = np.isfinite(xy).all(axis=1)
+    if not finite.any():
+        return None
+    x, y = xy[int(np.argmax(finite))]
+    return float(x), float(y)
+
+
+def production_eye_seeds(prod_trial_dir: Path) -> Dict[int, Tuple[float, float]]:
+    """``{production fly number: (x_class0, y_class0)}`` for the fly tables in ONE production trial folder, read from
+    the first row of each ``<trial>_fly{N}_distances.{parquet,csv}`` with a finite anchor (the columns are constant per
+    file and, on real data, never NaN). A Parquet table wins over a CSV sibling and only the two columns are read.
+    Empty when the folder is absent, cannot be listed (a secured mirror with a stale handle) or holds no usable fly
+    table -- the trial has no production identity yet."""
+    folder = Path(prod_trial_dir)
+    try:
+        if not folder.is_dir():
+            return {}
+        with contextlib.redirect_stdout(io.StringIO()):       # iter_fly_distance_csvs narrates every file it meets
+            tables = sorted(iter_fly_distance_csvs(folder, recursive=False), key=lambda t: (t[2], str(t[0])))
+    except OSError as exc:
+        print(f"[GEOMETRY] cannot list the production fly tables in {folder}: {type(exc).__name__}: {exc}")
+        return {}
+    seeds: Dict[int, Tuple[float, float]] = {}
+    for path, _token, n in tables:
+        if int(n) not in seeds:
+            anchor = _first_anchor(Path(path))
+            if anchor is not None:
+                seeds[int(n)] = anchor
+    return seeds
+
+
+def seed_digest(seeds: Mapping[int, Tuple[float, float]]) -> str:
+    """sha1 of the sorted ``(fly number, round(x, 1), round(y, 1))`` tuples: what a trial's meta records of the numbering
+    it was tracked with, so a later run can tell that production has changed it. The recipe is part of every recorded
+    meta -- changing it re-tracks every trial. Plain floats are rounded, never numpy ones (numpy rounds 754.15 to 754.2,
+    Python to 754.1)."""
+    items = sorted((int(n), round(float(x), 1), round(float(y), 1)) for n, (x, y) in seeds.items())
+    return hashlib.sha1(repr(items).encode("utf-8")).hexdigest()
+
+
+def _frozen_fly(slot: int, eye: Part, presence: float, vg: VideoGeometry) -> FrozenFly:
+    return FrozenFly(slot=slot, eye_model=Part(FG.EYE, eye.pts, eye.score),
+                     eye_report=Part(FG.EYE, vg.to_report(eye.pts), eye.score),
+                     scale=FG.eye_scale(eye), presence=presence, conf=_score(eye))
+
+
+def _freeze_seeded(per_frame_eyes: Sequence[Sequence[Part]], vg: VideoGeometry,
+                   seed_centers: Mapping[int, Tuple[float, float]], radius_frac: float) -> List[FrozenFly]:
+    """One slot per seed that has an eye in reach, in slot order; a seed without one gets no slot."""
+    frozen: List[FrozenFly] = []
+    for slot in sorted(seed_centers):
+        c = np.asarray(seed_centers[slot], dtype=float)
+        in_reach = [[e for e in eyes if np.linalg.norm(e.centroid - c) <= radius_frac * FG.eye_scale(e)]
+                    for eyes in per_frame_eyes]
+        eligible = [e for near in in_reach for e in near]
+        if eligible:
+            presence = sum(1 for near in in_reach if near) / max(1, len(per_frame_eyes))
+            frozen.append(_frozen_fly(int(slot), max(eligible, key=_score), presence, vg))
+    return frozen
+
+
 def freeze_slots(warmup_parts: Sequence[Sequence[Part]], vg: VideoGeometry, limits: FlyGeometryLimits, *,
-                 max_flies: int, presence_min: float, zero_iou_eps: float = 1e-8
+                 max_flies: int, presence_min: float, zero_iou_eps: float = 1e-8,
+                 seed_centers: Optional[Mapping[int, Tuple[float, float]]] = None, seed_radius_frac: float = 0.5
                  ) -> Tuple[List[FrozenFly], Optional[np.ndarray], float]:
     """Freeze the fly slots plus the posterior-axis and chirality priors.
 
@@ -128,17 +214,26 @@ def freeze_slots(warmup_parts: Sequence[Sequence[Part]], vg: VideoGeometry, limi
     eligible, and an anchor seen in fewer than ``presence_min`` of the warm-up
     frames is dropped. The best-confidence detection of each anchor becomes its
     frozen eye, so ``eye_scale`` is constant for the whole video.
+
+    With ``seed_centers`` (``{production fly number: (x, y)}`` in model space) the two passes are skipped and the slot
+    numbers are the seeds' own: each seed takes the best-confidence warm-up eye within ``seed_radius_frac`` x that
+    eye's scale of it. Production has already established the fly, so the eye needs no proboscis or abdomen attached,
+    and ``presence_min`` does not apply (the presence is still recorded). A seed with no eye in reach gets no slot, so
+    the caller finds it among the numbers missing from the result. The slots come back in number order.
     """
+    seeded = seed_centers is not None
     per_frame_eyes: List[List[Part]] = []
     axis_pairs, chir_triples = [], []
     for parts in warmup_parts:
         flies = FG.assemble(list(parts), vg.model_w, vg.model_h, limits)
-        per_frame_eyes.append([f.eye for f in flies if f.eye_ok and f.is_fly and f.scale > 0])
+        per_frame_eyes.append([f.eye for f in flies if f.eye_ok and (seeded or f.is_fly) and f.scale > 0])
         axis_pairs += [(f.eye.centroid, f.abdomen.centroid) for f in flies if f.abdomen is not None]
         chir_triples += [(f.eye.centroid, f.proboscis.centroid, f.abdomen.centroid)
                          for f in flies if f.abdomen is not None and f.proboscis is not None]
     axis = FG.estimate_posterior_axis(axis_pairs, limits=limits) if axis_pairs else None
     chirality = FG.estimate_chirality(chir_triples) if chir_triples else 0.0
+    if seeded:
+        return _freeze_seeded(per_frame_eyes, vg, seed_centers, seed_radius_frac), axis, chirality
     n_frames = len(per_frame_eyes)
     counter = EyeAnchorManager(max_eyes=max(1, int(max_flies)), zero_iou_eps=zero_iou_eps)
     for eyes in per_frame_eyes:
@@ -163,12 +258,7 @@ def freeze_slots(warmup_parts: Sequence[Sequence[Part]], vg: VideoGeometry, limi
         best = max(matched, key=_score)
         kept.append((c, best, presence))
     kept.sort(key=lambda t: (t[0][1], t[0][0]))      # top -> bottom, x as tie-break
-    frozen = [
-        FrozenFly(slot=i + 1, eye_model=Part(FG.EYE, p.pts, p.score),
-                  eye_report=Part(FG.EYE, vg.to_report(p.pts), p.score),
-                  scale=FG.eye_scale(p), presence=pr, conf=_score(p))
-        for i, (_, p, pr) in enumerate(kept)
-    ]
+    frozen = [_frozen_fly(i + 1, p, pr, vg) for i, (_, p, pr) in enumerate(kept)]
     return frozen, axis, chirality
 
 
@@ -287,8 +377,13 @@ def _open(video_path: Path) -> cv2.VideoCapture:
 def track_video(video_path: Path, info: TrialInfo, *, predict_fn: Callable[[list, float], list],
                 id_to_label: Mapping[int, str], settings: Settings, gcfg: GeometrySettings,
                 max_frames: Optional[int] = None, annotated_path: Optional[Path] = None,
-                batch_size: Optional[int] = None) -> TrackResult:
+                batch_size: Optional[int] = None,
+                seed_centers: Optional[Mapping[int, Tuple[float, float]]] = None) -> TrackResult:
     """Track one trial video: warm-up -> frozen slots -> per-frame rows per slot.
+
+    ``seed_centers`` ({production fly number: (x, y)} in model space) numbers the slots by production instead of
+    top -> bottom (see :func:`freeze_slots`); the meta then records ``slot_source`` "production", the seeds, their
+    :func:`seed_digest` and the numbers that found no eye (``unmatched_seeds``). Without seeds ``slot_source`` is "warmup".
 
     Raises ``RuntimeError`` for a video that cannot be opened or that yields no decodable frame. Both are broken
     files, not videos without flies (those come back as an empty result), and the caller must not record them as
@@ -323,7 +418,10 @@ def track_video(video_path: Path, info: TrialInfo, *, predict_fn: Callable[[list
     warm_parts = [parts_from_result(r, id_to_label) for r in warm_results]
     frozen, axis, chirality = freeze_slots(warm_parts, vg, limits, max_flies=settings.max_flies,
                                            presence_min=gcfg.warmup_presence_min,
-                                           zero_iou_eps=settings.zero_iou_epsilon)
+                                           zero_iou_eps=settings.zero_iou_epsilon,
+                                           seed_centers=seed_centers, seed_radius_frac=gcfg.seed_radius_frac)
+    seeded = seed_centers is not None
+    slots_found = {fz.slot for fz in frozen}
 
     fps = float(info.fps) if info.fps and info.fps > 0 else (fps_video if 1.0 <= fps_video <= 240.0 else settings.fps_default)
     AX, AY = resolve_anchor(video_path)
@@ -339,6 +437,10 @@ def track_video(video_path: Path, info: TrialInfo, *, predict_fn: Callable[[list
         "slots": [{"slot": fz.slot, "eye_x": float(FG.polygon_centroid(fz.eye_report.pts)[0]),
                    "eye_y": float(FG.polygon_centroid(fz.eye_report.pts)[1]), "eye_scale_px": fz.scale,
                    "presence": fz.presence, "conf": fz.conf} for fz in frozen],
+        "slot_source": "production" if seeded else "warmup",
+        "seed_centers": {str(int(n)): [float(x), float(y)] for n, (x, y) in sorted(seed_centers.items())} if seeded else {},
+        "seed_digest": seed_digest(seed_centers) if seeded else None,
+        "unmatched_seeds": sorted(int(n) for n in seed_centers if n not in slots_found) if seeded else [],
         "posterior_axis_deg": None if axis is None else float(math.degrees(math.atan2(axis[1], axis[0])) % 360.0),
         "chirality": float(chirality),
         "rig_anchor_model_px": [float(AX), float(AY)],

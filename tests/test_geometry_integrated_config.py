@@ -567,8 +567,13 @@ def launched(monkeypatch):
 def test_main_gives_every_track_worker_the_annotated_video_flag_only_when_asked(tmp_path, launched, flags, want):
     rig = Rig(tmp_path)
     # one untracked trial video: with nothing pending `track` starts no workers (test_geometry_jobs.py)
-    (rig.flys_new / DATASETS[0] / "october_07_batch_2" / "output_october_07_batch_2_pretest_1_Citral_20261007_100000.mp4"
-     ).write_bytes(b"x")
+    batch = rig.flys_new / DATASETS[0] / "october_07_batch_2"
+    (batch / "output_october_07_batch_2_pretest_1_Citral_20261007_100000.mp4").write_bytes(b"x")
+    # ... and its production fly table: the overlay numbers slots by production, and a trial PER has not
+    # processed is awaited, not pending (test_geometry_seeds.py)
+    (batch / "october_07_batch_2_pretest_1").mkdir()
+    (batch / "october_07_batch_2_pretest_1" / "october_07_batch_2_pretest_1_fly1_distances.csv").write_text(
+        "x_class0,y_class0\n754.3,116.8\n", encoding="utf-8")
     assert GP.main(["--config", str(rig.overlay), *flags, "track"]) == 0
     assert len(launched) == 3, "abdomen.yolo.num_workers, not the PER block's 1"
     assert all(("--annotated-video" in cmd) is want for cmd in launched)

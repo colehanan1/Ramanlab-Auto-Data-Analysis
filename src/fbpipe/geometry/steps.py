@@ -9,6 +9,11 @@ production steps, so freeze rules apply identically, as :class:`BatchJob`s
   ``session_metadata.txt`` but no mp4s, so each trial's video is looked up per trial in the secured
   mirrors, then in the local batch (:func:`videos_for_job`), and every output goes to
   ``<out_base>/<dataset folder>/<batch>/``. Production and the mirrors are only ever read.
+
+With ``abdomen.slot_seeds: production`` (:func:`uses_production_seeds`) a trial's slots are numbered by production's own
+fly numbers, read from the trial's production tables (:func:`trial_seeds`). :func:`trial_status` is the one place that
+decides what a run does with a trial -- both ``run_track`` and ``pending_trials`` ask it -- and :func:`_clear_trial_outputs`
+removes what a re-track replaces.
 """
 from __future__ import annotations
 
@@ -197,16 +202,105 @@ def _cap_cpu_threads(n_workers: int) -> None:
 
 
 def trial_has_meta(job: BatchJob, gcfg: GeometrySettings, video: Path) -> bool:
-    """Whether the trial's meta JSON exists in the out tree -- the one marker of "already tracked". A trial that
-    failed writes none, so the next run retries it."""
+    """Whether the trial's meta JSON exists in the out tree -- the marker of "tracked at all". A trial that failed
+    writes none, so the next run retries it. Whether a tracked trial is still *current* is :func:`trial_status`."""
     return C.meta_path(trial_out_dir(job.out_dir, gcfg, video), trial_name_from_video(video)).exists()
 
 
+TRACKED, PENDING, AWAITING_SEEDS = "tracked", "pending", "awaiting_seeds"
+
+
+@dataclass(frozen=True)
+class TrialStatus:
+    """What a run does with one trial video. ``state``: ``TRACKED`` (skip it without ``--force``), ``PENDING`` (track it)
+    or ``AWAITING_SEEDS`` (production has not numbered this trial's flies yet: leave it, write no meta). ``seeds`` is
+    what to number the slots by (None unless production seeds are in use); ``stale`` marks a pending trial whose meta
+    exists but is out of date, so its outputs must be cleared before the re-track, and ``reason`` says why."""
+    state: str
+    seeds: Optional[Dict[int, Tuple[float, float]]] = None
+    stale: bool = False
+    reason: str = ""
+
+
+def uses_production_seeds(gcfg: GeometrySettings) -> bool:
+    """Integrated mode with ``abdomen.slot_seeds: production``. Warm-up numbering and legacy mode never look at seeds."""
+    return bool(gcfg.out_base) and gcfg.slot_seeds == "production"
+
+
+def trial_seeds(job: BatchJob, gcfg: GeometrySettings, trial_name: str) -> Dict[int, Tuple[float, float]]:
+    """Production's eye anchors of one trial, from the first of these folders that has any: the production trial folder,
+    then the same trial folder in each secured mirror (``video_bases`` order). ``{}`` = production has not numbered it."""
+    from .track import production_eye_seeds
+    folders = [job.prod_dir / trial_name, *(Path(base) / job.root_name / job.name / trial_name
+                                            for base in gcfg.video_bases)]
+    for folder in folders:
+        seeds = production_eye_seeds(folder)
+        if seeds:
+            return seeds
+    return {}
+
+
+def trial_status(job: BatchJob, gcfg: GeometrySettings, video: Path) -> TrialStatus:
+    """The single definition of what a trial needs, shared by ``run_track`` and ``pending_trials``.
+
+    Warm-up numbering and legacy mode: tracked iff its meta JSON exists. Production seeds: a trial with no seeds is
+    ``AWAITING_SEEDS`` (never pending, so the nightly does not start workers for trials PER has not processed); with
+    seeds it is pending when it has no meta, or its meta was not tracked from production seeds, or recorded a different
+    :func:`~fbpipe.geometry.track.seed_digest` -- an unreadable meta counts as out of date."""
+    name = trial_name_from_video(video)
+    meta_file = C.meta_path(trial_out_dir(job.out_dir, gcfg, video), name)
+    has_meta = trial_has_meta(job, gcfg, video)
+    if not uses_production_seeds(gcfg):
+        return TrialStatus(TRACKED if has_meta else PENDING)
+    seeds = trial_seeds(job, gcfg, name)
+    if not seeds:
+        return TrialStatus(AWAITING_SEEDS)
+    if not has_meta:
+        return TrialStatus(PENDING, seeds, reason="no meta")
+    from .track import seed_digest
+    try:
+        recorded = json.loads(meta_file.read_text(encoding="utf-8"))
+        source, digest = recorded.get("slot_source"), recorded.get("seed_digest")
+    except (OSError, ValueError, AttributeError):
+        return TrialStatus(PENDING, seeds, stale=True, reason="its meta cannot be read")
+    if source != "production":
+        return TrialStatus(PENDING, seeds, stale=True, reason="tracked with warm-up slot numbers, not production's")
+    if digest != seed_digest(seeds):
+        return TrialStatus(PENDING, seeds, stale=True, reason="production's fly numbers changed")
+    return TrialStatus(TRACKED, seeds)
+
+
 def pending_trials(settings: Settings, gcfg: GeometrySettings) -> int:
-    """How many trial videos of the live batches have no meta JSON yet: what ``run_track`` would track without
-    ``--force``. The CLI starts no worker, and loads no model, when this is 0."""
+    """How many trial videos of the live batches ``run_track`` would track without ``--force`` (:func:`trial_status`).
+    A trial awaiting production seeds is not counted: there is nothing a worker could do for it yet. The CLI starts no
+    worker, and loads no model, when this is 0."""
     return sum(1 for job in iter_batch_jobs(settings, gcfg) for video in videos_for_job(job, gcfg)
-               if not trial_has_meta(job, gcfg, video))
+               if trial_status(job, gcfg, video).state == PENDING)
+
+
+def _clear_trial_outputs(trial_dir: Path, trial_name: str, *, out_base: str | Path) -> List[Path]:
+    """Delete one trial's geometry outputs: its ``<trial>_fly{N}_geometry.{csv,parquet}`` tables, annotated mp4 and meta
+    JSON. A re-track clears first, so a slot the new numbering lacks cannot keep a table that a join would pick up.
+    REFUSES (``ValueError``) any ``trial_dir`` that is not a folder strictly inside the resolved ``out_base`` (symlinks
+    and ``..`` resolved, compared by path component), and an empty ``out_base``; nothing else is ever deleted. Returns
+    the removed paths."""
+    if not str(out_base).strip():
+        raise ValueError("refusing to clear a trial's outputs without an out_base to confine the deletion to")
+    root = Path(out_base).expanduser().resolve()
+    folder = Path(trial_dir).expanduser().resolve()
+    if folder == root or not folder.is_relative_to(root):
+        raise ValueError(f"refusing to clear {trial_dir}: it is not a folder inside the out tree {root}")
+    if not folder.is_dir():
+        return []
+    victims = [p for p in sorted(folder.iterdir())
+               if p.name.startswith(f"{trial_name}_fly") and C.fly_slot_from_geometry_name(p.name) is not None]
+    victims += [C.annotated_video_path(folder, trial_name), C.meta_path(folder, trial_name)]
+    removed = []
+    for path in victims:
+        if path.is_file() or path.is_symlink():
+            path.unlink()
+            removed.append(path)
+    return removed
 
 
 def write_source_json(job: BatchJob, gcfg: GeometrySettings, videos: List[Path]) -> Path:
@@ -227,11 +321,16 @@ def write_source_json(job: BatchJob, gcfg: GeometrySettings, videos: List[Path])
 
 def run_track(settings: Settings, gcfg: GeometrySettings, *, force: bool = False,
               only_trial: Optional[str] = None, max_frames: Optional[int] = None) -> dict:
-    """Detect + assemble + measure every live trial video; skips trials whose meta JSON exists.
+    """Detect + assemble + measure every live trial video; skips the trials that are already tracked (:func:`trial_status`).
 
     One bad video never stops the batch: any error while tracking it is logged (``[GEOMETRY] failed <video>:
     <error>``), counted in the result's ``failed`` and leaves no meta JSON behind, so the next run retries it.
-    Integrated mode also records each batch's ``source.json`` before its first video is tracked."""
+    Integrated mode also records each batch's ``source.json`` before its first video is tracked.
+
+    With production slot seeds a trial's slots take production's fly numbers. A trial whose seeds are not there yet is
+    counted under ``awaiting_seeds`` and left exactly as it is -- nothing is written for it, even with ``force``, since
+    it has no number to give its slots; one whose meta records other numbers has its old outputs cleared first, then is
+    tracked again."""
     import ultralytics
     from .detect import id_to_label_map, is_engine_path, load_model, make_predict_fn, model_sha1, resolve_model_path
     from .track import track_video
@@ -251,7 +350,7 @@ def run_track(settings: Settings, gcfg: GeometrySettings, *, force: bool = False
           f"classes {class_map} ultralytics {ultralytics.__version__} batch {batch_size} "
           f"worker {worker + 1}/{n_workers}")
     seq = -1
-    done = skipped = failed = 0
+    done = skipped = failed = awaiting = 0
     for job in iter_batch_jobs(settings, gcfg):
         videos = videos_for_job(job, gcfg)
         source_recorded = not gcfg.out_base                      # legacy batches record no source
@@ -263,12 +362,21 @@ def run_track(settings: Settings, gcfg: GeometrySettings, *, force: bool = False
             if only_trial and only_trial not in name:
                 continue
             out_dir = trial_out_dir(job.out_dir, gcfg, video)
-            if trial_has_meta(job, gcfg, video) and not force:
+            status = trial_status(job, gcfg, video)
+            if status.state == AWAITING_SEEDS:
+                print(f"[GEOMETRY] skip {video.name}: awaiting production seeds ({name}_fly*_distances not found in "
+                      f"{job.prod_dir / name} or the secured mirrors); retried next run")
+                awaiting += 1
+                continue
+            if status.state == TRACKED and not force:
                 print(f"[GEOMETRY] skip {video.name}: {out_dir.name} already tracked (use --force to redo)")
                 skipped += 1
                 continue
             t0 = time.time()
             try:
+                if status.stale:
+                    removed = _clear_trial_outputs(out_dir, name, out_base=gcfg.out_base)
+                    print(f"[GEOMETRY] {name}: {status.reason}; cleared {len(removed)} old output file(s), tracking again")
                 if not source_recorded:
                     write_source_json(job, gcfg, videos)
                     source_recorded = True
@@ -276,7 +384,7 @@ def run_track(settings: Settings, gcfg: GeometrySettings, *, force: bool = False
                 annotated = C.annotated_video_path(out_dir, name) if gcfg.annotated_video else None
                 result = track_video(video, info, predict_fn=predict_fn, id_to_label=id_to_label, settings=settings,
                                      gcfg=gcfg, max_frames=max_frames, annotated_path=annotated,
-                                     batch_size=batch_size)
+                                     batch_size=batch_size, seed_centers=status.seeds)
                 for slot, df in result.tables.items():
                     C.write_table_fmt(df, C.geometry_table_path(out_dir, name, slot, gcfg.table_format),
                                       gcfg.table_format)
@@ -291,8 +399,9 @@ def run_track(settings: Settings, gcfg: GeometrySettings, *, force: bool = False
             print(f"[GEOMETRY] {video.name}: {len(result.tables)} slot(s), {result.meta['n_frames_processed']} frames "
                   f"in {time.time() - t0:.1f}s -> {out_dir}")
             done += 1
-    print(f"[GEOMETRY] track done: {done} trial(s) tracked, {skipped} skipped, {failed} failed")
-    return {"tracked": done, "skipped": skipped, "failed": failed}
+    waiting = f", {awaiting} awaiting production seeds" if uses_production_seeds(gcfg) else ""
+    print(f"[GEOMETRY] track done: {done} trial(s) tracked, {skipped} skipped, {failed} failed{waiting}")
+    return {"tracked": done, "skipped": skipped, "failed": failed, "awaiting_seeds": awaiting}
 
 
 def run_normalize(settings: Settings, gcfg: GeometrySettings, *, force: bool = False) -> dict:

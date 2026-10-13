@@ -19,6 +19,7 @@ TABLE_FORMATS = ("csv", "parquet")
 GEOMETRY_SUBDIR_DEFAULT = "geometry"
 
 _FLY_FILE_RE = re.compile(r"_fly(?P<slot>\d+)_geometry\.(?P<ext>csv|parquet)$", re.IGNORECASE)
+_STATS_FILE_RE = re.compile(r"^fly(?P<slot>\d+)_geometry_stats\.json$", re.IGNORECASE)
 
 # ---- per-frame table -------------------------------------------------------
 FRAME = "frame"
@@ -81,6 +82,12 @@ def annotated_video_path(trial_dir: Path, trial_name: str) -> Path:
 
 def stats_path(geometry_dir: Path, slot: int) -> Path:
     return Path(geometry_dir) / f"fly{int(slot)}_geometry_stats.json"
+
+
+def fly_slot_from_stats_name(name: str) -> Optional[int]:
+    """The slot of a ``fly{N}_geometry_stats.json`` file name (the inverse of :func:`stats_path`), else None."""
+    m = _STATS_FILE_RE.match(str(name))
+    return int(m.group("slot")) if m else None
 
 
 def source_path(geometry_dir: Path) -> Path:

@@ -199,3 +199,61 @@ def test_frames_below_the_trimmed_per_floor_clamp_to_zero_rather_than_going_miss
     assert pct[0] == pytest.approx(0.0), "the sub-floor frame is 0 %, not NaN"
     assert pct[100] == pytest.approx(100.0)
     assert np.isfinite(pct).all()
+
+
+# --------------------------------------------------------------------------- #
+# Slots that no longer exist
+#
+# Abdomen slot N is production fly N. When production renumbers a trial and the trial is tracked
+# again, the slots it no longer has must not leave a stats file behind, and the numbering may have gaps.
+# --------------------------------------------------------------------------- #
+def test_normalize_deletes_the_stats_of_slots_that_no_longer_appear_in_any_trial(batch):
+    gdir = batch / "geometry"
+    for ghost in (2, 4):                                  # left by a numbering production has since replaced
+        C.stats_path(gdir, ghost).write_text(json.dumps({"slot": ghost}), encoding="utf-8")
+    unrelated = [gdir / "source.json", gdir / "fly2_geometry_stats.json.bak", gdir / "notes.txt"]
+    for p in unrelated:
+        p.write_text("keep", encoding="utf-8")
+    out = N.normalize_batch(batch, _settings(), GeometrySettings(table_format="csv", rest_min_samples=5))
+    assert out["slots"] == [1]
+    assert sorted(p.name for p in gdir.glob("fly*_geometry_stats.json")) == ["fly1_geometry_stats.json"]
+    assert [p.read_text(encoding="utf-8") for p in unrelated] == ["keep"] * 3
+
+
+def test_normalize_keeps_the_stats_of_a_slot_only_some_trials_have_and_allows_gaps_in_the_numbering(batch):
+    n = 40
+    extra = _info(batch, "september_02_batch_1_testing_2", "testing", 2, "20260902_130000")
+    pro, ang = np.full(n, 41.0), np.full(n, 176.0)
+    _write(batch, extra, {1: _table(pro, ang, np.full(n, 151.0), np.full(n, 61.0)),
+                          3: _table(pro, ang, np.full(n, 151.0), np.full(n, 61.0))})     # production fly 3; no fly 2 anywhere
+    gdir = batch / "geometry"
+    C.stats_path(gdir, 2).write_text("{}", encoding="utf-8")
+    out = N.normalize_batch(batch, _settings(), GeometrySettings(table_format="csv", rest_min_samples=5))
+    assert out["slots"] == [1, 3] and out["n_trials"] == 3
+    assert sorted(p.name for p in gdir.glob("fly*_geometry_stats.json")) == ["fly1_geometry_stats.json",
+                                                                             "fly3_geometry_stats.json"]
+    assert json.loads(C.stats_path(gdir, 3).read_text())["n_trials"] == 1
+    t3 = C.read_table_any(gdir / extra.trial_name / f"{extra.trial_name}_fly3_geometry.csv")
+    assert C.PRO_PCT in t3.columns and list(t3.columns) == C.PER_FRAME_COLUMNS + C.NORMALIZED_COLUMNS
+
+
+def test_normalize_removes_every_stats_file_once_no_trial_has_a_table_left(batch):
+    N.normalize_batch(batch, _settings(), GeometrySettings(table_format="csv", rest_min_samples=5))
+    gdir = batch / "geometry"
+    assert (gdir / "fly1_geometry_stats.json").exists()
+    for trial_dir in [p for p in gdir.iterdir() if p.is_dir()]:        # every trial cleared for a re-track
+        for table in trial_dir.glob("*_fly*_geometry.*"):
+            table.unlink()
+    out = N.normalize_batch(batch, _settings(), GeometrySettings(table_format="csv", rest_min_samples=5))
+    assert out["slots"] == [] and list(gdir.glob("fly*_geometry_stats.json")) == []
+
+
+def test_remove_ghost_stats_keeps_every_live_slot_and_matches_whole_slot_numbers(tmp_path):
+    gdir = tmp_path / "geometry"
+    gdir.mkdir()
+    for slot in (1, 2, 3, 12):
+        C.stats_path(gdir, slot).write_text("{}", encoding="utf-8")
+    removed = N.remove_ghost_stats(gdir, [1, 3])
+    assert sorted(p.name for p in removed) == ["fly12_geometry_stats.json", "fly2_geometry_stats.json"]
+    assert sorted(p.name for p in gdir.iterdir()) == ["fly1_geometry_stats.json", "fly3_geometry_stats.json"]
+    assert N.remove_ghost_stats(tmp_path / "no_such_dir", [1]) == []
