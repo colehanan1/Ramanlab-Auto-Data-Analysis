@@ -22,10 +22,17 @@ def test_overlay_resolves_extends_against_its_own_directory(tmp_path, monkeypatc
     o = _w(sub / "config_new_abdomen.yaml", {"extends": "config_new.yaml", "abdomen": {"enabled": True}})
     monkeypatch.chdir(tmp_path)                                  # cwd must not matter
     layers = resolve_layers(o)
-    assert layers.base_path == resolve_config_path(base) and layers.is_layered
+    assert layers.base_path == resolve_config_path(base).resolve() and layers.is_layered
     assert dict(layers.overlay) == {"abdomen": {"enabled": True}}
     merged = load_layered(o)
     assert {k: v for k, v in merged.items() if k != "abdomen"} == BASE
+
+def test_overlay_base_path_is_fully_resolved_through_symlinks(tmp_path):
+    real = tmp_path / "real"; real.mkdir()
+    cfg = tmp_path / "cfg"; cfg.mkdir()
+    (cfg / "config_new.yaml").symlink_to(_w(real / "config_new.yaml", BASE))   # like the worktree's config_new.yaml
+    o = _w(cfg / "o.yaml", {"extends": "config_new.yaml", "abdomen": {"enabled": True}})
+    assert resolve_layers(o).base_path == (tmp_path / "real" / "config_new.yaml").resolve()
 
 @pytest.mark.parametrize("bad", [{"yolo": {"conf_thres": 0.5}}, {"force": {"pipeline": False}}, {"datasets": ["X"]}])
 def test_overlay_may_not_touch_a_base_key(tmp_path, bad):

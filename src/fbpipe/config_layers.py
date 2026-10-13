@@ -35,7 +35,7 @@ def _read(path: Path) -> Dict[str, Any]:
 @dataclass(frozen=True)
 class ConfigLayers:
     path: Path                     # the file the user passed
-    base_path: Path                # what every PER reader gets
+    base_path: Path                # what every PER reader gets (an overlay's is fully resolved)
     overlay: Mapping[str, Any]     # only the abdomen/mounting blocks (may be empty)
 
     @property
@@ -56,7 +56,10 @@ def resolve_layers(path: str | Path) -> ConfigLayers:
         raise LayeredConfigError(
             f"{path}: an extends-overlay may only add {list(OVERLAY_BLOCKS)}; it also sets {extra}, "
             "which would change the base config's behaviour")
-    base_path = resolve_config_path(path.resolve().parent / str(data[EXTENDS_KEY]))
+    # Fully resolved, symlinks included, as resolve_config_path does for the relative path the
+    # nightly passes: a PER child's --config must match a direct run even when config_new.yaml
+    # is a symlink (as in a worktree).
+    base_path = resolve_config_path(path.resolve().parent / str(data[EXTENDS_KEY])).resolve()
     if base_path == path.resolve():
         raise LayeredConfigError(f"{path}: extends itself")
     if not base_path.is_file():
