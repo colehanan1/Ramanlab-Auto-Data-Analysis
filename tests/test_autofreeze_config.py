@@ -231,3 +231,26 @@ def test_thaw_keeps_folder_retirements_and_cutoffs_live(tmp_path, kw):
     assert is_frozen_folder(cfg, "Hex-Training-24-0.1", aug, **kw) is True
     assert frozen_folders_for_root(cfg, root, **kw) == {may.name, aug.name}
     assert [p.name for p in iter_live_batch_dirs(cfg, root, **kw)] == [live.name]
+
+
+# --- a listed dataset that is not on disk -----------------------------------
+
+def _write_listed(tmp_path: Path, overrides: dict) -> Path:
+    """A config whose ``datasets`` list names DS, which is on neither base."""
+    (tmp_path / "data").mkdir()
+    (tmp_path / "secured").mkdir()
+    return _write(
+        tmp_path, overrides, datasets=["DS"],
+        dataset_bases={"data": str(tmp_path / "data"), "secured": str(tmp_path / "secured")},
+    )
+
+
+def test_a_missing_auto_dataset_is_skipped_not_a_hard_error(tmp_path):
+    """``data: auto`` is not a data freeze: a dataset not on disk yet is skipped
+    like any other instead of failing every night at config load."""
+    load_settings(_write_listed(tmp_path, {"DS": {"freeze": {"data": "auto"}}}))
+
+
+def test_a_missing_data_frozen_dataset_still_fails_loudly(tmp_path):
+    with pytest.raises(RuntimeError, match="not found on disk"):
+        load_settings(_write_listed(tmp_path, {"DS": {"freeze": {"data": True}}}))

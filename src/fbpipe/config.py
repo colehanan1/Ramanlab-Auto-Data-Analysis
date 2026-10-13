@@ -325,9 +325,10 @@ def _expand_datasets(data: dict) -> dict:
     # assumes the raw data stays put, and we cannot auto-rebuild what is absent.
     # Dropping it would quietly delete its rows from the wide CSV.
     raw_overrides = data.get("dataset_overrides") or {}
+    # An explicit ``data: true`` only: ``data: auto`` is truthy but is no freeze.
     frozen_missing = [
         ds for ds in skipped
-        if _freeze_block(raw_overrides.get(ds)).get("data", False)
+        if _freeze_flag(_freeze_block(raw_overrides.get(ds)).get("data"))
     ]
     if frozen_missing:
         raise RuntimeError(
