@@ -1449,3 +1449,72 @@ def test_main_changes_nothing_under_production_the_mirror_or_the_geometry_tree(c
     assert snapshot(*watched) == before
     assert list(t.root.rglob("_trial_meta.json")) == []
     assert (t.root / "csv_out" / "fly_trial_posture.csv").is_file()          # the outputs went elsewhere
+
+
+# ---------------------------------------------------------------------------
+# The figures, the report and the pending-trial count (the figure code itself is in test_mounting_posture_figures.py)
+# ---------------------------------------------------------------------------
+
+FIGURES = {"mount_pitch_per_fly", "mount_pitch_vs_spontaneous_per", "mount_pitch_vs_held_out",
+           "response_by_mount_pitch_tercile", "baseline_state_vs_response", "pullins_held_vs_retracted"}
+
+
+def test_main_draws_the_six_figures_and_writes_the_report_beside_them(cli):
+    assert run_main(cli, "--predictions-csv", str(cli.preds)) == 0
+    figs = cli.tree.root / "figs_out"
+    assert {p.stem for p in figs.glob("*.png")} == FIGURES
+    report = (figs / "report.md").read_text(encoding="utf-8")
+    assert "## Mounting" in report and "uncorrected" in report and "`eye_mismatch`" in report
+    assert "no new-glue fly-trials in scope" not in report
+
+
+def test_main_counts_the_pending_trials_in_the_exclusions_and_the_report(cli, monkeypatch):
+    seen = []
+    monkeypatch.setattr(MP, "pending_trials", lambda settings, scope: seen.append(scope) or 7)
+    assert run_main(cli, "--predictions-csv", str(cli.preds)) == 0
+    exc = json.loads((cli.tree.root / "csv_out" / "exclusions.json").read_text(encoding="utf-8"))
+    assert exc["pending_trials"] == 7 and "pending_trials_error" not in exc
+    assert "`pending_trials`) | 7 |" in (cli.tree.root / "figs_out" / "report.md").read_text(encoding="utf-8")
+    assert len(seen) == 1 and seen[0].batch_date_from == CUTOFF
+
+
+def test_the_pending_trial_count_covers_the_batches_the_tables_do(tmp_path, monkeypatch):
+    monkeypatch.delenv("FLAGGED_FLIES_CSV", raising=False)
+    tree = variant(tmp_path)
+    seen = []
+    monkeypatch.setattr(MP, "pending_trials", lambda settings, scope: seen.append(scope) or 0)
+    overlay = write_configs(tree, write_predictions(tree.root / "p.csv"), batch_date_from=date(2026, 10, 8))
+    assert MP.main(["--config", str(overlay)]) == 0
+    assert seen[0].batch_date_from == date(2026, 10, 8)                  # the later of the abdomen and mounting cut-offs
+
+
+def test_main_records_a_failed_pending_trial_walk_and_still_writes_everything(cli, monkeypatch):
+    def broken(settings, scope):
+        raise OSError("mirror gone")
+    monkeypatch.setattr(MP, "pending_trials", broken)
+    assert run_main(cli, "--predictions-csv", str(cli.preds)) == 0
+    exc = json.loads((cli.tree.root / "csv_out" / "exclusions.json").read_text(encoding="utf-8"))
+    assert exc["pending_trials"] is None and exc["pending_trials_error"] == "OSError: mirror gone"
+    report = (cli.tree.root / "figs_out" / "report.md").read_text(encoding="utf-8")
+    assert "could not be counted" in report and "OSError: mirror gone" in report
+    assert {p.stem for p in (cli.tree.root / "figs_out").glob("*.png")} == FIGURES
+    assert (cli.tree.root / "csv_out" / "fly_trial_posture.csv").is_file()
+
+
+def test_main_with_nothing_in_scope_writes_the_empty_report_and_draws_nothing(tmp_path, monkeypatch):
+    monkeypatch.delenv("FLAGGED_FLIES_CSV", raising=False)
+    tree = variant(tmp_path)
+    overlay = write_configs(tree, write_predictions(tree.root / "p.csv"), cutoff=date(2030, 1, 1))
+    assert MP.main(["--config", str(overlay)]) == 0
+    figs = tree.root / "mfigs"
+    assert "no new-glue fly-trials in scope" in (figs / "report.md").read_text(encoding="utf-8")
+    assert list(figs.glob("*.png")) == []
+
+
+def test_main_without_a_figure_directory_writes_the_tables_but_no_figures_or_report(tmp_path, monkeypatch):
+    monkeypatch.delenv("FLAGGED_FLIES_CSV", raising=False)
+    tree = variant(tmp_path)
+    overlay = write_configs(tree, write_predictions(tree.root / "p.csv"), out_dir="")
+    assert MP.main(["--config", str(overlay)]) == 0
+    assert (tree.root / "csvs" / "fly_trial_posture.csv").is_file()
+    assert list(tree.root.rglob("report.md")) == [] and list(tree.root.rglob("*.png")) == []
