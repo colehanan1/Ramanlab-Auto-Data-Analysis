@@ -130,7 +130,28 @@ _TRIAL_LABEL_FROM_NAME = re.compile(
 )
 
 
-def _resolve_trial_meta_for_csv(csv_path: Path | str, n_frames_hint: int | None = None) -> TrialMetadata:
+def _trial_dir_for_label(batch_dir: Path, trial_type: str, trial_index: int) -> Path | None:
+    """The per-trial folder of ``(trial_type, trial_index)`` in ``batch_dir``.
+
+    ``<batch>_<type>_<N>`` for a plain batch. A rig batch
+    (``august_28_batch_1_rig_3``) names its trial folders WITHOUT the rig
+    suffix (``august_28_batch_1_testing_1``), so fall back to the one folder
+    ending in ``_<type>_<N>``. ``None`` when there is none, or more than one.
+    """
+
+    inferred_dir = batch_dir / f"{batch_dir.name}_{trial_type}_{trial_index}"
+    if inferred_dir.is_dir():
+        return inferred_dir
+    matches = [p for p in batch_dir.glob(f"*_{trial_type}_{trial_index}") if p.is_dir()]
+    return matches[0] if len(matches) == 1 else None
+
+
+def _resolve_trial_meta_for_csv(
+    csv_path: Path | str,
+    n_frames_hint: int | None = None,
+    *,
+    memo: MutableMapping[tuple, object] | None = None,
+) -> TrialMetadata:
     """Return ``TrialMetadata`` for the trial that owns ``csv_path``.
 
     Handles two CSV layouts seen in the pipeline:
@@ -139,15 +160,22 @@ def _resolve_trial_meta_for_csv(csv_path: Path | str, n_frames_hint: int | None 
        Sidecar sits one level up in the batch folder.
     2. Per-fly envelope CSV — ``<batch>/angle_distance_rms_envelope/<label>_fly<N>_…envelope.csv``.
        Sidecar sits in the batch folder (two levels up). The trial folder
-       is inferred from the label parsed out of the CSV name.
+       is resolved from the label parsed out of the CSV name.
 
     Falls back to config defaults when no sidecar / ActiveOFM data can be
     found, so legacy datasets without sidecars continue to work.
+
+    ``memo`` (one dict per ``build_wide_csv`` call) skips the repeat lookups
+    for a trial resolved to its own folder: every fly slot of a trial resolves
+    to the same trial, and testing trials are resolved twice (baseline pass +
+    main loop). The key carries ``n_frames_hint``, so a hit returns exactly
+    what the call would have.
     """
 
     path = Path(csv_path).resolve()
     cfg = _RUNTIME_SETTINGS
     parent = path.parent
+    meta_key: tuple | None = None
     # Decide which directory is the batch folder vs the trial folder.
     if parent.name.lower() == "angle_distance_rms_envelope":
         batch_dir = parent.parent
@@ -155,12 +183,29 @@ def _resolve_trial_meta_for_csv(csv_path: Path | str, n_frames_hint: int | None 
         if m:
             trial_type = m.group("type").lower()
             trial_index = int(m.group("index"))
-            sidecar_pair = find_sidecar_by_label(batch_dir, trial_type, trial_index)
-            # Pick a stable trial_dir for the cache key; prefer the matching
-            # per-trial folder if it exists on disk, else fall back to a
-            # synthetic path under the batch.
-            inferred_dir = batch_dir / f"{batch_dir.name}_{trial_type}_{trial_index}"
-            trial_dir = inferred_dir if inferred_dir.is_dir() else parent
+            trial_key = (str(batch_dir), trial_type, trial_index)
+            located = memo.get(("trial", *trial_key)) if memo is not None else None
+            if located is None:
+                located = (
+                    find_sidecar_by_label(batch_dir, trial_type, trial_index),
+                    _trial_dir_for_label(batch_dir, trial_type, trial_index),
+                )
+                if memo is not None:
+                    memo[("trial", *trial_key)] = located
+            sidecar_pair, trial_folder = located
+            if trial_folder is not None:
+                # Its own folder keys the cache on this one trial.
+                trial_dir = trial_folder
+                meta_key = ("meta", *trial_key, n_frames_hint)
+            else:
+                # No folder of its own (synthetic layouts; one frozen batch):
+                # a synthetic path under the batch, as before. That cache file
+                # is shared by every trial of the batch and keyed only on the
+                # sidecar mtime, so a sidecar-less trial there still reads
+                # back whichever trial was cached last. Sidecar-less fixtures
+                # (tests/golden/v2, test_multi_fly_pipeline) pin those rows,
+                # so this path is left unchanged and unmemoised.
+                trial_dir = parent
         else:
             sidecar_pair = (None, None)
             trial_dir = parent
@@ -168,10 +213,12 @@ def _resolve_trial_meta_for_csv(csv_path: Path | str, n_frames_hint: int | None 
         trial_dir = parent
         sidecar_pair = None  # let load_trial_metadata discover via find_sidecar
 
+    if meta_key is not None and memo is not None and meta_key in memo:
+        return memo[meta_key]  # type: ignore[return-value]
     override: DatasetOverride | None = (
         get_dataset_override(cfg, trial_dir) if cfg is not None else None
     )
-    return load_trial_metadata(
+    meta = load_trial_metadata(
         trial_dir,
         fps_default=float(cfg.fps_default) if cfg is not None else 40.0,
         odor_on_s_default=float(cfg.odor_on_s) if cfg is not None else 30.0,
@@ -182,6 +229,9 @@ def _resolve_trial_meta_for_csv(csv_path: Path | str, n_frames_hint: int | None 
         use_cache=True,
         sidecar_pair=sidecar_pair,
     )
+    if meta_key is not None and memo is not None:
+        memo[meta_key] = meta
+    return meta
 DURING_END_FRAME = BEFORE_FRAMES + DURING_FRAMES
 
 from fbpipe.analysis.threshold import (
@@ -2716,6 +2766,161 @@ def mirror_directory(source: str | os.PathLike[str], destination: str | os.PathL
 # ---------------------------------------------------------------------------
 
 
+def _wide_row_line(
+    meta_cells: Sequence[object],
+    values: object,
+    max_len: int,
+    columns: Sequence[str],
+) -> str:
+    """One wide-CSV line, byte-identical to the 1-row DataFrame writer.
+
+    That writer -- ``pd.DataFrame([row], columns=columns).to_csv(index=False,
+    header=False)`` with ``row`` = ``meta_cells`` + ``values`` NaN-padded or
+    truncated to ``max_len`` -- infers a dtype for each of ~12k columns of a
+    1-row object array, ~65 ms a row. Inference is per column, so the metadata
+    cells still go through that exact pandas call; a float64 ``values`` is
+    formatted the way pandas formats any float64 column for CSV
+    (``ndarray.astype(str)``, NaN -> ``na_rep=""``), and NaN padding is bare
+    commas. Any other ``values`` (an int trace prints ``5``, not ``5.0``) takes
+    the old path.
+    """
+
+    n_meta = len(meta_cells)
+    if not (
+        isinstance(values, np.ndarray)
+        and values.dtype == np.float64
+        and values.ndim == 1
+        and n_meta >= 2  # csv writes a lone empty field as '""'
+        and n_meta + max_len == len(columns)  # else raise or write as it did
+    ):
+        row = [*meta_cells, *list(values)]
+        if len(values) < max_len:
+            row.extend([np.nan] * (max_len - len(values)))
+        elif len(values) > max_len:
+            # The old writer kept len(metadata) + len(AUC_COLUMNS) + max_len
+            # cells: the header width, not len(meta_cells) + max_len.
+            row = row[: len(columns)]
+        return pd.DataFrame([row], columns=list(columns)).to_csv(index=False, header=False)
+
+    eol = os.linesep  # to_csv's default lineterminator
+    meta_txt = pd.DataFrame([list(meta_cells)], columns=list(columns[:n_meta])).to_csv(
+        index=False, header=False
+    )
+    if not max_len:
+        return meta_txt
+    head = values[:max_len]
+    if not head.size:
+        return meta_txt[: -len(eol)] + "," * max_len + eol
+    cells = head.astype(str)
+    cells[np.isnan(head)] = ""
+    return (
+        meta_txt[: -len(eol)] + "," + ",".join(cells.tolist()) + "," * (max_len - head.size) + eol
+    )
+
+
+def _write_wide_frame(fh, frame: pd.DataFrame, n_meta: int, *, chunk_rows: int = 256) -> None:
+    """Write ``frame.to_csv(index=False, header=False)`` to ``fh``, faster.
+
+    Used to splice cached frozen rows. The first ``n_meta`` columns go through
+    pandas unchanged. When every ``dir_val_*`` column after them is float64,
+    those are formatted the way pandas formats float64 for CSV (see
+    ``_wide_row_line``), up to each row's last non-NaN cell; the trailing NaN
+    padding (most of a row at the 12,204-frame global width) is bare commas.
+    Falls back to pandas for any other dtype, or when the metadata text does
+    not split into one line per row (a quoted embedded newline).
+    """
+
+    values = frame.iloc[:, n_meta:]
+    if n_meta < 2 or not all(dtype == np.float64 for dtype in values.dtypes):
+        fh.write(frame.to_csv(index=False, header=False))
+        return
+    eol = os.linesep
+    meta_lines = frame.iloc[:, :n_meta].to_csv(index=False, header=False).split(eol)
+    if meta_lines and meta_lines[-1] == "":
+        meta_lines.pop()
+    if len(meta_lines) != len(frame):
+        fh.write(frame.to_csv(index=False, header=False))
+        return
+    n_vals = values.shape[1]
+    if not n_vals:
+        fh.write("".join(line + eol for line in meta_lines))
+        return
+    for start in range(0, len(frame), chunk_rows):
+        block = values.iloc[start : start + chunk_rows].to_numpy(dtype=np.float64)
+        present = ~np.isnan(block)
+        # cells up to and including each row's last non-NaN; the rest is padding
+        kept = np.where(present.any(axis=1), n_vals - np.argmax(present[:, ::-1], axis=1), 0)
+        parts = []
+        for i, k in enumerate(kept.tolist()):
+            meta = meta_lines[start + i]
+            if not k:
+                parts.append(meta + "," * n_vals + eol)
+                continue
+            cells = block[i, :k].astype(str)
+            cells[~present[i, :k]] = ""
+            parts.append(meta + "," + ",".join(cells.tolist()) + "," * (n_vals - k) + eol)
+        fh.write("".join(parts))
+
+
+class _PandasAppend:
+    """Append handle for an output path pandas compresses (``.gz``, ``.bz2``,
+    ``.zip``, ...). ``to_csv(path, mode="a")`` wrote each row as its own
+    compressed member; a plain text handle would splice raw text into the
+    file. Each ``write`` goes through pandas' own handle in append mode
+    instead, so the file decompresses to exactly the plain-text output.
+    """
+
+    def __init__(self, target: Path) -> None:
+        self.target = str(target)
+
+    def write(self, text: str) -> None:
+        from pandas.io.common import get_handle
+
+        with get_handle(
+            self.target, "a", encoding="utf-8", errors="strict", compression="infer"
+        ) as handles:
+            handles.handle.write(text)
+
+    def close(self) -> None:
+        pass
+
+
+def _trial_read_columns(item: Mapping[str, object]) -> tuple[list[str], str | None, str | None]:
+    """``(read_cols, frame_col, ts_col)`` for one build_wide_csv trial item.
+
+    The measure plus any frame/timestamp column its cached header has, so the
+    table is read once for the trace and the FPS estimate together.
+    """
+
+    measure = str(item["measure_col"])
+    cached_cols = item.get("_header_cols") or []
+    _hdr = pd.DataFrame(columns=cached_cols)
+    frame_col = _pick_frame(_hdr) if cached_cols else None
+    ts_col = _pick_timestamp(_hdr) if cached_cols else None
+    read_cols = [measure]
+    if frame_col and frame_col not in read_cols:
+        read_cols.append(frame_col)
+    if ts_col and ts_col not in read_cols:
+        read_cols.append(ts_col)
+    return read_cols, frame_col, ts_col
+
+
+def _baseline_rows(full: pd.DataFrame, measure: str, nrows: int) -> pd.DataFrame | None:
+    """The first ``nrows`` rows of a whole-table read, standing in for an
+    ``nrows``-limited read of the same table -- or ``None`` if they might not.
+
+    They match when ``measure`` came back numeric: the parser converts each
+    token on its own, so the first ``nrows`` values are the ones a shorter read
+    gets (an int-only window that read infers int64 casts to the same floats).
+    An object column (a stray token anywhere) may parse differently once the
+    window is read alone, so it takes the ``nrows``-limited read, as before.
+    """
+
+    if measure not in full.columns or full[measure].dtype.kind not in "iuf":
+        return None
+    return full.iloc[: max(0, int(nrows))]
+
+
 def build_wide_csv(
     roots: Sequence[str],
     output_csv: str,
@@ -2903,6 +3108,12 @@ def build_wide_csv(
     for _frozen_rows, _own in frozen.values():
         max_len = max(max_len, int(_own))
 
+    # Trial metadata resolved once per (trial, n_frames hint) for THIS build
+    # only -- a sidecar edited between runs must reach the next build.
+    trial_meta_memo: dict[tuple, object] = {}
+    # Whole-table reads made by the baseline pass, handed to the main loop
+    # (which pops each one) instead of reading those tables a second time.
+    prefetched: dict[str, pd.DataFrame] = {}
     fly_before_samples: dict[str, list[np.ndarray]] = {}
     baseline_types = trial_type_allow or {"testing"}
     for item in items:
@@ -2917,7 +3128,7 @@ def build_wide_csv(
             _before_nrows = BEFORE_FRAMES
         else:
             try:
-                _meta_pre = _resolve_trial_meta_for_csv(csv_path)
+                _meta_pre = _resolve_trial_meta_for_csv(csv_path, memo=trial_meta_memo)
                 _before_nrows = (
                     int(_meta_pre.odor_on_frame)
                     if _meta_pre.odor_on_frame is not None
@@ -2925,13 +3136,24 @@ def build_wide_csv(
                 )
             except Exception:
                 _before_nrows = BEFORE_FRAMES
+        # The main loop's own read of this table, sampled here when its first
+        # rows are exactly what the nrows-limited read returns (_baseline_rows).
+        df_before = None
         try:
-            df_before = _read_trial_table(
-                csv_path, columns=[measure], nrows=max(1, _before_nrows)
-            )
-        except Exception as exc:
-            print(f"[WARN] build_wide_csv: failed to read before segment from {csv_path.name}: {exc}")
-            continue
+            _full = _read_trial_table(csv_path, columns=_trial_read_columns(item)[0])
+            df_before = _baseline_rows(_full, measure, max(1, _before_nrows))
+            if df_before is not None:
+                prefetched[str(csv_path)] = _full
+        except Exception:
+            df_before = None
+        if df_before is None:
+            try:
+                df_before = _read_trial_table(
+                    csv_path, columns=[measure], nrows=max(1, _before_nrows)
+                )
+            except Exception as exc:
+                print(f"[WARN] build_wide_csv: failed to read before segment from {csv_path.name}: {exc}")
+                continue
         series = pd.to_numeric(df_before[measure], errors="coerce").astype(float).to_numpy()
         if series.size == 0:
             continue
@@ -3019,6 +3241,29 @@ def build_wide_csv(
             header_df.to_csv(target, index=False)
             extra_paths[trial_key] = target
 
+    row_cols = metadata + list(AUC_COLUMNS) + value_cols
+    n_meta = len(metadata) + len(AUC_COLUMNS)
+    # One append handle per output for the whole build; rows used to reopen
+    # the file per row via to_csv(mode="a"). utf-8 + newline="" is how pandas
+    # opens a path for to_csv. Line-buffered, so every finished row is on disk
+    # as soon as it is written -- as it was with the per-row open/close --
+    # even if the build raises before the close below, which runs before the
+    # frozen-row sort reads the files back. A path pandas would compress
+    # (.csv.gz, ...) appends through pandas instead (_PandasAppend).
+    out_handles: dict[str, object] = {}
+
+    def _out(target: Path):
+        fh = out_handles.get(str(target))
+        if fh is None:
+            from pandas.io.common import infer_compression
+
+            if infer_compression(str(target), "infer") is not None:
+                fh = _PandasAppend(target)
+            else:
+                fh = open(target, "a", encoding="utf-8", newline="", buffering=1)
+            out_handles[str(target)] = fh
+        return fh
+
     slot_stats_cache: dict[tuple[str, str], tuple[float, float] | None] = {}
     distance_trim_cache: dict[tuple[str, str], tuple[float, float, int] | None] = {}
 
@@ -3088,24 +3333,17 @@ def build_wide_csv(
         for item in group_items:
             csv_path = Path(item["csv_path"])
             measure = str(item["measure_col"])
-            cached_cols = item.get("_header_cols") or []
-
-            # Resolve frame/timestamp columns from cached header columns
-            _hdr = pd.DataFrame(columns=cached_cols)
-            frame_col = _pick_frame(_hdr) if cached_cols else None
-            ts_col = _pick_timestamp(_hdr) if cached_cols else None
 
             # Single read: fetch measure + frame + timestamp columns together
-            read_cols = [measure]
-            if frame_col and frame_col not in read_cols:
-                read_cols.append(frame_col)
-            if ts_col and ts_col not in read_cols:
-                read_cols.append(ts_col)
-            try:
-                chunk = _read_trial_table(csv_path, columns=read_cols)
-            except Exception as exc:
-                print(f"[WARN] Read failed {csv_path}: {exc}")
-                continue
+            # (already done by the baseline pass for most testing tables).
+            read_cols, frame_col, ts_col = _trial_read_columns(item)
+            chunk = prefetched.pop(str(csv_path), None)
+            if chunk is None:
+                try:
+                    chunk = _read_trial_table(csv_path, columns=read_cols)
+                except Exception as exc:
+                    print(f"[WARN] Read failed {csv_path}: {exc}")
+                    continue
 
             values = pd.to_numeric(chunk[measure], errors="coerce").astype(float).to_numpy()
 
@@ -3138,7 +3376,9 @@ def build_wide_csv(
                 meta = None
             else:
                 try:
-                    meta = _resolve_trial_meta_for_csv(csv_path, n_frames_hint=int(len(values)))
+                    meta = _resolve_trial_meta_for_csv(
+                        csv_path, n_frames_hint=int(len(values)), memo=trial_meta_memo
+                    )
                 except Exception as exc:  # pragma: no cover - defensive
                     print(f"[WARN] trial-meta load failed for {csv_path.name}: {exc}")
                     meta = None
@@ -3417,7 +3657,7 @@ def build_wide_csv(
                 if _is_legacy()
                 else [fly in frozen_dirs.get(dataset, ())]
             )
-            row = [
+            meta_cells = [
                 dataset,
                 fly,
                 fly_number_label,
@@ -3453,24 +3693,19 @@ def build_wide_csv(
                 result["metrics"]["AUC-After-Before-Ratio"],
                 result["metrics"]["TimeToPeak-During"],
                 result["metrics"]["Peak-Value"],
-                *list(values),
             ]
-            if len(values) < max_len:
-                row.extend([np.nan] * (max_len - len(values)))
-            elif len(values) > max_len:
-                row = row[: len(metadata) + len(AUC_COLUMNS) + max_len]
 
             trial_key = str(result["trial_type"]).strip().lower()
-            if trial_key in main_trial_allow:
-                pd.DataFrame([row], columns=metadata + list(AUC_COLUMNS) + value_cols).to_csv(
-                    out_path, index=False, mode="a", header=False
-                )
-                main_rows_written += 1
             extra_target = extra_paths.get(trial_key)
+            if trial_key not in main_trial_allow and extra_target is None:
+                continue
+            # values NaN-padded / truncated to max_len (the dir_val_* columns).
+            line = _wide_row_line(meta_cells, values, max_len, row_cols)
+            if trial_key in main_trial_allow:
+                _out(out_path).write(line)
+                main_rows_written += 1
             if extra_target is not None:
-                pd.DataFrame([row], columns=metadata + list(AUC_COLUMNS) + value_cols).to_csv(
-                    extra_target, index=False, mode="a", header=False
-                )
+                _out(extra_target).write(line)
 
     # Splice frozen rows. reindex(columns=...) IS pad-and-truncate: it inserts
     # NaN for dir_val_* columns the cache lacks and drops any beyond max_len --
@@ -3496,11 +3731,14 @@ def build_wide_csv(
             trial_keys = trial_keys[_keep]
         for trial_key, group in aligned.groupby(trial_keys):
             if trial_key in main_trial_allow:
-                group.to_csv(out_path, index=False, mode="a", header=False)
+                _write_wide_frame(_out(out_path), group, n_meta)
                 main_rows_written += len(group)
             extra_target = extra_paths.get(trial_key)
             if extra_target is not None:
-                group.to_csv(extra_target, index=False, mode="a", header=False)
+                _write_wide_frame(_out(extra_target), group, n_meta)
+
+    for _fh in out_handles.values():
+        _fh.close()
 
     if frozen:
         # Live rows were written in items_sorted order, i.e. sorted by

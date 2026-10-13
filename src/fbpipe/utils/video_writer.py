@@ -96,6 +96,14 @@ class FFmpegFrameWriter:
 
     ``encoder``: ``"auto"`` (default) uses h264_nvenc when available else libx264;
     pass ``"libx264"`` or ``"h264_nvenc"`` to force one.
+
+    ffmpeg can die mid-stream (h264_nvenc does when VRAM runs out: "Failed
+    locking bitstream buffer", exit 234) while the caller keeps producing
+    frames, so check the outcome after :meth:`release` instead of trusting the
+    file: ``frames_written`` counts the frames the pipe accepted, ``returncode``
+    is ffmpeg's exit status, and ``error`` says why the video is incomplete (a
+    failed pipe write, a non-zero exit, or an encode that never finished) or is
+    ``None`` when it succeeded.
     """
 
     def __init__(
@@ -115,6 +123,9 @@ class FFmpegFrameWriter:
         self.proc: Optional[subprocess.Popen] = None
         self.encoder_used: Optional[str] = None
         self._dead = False
+        self.frames_written = 0
+        self.returncode: Optional[int] = None
+        self.error: Optional[str] = None
 
         ffmpeg_bin = ffmpeg or _default_ffmpeg_bin()
         if not ffmpeg_bin:
@@ -175,12 +186,14 @@ class FFmpegFrameWriter:
             return False
         try:
             self.proc.stdin.write(np.ascontiguousarray(frame, dtype=np.uint8).tobytes())
+            self.frames_written += 1
             return True
         except (BrokenPipeError, OSError) as exc:
             # The underlying ffmpeg process is gone -- every later frame would
             # hit this same exception, so latch dead here rather than logging
             # once per remaining frame in the trial.
             self._dead = True
+            self.error = f"pipe write failed after {self.frames_written} frames: {exc}"
             log.warning("ffmpeg pipe write failed, dropping remaining frames for %s: %s", self.path, exc)
             return False
 
@@ -191,9 +204,19 @@ class FFmpegFrameWriter:
         # stdin manually first would make it flush a closed pipe and raise.
         try:
             _, stderr = self.proc.communicate(timeout=300)
-            if self.proc.returncode not in (0, None) and stderr:
-                log.warning("ffmpeg exited %s: %s", self.proc.returncode, stderr.decode(errors="ignore")[:500])
-        except Exception:
+            self.returncode = self.proc.returncode
+            if self.returncode not in (0, None):
+                detail = stderr.decode(errors="ignore") if stderr else ""
+                if stderr:
+                    log.warning("ffmpeg exited %s: %s", self.returncode, detail[:500])
+                # ffmpeg's first line (e.g. NVENC's) says more than a broken pipe.
+                first = next((ln.strip() for ln in detail.splitlines() if ln.strip()), "")
+                self.error = f"ffmpeg exited {self.returncode} after {self.frames_written} frames" + (
+                    f": {first}" if first else ""
+                )
+        except Exception as exc:
+            self.error = f"ffmpeg did not finish ({exc!r}); killed"
+            log.warning("ffmpeg did not finish for %s: %r", self.path, exc)
             try:
                 self.proc.kill()
             except Exception:

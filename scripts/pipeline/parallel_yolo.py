@@ -67,16 +67,26 @@ def main() -> int:
     base_env["PYTHONPATH"] = str(REPO_ROOT / "src") + os.pathsep + base_env.get("PYTHONPATH", "")
     base_env["PYTHONUNBUFFERED"] = "1"  # flush worker prints so logs are live
 
-    # Cap each worker's CPU-library thread pools to cores/N. Without this, every
-    # worker's OpenCV/BLAS/torch each grab ALL cores, so N workers oversubscribe
-    # (e.g. 4 workers spawned ~200 threads on 16 cores -> 60% of CPU lost to kernel
-    # context-switching). Sharing the cores cleanly keeps useful work high.
+    # Cap each worker's CPU-library thread pools. Without this, every worker's
+    # OpenCV/BLAS/torch each grab ALL cores, so N workers oversubscribe (e.g. 4
+    # workers spawned ~200 threads on 16 cores -> 60% of CPU lost to kernel
+    # context-switching). OpenMP (torch/OpenCV) shares the cores: cores/N each.
+    # BLAS gets exactly 1: numpy's bundled OpenBLAS keeps its pool spinning at
+    # 100% CPU after the tracker's tiny per-frame np.linalg.inv calls, and any
+    # cap above 1 still left spinners (16/5/4 -> 3 per worker, 2 -> 1). At 1, a
+    # 2-video run went 205.6 -> 61.1 process CPU-s with md5-identical outputs.
+    # MKL_NUM_THREADS also sizes torch's default intra-op pool (it wins over
+    # OMP_NUM_THREADS: 1 under MKL=1), so it drops to 1 only when yolo_infer
+    # re-pins torch and cv2 to cores/N itself, i.e. when NUM_WORKERS > 1. A
+    # lone worker keeps the old cores//1 value and torch its default pool.
     cores = os.cpu_count() or 16
     threads_per_worker = max(1, cores // n)
-    for var in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS",
-                "NUMEXPR_NUM_THREADS", "VECLIB_MAXIMUM_THREADS"):
-        base_env[var] = str(threads_per_worker)
-    print(f"[parallel-yolo] {cores} cores / {n} workers -> {threads_per_worker} CPU threads per worker", flush=True)
+    base_env["OMP_NUM_THREADS"] = str(threads_per_worker)
+    base_env["MKL_NUM_THREADS"] = "1" if n > 1 else str(threads_per_worker)
+    for var in ("OPENBLAS_NUM_THREADS", "NUMEXPR_NUM_THREADS", "VECLIB_MAXIMUM_THREADS"):
+        base_env[var] = "1"
+    print(f"[parallel-yolo] {cores} cores / {n} workers -> {threads_per_worker} CPU threads per worker "
+          f"(OpenBLAS/NumExpr pools: 1, MKL: {base_env['MKL_NUM_THREADS']})", flush=True)
 
     procs = []
     t0 = time.time()
