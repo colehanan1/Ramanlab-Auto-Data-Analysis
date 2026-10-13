@@ -2,11 +2,15 @@
 
     conda run -n yolo-env python -m fbpipe.geometry_pipeline --config config/config_abdomen.yaml [STEP ...]
 
-Steps run in order: track -> normalize -> wide -> figures. ``list`` prints them.
+``--config`` is a legacy ``config_abdomen*.yaml`` or an ``extends:`` overlay with an ``abdomen:``
+block (``config/config_new_abdomen.yaml``). Steps run in order: track -> normalize -> wide ->
+figures. ``list`` prints them. ``--annotated-video`` (the one-time backfill) writes the annotated
+mp4 per trial even where the config says tables only (the nightly).
 """
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import inspect
 import os
 import subprocess
@@ -58,6 +62,8 @@ def worker_commands(config_path: Path, n_workers: int, *, cores: Optional[int] =
         cmd += ["--only-trial", str(options["only_trial"])]
     if options.get("max_frames") is not None:
         cmd += ["--max-frames", str(int(options["max_frames"]))]
+    if options.get("annotated_video"):
+        cmd.append("--annotated-video")      # each worker reloads the config, so it must hear this too
     cmd.append("track")
     return [(list(cmd), dict(base_env, NUM_WORKERS=str(n), WORKER_INDEX=str(k))) for k in range(n)]
 
@@ -92,6 +98,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--force", action="store_true", help="re-track trials that already have outputs")
     p.add_argument("--only-trial", default=None, help="substring of the trial folder name, e.g. pretest_1")
     p.add_argument("--max-frames", type=int, default=None, help="cap frames per trial (smoke tests)")
+    p.add_argument("--annotated-video", action="store_true",
+                   help="write the annotated mp4 per trial even if the config's geometry.annotated_video is false "
+                        "(the nightly writes tables only; the one-time backfill passes this)")
     p.add_argument("--workers", type=int, default=None,
                    help="parallel worker processes for the track step (default: yolo.num_workers in the config)")
     p.add_argument("--no-fan-out", action="store_true", help=argparse.SUPPRESS)   # set on the workers themselves
@@ -110,8 +119,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         raise SystemExit(f"Unknown step(s): {', '.join(unknown)}; choose from {STEP_NAMES}")
     from .geometry import config as geometry_config
     settings, gcfg = geometry_config.load_geometry_config(args.config)
+    if args.annotated_video:
+        gcfg = dataclasses.replace(gcfg, annotated_video=True)
     names = list(args.steps or STEP_NAMES)
-    options = {"force": args.force, "only_trial": args.only_trial, "max_frames": args.max_frames}
+    options = {"force": args.force, "only_trial": args.only_trial, "max_frames": args.max_frames,
+               "annotated_video": args.annotated_video}
     n_workers = args.workers if args.workers is not None else int(getattr(settings, "yolo_num_workers", 1) or 1)
     if "track" in names and n_workers > 1 and not args.no_fan_out:
         failed = fan_out_track(Path(args.config), n_workers, settings=settings, options=options)
