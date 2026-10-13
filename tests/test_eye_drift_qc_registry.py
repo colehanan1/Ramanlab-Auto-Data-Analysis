@@ -49,7 +49,7 @@ def test_both_pipeline_import_branches_bring_in_the_step():
 
 
 def test_run_workflows_runs_it_with_the_per_trial_steps_not_the_yolo_workers():
-    src = inspect.getsource(rw.main)
+    src = inspect.getsource(getattr(rw, "_main_locked", rw.main))  # main() runs it under the run lock
     # main() derives the per-dataset step list from ORDERED_STEPS minus YOLO ...
     assert re.search(
         r'remaining_steps\s*=\s*\[step\.name for step in ORDERED_STEPS if step\.name != "yolo"\]', src

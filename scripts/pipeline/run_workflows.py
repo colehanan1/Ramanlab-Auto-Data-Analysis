@@ -5212,20 +5212,21 @@ def ntfy_notify(title, message, priority="default", tags=""):
     except Exception:
         pass
 
-if __name__ == "__main__" and "--freeze-status" in sys.argv[1:]:  # pragma: no cover
-    main()  # a read-only report: no run happened, nothing to notify about
-elif __name__ == "__main__":  # pragma: no cover
-    try:
-        main()
-        _message = "Pipeline finished successfully."
-        if LAST_EYE_QC_SUMMARY:
-            _message += f"\n\n{LAST_EYE_QC_SUMMARY}"
-        if _RUN_SUMMARY:
-            _message += "\n" + _RUN_SUMMARY
-        ntfy_notify("Pipeline Complete", _message, tags="white_check_mark")
-    except RunLockTimeout as exc:
-        ntfy_notify("Pipeline SKIPPED", f"Another pipeline run held the lock:\n{exc}", priority="high", tags="hourglass")
-        raise SystemExit(75)
-    except Exception as exc:
-        ntfy_notify("Pipeline FAILED", f"Pipeline crashed with error:\n{exc}", priority="high", tags="x")
-        raise
+if __name__ == "__main__":  # pragma: no cover
+    if "--freeze-status" in sys.argv[1:]:
+        main()  # a read-only report: no run happened, nothing to notify about
+    else:
+        try:
+            main()
+            _message = "Pipeline finished successfully."
+            if LAST_EYE_QC_SUMMARY:
+                _message += f"\n\n{LAST_EYE_QC_SUMMARY}"
+            if _RUN_SUMMARY:
+                _message += "\n" + _RUN_SUMMARY
+            ntfy_notify("Pipeline Complete", _message, tags="white_check_mark")
+        except RunLockTimeout as exc:
+            ntfy_notify("Pipeline SKIPPED", f"Another pipeline run held the lock:\n{exc}", priority="high", tags="hourglass")
+            raise SystemExit(75)
+        except Exception as exc:
+            ntfy_notify("Pipeline FAILED", f"Pipeline crashed with error:\n{exc}", priority="high", tags="x")
+            raise

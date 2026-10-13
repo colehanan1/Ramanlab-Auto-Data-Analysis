@@ -18,6 +18,7 @@ really written -- so these pin what the nightly does:
 
 from __future__ import annotations
 
+import ast
 import json
 import os
 import subprocess
@@ -507,9 +508,14 @@ def test_freeze_status_never_sends_the_end_of_run_notification():
     """It is a read-only report: the script's __main__ must not ntfy
     "Pipeline Complete" for it (checked on the source -- running __main__ would
     post to the user's phone)."""
-    src = Path(rw.__file__).read_text(encoding="utf-8")
-    tail = src[src.index('if __name__ == "__main__"'):]
-    status_branch, rest = tail.split("elif __name__", 1)
-    assert '"--freeze-status" in sys.argv[1:]' in status_branch
+    tree = ast.parse(Path(rw.__file__).read_text(encoding="utf-8"))
+    (guard,) = [
+        n for n in tree.body
+        if isinstance(n, ast.If) and ast.unparse(n.test) == "__name__ == '__main__'"
+    ]
+    (status,) = [n for n in guard.body if isinstance(n, ast.If)]
+    assert ast.unparse(status.test) == "'--freeze-status' in sys.argv[1:]"
+    status_branch = "\n".join(ast.unparse(n) for n in status.body)
+    rest = "\n".join(ast.unparse(n) for n in status.orelse)
     assert "ntfy_notify" not in status_branch
-    assert "ntfy_notify(\"Pipeline Complete\"" in rest
+    assert "ntfy_notify('Pipeline Complete'" in rest
