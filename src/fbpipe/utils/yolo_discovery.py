@@ -11,10 +11,16 @@ rules live here, free of torch/cv2 imports:
   (``output_october_06_batch_1_training_1_IsoamylAcetate-1_20261006_120331`` ->
   ``october_06_batch_1_training_1``), which drops the odor and the stamp;
 * YOLO skips a video whose trial folder exists;
-* several videos of one batch can name the same trial folder -- a restarted
-  session records the trial again -- and the LATEST one (last in sorted order:
-  the stamp is in the name) is the real session, as the trial metadata
-  (``trial_metadata.find_sidecar``: most recent sidecar) already assumes. A
+* a restarted session records a trial again, and every attempt names the same
+  trial folder. YOLO processes the session the trial's metadata is read from
+  (``trial_metadata.find_sidecar``: the most recent sidecar ``.txt``, else rig
+  CSV), so its tables and its metadata are one recording -- never "the last
+  name in sorted order": the odor label precedes the stamp, and a restart may
+  carry another label (Hex-Control-24-0.01 april_17_batch_1 testing_3).
+  While that session has no video, none is processed (an aborted attempt's
+  tables would be paired with the real session's metadata); with no rig file
+  at all, the latest ``_YYYYMMDD_HHMMSS`` stamp decides. Several files of one
+  session (an ``.avi`` beside the ``.mp4``) keep yolo_infer's first pick. A
   folder YOLO built before this rule may hold an earlier attempt, so the
   cleanup keeps every session's video and auto-freeze reports the trial
   (``trial_sessions``, ``trial_report``);
@@ -27,6 +33,7 @@ from __future__ import annotations
 
 import dataclasses
 import os
+import re
 from pathlib import Path
 from typing import Any, Iterable, Optional
 
@@ -39,6 +46,9 @@ RAW_VIDEO_SUFFIXES = (".mp4", ".avi")
 _SESSION_VIDEO_SUFFIXES = (".mp4", ".avi", ".h264")
 
 MERGED_SUFFIX = "_distances_merged"
+
+#: The rig's session start stamp, the last field of every session file's stem.
+_STAMP_RE = re.compile(r"_(\d{8}_\d{6})$")
 
 
 def trial_folder_name(video: str | Path) -> str:
@@ -56,34 +66,76 @@ def raw_videos(batch_dir: str | Path) -> list[Path]:
     )
 
 
-def superseded_videos(videos: Iterable[str | Path]) -> set[Path]:
-    """Every video of *videos* that a LATER one naming the same trial supersedes.
+def _session_of(video: Path) -> str:
+    """The recording session *video* belongs to: its stem, ``_preprocessed`` dropped."""
+    return video.stem.replace("_preprocessed", "")
 
-    *videos* is one batch's list in yolo_infer order (sorted); the last member
-    of each trial-folder group is the session that counts.
+
+def _stamp_order(session: str) -> tuple[str, str]:
+    m = _STAMP_RE.search(session)
+    return (m.group(1) if m else "", session)
+
+
+def _metadata_session(trial_dir: Path) -> Optional[str]:
+    """The session the trial's metadata is read from; None without rig files."""
+    from .trial_metadata import find_sidecar
+
+    txt, csv = find_sidecar(trial_dir)
+    source = txt if txt is not None else csv
+    return None if source is None else source.stem.replace("_preprocessed", "")
+
+
+def _processed_videos(videos: Iterable[str | Path]) -> dict[Path, Optional[Path]]:
+    """``{video: the video YOLO processes for its trial}`` (None: it processes none).
+
+    The rules are the module docstring's; a trial recorded once keeps
+    yolo_infer's first pick, so only a restarted trial reads its rig files.
     """
-    latest: dict[str, Path] = {}
-    group: dict[str, list[Path]] = {}
-    for video in sorted((Path(v) for v in videos), key=str):
-        name = trial_folder_name(video)
-        group.setdefault(name, []).append(video)
-        latest[name] = video
-    return {v for name, members in group.items() for v in members if v != latest[name]}
+    trials: dict[tuple[Path, str], list[Path]] = {}
+    for video in sorted({Path(v) for v in videos}, key=str):
+        trials.setdefault((video.parent, trial_folder_name(video)), []).append(video)
+    listed: dict[Path, dict[str, dict[str, Any]]] = {}
+    choice: dict[Path, Optional[Path]] = {}
+    for (batch, name), members in trials.items():
+        if batch not in listed:
+            listed[batch] = _session_groups(batch)
+        sessions = set(listed[batch].get(name, {}).get("stems", ())) | {_session_of(m) for m in members}
+        kept: Optional[Path] = members[0]
+        if len(sessions) > 1:
+            real = _metadata_session(batch / name)
+            if real is None:
+                real = max((_session_of(m) for m in members), key=_stamp_order)
+            kept = next((m for m in members if _session_of(m) == real), None)
+        for member in members:
+            choice[member] = kept
+    return choice
 
 
-def latest_session(videos: Iterable[str | Path], video: str | Path) -> Path:
-    """The video that supersedes *video* among *videos* (itself if none does)."""
+def superseded_videos(videos: Iterable[str | Path]) -> set[Path]:
+    """Every video of *videos* (one batch's) that YOLO skips for its trial.
+
+    Another video of the trial is the one processed, or -- for a restarted
+    trial whose metadata session has no video here -- none is.
+    """
+    return {video for video, kept in _processed_videos(videos).items() if kept != video}
+
+
+def latest_session(videos: Iterable[str | Path], video: str | Path) -> Optional[Path]:
+    """The video YOLO processes for *video*'s trial among *videos*: *video*
+    itself unless superseded, None when it processes none of them."""
+    video = Path(video)
     name = trial_folder_name(video)
-    same = sorted((Path(v) for v in videos if trial_folder_name(v) == name), key=str)
-    return same[-1] if same else Path(video)
+    same = {Path(v) for v in videos if trial_folder_name(v) == name} | {video}
+    return _processed_videos(same)[video]
 
 
 def pending_videos(cfg: Any, root: str | Path) -> list[Path]:
     """The videos under dataset *root* that a YOLO run would process now.
 
     Exactly yolo_infer.main's discovery: live batch folders (folder rules
-    applied), raw videos in sorted order, a collision group counted once as
-    its latest session, and a video whose trial folder exists left alone.
+    applied), raw videos in sorted order, a restarted trial counted once as
+    the video YOLO processes for it (none while its metadata session has no
+    video), and a video whose trial folder exists left alone.
     """
     return trial_report(cfg, root).pending
 

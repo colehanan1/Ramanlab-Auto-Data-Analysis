@@ -10,7 +10,6 @@ byte-identical duplicate rows removed. Cascades are only reported.
 
 from __future__ import annotations
 
-import json
 import os
 from pathlib import Path
 
@@ -617,7 +616,8 @@ def test_frozen_datasets_built_under_other_settings_are_reported(scene):
 
 def test_a_trial_recorded_more_than_once_is_reported(scene):
     """EB-Control-24-1 july_17_batch_1_rig_3 training_1 was recorded three
-    times. YOLO processes only the latest session; the run says so every time."""
+    times. YOLO processes only the latest session (the one the trial's metadata
+    is read from); the run says so every time."""
     _settle(scene)
     (scene.root(LIVE) / BATCH / f"{_stem(BATCH, 'testing_1', '20260809_093939')}.csv").write_text("frame\n0\n")
     plan = scene.plan()
@@ -625,6 +625,7 @@ def test_a_trial_recorded_more_than_once_is_reported(scene):
     assert notice.startswith(f"[FREEZE] {LIVE}: 1 trial(s) recorded more than once")
     assert f"{BATCH}/august_09_batch_1_testing_1 (2 sessions)" in notice
     assert "only the latest session" in notice
+    assert "the one its metadata is read from; none while that one has no video" in notice
 
 
 def test_untracked_trials_are_reported_and_never_thaw(scene):

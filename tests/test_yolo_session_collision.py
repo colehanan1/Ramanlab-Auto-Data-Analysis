@@ -8,16 +8,20 @@ metadata (fbpipe.utils.trial_metadata.find_sidecar: most recent sidecar) came
 from 11:51. With several workers two members of one group could even both see
 the folder missing and write into it at once.
 
-Now the latest session (last in sorted order; the stamp is in the name) is the
-real one: every earlier member is skipped, keeping its job slot so every other
-video's worker assignment is unchanged. Nothing is deleted.
+Now YOLO processes the session the trial's metadata is read from (the most
+recent sidecar; without rig files, the latest stamp), and none while that
+session has no video -- never the last name in sorted order, since the odor
+label precedes the stamp (Hex-Control-24-0.01 april_17_batch_1 testing_3:
+Linalool, then 3-Octonol). Every other member is skipped, keeping its job slot
+so every other video's worker assignment is unchanged. Nothing is deleted.
 """
 
 from __future__ import annotations
 
+import datetime as dt
+import os
 from pathlib import Path
 
-import numpy as np
 import pandas as pd
 import pytest
 
@@ -29,6 +33,7 @@ import fbpipe.utils.track as track_module  # noqa: E402
 import fbpipe.utils.video_writer as vw  # noqa: E402
 from fbpipe.config import Settings  # noqa: E402
 from fbpipe.steps import yolo_infer  # noqa: E402
+from fbpipe.utils.trial_metadata import find_sidecar  # noqa: E402
 
 SIDE = 1080
 STEM = "output_july_17_batch_1_training_1_EthylButyrate_20260717_{}.mp4"
@@ -64,11 +69,16 @@ class _SourceCap:
         pass
 
 
-def _run(tmp_path, monkeypatch, *, workers=1, index=0):
+def _run(tmp_path, monkeypatch, *, workers=1, index=0, layout=None):
+    """Run yolo_infer.main over one batch; *layout(batch)* writes its files
+    (default: the three july_17 training_1 videos plus training_2, no rig files)."""
     batch = tmp_path / "EB-Control-24-1" / "july_17_batch_1_rig_3"
     batch.mkdir(parents=True, exist_ok=True)
-    for name in [STEM.format(s) for s in SESSIONS] + [OTHER]:
-        (batch / name).write_bytes(b"raw")
+    if layout is None:
+        for name in [STEM.format(s) for s in SESSIONS] + [OTHER]:
+            (batch / name).write_bytes(b"raw")
+    else:
+        layout(batch)
     opened: list[str] = []
 
     def _capture(path, *a, **k):
@@ -113,3 +123,59 @@ def test_skipped_sessions_keep_their_job_slots(tmp_path, monkeypatch, index):
     the same assignment as before for every video that is processed."""
     _, opened = _run(tmp_path, monkeypatch, workers=3, index=index)
     assert opened == {0: [OTHER], 1: [], 2: [STEM.format("115131")]}[index]
+
+
+def _session(batch: Path, stem: str, when: dt.datetime, *, video=True) -> None:
+    """One recording session's files as the rig leaves them, written at *when*."""
+    for ext in (".csv", ".txt") + ((".mp4",) if video else ()):
+        path = batch / f"{stem}{ext}"
+        path.write_bytes(b"raw")
+        os.utime(path, (when.timestamp(), when.timestamp()))
+
+
+APR_TRIAL = "april_17_batch_1_testing_3"
+APR_EARLY = "output_april_17_batch_1_testing_3_Linalool_20260417_141350"
+APR_LATE = "output_april_17_batch_1_testing_3_3-Octonol_20260417_143027"
+
+
+def test_a_restart_under_another_odor_label_processes_the_session_its_metadata_reads(
+    tmp_path, monkeypatch, capsys
+):
+    """Hex-Control-24-0.01 april_17_batch_1 testing_3: Linalool at 14:13:50,
+    then 3-Octonol at 14:30:27, which sorts FIRST by name. The tables must come
+    from the recording find_sidecar reads the trial's metadata from."""
+
+    def layout(batch):
+        _session(batch, APR_EARLY, dt.datetime(2026, 4, 17, 14, 16, 20))
+        _session(batch, APR_LATE, dt.datetime(2026, 4, 17, 14, 32, 57))
+
+    batch, opened = _run(tmp_path, monkeypatch, layout=layout)
+    assert opened == [f"{APR_LATE}.mp4"]
+    merged = pd.read_parquet(batch / APR_TRIAL / f"{APR_TRIAL}_distances_merged.parquet")
+    assert set(merged["source"]) == {f"{APR_LATE}.mp4"}
+    txt, csv = find_sidecar(batch / APR_TRIAL)
+    assert (txt.name, csv.name) == (f"{APR_LATE}.txt", f"{APR_LATE}.csv")
+    out = capsys.readouterr().out
+    assert f"[YOLO] Skipping {APR_EARLY}.mp4: superseded by {APR_LATE}.mp4" in out
+    assert (batch / f"{APR_EARLY}.mp4").exists()
+
+
+def test_no_session_is_processed_while_the_metadata_session_has_no_video(
+    tmp_path, monkeypatch, capsys
+):
+    """Only the aborted 09:39 video is local; the trial's metadata is the
+    11:51 session's. Building the folder from 09:39 is what left EB-Control-24-1
+    july_17_batch_1_rig_3 training_1 eyeless, so the trial waits instead: no
+    folder, no video opened, the other trial processed as usual."""
+
+    def layout(batch):
+        _session(batch, STEM.format("093939")[: -len(".mp4")], dt.datetime(2026, 7, 17, 9, 41, 10))
+        _session(batch, STEM.format("115131")[: -len(".mp4")], dt.datetime(2026, 7, 17, 11, 53, 1), video=False)
+        (batch / OTHER).write_bytes(b"raw")
+
+    batch, opened = _run(tmp_path, monkeypatch, layout=layout)
+    assert opened == [OTHER]
+    assert not (batch / TRIAL).exists()
+    out = capsys.readouterr().out
+    assert f"[YOLO] Skipping {STEM.format('093939')}: trial {TRIAL} was recorded more than once" in out
+    assert (batch / STEM.format("093939")).exists()

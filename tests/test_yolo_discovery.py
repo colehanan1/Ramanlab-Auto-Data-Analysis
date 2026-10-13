@@ -8,8 +8,11 @@ module:
 * a raw video is a ``.mp4``/``.avi`` directly inside a live batch folder;
 * its trial folder is ``<batch>/<fields 1-6 of the stem>`` (odor and stamp
   dropped), and YOLO skips a video whose trial folder exists;
-* several videos naming one trial folder are a restarted session: the LATEST
-  (last in sorted order -- the stamp is in the name) is the real one;
+* a trial recorded more than once (a restarted session) names one trial folder
+  from every attempt: YOLO processes the session the trial's metadata is read
+  from (trial_metadata.find_sidecar: most recent sidecar), never the last name
+  in sorted order -- the odor label precedes the stamp -- and none while that
+  session has no video; without rig files, the latest stamp decides;
 * "fully processed" = the trial folder holds the merged table and a per-fly
   table for every fly slot the merged table has eye data for.
 """
@@ -18,6 +21,7 @@ from __future__ import annotations
 
 import datetime as dt
 import inspect
+import os
 from pathlib import Path
 
 import numpy as np
@@ -27,6 +31,7 @@ import pytest
 from fbpipe.steps import yolo_infer
 from fbpipe.utils import yolo_discovery as yd
 from fbpipe.utils.frozen_folders import FolderRule
+from fbpipe.utils.trial_metadata import find_sidecar
 
 
 def _inline_name(video: Path) -> str:
@@ -88,6 +93,112 @@ def test_latest_session_supersedes_the_earlier_ones(tmp_path):
     videos = yd.raw_videos(batch)
     assert yd.superseded_videos(videos) == {early, mid}
     assert late in videos and other in videos
+
+
+# Hex-Control-24-0.01 april_17_batch_1 testing_3 was recorded under Linalool at
+# 14:13:50, then again under 3-Octonol at 14:30:27. The odor label precedes the
+# stamp, so the LATER session sorts FIRST ('3' < 'L').
+APR_TRIAL = "april_17_batch_1_testing_3"
+APR_EARLY = "output_april_17_batch_1_testing_3_Linalool_20260417_141350"
+APR_LATE = "output_april_17_batch_1_testing_3_3-Octonol_20260417_143027"
+EB_STEM = "output_july_17_batch_1_training_1_EthylButyrate_20260717_{}"
+
+
+def _written(path: Path, when: dt.datetime) -> Path:
+    stamp = when.timestamp()
+    os.utime(path, (stamp, stamp))
+    return path
+
+
+def _session(batch: Path, stem: str, when: dt.datetime, *, video=".mp4", sidecar=True):
+    """One recording session as the rig leaves it: rig CSV, sidecar, video."""
+    files = [batch / f"{stem}.csv"] + ([batch / f"{stem}.txt"] if sidecar else [])
+    for path in files:
+        _written(_touch(path), when)
+    return _written(_touch(batch / f"{stem}{video}"), when) if video else None
+
+
+def _metadata_stems(batch: Path, trial: str) -> tuple:
+    txt, csv = find_sidecar(batch / trial)
+    return (txt.stem if txt else None, csv.stem if csv else None)
+
+
+def test_a_restart_under_another_odor_label_keeps_the_session_its_metadata_reads(tmp_path):
+    """Picking the last name would process the EARLIER Linalool session while
+    the trial's metadata (odor, frames, odor window) comes from 3-Octonol."""
+    batch = tmp_path / "april_17_batch_1"
+    early = _session(batch, APR_EARLY, dt.datetime(2026, 4, 17, 14, 16, 20))
+    late = _session(batch, APR_LATE, dt.datetime(2026, 4, 17, 14, 32, 57))
+    videos = yd.raw_videos(batch)
+    assert videos == [late, early]  # sorted by name: the later session first
+    assert yd.superseded_videos(videos) == {early}
+    assert yd.latest_session(videos, early) == late
+    assert yd.latest_session(videos, late) == late
+    assert _metadata_stems(batch, APR_TRIAL) == (late.stem, late.stem)
+
+
+def test_without_rig_files_the_latest_stamp_decides_not_the_name(tmp_path):
+    """Only videos (nothing to read metadata from): the latest stamp is the
+    restart. The videos' own times are ignored -- a copy back from the
+    secured mirror rewrites them."""
+    batch = tmp_path / "april_17_batch_1"
+    late = _written(_touch(batch / f"{APR_LATE}.mp4"), dt.datetime(2026, 10, 7, 9, 0, 0))
+    early = _written(_touch(batch / f"{APR_EARLY}.mp4"), dt.datetime(2026, 10, 7, 9, 5, 0))
+    assert yd.superseded_videos(yd.raw_videos(batch)) == {early}
+    assert yd.latest_session(yd.raw_videos(batch), early) == late
+
+
+def test_the_metadata_session_wins_over_the_stamps(tmp_path):
+    """Whatever made an earlier session's sidecar the most recent, the trial's
+    metadata is read from it: its tables must come from that same recording."""
+    batch = tmp_path / "july_17_batch_1_rig_3"
+    later = _session(batch, EB_STEM.format("115131"), dt.datetime(2026, 7, 17, 11, 53, 1))
+    earlier = _session(batch, EB_STEM.format("093939"), dt.datetime(2026, 7, 17, 12, 30, 0))
+    assert yd.superseded_videos(yd.raw_videos(batch)) == {later}
+    assert _metadata_stems(batch, "july_17_batch_1_training_1") == (earlier.stem, earlier.stem)
+
+
+def test_an_aborted_attempt_without_a_sidecar_never_wins(tmp_path):
+    """Hex-Control-24-0.01 may_13_batch_1 training_1: the 09:24 attempt was
+    aborted (no sidecar .txt, an 8 KB rig CSV); 10:54 is the real session."""
+    batch = tmp_path / "may_13_batch_1"
+    stem = "output_may_13_batch_1_training_1_Hexanol_20260513_{}"
+    aborted = _session(batch, stem.format("092405"), dt.datetime(2026, 5, 13, 9, 24, 8), sidecar=False)
+    real = _session(batch, stem.format("105423"), dt.datetime(2026, 5, 13, 10, 56, 53))
+    assert yd.superseded_videos(yd.raw_videos(batch)) == {aborted}
+    assert yd.latest_session(yd.raw_videos(batch), aborted) == real
+
+
+def test_no_video_is_processed_while_the_metadata_session_has_none(tmp_path):
+    """EB-Control-24-1 july_17_batch_1_rig_3 training_1, had only the aborted
+    09:39 video been local: building the folder from it would pair its tables
+    with the 11:51 metadata. Nothing is processed, and nothing is pending."""
+    root = tmp_path / "EB-Control-24-1"
+    batch = root / "july_17_batch_1_rig_3"
+    aborted = _session(batch, EB_STEM.format("093939"), dt.datetime(2026, 7, 17, 9, 41, 10))
+    _session(batch, EB_STEM.format("115131"), dt.datetime(2026, 7, 17, 11, 53, 1), video=None)
+    videos = yd.raw_videos(batch)
+    assert videos == [aborted]
+    assert yd.superseded_videos(videos) == {aborted}
+    assert yd.latest_session(videos, aborted) is None
+    report = yd.trial_report(_Cfg(), root)
+    assert report.pending == []
+    assert report.collisions == {"july_17_batch_1_rig_3/july_17_batch_1_training_1": 2}
+
+
+def test_one_sessions_several_videos_keep_yolo_infers_first_pick(tmp_path):
+    """Two files of ONE recording (an .avi beside the .mp4, a _preprocessed
+    copy) are no restart: yolo_infer keeps processing the first in its order."""
+    batch = tmp_path / "july_17_batch_1_rig_3"
+    stem = EB_STEM.format("115131")
+    when = dt.datetime(2026, 7, 17, 11, 53, 1)
+    avi = _session(batch, stem, when, video=".avi")
+    mp4 = _written(_touch(batch / f"{stem}.mp4"), when)
+    pre = _written(_touch(batch / f"{stem}_preprocessed.mp4"), when)
+    videos = yd.raw_videos(batch)
+    assert videos == [avi, mp4, pre]
+    assert yd.superseded_videos(videos) == {mp4, pre}
+    assert yd.latest_session(videos, pre) == avi
 
 
 class _Cfg:

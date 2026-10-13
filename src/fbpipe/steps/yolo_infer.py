@@ -693,8 +693,9 @@ def main(cfg: Settings):
             fly_cfg = apply_rig_gate_overrides(cfg, fly)
             video_files = raw_videos(fly)
             # A trial recorded more than once (a restarted session) names one
-            # trial folder from every attempt: only its latest session is real
-            # (utils/yolo_discovery). The earlier ones keep their job slots.
+            # trial folder from every attempt: only the session its metadata is
+            # read from is processed (utils/yolo_discovery). The others keep
+            # their job slots.
             superseded = superseded_videos(video_files)
             # A trial whose annotated video failed is re-run once, right away, with
             # libx264 (NVENC is what dies when VRAM runs out); when that video fails
@@ -716,10 +717,14 @@ def main(cfg: Settings):
                 base = video_path.stem
                 folder_name = trial_folder_name(video_path)
                 if video_path in superseded:
+                    kept = latest_session(video_files, video_path)
                     print(
-                        f"[YOLO] Skipping {video_path.name}: superseded by "
-                        f"{latest_session(video_files, video_path).name} "
-                        f"(a later session of trial {folder_name})"
+                        f"[YOLO] Skipping {video_path.name}: superseded by {kept.name} "
+                        f"(trial {folder_name} is processed from that video)"
+                        if kept is not None else
+                        f"[YOLO] Skipping {video_path.name}: trial {folder_name} was recorded "
+                        f"more than once and the session its metadata is read from has no "
+                        f"video here"
                     )
                     continue
                 # rig_3 is physically mirrored, so its anchor is on the other

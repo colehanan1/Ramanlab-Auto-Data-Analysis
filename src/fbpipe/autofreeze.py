@@ -1110,8 +1110,9 @@ def _trial_notices(plan: Plan, dataset: str, root: Path, trials: Any, unprocessa
         items = [f"{name} ({n} sessions)" for name, n in sorted(trials.collisions.items())]
         plan.notices.append(
             f"[FREEZE] {dataset}: {len(items)} trial(s) recorded more than once (a restarted session): "
-            f"{_examples(items)}; YOLO processes only the latest session of a new one, and the secure "
-            f"cleanup keeps every session's video -- move the aborted sessions' files aside to resolve"
+            f"{_examples(items)}; YOLO processes only the latest session of a new one (the one its "
+            f"metadata is read from; none while that one has no video), and the secure cleanup keeps "
+            f"every session's video -- move the aborted sessions' files aside to resolve"
         )
     if trials.untracked:
         plan.notices.append(
