@@ -3260,6 +3260,32 @@ def _print_freeze_status(args: argparse.Namespace, config_path: Path, data: dict
         print(line)
 
 
+def _commit_freeze_plan(plan, combined_ran: bool) -> str:
+    """Record tonight's rebuilt datasets as frozen, write the status file, and
+    return the one-line run summary.
+
+    Never raises: data and figures are already done when this runs, so a
+    failure here must not skip the secure cleanup, the SMB copy or the eye-QC
+    summary. Datasets a failed commit leaves ``thawing`` are rebuilt next run.
+    """
+    try:
+        committed = plan.commit(combined_ran=combined_ran)
+        for line in committed:
+            print(line)
+        status = plan.write_status(committed)
+        summary = plan.short_summary()
+        print(f"[FREEZE] {summary} (status: {status})")
+        return summary
+    except Exception as exc:  # noqa: BLE001 -- see docstring
+        LOGGER.exception("[FREEZE] recording tonight's freezes failed")
+        summary = (
+            f"auto-freeze bookkeeping FAILED ({exc}); "
+            "tonight's rebuilt datasets stay thawing and rebuild next run"
+        )
+        print(f"[FREEZE] ERROR: {summary}")
+        return summary
+
+
 def _main_locked(args: argparse.Namespace, config_path: Path, data: dict, settings: Settings) -> None:
     """The whole run, under the run lock (see ``main``)."""
     from fbpipe import autofreeze as _autofreeze
@@ -3942,12 +3968,7 @@ def _main_locked(args: argparse.Namespace, config_path: Path, data: dict, settin
     # (with the inputs seen when the run started). A run that died before this
     # point left them ``thawing``, and the next run rebuilds them.
     if plan is not None:
-        committed = plan.commit(combined_ran=combined_ran)
-        for line in committed:
-            print(line)
-        status = plan.write_status(committed)
-        _RUN_SUMMARY = plan.short_summary()
-        print(f"[FREEZE] {_RUN_SUMMARY} (status: {status})")
+        _RUN_SUMMARY = _commit_freeze_plan(plan, combined_ran)
 
     # All figures are now rendered (combined, envelope_visuals, deferred
     # model-annotated re-renders, dataset_means). NOW copy local experiment data

@@ -519,3 +519,44 @@ def test_freeze_status_never_sends_the_end_of_run_notification():
     rest = "\n".join(ast.unparse(n) for n in status.orelse)
     assert "ntfy_notify" not in status_branch
     assert "ntfy_notify('Pipeline Complete'" in rest
+
+
+# --- recording tonight's freezes never stops the run --------------------------
+
+class _CommitPlan:
+    def __init__(self, fail: bool):
+        self.fail = fail
+
+    def commit(self, combined_ran):
+        if self.fail:
+            raise OSError("disk full")
+        return ["[FREEZE] DS recorded frozen"]
+
+    def write_status(self, committed):
+        return "/tmp/status.txt"
+
+    def short_summary(self):
+        return "1 frozen"
+
+
+def test_a_freeze_commit_returns_the_plan_summary(capsys):
+    assert rw._commit_freeze_plan(_CommitPlan(fail=False), combined_ran=True) == "1 frozen"
+    out = capsys.readouterr().out
+    assert "[FREEZE] DS recorded frozen" in out and "status: /tmp/status.txt" in out
+
+
+def test_a_failed_freeze_commit_never_stops_the_run(capsys):
+    """Data and figures are done by then: a failure must not skip the secure
+    cleanup, the SMB copy or the eye-QC summary (the datasets stay thawing and
+    the next run rebuilds them)."""
+    summary = rw._commit_freeze_plan(_CommitPlan(fail=True), combined_ran=True)
+    assert "FAILED" in summary and "disk full" in summary
+    assert "[FREEZE] ERROR" in capsys.readouterr().out
+
+
+def test_the_night_records_its_freezes_through_the_guarded_helper():
+    tree = ast.parse(Path(rw.__file__).read_text(encoding="utf-8"))
+    (night,) = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "_main_locked"]
+    calls = [n for n in ast.walk(night) if isinstance(n, ast.Call)]
+    assert any(isinstance(c.func, ast.Name) and c.func.id == "_commit_freeze_plan" for c in calls)
+    assert not any(isinstance(c.func, ast.Attribute) and c.func.attr == "commit" for c in calls)
