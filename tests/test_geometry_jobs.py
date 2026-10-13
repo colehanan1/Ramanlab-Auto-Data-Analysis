@@ -6,9 +6,10 @@ and from the local batch second, and write every output to
 ``<out_base>/<dataset folder>/<batch>/geometry/``. Pinned here: which batches are walked (cut-off
 date, dataset subset, freeze judged on the production dir), where each trial's video comes from, that
 the read-only trees are never written, that one bad video is logged and counted instead of stopping
-the batch, that normalize/wide/figures need nothing but ``geometry/``, and that a track with nothing
-pending spawns no workers and loads no model. Legacy mode (no ``out_base``) keeps walking exactly what
-``iter_batches`` yields.
+the batch, that normalize/wide/figures need nothing but ``geometry/``, that a track with nothing
+pending spawns no workers and loads no model, and that the integrated track stops at the next video
+while a PER run holds the shared run lock (resumable, nothing half-written). Legacy mode (no
+``out_base``) keeps walking exactly what ``iter_batches`` yields.
 """
 import dataclasses
 import json
@@ -31,6 +32,7 @@ from fbpipe.geometry import stats as ST
 from fbpipe.geometry.config import GeometrySettings
 from fbpipe.geometry.trial_meta import trial_name_from_video
 from fbpipe.utils.frozen_folders import FolderRule
+from fbpipe.utils.run_locks import per_run_lock
 from test_geometry_track import H, NAMES, W, fake_predict, video  # noqa: F401  (``video``: the synthetic 40-frame clip)
 
 DATASET = "IAA-X"
@@ -500,6 +502,66 @@ def test_legacy_track_still_writes_beside_the_batch_and_records_no_source(tmp_pa
     again = S.run_track(settings, gcfg)
     assert (again["tracked"], again["skipped"], again["failed"]) == (0, 2, 0)
     assert S.run_normalize(settings, gcfg) == {str(batch.resolve()): [1, 2, 3]}
+
+
+# ---- yielding to a running PER pass ---------------------------------------------------------------
+
+def test_track_yields_to_a_per_run_that_starts_midway_and_writes_no_partial_meta(tree, tmp_path, fake_model,
+                                                                                monkeypatch, capsys):
+    asked = []
+
+    def per_run_active(cache_dir):                      # PER starts while the first video is being tracked
+        asked.append(cache_dir)
+        return len(asked) > 1
+
+    monkeypatch.setattr(S, "per_run_active", per_run_active)
+    add_trial(tree.ds_prod / RIG_BATCH, tree.template, RIG_BATCH, "pretest", 2, "Hexanol-0.1", day=STAMP)  # a 2nd batch
+    settings, gcfg = tree.settings(cache_dir=str(tmp_path / "cache")), tree.gcfg()
+    result = S.run_track(settings, gcfg)
+    assert result["yielded"] is True
+    assert (result["tracked"], result["skipped"], result["failed"]) == (1, 0, 0)
+    assert asked == [settings.cache_dir] * 2, "asked before each video, in the cache dir the PER lock lives in"
+    assert tree.meta(1).is_file(), "the video tracked before PER started is kept"
+    assert not tree.trial_dir(2).exists() and not tree.trial_dir(3).exists(), "nothing written for the trials left"
+    assert not tree.out_batch(RIG_BATCH).exists(), "the loop stops for good: later batches are not even visited"
+    out = capsys.readouterr().out
+    assert out.count("[GEOMETRY] PER run active — yielding; remaining trials resume next run") == 1
+    assert S.pending_trials(settings, gcfg) == 3, "the rest resume next run"
+
+    monkeypatch.setattr(S, "per_run_active", lambda cache_dir: False)
+    resumed = S.run_track(settings, gcfg)
+    assert resumed["yielded"] is False and (resumed["tracked"], resumed["skipped"]) == (3, 1)
+    assert all(tree.meta(n).is_file() for n in (1, 2, 3))
+
+
+def test_a_pass_that_holds_the_real_per_lock_makes_track_yield_before_the_first_video(tree, tmp_path, fake_model):
+    settings, gcfg = tree.settings(cache_dir=str(tmp_path / "cache")), tree.gcfg()
+    with per_run_lock(settings.cache_dir):
+        result = S.run_track(settings, gcfg)
+    assert result["yielded"] is True and result["tracked"] == 0
+    assert not tree.out_base.exists(), "no meta, no trial folder, not even source.json"
+    resumed = S.run_track(settings, gcfg)
+    assert resumed["yielded"] is False and resumed["tracked"] == 3
+
+
+def test_a_run_with_nothing_left_to_track_does_not_report_yielding(tree, fake_model, monkeypatch, capsys):
+    settings, gcfg = tree.settings(), tree.gcfg()
+    S.run_track(settings, gcfg)
+    monkeypatch.setattr(S, "per_run_active", lambda cache_dir: True)
+    capsys.readouterr()
+    result = S.run_track(settings, gcfg)
+    assert result["yielded"] is False and (result["tracked"], result["skipped"]) == (0, 3)
+    assert "yielding" not in capsys.readouterr().out
+
+
+def test_legacy_track_never_looks_at_the_per_lock(tmp_path, video, fake_model, monkeypatch):
+    batch = production_batch(tmp_path / "flys_Abdomen" / DATASET, BATCH, video, day=None)
+    add_trial(batch, video, BATCH, "pretest", 1, "Citral-1", day=STAMP)
+    settings = Settings(model_path=str(tmp_path / "m.pt"), main_directories=[str(batch.parent)], datasets=(DATASET,),
+                        conf_thres=0.25, max_flies=5, inference_batch_size=7, allow_cpu=True, fps_default=40.0)
+    monkeypatch.setattr(S, "per_run_active", lambda cache_dir: pytest.fail("legacy mode must not ask"))
+    result = S.run_track(settings, GeometrySettings(warmup_frames=5, annotated_video=False))
+    assert result["tracked"] == 1 and result["yielded"] is False
 
 
 # ---- normalize / wide / figures / stats read only geometry/ ---------------------------------------

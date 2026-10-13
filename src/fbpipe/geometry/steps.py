@@ -14,6 +14,9 @@ With ``abdomen.slot_seeds: production`` (:func:`uses_production_seeds`) a trial'
 fly numbers, read from the trial's production tables (:func:`trial_seeds`). :func:`trial_status` is the one place that
 decides what a run does with a trial -- both ``run_track`` and ``pending_trials`` ask it -- and :func:`_clear_trial_outputs`
 removes what a re-track replaces.
+
+Integrated tracking yields to PER: before each video it asks :func:`~fbpipe.utils.run_locks.per_run_active` and, while a
+PER run holds the shared run lock, stops cleanly (the trials left have no meta, so the next run does them).
 """
 from __future__ import annotations
 
@@ -29,6 +32,7 @@ from typing import Dict, Iterator, List, Optional, Tuple
 from ..config import Settings, get_main_directories, infer_dataset_for_path
 from ..utils.frozen_folders import is_frozen_folder, iter_live_batch_dirs
 from ..utils.rig_gates import read_batch_date
+from ..utils.run_locks import per_run_active
 from . import columns as C
 from .config import GeometrySettings
 from .trial_meta import TrialInfo, protocol_sort_key, trial_info_for_video, trial_name_from_video
@@ -330,7 +334,12 @@ def run_track(settings: Settings, gcfg: GeometrySettings, *, force: bool = False
     With production slot seeds a trial's slots take production's fly numbers. A trial whose seeds are not there yet is
     counted under ``awaiting_seeds`` and left exactly as it is -- nothing is written for it, even with ``force``, since
     it has no number to give its slots; one whose meta records other numbers has its old outputs cleared first, then is
-    tracked again."""
+    tracked again.
+
+    Integrated mode yields to a PER run: before each video it would track, ``per_run_active(settings.cache_dir)`` is
+    asked, and while it is True the loop stops (``[GEOMETRY] PER run active — yielding``), writing nothing for the
+    video it declined or any after it; the result then carries ``"yielded": True`` and the trials left resume next run.
+    Legacy mode never asks."""
     import ultralytics
     from .detect import id_to_label_map, is_engine_path, load_model, make_predict_fn, model_sha1, resolve_model_path
     from .track import track_video
@@ -351,6 +360,7 @@ def run_track(settings: Settings, gcfg: GeometrySettings, *, force: bool = False
           f"worker {worker + 1}/{n_workers}")
     seq = -1
     done = skipped = failed = awaiting = 0
+    yielded = False
     for job in iter_batch_jobs(settings, gcfg):
         videos = videos_for_job(job, gcfg)
         source_recorded = not gcfg.out_base                      # legacy batches record no source
@@ -372,6 +382,10 @@ def run_track(settings: Settings, gcfg: GeometrySettings, *, force: bool = False
                 print(f"[GEOMETRY] skip {video.name}: {out_dir.name} already tracked (use --force to redo)")
                 skipped += 1
                 continue
+            if gcfg.out_base and per_run_active(settings.cache_dir):
+                print("[GEOMETRY] PER run active — yielding; remaining trials resume next run")
+                yielded = True
+                break
             t0 = time.time()
             try:
                 if status.stale:
@@ -399,9 +413,12 @@ def run_track(settings: Settings, gcfg: GeometrySettings, *, force: bool = False
             print(f"[GEOMETRY] {video.name}: {len(result.tables)} slot(s), {result.meta['n_frames_processed']} frames "
                   f"in {time.time() - t0:.1f}s -> {out_dir}")
             done += 1
+        if yielded:
+            break
     waiting = f", {awaiting} awaiting production seeds" if uses_production_seeds(gcfg) else ""
-    print(f"[GEOMETRY] track done: {done} trial(s) tracked, {skipped} skipped, {failed} failed{waiting}")
-    return {"tracked": done, "skipped": skipped, "failed": failed, "awaiting_seeds": awaiting}
+    stopped = ", stopped early for a PER run" if yielded else ""
+    print(f"[GEOMETRY] track done: {done} trial(s) tracked, {skipped} skipped, {failed} failed{waiting}{stopped}")
+    return {"tracked": done, "skipped": skipped, "failed": failed, "awaiting_seeds": awaiting, "yielded": yielded}
 
 
 def run_normalize(settings: Settings, gcfg: GeometrySettings, *, force: bool = False) -> dict:

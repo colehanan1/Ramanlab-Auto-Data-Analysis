@@ -9,6 +9,7 @@ import json
 import logging
 import os
 import re
+import signal
 import subprocess
 import sys
 import time
@@ -48,9 +49,11 @@ STATE_VERSION = 2
 
 from fbpipe.analysis.threshold import ThresholdRule
 from fbpipe.config import Settings, discover_flagged_directories, load_settings, resolve_config_path, _expand_datasets
+from fbpipe.config_layers import OVERLAY_BLOCKS, ConfigLayers, LayeredConfigError, resolve_layers
 from fbpipe.pipeline import ORDERED_STEPS
 from fbpipe.steps import predict_reactions
 from fbpipe.utils.data_secured_sync import sync_data_secured
+from fbpipe.utils.run_locks import abdomen_lock, acquire_per_run_lock, release_run_lock
 from fbpipe.utils.smb_copy import copy_to_smb
 
 from scripts.analysis.envelope_visuals import (
@@ -2600,6 +2603,25 @@ def _build_arg_parser() -> argparse.ArgumentParser:
             "predictions and the figures drawn from them."
         ),
     )
+    parser.add_argument(
+        "--abdomen-only",
+        action="store_true",
+        help=(
+            "Run only the abdomen/mounting stages of an extends-overlay config "
+            "(config/config_new_abdomen.yaml): no YOLO, combine, reactions, figures, "
+            "cleanup, SMB copy or sync, and no PER lock. Exits with an error when "
+            "the config has no enabled abdomen/mounting block."
+        ),
+    )
+    parser.add_argument(
+        "--abdomen-video",
+        action="store_true",
+        help=(
+            "Also write the annotated abdomen video of every trial (the one-time "
+            "backfill; the nightly writes tables only). Reaches the abdomen track "
+            "step only."
+        ),
+    )
     return parser
 
 
@@ -2634,6 +2656,15 @@ def main(argv: Sequence[str] | None = None) -> None:
     if not config_path.exists():
         raise FileNotFoundError(f"Configuration file not found: {config_path}")
 
+    # config_new_abdomen.yaml is `extends: config_new.yaml` plus the abdomen/mounting
+    # blocks. PER must not notice it: from here on config_path is the BASE file, so
+    # the raw YAML read, the settings and every child's --config are exactly what a
+    # plain config_new.yaml run passes (a plain config is its own base, unchanged).
+    # Only the abdomen stage gets the overlay itself (layers.path). An invalid
+    # overlay stops the run here, like any other config error.
+    layers = resolve_layers(config_path)
+    config_path = layers.base_path
+
     with config_path.open("r", encoding="utf-8") as fh:
         data = _expand_datasets(yaml.safe_load(fh) or {})
 
@@ -2642,6 +2673,34 @@ def main(argv: Sequence[str] | None = None) -> None:
 
     # Fail fast on a typo'd --thaw name before any YOLO/pipeline work runs.
     _validate_thaw(args.thaw, datasets=getattr(settings, "datasets", ()))
+
+    # --abdomen-only: just the overlay's abdomen/mounting stages. Nothing of PER runs
+    # (no YOLO, combine, reactions, figures, cleanup, SMB copy or sync) and no PER
+    # lock is taken, so the stage's own tracker never mistakes this run for PER.
+    # A bare `return`: the legacy shim's SystemExit(main()) must exit 0.
+    global LAST_RUN_ABDOMEN_ONLY
+    LAST_RUN_ABDOMEN_ONLY = bool(args.abdomen_only)
+    if args.abdomen_only:
+        if not any(_block_enabled(layers.overlay.get(name)) for name in OVERLAY_BLOCKS):
+            raise SystemExit(
+                f"--abdomen-only: {layers.path} has no abdomen/mounting block that is present and "
+                "enabled (use an extends-overlay such as config/config_new_abdomen.yaml)"
+            )
+        _run_abdomen_stages(
+            layers,
+            settings,
+            figures_only=args.figures_only,
+            folder=args.folder,
+            annotated_video=args.abdomen_video,
+        )
+        return
+
+    # Everything below is PER work: hold the shared advisory run lock for it. An
+    # abdomen backfill running at the same time asks before each video and stops at
+    # the next one, resuming on a later run. The lock fails open and adds nothing to
+    # the run but an empty file under <cache_dir>/locks; it is released just before
+    # the abdomen stage, below.
+    per_lock = acquire_per_run_lock(settings.cache_dir)
 
     # Register light-only datasets so envelope_visuals draws a light span
     # instead of the odor span for those plots.
@@ -3170,7 +3229,23 @@ def main(argv: Sequence[str] | None = None) -> None:
     LOGGER.info("=" * 70 + "\n")
     _run_data_secured_sync(data)
 
-    # Last of all: one line on the eye-drift QC report, kept in the module
+    # PER is done: let go of the lock before the abdomen stage, whose tracker would
+    # otherwise see this very run and yield at its first video.
+    release_run_lock(per_lock)
+
+    # The overlay's abdomen/mounting stages. A plain config has none, so it never
+    # even calls the stage. The stage never raises and leaves its one-line summary
+    # in LAST_ABDOMEN_SUMMARY for the ntfy.
+    if layers.overlay:
+        _run_abdomen_stages(
+            layers,
+            settings,
+            figures_only=figures_only,
+            folder=folder_filter,
+            annotated_video=args.abdomen_video,
+        )
+
+    # After everything else: one line on the eye-drift QC report, kept in the module
     # global the __main__ block adds to the "Pipeline Complete" ntfy (main()
     # itself must return None; see LAST_EYE_QC_SUMMARY). Never raises.
     global LAST_EYE_QC_SUMMARY
@@ -4241,12 +4316,277 @@ def _run_data_secured_sync(raw_cfg: Dict[str, Any]) -> None:
     LOGGER.info("=" * 70 + "\n")
 
 
+# ============================================================================
+# Abdomen overlay stages (config_new_abdomen.yaml = config_new.yaml + abdomen:)
+# ============================================================================
+
+ABDOMEN_MAX_HOURS_DEFAULT = 10.0     # abdomen.max_hours when the block does not say
+ABDOMEN_NUM_WORKERS_DEFAULT = 3      # abdomen.yolo.num_workers, the geometry loader's own default
+ABDOMEN_TERM_GRACE_S = 30.0          # between SIGTERM and SIGKILL of a command that ran out of time
+
+_GEOMETRY_STEPS = ("track", "normalize", "wide", "figures")
+
+
+def _block_enabled(block: Any) -> bool:
+    """A present ``abdomen:`` / ``mounting:`` block that is not switched off with ``enabled: false``."""
+    return isinstance(block, Mapping) and bool(block.get("enabled", True))
+
+
+def _abdomen_commands(
+    overlay: Mapping[str, Any] | None,
+    *,
+    python_exec: str,
+    overlay_path: Path | str,
+    figures_only: bool,
+    annotated_video: bool,
+    n_workers: int,
+) -> list[list[str]]:
+    """The abdomen stage's commands in the order they run; ``[]`` when the overlay has no enabled ``abdomen:`` block.
+
+    Pure, like ``_pretest_vs_test_command``: nothing runs unless the user wrote the block. Every command is handed
+    the OVERLAY as ``--config`` -- the geometry loader takes the ``abdomen:`` block from it and the production
+    settings from its base. ``--annotated-video`` (the one-time backfill) goes to ``track`` alone, the only step
+    that writes videos; ``figures_only`` drops ``track``, since restyling figures must not load the model.
+    """
+    if not _block_enabled((overlay or {}).get("abdomen")):
+        return []
+    py = str(Path(python_exec).expanduser())
+    config = str(overlay_path)
+    geometry = [py, "-m", "fbpipe.geometry_pipeline", "--config", config]
+    commands: list[list[str]] = []
+    if not figures_only:
+        track = geometry + ["--workers", str(int(n_workers))]
+        if annotated_video:
+            track.append("--annotated-video")
+        commands.append(track + ["track"])
+    commands.append(geometry + ["normalize", "wide", "figures"])
+    commands.append(
+        [py, str(REPO_ROOT / "scripts" / "analysis" / "abdomen_geometry_stats.py"), "--config", config]
+    )
+    # Commands that read the abdomen outputs (the mounting-posture analysis) are appended here, after the stats.
+    return commands
+
+
+def _abdomen_command_label(cmd: Sequence[str]) -> str:
+    """A command's short name for logs and the summary: the geometry steps it runs (``normalize+wide+figures``)
+    or its script's name (``abdomen_geometry_stats``)."""
+    if len(cmd) > 2 and cmd[1] == "-m":
+        return "+".join(tok for tok in cmd[2:] if tok in _GEOMETRY_STEPS) or str(cmd[2])
+    return Path(cmd[1]).stem if len(cmd) > 1 else str(cmd[0])
+
+
+def _positive_number(value: Any, what: str, *, integer: bool = False) -> float | int:
+    """*value* as a finite number > 0, else ValueError naming *what* (so a typo is a warning, not a silent default)."""
+    try:
+        number = int(value) if integer else float(value)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError(f"{what} must be a positive number, got {value!r}") from exc
+    if not (number > 0 and number != float("inf")):          # written so that NaN fails too
+        raise ValueError(f"{what} must be a positive number, got {value!r}")
+    return number
+
+
+_ABDOMEN_SKIP_TEXT = {
+    "nothing to run": "no enabled abdomen block",
+    "folder": "--folder run",
+    "locked": "another abdomen run holds abdomen.lock",
+}
+
+
+def _abdomen_summary(result: Mapping[str, Any]) -> str:
+    """One line on what the stage did, for the end-of-run log and the ntfy."""
+    reason = result.get("skipped_reason")
+    if reason:
+        return f"ABDOMEN: skipped ({_ABDOMEN_SKIP_TEXT.get(reason, reason)})"
+    parts = []
+    for command in result.get("commands", ()):
+        label = command["label"]
+        if command["timed_out"]:
+            parts.append(f"{label} TIMED OUT (killed)")
+        elif not command["ran"]:
+            parts.append(f"{label} not run")
+        else:
+            parts.append(f"{label} rc={command['returncode']}")
+    if result.get("error"):
+        parts.append(f"stopped: {result['error']}")
+    return "ABDOMEN: " + ("; ".join(parts) if parts else "not run")
+
+
+def _terminate_process_group(proc: Any) -> None:
+    """SIGTERM *proc*'s whole process group, give it ABDOMEN_TERM_GRACE_S to leave, then SIGKILL it."""
+    try:
+        os.killpg(proc.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        pass                                              # already gone
+    try:
+        proc.wait(timeout=ABDOMEN_TERM_GRACE_S)
+        return
+    except subprocess.TimeoutExpired:
+        pass
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    try:
+        proc.wait(timeout=ABDOMEN_TERM_GRACE_S)
+    except subprocess.TimeoutExpired:
+        LOGGER.warning(
+            "[abdomen] process %s ignored SIGKILL for %.0f s; giving up on it", proc.pid, ABDOMEN_TERM_GRACE_S
+        )
+
+
+def _run_budgeted(cmd: Sequence[str], env: Mapping[str, str], seconds: float) -> tuple[int | None, bool]:
+    """Run *cmd* in a session of its own and wait at most *seconds*; ``(returncode, timed_out)``.
+
+    The own session makes the command's process group killable as one: the track step fans out worker processes of
+    its own, and killing the parent alone would orphan them. Whatever ends this function early (a timeout, Ctrl-C),
+    the group does not outlive it.
+    """
+    proc = subprocess.Popen(list(cmd), env=dict(env), start_new_session=True)
+    try:
+        try:
+            return proc.wait(timeout=seconds), False
+        except subprocess.TimeoutExpired:
+            _terminate_process_group(proc)
+            return proc.returncode, True
+    finally:
+        if proc.poll() is None:
+            _terminate_process_group(proc)
+
+
+def _run_abdomen_commands(
+    layers: ConfigLayers,
+    settings: Any,
+    result: dict[str, Any],
+    *,
+    figures_only: bool,
+    folder: str | None,
+    annotated_video: bool,
+) -> None:
+    """The body of :func:`_run_abdomen_stages`; records into *result* and may raise what that catches."""
+
+    def skip(reason: str, level: int = logging.INFO) -> None:
+        result["skipped_reason"] = reason
+        LOGGER.log(level, "[abdomen] stage skipped: %s", _ABDOMEN_SKIP_TEXT[reason])
+
+    block = layers.overlay.get("abdomen")
+    if not _block_enabled(block):
+        skip("nothing to run")
+        return
+    if folder:
+        skip("folder")                   # a partial PER pass: the multi-hour stage waits for a full run
+        return
+
+    python = block.get("python")
+    if python is not None and not isinstance(python, str):
+        raise ValueError(f"abdomen.python must be a path, got {python!r}")
+    yolo = block.get("yolo")
+    if yolo is not None and not isinstance(yolo, Mapping):
+        raise ValueError(f"abdomen.yolo must be a mapping, got {yolo!r}")
+    workers = (yolo or {}).get("num_workers")
+    hours = block.get("max_hours")
+    n_workers = _positive_number(
+        ABDOMEN_NUM_WORKERS_DEFAULT if workers is None else workers, "abdomen.yolo.num_workers", integer=True
+    )
+    max_hours = _positive_number(ABDOMEN_MAX_HOURS_DEFAULT if hours is None else hours, "abdomen.max_hours")
+    commands = _abdomen_commands(
+        layers.overlay,
+        python_exec=python or sys.executable,
+        overlay_path=layers.path,
+        figures_only=figures_only,
+        annotated_video=annotated_video,
+        n_workers=n_workers,
+    )
+    if not commands:
+        skip("nothing to run")
+        return
+
+    with abdomen_lock(settings.cache_dir) as acquired:
+        if not acquired:
+            skip("locked", logging.WARNING)
+            return
+        env = os.environ.copy()
+        env["MPLBACKEND"] = "Agg"
+        env["PYTHONPATH"] = os.pathsep.join(
+            filter(None, [str(REPO_ROOT / "src"), env.get("PYTHONPATH")])
+        )
+        deadline = time.monotonic() + max_hours * 3600.0      # one budget for the whole stage
+        for cmd in commands:
+            label = _abdomen_command_label(cmd)
+            entry = {"label": label, "returncode": None, "timed_out": False, "ran": False}
+            result["commands"].append(entry)
+            remaining = deadline - time.monotonic()
+            if result["timed_out"] or remaining <= 0:
+                LOGGER.warning(
+                    "[abdomen] %s not run: the %.1f h budget (abdomen.max_hours) is used up", label, max_hours
+                )
+                continue
+            LOGGER.info("[abdomen] %s → %s", label, " ".join(cmd))
+            returncode, timed_out = _run_budgeted(cmd, env, remaining)
+            entry.update(ran=True, returncode=returncode, timed_out=timed_out)
+            if timed_out:
+                result["timed_out"] = True
+                LOGGER.warning(
+                    "[abdomen] %s timed out with the %.1f h budget (abdomen.max_hours) and was killed; "
+                    "what it did not get to resumes next run", label, max_hours
+                )
+            elif returncode != 0:
+                LOGGER.warning("[abdomen] %s exited with code %d", label, returncode)
+
+
+def _run_abdomen_stages(
+    layers: ConfigLayers,
+    settings: Any,
+    *,
+    figures_only: bool = False,
+    folder: str | None = None,
+    annotated_video: bool = False,
+) -> dict[str, Any]:
+    """Run the overlay's abdomen stage after PER: ``track``; ``normalize wide figures``; the stats report.
+
+    The commands run one after another, each in a process group of its own, against ONE ``abdomen.max_hours``
+    budget (default 10 h): a command that outlasts it gets SIGTERM, ``ABDOMEN_TERM_GRACE_S`` later SIGKILL, and
+    nothing more is started. A non-zero exit is a warning and the next command still runs (a failed track must not
+    stop the figures of what was tracked). The stage is skipped, with a log line, when there is nothing to run,
+    for ``--folder`` runs, and while another abdomen run holds ``abdomen.lock``.
+
+    Never raises on anything that goes wrong in the stage or its configuration: a PER run that has finished
+    must not be failed by it. Returns ``{"ran", "skipped_reason", "error", "timed_out", "commands", "summary"}``
+    (``commands`` one ``{"label", "returncode", "timed_out", "ran"}`` per command) and leaves ``summary`` in
+    ``LAST_ABDOMEN_SUMMARY`` for the ntfy.
+    """
+    global LAST_ABDOMEN_SUMMARY
+    result: dict[str, Any] = {
+        "ran": False, "skipped_reason": "", "error": "", "timed_out": False, "commands": [], "summary": "",
+    }
+    try:
+        _run_abdomen_commands(
+            layers, settings, result,
+            figures_only=figures_only, folder=folder, annotated_video=annotated_video,
+        )
+    except (LayeredConfigError, OSError, yaml.YAMLError, subprocess.SubprocessError, ValueError) as exc:
+        result["error"] = f"{type(exc).__name__}: {exc}"
+        LOGGER.warning("[abdomen] stage failed (%s); PER outputs are not affected", result["error"])
+    result["ran"] = any(command["ran"] for command in result["commands"])
+    result["summary"] = _abdomen_summary(result)
+    LAST_ABDOMEN_SUMMARY = result["summary"]
+    LOGGER.info("[abdomen] %s", result["summary"])
+    return result
+
+
 #: The end-of-run eye-drift QC line of the last main() call ("" for none), for
 #: the "Pipeline Complete" ntfy the ``__main__`` block sends. It is not main()'s
 #: return value: the legacy scripts/run_workflows.py shim does
 #: ``raise SystemExit(main())``, and a SystemExit carrying any str -- even "" --
 #: exits with status 1, reporting every finished run as a failed one.
 LAST_EYE_QC_SUMMARY: str = ""
+
+#: The abdomen stage's one-line summary of the last main() call ("" when the
+#: config has no abdomen overlay), appended to the same ntfy, and whether that
+#: call was an ``--abdomen-only`` run (its ntfy is titled "Abdomen stage
+#: complete", not "Pipeline Complete"). Module globals for the reason above.
+LAST_ABDOMEN_SUMMARY: str = ""
+LAST_RUN_ABDOMEN_ONLY: bool = False
 
 
 def _eye_qc_summary(settings: Settings, *, figures_only: bool = False) -> str:
@@ -4345,12 +4685,20 @@ def ntfy_notify(title, message, priority="default", tags=""):
 if __name__ == "__main__":  # pragma: no cover
     try:
         main()
-        ntfy_notify(
-            "Pipeline Complete",
-            "Pipeline finished successfully."
-            + (f"\n\n{LAST_EYE_QC_SUMMARY}" if LAST_EYE_QC_SUMMARY else ""),
-            tags="white_check_mark",
-        )
+        if LAST_RUN_ABDOMEN_ONLY:
+            ntfy_notify(
+                "Abdomen stage complete",
+                LAST_ABDOMEN_SUMMARY or "Abdomen stage finished.",
+                tags="white_check_mark",
+            )
+        else:
+            ntfy_notify(
+                "Pipeline Complete",
+                "Pipeline finished successfully."
+                + (f"\n\n{LAST_EYE_QC_SUMMARY}" if LAST_EYE_QC_SUMMARY else "")
+                + (f"\n\n{LAST_ABDOMEN_SUMMARY}" if LAST_ABDOMEN_SUMMARY else ""),
+                tags="white_check_mark",
+            )
     except Exception as exc:
         ntfy_notify("Pipeline FAILED", f"Pipeline crashed with error:\n{exc}", priority="high", tags="x")
         raise

@@ -462,7 +462,9 @@ def _run_main_guard(run, sent: list) -> None:
 
     ``run(namespace)`` is the stub main()'s body. Like the real main() it
     leaves the summary in the module's LAST_EYE_QC_SUMMARY; whatever it
-    returns is main()'s return value, which the block must not read.
+    returns is main()'s return value, which the block must not read. The
+    abdomen stage's two globals start at their module defaults (no summary,
+    not an --abdomen-only run), as in a plain run.
     """
     guard = next(
         n for n in _module_tree().body
@@ -471,6 +473,8 @@ def _run_main_guard(run, sent: list) -> None:
     namespace = {
         "__name__": "__main__",
         "LAST_EYE_QC_SUMMARY": "",
+        "LAST_ABDOMEN_SUMMARY": "",
+        "LAST_RUN_ABDOMEN_ONLY": False,
         "ntfy_notify": lambda title, message, **kwargs: sent.append((title, message, kwargs)),
     }
     namespace["main"] = lambda: run(namespace)
