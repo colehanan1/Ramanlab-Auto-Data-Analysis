@@ -15,15 +15,13 @@ import yaml
 
 CONFIG = Path(__file__).resolve().parent.parent / "config" / "config_new.yaml"
 
-# Deliberately thawed for a single run; empty this mapping when it is
-# re-frozen, and the "everything else is frozen" test below starts guarding it
-# again. The value is the folder retirements the dataset carried BEFORE the
-# thaw, which a config thaw must preserve -- ``None`` means it never had any
-# and the global cutoffs at the top of config_new.yaml are its only folder
+# Managed by auto-freeze (2026-10-12): no data/figures flag, so they rebuild
+# only when something new lands in them. They were the explicitly thawed pair
+# (2026-09-01, swapped with the 3Oct-24-0.1 pair). The value is the folder
+# retirements each carries, which must survive -- ``None`` means none of its
+# own: the global cutoffs at the top of config_new.yaml are its only folder
 # rules, which is not the same thing as having lost them.
-TEMPORARILY_THAWED = {
-    # Thawed 2026-09-01, swapped with the 3Oct-24-0.1 pair, which went back to
-    # data+figures frozen the same day.
+AUTOMATIC = {
     "Hex-Control-24-0.1": ["august_25_batch_1_rig_2", "august_25_batch_1_rig_3"],
     "Hex-Training-24-0.1": None,
 }
@@ -138,7 +136,7 @@ def test_pretest_score_bars_datasets_are_registered(cfg):
 
 def test_every_other_dataset_is_frozen(cfg):
     stale = [d for d in cfg["datasets"]
-             if d not in SENSITIVITY and d not in TEMPORARILY_THAWED
+             if d not in SENSITIVITY and d not in AUTOMATIC
              and d not in OTHER_LIVE
              and not (_freeze(cfg, d).get("data") is True
                       and _freeze(cfg, d).get("figures") is True)]
@@ -163,22 +161,18 @@ def test_folder_freeze_rules_survive(cfg):
     assert "august_25_batch_1_rig_2" in folders
 
 
-@pytest.mark.parametrize("name", TEMPORARILY_THAWED)
-def test_temporary_thaw_keeps_its_folder_retirements(cfg, name):
-    """A config thaw lifts the DATASET freeze only.
-
-    The per-run ``--thaw`` flag would also drop this dataset's folder rules and
-    the global recording/born cutoffs, silently readmitting retired batches --
-    which is why the thaw is done here in the config instead.
-    """
-    fz = cfg["dataset_overrides"][name]["freeze"]
-    assert fz.get("data") is False and fz.get("figures") is False
-    expected = TEMPORARILY_THAWED[name]
+@pytest.mark.parametrize("name", AUTOMATIC)
+def test_automatic_dataset_keeps_its_folder_retirements(cfg, name):
+    """Auto-freeze decides when these rebuild (no data/figures flag), and the
+    folder retirements -- live on every rebuild, --thaw included -- survive."""
+    fz = (cfg["dataset_overrides"].get(name) or {}).get("freeze") or {}
+    assert "data" not in fz and "figures" not in fz
+    expected = AUTOMATIC[name]
     if expected is None:
         return
     folders = fz.get("folders") or []
     missing = [f for f in expected if f not in folders]
-    assert not missing, f"{name} lost folder retirements in the thaw: {missing}"
+    assert not missing, f"{name} lost folder retirements: {missing}"
 
 
 @pytest.mark.parametrize("name", ["3Oct-Training-24-0.1", "3Oct-Control-24-0.1"])
