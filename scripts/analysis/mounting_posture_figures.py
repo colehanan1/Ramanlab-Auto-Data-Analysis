@@ -119,32 +119,32 @@ def p_text(p, digits: int = 3) -> str:
     return f"p={p:.{digits}f}"
 
 
-def _rho_text(rho, digits: int = 2) -> str:
+def rho_text(rho, digits: int = 2) -> str:
     return f"ρ={rho:.{digits}f}" if rho is not None and np.isfinite(rho) else "ρ=n/a"
 
 
-def _count(n: int, one: str, many: str) -> str:
+def count_noun(n: int, one: str, many: str) -> str:
     """``1 fly`` / ``2 flies``: a count with its noun in the right number (thousands separated)."""
     return f"{n:,} {one if n == 1 else many}"
 
 
 def n_flies_label(flies: int) -> str:
-    return f"n={_count(flies, 'fly', 'flies')}"
+    return f"n={count_noun(flies, 'fly', 'flies')}"
 
 
 def n_label(trials: int, flies: int) -> str:
     """``n=120 trials / 14 flies``: the pooled-trial label of every bar."""
-    return f"n={_count(trials, 'trial', 'trials')} / {_count(flies, 'fly', 'flies')}"
+    return f"n={count_noun(trials, 'trial', 'trials')} / {count_noun(flies, 'fly', 'flies')}"
 
 
-def _points(diff: float, digits: int = 0) -> str:
+def points_text(diff: float, digits: int = 0) -> str:
     """A difference of two proportions in percentage points (``+9 points``); ``n/a`` when there is none."""
     if not np.isfinite(diff):
         return "n/a"
     return f"{round(100 * diff, digits) + 0.0:+.{digits}f} points"                # + 0.0: a rounded -0.0 prints as +0
 
 
-def _group_n(group: Mapping) -> str:
+def group_n(group: Mapping) -> str:
     """``n_label`` of a stats entry that carries ``n_trials`` and ``n_flies``."""
     return n_label(group["n_trials"], group["n_flies"])
 
@@ -158,41 +158,41 @@ def verdict(p, effect, *, up: str, down: str, none: str = "No clear link") -> st
     return none
 
 
-def _col(df: pd.DataFrame, name: str) -> np.ndarray:
+def float_column(df: pd.DataFrame, name: str) -> np.ndarray:
     """Column *name* as floats (NaN for missing / None); all NaN when the column is absent."""
     return df[name].to_numpy(dtype=float, na_value=np.nan) if name in df else np.full(len(df), np.nan)
 
 
-def _flag(series: pd.Series) -> pd.Series:
+def as_flag(series: pd.Series) -> pd.Series:
     """A boolean column that may have been through a CSV (bool, 0/1 or "True"/"False" text)."""
     if series.dtype == bool:
         return series
     return series.map(lambda v: str(v).strip().lower() in ("true", "1", "1.0"))
 
 
-def _consistent(fly_trial: pd.DataFrame) -> pd.DataFrame:
+def consistent_trials(fly_trial: pd.DataFrame) -> pd.DataFrame:
     """The fly-trials of identity-consistent flies: the only ones a pooled bar may count."""
     if fly_trial.empty or "identity_consistent" not in fly_trial:
         return fly_trial
-    return fly_trial[_flag(fly_trial["identity_consistent"])]
+    return fly_trial[as_flag(fly_trial["identity_consistent"])]
 
 
-def _scored(trials: pd.DataFrame) -> pd.DataFrame:
+def scored_trials(trials: pd.DataFrame) -> pd.DataFrame:
     """The trials the response analyses use: pretest + testing trials that have a score (training trials get none)."""
     if trials.empty:
         return trials
     return trials[trials["trial_type"].isin(SCORED_TYPES) & trials["score"].notna() & trials["responded"].notna()]
 
 
-def _strata(fly: pd.DataFrame) -> np.ndarray:
+def dataset_rig_strata(fly: pd.DataFrame) -> np.ndarray:
     return (fly["dataset"].astype(str) + " | " + fly["rig"].astype(str)).to_numpy()
 
 
-def _rate(events: float, minutes: float) -> float:
+def pooled_rate(events: float, minutes: float) -> float:
     return float(events / minutes) if minutes > 0 else float("nan")
 
 
-def _num(v: float) -> str:
+def num_text(v: float) -> str:
     if not np.isfinite(v):
         return "n/a"
     return f"{v:.2f}" if v < 1 else f"{v:.1f}" if v < 10 else f"{v:.0f}"
@@ -202,8 +202,8 @@ def _num(v: float) -> str:
 # Statistics (the one place any number is computed)
 # ---------------------------------------------------------------------------
 
-def _rig_summary(fly: pd.DataFrame) -> List[dict]:
-    frame = pd.DataFrame({"rig": fly["rig"].astype(str).to_numpy(), "pitch": _col(fly, "mount_pitch_deg")}).dropna()
+def rig_summary(fly: pd.DataFrame) -> List[dict]:
+    frame = pd.DataFrame({"rig": fly["rig"].astype(str).to_numpy(), "pitch": float_column(fly, "mount_pitch_deg")}).dropna()
     out = []
     for rig, g in frame.groupby("rig", sort=True):
         q1, med, q3 = np.percentile(g["pitch"].to_numpy(float), [25, 50, 75])
@@ -212,7 +212,7 @@ def _rig_summary(fly: pd.DataFrame) -> List[dict]:
     return out
 
 
-def _rig_answer(rigs: Sequence[dict]) -> str:
+def rig_answer(rigs: Sequence[dict]) -> str:
     if not rigs:
         return "No fly has a mounting angle"
     lo, hi = min(rigs, key=lambda r: r["median_deg"]), max(rigs, key=lambda r: r["median_deg"])
@@ -222,10 +222,10 @@ def _rig_answer(rigs: Sequence[dict]) -> str:
             f"{hi['rig']} {hi['median_deg']:+.1f}°)")
 
 
-def _scatter_stats(fly: pd.DataFrame, column: str, *, n_perm: int, seed: int, up: str, down: str,
-                   none: str = "No clear link") -> dict:
+def scatter_stats(fly: pd.DataFrame, column: str, *, n_perm: int, seed: int, up: str, down: str,
+                  none: str = "No clear link") -> dict:
     """Per-fly rig-centred pitch vs *column*: Spearman rho / p, the dataset x rig stratified permutation p, n."""
-    x, y, strata = _col(fly, "mount_pitch_centred_deg"), _col(fly, column), _strata(fly)
+    x, y, strata = float_column(fly, "mount_pitch_centred_deg"), float_column(fly, column), dataset_rig_strata(fly)
     done = np.isfinite(x) & np.isfinite(y)
     rho, p = M.spearman(x, y)
     p_perm = M.stratified_permutation_p(x, y, strata, n=n_perm, seed=seed)
@@ -239,15 +239,15 @@ def _scatter_stats(fly: pd.DataFrame, column: str, *, n_perm: int, seed: int, up
 
 def _tercile_stats(fly: pd.DataFrame, trials: pd.DataFrame, *, n_perm: int, seed: int) -> dict:
     """The per-fly test of response rate vs pitch, and the pooled-trial response rate in each third of the pitch."""
-    out = _scatter_stats(fly, "response_rate", n_perm=n_perm, seed=seed, up="flies tilted more head-up respond more often",
-                         down="flies tilted more head-down respond more often", none="No clear difference")
+    out = scatter_stats(fly, "response_rate", n_perm=n_perm, seed=seed, up="flies tilted more head-up respond more often",
+                        down="flies tilted more head-down respond more often", none="No clear difference")
     out.update(bins=[], n_trials=0)
-    pitch, rate = _col(fly, "mount_pitch_centred_deg"), _col(fly, "response_rate")
+    pitch, rate = float_column(fly, "mount_pitch_centred_deg"), float_column(fly, "response_rate")
     use = fly[np.isfinite(pitch) & np.isfinite(rate)]
     if len(use) < MIN_FLIES:
         return out
-    ids, centred = use["fly_id"].to_numpy(), _col(use, "mount_pitch_centred_deg")
-    scored = _scored(trials)
+    ids, centred = use["fly_id"].to_numpy(), float_column(use, "mount_pitch_centred_deg")
+    scored = scored_trials(trials)
     for (name, _, _), idx in zip(THIRDS, np.array_split(np.argsort(centred, kind="stable"), 3)):
         rows = scored[scored["fly_id"].isin(ids[idx])]
         k = float(rows["responded"].sum())
@@ -289,7 +289,7 @@ def _within_fly(df: pd.DataFrame, state: str, *, n_perm: int, seed: int, up: str
 
 
 def _baseline_stats(trials: pd.DataFrame, *, n_perm: int, seed: int) -> dict:
-    scored = _scored(trials)
+    scored = scored_trials(trials)
     known = scored[scored["held_subtype"].notna()]
     known = known.assign(held_any=(known["held_subtype"] != "retracted").astype(float))
     present = [s for s in STATES if s in ("retracted", "held_down", "held_back") or (known["held_subtype"] == s).any()]
@@ -311,7 +311,7 @@ def _pullin_stats(trials: pd.DataFrame) -> dict:
     cols = ["pullin_events_pre", "pullin_events_stim", "pre_min", "stim_min"]
     use = trials[trials["held_subtype"].notna()]
     if len(use):
-        values = np.column_stack([_col(use, c) for c in cols])
+        values = np.column_stack([float_column(use, c) for c in cols])
         use = use[np.isfinite(values).all(axis=1) & (values[:, 2] > 0) & (values[:, 3] > 0)]
     held = use["held_subtype"] != "retracted"
     groups = {}
@@ -319,30 +319,30 @@ def _pullin_stats(trials: pd.DataFrame) -> dict:
         ev_pre, ev_stim = float(rows["pullin_events_pre"].sum()), float(rows["pullin_events_stim"].sum())
         min_pre, min_stim = float(rows["pre_min"].sum()), float(rows["stim_min"].sum())
         groups[name] = {"n_trials": int(len(rows)), "n_flies": int(rows["fly_id"].nunique()), "events_pre": ev_pre,
-                        "minutes_pre": min_pre, "rate_pre": _rate(ev_pre, min_pre), "events_stim": ev_stim,
-                        "minutes_stim": min_stim, "rate_stim": _rate(ev_stim, min_stim)}
+                        "minutes_pre": min_pre, "rate_pre": pooled_rate(ev_pre, min_pre), "events_stim": ev_stim,
+                        "minutes_stim": min_stim, "rate_stim": pooled_rate(ev_stim, min_stim)}
     return {"groups": groups, "answer": _pullin_answer(groups)}
 
 
 def _pullin_answer(groups: Mapping[str, dict]) -> str:
     def part(label, g):
-        return f"{label}: {_num(g['rate_pre'])} → {_num(g['rate_stim'])}" if g["n_trials"] else f"{label}: no trials"
+        return f"{label}: {num_text(g['rate_pre'])} → {num_text(g['rate_stim'])}" if g["n_trials"] else f"{label}: no trials"
     return f"{part('Held-out trials', groups['held'])}; {part('retracted', groups['retracted'])} (pull-ins per min)"
 
 
 def compute_stats(fly_trial: pd.DataFrame, fly: pd.DataFrame, *, n_perm: int, seed: int = 0) -> dict:
     """Every number the figures and the report show. ``placeholders`` names the figures that cannot be drawn and why."""
-    trials = _consistent(fly_trial)
+    trials = consistent_trials(fly_trial)
     stats: dict = {"n_perm": int(n_perm), "seed": int(seed), "alpha": ALPHA, "n_fly_trials": int(len(fly_trial)),
                    "n_trials": int(len(trials)), "n_flies": int(len(fly)), "placeholders": {}}
     if fly_trial.empty:
         return stats
-    stats["rigs"] = _rig_summary(fly)
-    stats["rig_answer"] = _rig_answer(stats["rigs"])
-    stats["spontaneous"] = _scatter_stats(
+    stats["rigs"] = rig_summary(fly)
+    stats["rig_answer"] = rig_answer(stats["rigs"])
+    stats["spontaneous"] = scatter_stats(
         fly, "spont_per_frac", n_perm=n_perm, seed=seed, up="flies tilted more head-up show more spontaneous PER",
         down="flies tilted more head-down show more spontaneous PER")
-    stats["held_out"] = _scatter_stats(
+    stats["held_out"] = scatter_stats(
         fly, "held_out_frac", n_perm=n_perm, seed=seed, up="flies tilted more head-up hold the proboscis out more often",
         down="flies tilted more head-down hold the proboscis out more often")
     stats["tercile"] = _tercile_stats(fly, trials, n_perm=n_perm, seed=seed)
@@ -370,7 +370,7 @@ def compute_stats(fly_trial: pd.DataFrame, fly: pd.DataFrame, *, n_perm: int, se
 # ---------------------------------------------------------------------------
 
 @contextmanager
-def _style() -> Iterator[None]:
+def lab_style() -> Iterator[None]:
     """The lab style, the figure rc and 300 dpi for the figures built inside; the global matplotlib state is restored."""
     with matplotlib.rc_context():
         apply_lab_style(dpi=DPI)
@@ -378,7 +378,7 @@ def _style() -> Iterator[None]:
         yield
 
 
-def _new_figure(width: float, height: float) -> Figure:
+def new_figure(width: float, height: float) -> Figure:
     fig = Figure(figsize=(width, height), facecolor=SURFACE)
     FigureCanvasAgg(fig)
     return fig
@@ -388,7 +388,7 @@ _GLUE = re.compile(r"n=[\d,]+ (?:trials?|flies|fly)(?: / [\d,]+ (?:flies|fly))?|
                    r"|[+-]\d+(?:\.\d+)? points")
 
 
-def _wrap(fig: Figure, text: str, size: float, weight: str, max_in: float) -> List[str]:
+def wrap_text(fig: Figure, text: str, size: float, weight: str, max_in: float) -> List[str]:
     """*text* broken at spaces into lines no wider than *max_in* inches (measured with the real font).
 
     An ``n=...`` label, a ``p=... (uncorrected)`` and a ``+9 points`` stay on one line (their spaces are non-breaking).
@@ -411,7 +411,7 @@ def _wrap(fig: Figure, text: str, size: float, weight: str, max_in: float) -> Li
     return lines
 
 
-def _title_block(fig: Figure, title: str, answer: str = "", numbers: str = "") -> float:
+def title_block(fig: Figure, title: str, answer: str = "", numbers: str = "") -> float:
     """The question (bold), the computed answer and the numbers (small) at the top left; returns the inches used."""
     width, height = fig.get_size_inches()
     x, room, used = 0.3 / width, width - 0.6, 0.2
@@ -420,14 +420,14 @@ def _title_block(fig: Figure, title: str, answer: str = "", numbers: str = "") -
                                                      (numbers, 8.5, "normal", INK_SECONDARY, 0.165, 0.0)):
         if not text:
             continue
-        lines = _wrap(fig, text, size, weight, room)
+        lines = wrap_text(fig, text, size, weight, room)
         fig.text(x, 1 - used / height, "\n".join(lines), ha="left", va="top", fontsize=size, weight=weight, color=color,
                  linespacing=1.15 if size == 13 else 1.3 if size > 9 else 1.4)
         used += line_in * len(lines) + gap
     return used + 0.12
 
 
-def _axes(fig: Figure, left: float, bottom: float, width: float, height: float):
+def inch_axes(fig: Figure, left: float, bottom: float, width: float, height: float):
     """An axes placed in inches (left / bottom from the figure's lower left corner), recessive grid, two spines."""
     w, h = fig.get_size_inches()
     ax = fig.add_axes([left / w, bottom / h, width / w, height / h])
@@ -440,7 +440,7 @@ def _axes(fig: Figure, left: float, bottom: float, width: float, height: float):
     return ax
 
 
-def _pct_axis(ax, top: float) -> None:
+def pct_axis(ax, top: float) -> None:
     """A 0-100 % axis that may run past 100 for headroom (ticks stop at 100)."""
     step = next(s for s in (5, 10, 20, 25) if min(top, 100) / s <= 5)
     ax.set_ylim(0, top)
@@ -448,27 +448,27 @@ def _pct_axis(ax, top: float) -> None:
     ax.yaxis.set_major_formatter(FuncFormatter(lambda v, _: f"{v:g}%"))
 
 
-def _headroom(rates_pct) -> float:
+def headroom(rates_pct) -> float:
     finite = [r for r in rates_pct if np.isfinite(r)]
     return max(20.0, 1.2 * max(finite, default=0.0))
 
 
-def _bar(ax, x: float, height: float, width: float, *, held: bool):
+def draw_bar(ax, x: float, height: float, width: float, *, held: bool):
     return ax.bar(x, height, width=width, facecolor=ORANGE if held else BLUE, edgecolor="white" if held else "none",
                   hatch=HATCH if held else None, linewidth=0, zorder=3)[0]
 
 
-def _tip(ax, x: float, height: float, text: str, top: float) -> None:
+def tip_label(ax, x: float, height: float, text: str, top: float) -> None:
     ax.text(x, height + 0.015 * top, text, ha="center", va="bottom", fontsize=8.5, color=INK, zorder=5)
 
 
-def _n_lines(trials: int, flies: int) -> str:
-    return f"n={_count(trials, 'trial', 'trials')}\n/ {_count(flies, 'fly', 'flies')}"
+def n_lines(trials: int, flies: int) -> str:
+    return f"n={count_noun(trials, 'trial', 'trials')}\n/ {count_noun(flies, 'fly', 'flies')}"
 
 
-def _bar_axes(fig: Figure, left: float, bottom: float, width: float, height: float, n_slots: int):
+def bar_axes(fig: Figure, left: float, bottom: float, width: float, height: float, n_slots: int):
     """Axes with *n_slots* category slots; returns it and the bar width (data units) that makes a bar ``BAR_IN`` thick."""
-    ax = _axes(fig, left, bottom, width, height)
+    ax = inch_axes(fig, left, bottom, width, height)
     ax.set_xlim(-0.6, n_slots - 0.4)
     ax.set_xticks(range(n_slots))
     return ax, BAR_IN * (n_slots + 0.2) / width
@@ -476,8 +476,8 @@ def _bar_axes(fig: Figure, left: float, bottom: float, width: float, height: flo
 
 def _placeholder(name: str, stats: dict) -> Figure:
     info = stats["placeholders"][name]
-    fig = _new_figure(6.8, 4.4)
-    _title_block(fig, TITLES[name], f"Not enough data — {info['reason']}", info["n"])
+    fig = new_figure(6.8, 4.4)
+    title_block(fig, TITLES[name], f"Not enough data — {info['reason']}", info["n"])
     fig.text(0.5, 0.4, "No figure: not enough data", ha="center", va="center", fontsize=11, color=MUTED)
     return fig
 
@@ -485,14 +485,14 @@ def _placeholder(name: str, stats: dict) -> Figure:
 def _fig_pitch_per_fly(trials: pd.DataFrame, fly: pd.DataFrame, stats: dict) -> Figure:
     rigs = stats["rigs"]
     width, height = max(6.0, 1.5 * len(rigs) + 2.8), 5.2
-    fig = _new_figure(width, height)
-    top = _title_block(fig, TITLES["mount_pitch_per_fly"], stats["rig_answer"],
-                       f"Camera roll differs per rig, so angles are compared within a rig; "
-                       f"{n_flies_label(sum(r['n_flies'] for r in rigs))}")
-    ax = _axes(fig, 0.95, 0.8, width - 1.3, height - top - 0.8 - 0.1)
+    fig = new_figure(width, height)
+    top = title_block(fig, TITLES["mount_pitch_per_fly"], stats["rig_answer"],
+                      f"Camera roll differs per rig, so angles are compared within a rig; "
+                      f"{n_flies_label(sum(r['n_flies'] for r in rigs))}")
+    ax = inch_axes(fig, 0.95, 0.8, width - 1.3, height - top - 0.8 - 0.1)
     rng = np.random.default_rng(stats["seed"])
     for i, r in enumerate(rigs):
-        v = _col(fly[fly["rig"].astype(str) == r["rig"]], "mount_pitch_deg")
+        v = float_column(fly[fly["rig"].astype(str) == r["rig"]], "mount_pitch_deg")
         v = v[np.isfinite(v)]
         ax.vlines(i, r["q1_deg"], r["q3_deg"], color=BLUE, linewidth=2.0, alpha=0.30, zorder=2)
         ax.hlines(r["median_deg"], i - 0.28, i + 0.28, color=INK_SECONDARY, linewidth=1.6, zorder=4)
@@ -510,11 +510,11 @@ def _fig_pitch_per_fly(trials: pd.DataFrame, fly: pd.DataFrame, stats: dict) -> 
 
 
 def _scatter_axes(ax, x: np.ndarray, y: np.ndarray, ylabel: str) -> None:
-    top = _headroom(y)
+    top = headroom(y)
     ax.axvline(0, color=AXIS, linewidth=0.8, zorder=1)
     pad = 0.08 * (np.ptp(x) or 1.0)
     ax.set_xlim(x.min() - pad, x.max() + pad)
-    _pct_axis(ax, top)
+    pct_axis(ax, top)
     ax.set_ylim(-0.04 * top, top)
     ax.set_xlabel("Mounting angle relative to the rig median (°)")
     for x_axes, align, hint in ((0.0, "left", "← head-down"), (1.0, "right", "head-up →")):
@@ -523,8 +523,8 @@ def _scatter_axes(ax, x: np.ndarray, y: np.ndarray, ylabel: str) -> None:
     ax.set_ylabel(ylabel)
 
 
-def _scatter_numbers(s: dict) -> str:
-    return (f"{_rho_text(s['rho'])}, {p_text(s['p'])} (uncorrected); stratified permutation {p_text(s['p_perm'])} "
+def scatter_numbers(s: dict) -> str:
+    return (f"{rho_text(s['rho'])}, {p_text(s['p'])} (uncorrected); stratified permutation {p_text(s['p_perm'])} "
             f"(uncorrected); {n_flies_label(s['n_flies'])}")
 
 
@@ -554,10 +554,10 @@ def _fig_scatter(name: str, stats: dict, fly: pd.DataFrame, key: str, column: st
                  *, kinds: bool = False) -> Figure:
     s = stats[key]
     width, height, bottom = 6.8, 5.6, (1.25 if kinds else 0.8)
-    fig = _new_figure(width, height)
-    top = _title_block(fig, TITLES[name], s["verdict"], _scatter_numbers(s))
-    ax = _axes(fig, 0.9, bottom, width - 1.2, height - top - bottom - 0.1)
-    x, y = _col(fly, "mount_pitch_centred_deg"), 100.0 * _col(fly, column)
+    fig = new_figure(width, height)
+    top = title_block(fig, TITLES[name], s["verdict"], scatter_numbers(s))
+    ax = inch_axes(fig, 0.9, bottom, width - 1.2, height - top - bottom - 0.1)
+    x, y = float_column(fly, "mount_pitch_centred_deg"), 100.0 * float_column(fly, column)
     done = np.isfinite(x) & np.isfinite(y)
     if kinds:
         _subtype_scatter(fig, ax, fly, x, y, done)
@@ -580,20 +580,20 @@ def _fig_held_out(trials, fly, stats):
 def _fig_tercile(trials, fly, stats):
     t = stats["tercile"]
     width, height, bottom = 6.8, 5.5, 1.3
-    fig = _new_figure(width, height)
-    numbers = (f"per-fly {_rho_text(t['rho'])}, {p_text(t['p'])} (uncorrected); stratified permutation "
-               f"{p_text(t['p_perm'])} (uncorrected); bars pool the pretest + testing trials, {_group_n(t)}")
-    top = _title_block(fig, TITLES["response_by_mount_pitch_tercile"], t["verdict"], numbers)
-    ax, bar_w = _bar_axes(fig, 0.95, bottom, width - 1.25, height - top - bottom - 0.1, len(t["bins"]))
-    ceiling = _headroom([100 * b["rate"] for b in t["bins"]])
-    _pct_axis(ax, ceiling)
+    fig = new_figure(width, height)
+    numbers = (f"per-fly {rho_text(t['rho'])}, {p_text(t['p'])} (uncorrected); stratified permutation "
+               f"{p_text(t['p_perm'])} (uncorrected); bars pool the pretest + testing trials, {group_n(t)}")
+    top = title_block(fig, TITLES["response_by_mount_pitch_tercile"], t["verdict"], numbers)
+    ax, bar_w = bar_axes(fig, 0.95, bottom, width - 1.25, height - top - bottom - 0.1, len(t["bins"]))
+    ceiling = headroom([100 * b["rate"] for b in t["bins"]])
+    pct_axis(ax, ceiling)
     labels = []
     for i, (b, (_, name, note)) in enumerate(zip(t["bins"], THIRDS)):
         if np.isfinite(b["rate"]):
-            _bar(ax, i, 100 * b["rate"], bar_w, held=False)
-            _tip(ax, i, 100 * b["rate"], f"{100 * b['rate']:.0f}%", ceiling)
+            draw_bar(ax, i, 100 * b["rate"], bar_w, held=False)
+            tip_label(ax, i, 100 * b["rate"], f"{100 * b['rate']:.0f}%", ceiling)
         labels.append(f"{name}{f' ({note})' if note else ''}\n{b['lo_deg']:+.1f}° to {b['hi_deg']:+.1f}°\n"
-                      f"{_n_lines(b['n_trials'], b['n_flies'])}")
+                      f"{n_lines(b['n_trials'], b['n_flies'])}")
     ax.set_xticklabels(labels, fontsize=8)
     ax.set_ylabel("Trials with a response")
     ax.set_xlabel("Third of the rig-centred mounting angle (pretest + testing trials pooled)")
@@ -604,10 +604,10 @@ def _panel_note(panel: dict, what: str) -> str:
     n = panel["n_flies_both"]
     if not n:
         return f"{what}: no fly was seen in both states, so there is nothing to compare"
-    have = f"{_count(n, 'fly', 'flies')} {'has' if n == 1 else 'have'} both states"
+    have = f"{count_noun(n, 'fly', 'flies')} {'has' if n == 1 else 'have'} both states"
     if n < MIN_FLIES:
         have += f" (needs at least {MIN_FLIES})"
-    return (f"{what}, within fly × phase (MH): {_points(panel['diff'])}; within-fly permutation "
+    return (f"{what}, within fly × phase (MH): {points_text(panel['diff'])}; within-fly permutation "
             f"{p_text(panel['p_perm'])} (uncorrected); {have}")
 
 
@@ -616,26 +616,26 @@ def _fig_baseline(trials, fly, stats):
     slot, left, gap, right, bottom, height = 1.45, 0.95, 0.9, 0.3, 1.05, 5.4
     widths = [slot * (len(pro["bars"]) + 0.2), slot * (len(spo["bars"]) + 0.2)]
     width = left + sum(widths) + gap + right
-    fig = _new_figure(width, height)
+    fig = new_figure(width, height)
     answer = f"Proboscis position: {pro['verdict']}\nSpontaneous PER: {spo['verdict']}"
-    used = _title_block(fig, TITLES["baseline_state_vs_response"], answer,
-                        "Bars: pooled pretest + testing trials. Differences (MH = Mantel–Haenszel) and p-values "
-                        "(uncorrected): within fly × trial type, the state shuffled among a fly's trials of the same type")
-    notes = [_wrap(fig, _panel_note(pro, "Held out minus retracted"), 8, "normal", widths[0]),
-             _wrap(fig, _panel_note(spo, "Spontaneous PER minus none"), 8, "normal", widths[1])]
+    used = title_block(fig, TITLES["baseline_state_vs_response"], answer,
+                       "Bars: pooled pretest + testing trials. Differences (MH = Mantel–Haenszel) and p-values "
+                       "(uncorrected): within fly × trial type, the state shuffled among a fly's trials of the same type")
+    notes = [wrap_text(fig, _panel_note(pro, "Held out minus retracted"), 8, "normal", widths[0]),
+             wrap_text(fig, _panel_note(spo, "Spontaneous PER minus none"), 8, "normal", widths[1])]
     axes_top = used + 0.28 + 0.14 * max(len(n) for n in notes) + 0.12
-    ceiling = _headroom([100 * b["rate"] for p in (pro, spo) for b in p["bars"]])
+    ceiling = headroom([100 * b["rate"] for p in (pro, spo) for b in p["bars"]])
     corner = left
     headings = ("Proboscis position at rest", "Spontaneous PER before the stimulus")
     for panel, heading, w, note in zip((pro, spo), headings, widths, notes):
-        ax, bar_w = _bar_axes(fig, corner, bottom, w, height - axes_top - bottom, len(panel["bars"]))
-        _pct_axis(ax, ceiling)
+        ax, bar_w = bar_axes(fig, corner, bottom, w, height - axes_top - bottom, len(panel["bars"]))
+        pct_axis(ax, ceiling)
         labels = []
         for i, b in enumerate(panel["bars"]):
             if b["n_trials"]:
-                _bar(ax, i, 100 * b["rate"], bar_w, held=b["state"] not in ("retracted", "no_spont"))
-                _tip(ax, i, 100 * b["rate"], f"{100 * b['rate']:.0f}%", ceiling)
-            labels.append(f"{STATE_LABELS[b['state']]}\n{_n_lines(b['n_trials'], b['n_flies'])}")
+                draw_bar(ax, i, 100 * b["rate"], bar_w, held=b["state"] not in ("retracted", "no_spont"))
+                tip_label(ax, i, 100 * b["rate"], f"{100 * b['rate']:.0f}%", ceiling)
+            labels.append(f"{STATE_LABELS[b['state']]}\n{n_lines(b['n_trials'], b['n_flies'])}")
         ax.set_xticklabels(labels, fontsize=8)
         fig.text(corner / width, 1 - used / height, heading, ha="left", va="top", fontsize=10, weight="bold", color=INK)
         fig.text(corner / width, 1 - (used + 0.25) / height, "\n".join(note), ha="left", va="top", fontsize=8,
@@ -648,11 +648,11 @@ def _fig_baseline(trials, fly, stats):
 def _fig_pullins(trials, fly, stats):
     groups = stats["pullins"]["groups"]
     width, height, bottom = 6.8, 5.0, 1.05
-    fig = _new_figure(width, height)
-    top = _title_block(fig, TITLES["pullins_held_vs_retracted"], stats["pullins"]["answer"],
-                       "Before → during the stimulus; pooled events over pooled minutes, all trial types; "
-                       "descriptive, no test")
-    ax, _ = _bar_axes(fig, 0.95, bottom, width - 1.25, height - top - bottom - 0.1, 2)
+    fig = new_figure(width, height)
+    top = title_block(fig, TITLES["pullins_held_vs_retracted"], stats["pullins"]["answer"],
+                      "Before → during the stimulus; pooled events over pooled minutes, all trial types; "
+                      "descriptive, no test")
+    ax, _ = bar_axes(fig, 0.95, bottom, width - 1.25, height - top - bottom - 0.1, 2)
     bar_w = BAR_IN * 2.2 / (width - 1.25)
     rates = [v for g in groups.values() for v in (g["rate_pre"], g["rate_stim"]) if np.isfinite(v)]
     ceiling = max(1.0, 1.2 * max(rates, default=0.0))
@@ -660,13 +660,13 @@ def _fig_pullins(trials, fly, stats):
     for slot, key in enumerate(("rate_pre", "rate_stim")):
         for name, shift in (("retracted", -0.5 * bar_w - 0.012), ("held", 0.5 * bar_w + 0.012)):
             if np.isfinite(groups[name][key]):
-                _bar(ax, slot + shift, groups[name][key], bar_w, held=name == "held")
-                _tip(ax, slot + shift, groups[name][key], _num(groups[name][key]), ceiling)
+                draw_bar(ax, slot + shift, groups[name][key], bar_w, held=name == "held")
+                tip_label(ax, slot + shift, groups[name][key], num_text(groups[name][key]), ceiling)
     ax.set_xticklabels(["Before the stimulus", "During the stimulus"])
     ax.set_ylabel("Pull-in events per minute")
-    swatches = [Patch(facecolor=BLUE, linewidth=0, label=f"Retracted ({_group_n(groups['retracted'])})"),
+    swatches = [Patch(facecolor=BLUE, linewidth=0, label=f"Retracted ({group_n(groups['retracted'])})"),
                 Patch(facecolor=ORANGE, edgecolor="white", hatch=HATCH, linewidth=0,
-                      label=f"Held out ({_group_n(groups['held'])})")]
+                      label=f"Held out ({group_n(groups['held'])})")]
     legend = fig.legend(handles=swatches, loc="lower center", ncol=1, frameon=False, bbox_to_anchor=(0.5, 0.02))
     for text in legend.get_texts():
         text.set_color(INK_SECONDARY)
@@ -684,8 +684,8 @@ def iter_figures(fly_trial: pd.DataFrame, fly: pd.DataFrame, stats: dict) -> Ite
 
     A figure that raises is logged (with its traceback) and left out, so one bad figure never costs the rest nor the report.
     """
-    trials = _consistent(fly_trial)
-    with _style():
+    trials = consistent_trials(fly_trial)
+    with lab_style():
         for name, build in BUILDERS.items():
             try:
                 fig = _placeholder(name, stats) if name in stats["placeholders"] else build(trials, fly, stats)
@@ -700,7 +700,7 @@ def build_figures(fly_trial: pd.DataFrame, fly: pd.DataFrame, stats: dict) -> Di
     return dict(iter_figures(fly_trial, fly, stats))
 
 
-def _remove_pictures(out: Path) -> None:
+def remove_pictures(out: Path) -> None:
     """Delete the six figures of an earlier run from *out* (those names only; nothing else, and nothing is created)."""
     for name in NAMES:
         (out / f"{name}.png").unlink(missing_ok=True)
@@ -718,11 +718,11 @@ def render_figures(fly_trial: pd.DataFrame, fly: pd.DataFrame, out_dir, *, n_per
     """
     out = Path(out_dir).expanduser()
     if len(fly_trial) == 0:
-        _remove_pictures(out)
+        remove_pictures(out)
         return {}
     stats = stats if stats is not None else compute_stats(fly_trial, fly, n_perm=n_perm, seed=seed)
     out.mkdir(parents=True, exist_ok=True)
-    _remove_pictures(out)
+    remove_pictures(out)
     written: Dict[str, Path] = {}
     for name, fig in iter_figures(fly_trial, fly, stats):
         path = out / f"{name}.png"
@@ -797,9 +797,9 @@ def _header(fly_trial: pd.DataFrame, stats: Mapping) -> str:
     if len(fly_trial) == 0:
         lines += ["Nothing to report: no new-glue fly-trials in scope (see the exclusions below for what was left out)."]
         return "\n".join(lines)
-    lines += [f"New-glue flies only: {_count(stats['n_fly_trials'], 'fly-trial', 'fly-trials')} in the table, "
+    lines += [f"New-glue flies only: {count_noun(stats['n_fly_trials'], 'fly-trial', 'fly-trials')} in the table, "
               f"{stats['n_trials']} of them from identity-consistent flies; "
-              f"{_count(stats['n_flies'], 'identity-consistent fly', 'identity-consistent flies')}.", "",
+              f"{count_noun(stats['n_flies'], 'identity-consistent fly', 'identity-consistent flies')}.", "",
               "How to read the statistics:", "",
               "- The fly is the unit of inference. Per-fly figures use the fly table; pooled-trial bars use the trials of "
               "identity-consistent flies and divide pooled counts (never a mean of per-fly means).",
@@ -822,16 +822,16 @@ def _header(fly_trial: pd.DataFrame, stats: Mapping) -> str:
     return "\n".join(lines)
 
 
-def _scatter_lines(name: str, question: str, s: Mapping, what: str) -> List[str]:
+def scatter_lines(name: str, question: str, s: Mapping, what: str) -> List[str]:
     return [f"### {question}", "",
             f"Figure `{name}.png`: {what}.", "",
             f"- Answer: **{s['verdict']}**",
-            f"- {n_flies_label(s['n_flies'])}; Spearman {_rho_text(s['rho'], 3)}, {p_text(s['p'], 4)} (uncorrected)",
+            f"- {n_flies_label(s['n_flies'])}; Spearman {rho_text(s['rho'], 3)}, {p_text(s['p'], 4)} (uncorrected)",
             f"- Stratified permutation {p_text(s['p_perm'], 4)} (uncorrected): pitch shuffled within dataset × rig strata, "
-            f"{_count(s['n_strata'], 'stratum', 'strata')} ({s['n_strata_shuffled']} with at least 2 flies)"]
+            f"{count_noun(s['n_strata'], 'stratum', 'strata')} ({s['n_strata_shuffled']} with at least 2 flies)"]
 
 
-def _placeholder_line(stats: Mapping, name: str) -> List[str]:
+def placeholder_line(stats: Mapping, name: str) -> List[str]:
     info = stats["placeholders"].get(name)
     return [f"- **Placeholder, not drawn:** not enough data — {info['reason']}."] if info else []
 
@@ -844,38 +844,38 @@ def _mounting_section(stats: Mapping, missing: Sequence[str] = ()) -> str:
               " (a figure that fails to build is logged and skipped; see the run log).", ""]
     L += [f"### {q['mount_pitch_per_fly']}", "",
           "Figure `mount_pitch_per_fly.png`: the mounting angle of every fly, by rig.", "",
-          f"- {stats['rig_answer']}", *_placeholder_line(stats, "mount_pitch_per_fly"), "",
+          f"- {stats['rig_answer']}", *placeholder_line(stats, "mount_pitch_per_fly"), "",
           "| Rig | Flies | Median (°) | Q1 – Q3 (°) |", "|---|---|---|---|"]
     L += [f"| {r['rig']} | {n_flies_label(r['n_flies'])} | {r['median_deg']:+.1f} | "
           f"{r['q1_deg']:+.1f} to {r['q3_deg']:+.1f} |" for r in stats["rigs"]]
-    L += [""] + _scatter_lines("mount_pitch_vs_spontaneous_per", q["mount_pitch_vs_spontaneous_per"], stats["spontaneous"],
-                               "per fly, rig-centred pitch vs the % of its pre-stimulus windows with a spontaneous PER")
-    L += _placeholder_line(stats, "mount_pitch_vs_spontaneous_per") + [""]
-    L += _scatter_lines("mount_pitch_vs_held_out", q["mount_pitch_vs_held_out"], stats["held_out"],
-                        "per fly, rig-centred pitch vs the fraction of its trials with the proboscis held out "
-                        "(marker fill = the fly's dominant held sub-type)")
-    L += _placeholder_line(stats, "mount_pitch_vs_held_out") + [""]
+    L += [""] + scatter_lines("mount_pitch_vs_spontaneous_per", q["mount_pitch_vs_spontaneous_per"], stats["spontaneous"],
+                              "per fly, rig-centred pitch vs the % of its pre-stimulus windows with a spontaneous PER")
+    L += placeholder_line(stats, "mount_pitch_vs_spontaneous_per") + [""]
+    L += scatter_lines("mount_pitch_vs_held_out", q["mount_pitch_vs_held_out"], stats["held_out"],
+                       "per fly, rig-centred pitch vs the fraction of its trials with the proboscis held out "
+                       "(marker fill = the fly's dominant held sub-type)")
+    L += placeholder_line(stats, "mount_pitch_vs_held_out") + [""]
     t = stats["tercile"]
-    L += _scatter_lines("response_by_mount_pitch_tercile", q["response_by_mount_pitch_tercile"], t,
-                        "pooled-trial response rate (pretest + testing trials) in each third of the rig-centred pitch; the "
-                        "p-values are the per-fly test of response rate vs pitch")
-    L += _placeholder_line(stats, "response_by_mount_pitch_tercile")
+    L += scatter_lines("response_by_mount_pitch_tercile", q["response_by_mount_pitch_tercile"], t,
+                       "pooled-trial response rate (pretest + testing trials) in each third of the rig-centred pitch; the "
+                       "p-values are the per-fly test of response rate vs pitch")
+    L += placeholder_line(stats, "response_by_mount_pitch_tercile")
     L += ["", "| Third | Pitch range (° from the rig median) | Trials / flies | Response rate |", "|---|---|---|---|"]
-    L += [f"| {n} | {b['lo_deg']:+.1f} to {b['hi_deg']:+.1f} | {_group_n(b)} | {100 * b['rate']:.1f}% |"
+    L += [f"| {n} | {b['lo_deg']:+.1f} to {b['hi_deg']:+.1f} | {group_n(b)} | {100 * b['rate']:.1f}% |"
           for b, (_, n, _) in zip(t["bins"], THIRDS)]
     L += ["", f"### {q['baseline_state_vs_response']}", "",
           "Figure `baseline_state_vs_response.png`: pooled response rate of the pretest + testing trials by the state "
           "before the stimulus.", ""]
-    L += _placeholder_line(stats, "baseline_state_vs_response")
+    L += placeholder_line(stats, "baseline_state_vs_response")
     for key, title, what in (("proboscis", "Proboscis state", "held out (any sub-type) minus retracted"),
                              ("spontaneous", "Spontaneous PER", "spontaneous PER minus none")):
         panel = stats["baseline"][key]
         if panel["n_groups_both"]:
-            groups = _count(panel["n_groups_both"], "fly × trial-type group", "fly × trial-type groups")
-            used = (f"{_points(panel['diff'], 1)} (Mantel–Haenszel over {groups} of "
-                    f"{_count(panel['n_flies_both'], 'fly', 'flies')} seen in both states, "
-                    f"{_count(panel['n_trials_both'], 'trial', 'trials')}); the pooled difference of the bars is "
-                    f"{_points(panel['diff_pooled'], 1)}")
+            groups = count_noun(panel["n_groups_both"], "fly × trial-type group", "fly × trial-type groups")
+            used = (f"{points_text(panel['diff'], 1)} (Mantel–Haenszel over {groups} of "
+                    f"{count_noun(panel['n_flies_both'], 'fly', 'flies')} seen in both states, "
+                    f"{count_noun(panel['n_trials_both'], 'trial', 'trials')}); the pooled difference of the bars is "
+                    f"{points_text(panel['diff_pooled'], 1)}")
             if panel["n_flies_both"] < MIN_FLIES:
                 used += f"; fewer than {MIN_FLIES} flies, so no answer is drawn"
         else:
@@ -885,7 +885,7 @@ def _mounting_section(stats: Mapping, missing: Sequence[str] = ()) -> str:
               f"- Within-fly permutation {p_text(panel['p_perm'], 4)} (uncorrected), shuffled inside each fly × trial-type "
               f"group; {stats['n_perm']} permutations, seed {stats['seed']}", "",
               "| State | Trials / flies | Response rate |", "|---|---|---|"]
-        L += [f"| {STATE_LABELS[b['state']]} | {_group_n(b)} | {100 * b['rate']:.1f}% |"
+        L += [f"| {STATE_LABELS[b['state']]} | {group_n(b)} | {100 * b['rate']:.1f}% |"
               for b in panel["bars"] if b["n_trials"]]
         L += [""]
     g = stats["pullins"]["groups"]
@@ -893,9 +893,9 @@ def _mounting_section(stats: Mapping, missing: Sequence[str] = ()) -> str:
           "Figure `pullins_held_vs_retracted.png`: pull-in events per minute (pooled events over pooled minutes, every "
           "trial type with a stimulus window), before vs during the stimulus. Descriptive: no test.", "",
           f"- {stats['pullins']['answer']}",
-          *_placeholder_line(stats, "pullins_held_vs_retracted"),
+          *placeholder_line(stats, "pullins_held_vs_retracted"),
           "", "| Group | Trials / flies | Pull-ins per min before | Pull-ins per min during |", "|---|---|---|---|"]
-    L += [f"| {label} | {_group_n(g[k])} | {_num(g[k]['rate_pre'])} | {_num(g[k]['rate_stim'])} |"
+    L += [f"| {label} | {group_n(g[k])} | {num_text(g[k]['rate_pre'])} | {num_text(g[k]['rate_stim'])} |"
           for label, k in (("Retracted", "retracted"), ("Held out", "held"))]
     return "\n".join(L)
 

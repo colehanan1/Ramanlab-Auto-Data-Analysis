@@ -391,16 +391,17 @@ def test_the_figure_and_the_report_show_the_mantel_haenszel_difference_beside_th
     text = all_text(figures["baseline_state_vs_response"])
     for key in ("proboscis", "spontaneous"):
         panel = data.stats["baseline"][key]
-        assert f"within fly × phase (MH): {F._points(panel['diff'])}" in text, key
-        assert f"{F._points(panel['diff'], 1)} (Mantel–Haenszel" in report, key
-        assert f"pooled difference of the bars is {F._points(panel['diff_pooled'], 1)}" in report, key
+        assert f"within fly × phase (MH): {F.points_text(panel['diff'])}" in text, key
+        assert f"{F.points_text(panel['diff'], 1)} (Mantel–Haenszel" in report, key
+        assert f"pooled difference of the bars is {F.points_text(panel['diff_pooled'], 1)}" in report, key
     assert "Mantel–Haenszel" in report.split("## Exclusions")[0]
     assert "- Held out (any sub-type) minus retracted, within fly × trial type: " in report      # a sentence, not a fragment
     assert "- Spontaneous PER minus none, within fly × trial type: " in report
 
 
 def test_a_difference_of_nothing_is_written_as_zero_points_never_minus_zero():
-    assert F._points(-1e-17) == "+0 points" and F._points(1e-17, 1) == "+0.0 points" and F._points(-0.0004, 1) == "+0.0 points"
+    assert F.points_text(-1e-17) == "+0 points" and F.points_text(1e-17, 1) == "+0.0 points"
+    assert F.points_text(-0.0004, 1) == "+0.0 points"
 
 
 @pytest.mark.parametrize("n_both, wording", [(0, "no fly was seen in both states"),
@@ -546,7 +547,8 @@ def test_p_values_are_printed_short_on_figures_and_longer_in_the_report():
 
 
 def test_a_missing_difference_is_n_a_never_nan_points():
-    assert F._points(0.0941, 1) == "+9.4 points" and F._points(-0.2) == "-20 points" and F._points(float("nan")) == "n/a"
+    assert F.points_text(0.0941, 1) == "+9.4 points" and F.points_text(-0.2) == "-20 points"
+    assert F.points_text(float("nan")) == "n/a"
 
 
 def test_the_n_labels_name_trials_and_flies():
@@ -556,9 +558,9 @@ def test_the_n_labels_name_trials_and_flies():
 
 
 def test_wrapping_never_splits_an_n_label_a_p_value_or_a_number_of_points():
-    fig = F._new_figure(6.0, 3.0)
-    lines = F._wrap(fig, "word " * 30 + "n=12 trials / 3 flies and p=0.04 (uncorrected) and +9 points, -12.5 points end",
-                    8.5, "normal", 3.0)
+    fig = F.new_figure(6.0, 3.0)
+    lines = F.wrap_text(fig, "word " * 30 + "n=12 trials / 3 flies and p=0.04 (uncorrected) and +9 points, -12.5 points end",
+                        8.5, "normal", 3.0)
     assert len(lines) > 3
     text = "\n".join(lines)
     assert "n=12\u00a0trials\u00a0/\u00a03\u00a0flies" in text and "p=0.04\u00a0(uncorrected)" in text
