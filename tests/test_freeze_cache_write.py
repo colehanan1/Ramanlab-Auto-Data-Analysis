@@ -332,3 +332,77 @@ def test_run_combined_passes_the_spliced_slices(tmp_path, monkeypatch):
     rw._run_combined(cfg, _Settings(tmp_path, {}, ["DS1"]), config_path=tmp_path / "c.yaml")
     assert len(captured) == len(returned) == 3
     assert all(c is r for c, r in zip(captured, returned))
+
+
+def test_auto_freeze_caches_the_walked_datasets_stamped_with_the_run(tmp_path, monkeypatch):
+    """Under an active auto-freeze plan only the datasets this run walked are
+    cached, each stamped with the run that wrote it -- the commit trusts no
+    other slice -- and a walked dataset that produced no rows gets an empty
+    slice (no rows IS its truth). A spliced dataset is never re-saved."""
+    from fbpipe import autofreeze as af
+
+    monkeypatch.setattr(af, "_ACTIVE", {"schema": af.PLAN_SCHEMA, "run_id": "R1", "datasets": {}})
+    main, train = _write_outputs(tmp_path)  # rows for LIVE and FROZEN only
+    s = _Settings(tmp_path, {}, ["LIVE", "FROZEN", "EMPTY"])
+    _run(s, main, train, spliced={"FROZEN": (_wide("FROZEN", 4), 6)}, walked={"LIVE", "FROZEN", "EMPTY"})
+
+    def _meta(ds):
+        return json.loads((freeze.slice_dir(s.cache_dir, "combined_base", ds) / "meta.json").read_text())
+
+    assert _meta("LIVE")["built_by_run"] == "R1" and _meta("LIVE")["row_count"] == 8
+    assert _meta("EMPTY")["built_by_run"] == "R1" and _meta("EMPTY")["row_count"] == 0
+    assert not freeze.slice_dir(s.cache_dir, "combined_base", "FROZEN").exists()
+
+
+def test_walked_rows_are_found_when_dataset_is_not_the_first_column(tmp_path, monkeypatch):
+    """The walked datasets' lines are picked by their leading field. Were
+    ``dataset`` not the first column, no line would match and every walked
+    dataset would be cached EMPTY -- then recorded frozen without its rows."""
+    from fbpipe import autofreeze as af
+
+    monkeypatch.setattr(af, "_ACTIVE", {"schema": af.PLAN_SCHEMA, "run_id": "R1", "datasets": {}})
+    main, train = tmp_path / "wide.csv", tmp_path / "wide_training.csv"
+    live = _wide("LIVE", 5)
+    cols = ["fly", *[c for c in live.columns if c != "fly"]]
+    pd.concat([live, _wide("OTHER", 4)], ignore_index=True)[cols].to_csv(main, index=False)
+    _wide("LIVE", 3, "training")[cols].to_csv(train, index=False)
+    s = _Settings(tmp_path, {}, ["LIVE", "OTHER"])
+    _run(s, main, train, walked={"LIVE"})
+    rows = pd.read_parquet(freeze.slice_dir(s.cache_dir, "combined_base", "LIVE") / "rows.parquet")
+    expected = pd.concat([live, _wide("LIVE", 3, "training")], ignore_index=True)[cols]
+    assert len(rows) == 8 and set(rows["dataset"]) == {"LIVE"}
+    assert list(rows["fly"]) == list(expected["fly"])
+    assert not freeze.slice_dir(s.cache_dir, "combined_base", "OTHER").exists()
+
+
+def test_a_wide_output_without_a_dataset_column_caches_nothing(tmp_path, monkeypatch):
+    """No ``dataset`` column: no row can be told apart, so nothing is cached --
+    every walked dataset stays thawing and is rebuilt next run, instead of
+    being frozen empty."""
+    from fbpipe import autofreeze as af
+
+    monkeypatch.setattr(af, "_ACTIVE", {"schema": af.PLAN_SCHEMA, "run_id": "R1", "datasets": {}})
+    main, train = tmp_path / "wide.csv", tmp_path / "wide_training.csv"
+    _wide("LIVE", 5).drop(columns=["dataset"]).to_csv(main, index=False)
+    _wide("LIVE", 3, "training").drop(columns=["dataset"]).to_csv(train, index=False)
+    s = _Settings(tmp_path, {}, ["LIVE", "EMPTY"])
+    _run(s, main, train, walked={"LIVE", "EMPTY"})
+    for ds in ("LIVE", "EMPTY"):
+        assert not freeze.slice_dir(s.cache_dir, "combined_base", ds).exists()
+
+
+def test_auto_freeze_never_caches_an_exact_duplicate_row(tmp_path, monkeypatch):
+    """A fresh build emits each trial once; a repeated line could only come
+    from overlapping outputs, and caching it would splice it back every night."""
+    from fbpipe import autofreeze as af
+
+    monkeypatch.setattr(af, "_ACTIVE", {"schema": af.PLAN_SCHEMA, "run_id": "R1", "datasets": {}})
+    main, train = tmp_path / "wide.csv", tmp_path / "wide_training.csv"
+    live = _wide("LIVE", 4)
+    pd.concat([live, live.iloc[[1, 2]]], ignore_index=True).to_csv(main, index=False)
+    _wide("LIVE", 2, "training").to_csv(train, index=False)
+    s = _Settings(tmp_path, {}, ["LIVE"])
+    _run(s, main, train, walked={"LIVE"})
+    rows = pd.read_parquet(freeze.slice_dir(s.cache_dir, "combined_base", "LIVE") / "rows.parquet")
+    assert len(rows) == 6
+    assert not rows.duplicated().any()

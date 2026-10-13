@@ -12,6 +12,7 @@ the line in the module's ``LAST_EYE_QC_SUMMARY`` for the ``__main__`` block.
 """
 from __future__ import annotations
 
+import sys
 import ast
 import inspect
 import os
@@ -192,8 +193,12 @@ def test_rows_of_folders_frozen_right_now_are_left_out(tmp_path):
 
 
 @pytest.mark.parametrize("thaw", ["named", "all"])
-def test_a_thawed_dataset_counts_its_frozen_folders_again(tmp_path, thaw):
+def test_a_thawed_dataset_keeps_its_folder_retirements(tmp_path, thaw):
+    """Auto-freeze rule (2026-10-06): an explicit unfreeze (--thaw / --thaw-all)
+    rebuilds a dataset with its folder retirements still applied, so the
+    summary counts exactly what it counts without the thaw."""
     _live_and_retired_report(tmp_path)
+    expected = rw._eye_qc_summary(_retiring(tmp_path, "may_22*"))
     settings = _retiring(tmp_path, "may_22*")
     # main() stashes --thaw / --thaw-all on settings before the summary runs.
     if thaw == "named":
@@ -201,9 +206,8 @@ def test_a_thawed_dataset_counts_its_frozen_folders_again(tmp_path, thaw):
     else:
         settings._thaw_all = True
 
-    assert rw._eye_qc_summary(settings).startswith(
-        "EYE-QC: 3 of 6 assessed trial-flies flagged (fly came loose?); 6 trials not assessable "
-    )
+    assert expected.startswith("EYE-QC: 1 of 4 assessed trial-flies flagged")
+    assert rw._eye_qc_summary(settings) == expected
 
 
 def test_a_report_whose_folders_are_all_frozen_says_nothing(tmp_path):
@@ -397,7 +401,10 @@ def _module_tree() -> ast.Module:
 
 
 def _main_def() -> ast.FunctionDef:
-    return next(n for n in _module_tree().body if isinstance(n, ast.FunctionDef) and n.name == "main")
+    """The function that runs a night: _main_locked(), which main() calls under
+    the run lock (auto-freeze), or main() itself where there is no lock."""
+    defs = {n.name: n for n in _module_tree().body if isinstance(n, ast.FunctionDef)}
+    return defs.get("_main_locked") or defs["main"]
 
 
 def _calls(node: ast.AST, name: str) -> list[ast.Call]:
@@ -471,6 +478,10 @@ def _run_main_guard(run, sent: list) -> None:
     namespace = {
         "__name__": "__main__",
         "LAST_EYE_QC_SUMMARY": "",
+        # The block also reads these module names (run lock, auto-freeze summary).
+        "sys": sys,
+        "RunLockTimeout": rw.RunLockTimeout,
+        "_RUN_SUMMARY": "",
         "ntfy_notify": lambda title, message, **kwargs: sent.append((title, message, kwargs)),
     }
     namespace["main"] = lambda: run(namespace)

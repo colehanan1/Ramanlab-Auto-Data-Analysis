@@ -22,6 +22,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import csv
 import math
 import re
 import sys
@@ -394,6 +395,40 @@ def _read_wide_for_light(csv_path) -> pd.DataFrame:
     return df
 
 
+def _first_field(line: str) -> str:
+    return next(csv.reader([line]), [""])[0] if line.strip() else ""
+
+
+def _with_held_rows(text: str, path: Path, held) -> str:
+    """The summary *text*, plus the rows an earlier run wrote for *held* datasets.
+
+    A dataset frozen for figures is not redrawn and its summary rows are not
+    recomputed -- but they must not vanish from the summary either: under
+    auto-freeze most datasets sit out most nights, and a summary rebuilt from
+    the drawn datasets alone would shrink to nothing on a quiet night. Line
+    level, so carried rows keep their exact bytes; build_summary sorts by
+    dataset first and the two sources never share a dataset, so a stable sort
+    on that field restores its order. A changed header carries nothing over.
+    """
+    held = {str(d) for d in (held or ())}
+    if not held or not path.is_file():
+        return text
+    try:
+        old = path.read_text(encoding="utf-8").splitlines(keepends=True)
+    except OSError:
+        return text
+    carried = [line for line in old[1:] if _first_field(line) in held]
+    if not carried:
+        return text
+    new = text.splitlines(keepends=True)
+    has_rows = bool(new) and bool(new[0].strip())
+    if has_rows and new[0] != old[0]:
+        print("  summary columns changed: held datasets' rows are not carried over")
+        return text
+    body = new[1:] if has_rows else []
+    return old[0] + "".join(sorted(body + carried, key=_first_field))
+
+
 def generate(csv_path, out_dir, datasets=None, skip_datasets=None) -> dict:
     """Render per-fly light-only PER traces, sorted into per-dataset subfolders.
 
@@ -451,7 +486,8 @@ def generate(csv_path, out_dir, datasets=None, skip_datasets=None) -> dict:
 
     summary = build_summary(df, dir_val_cols)
     summary_path = out_dir / "light_trial_summary.csv"
-    summary.to_csv(summary_path, index=False)
+    text = _with_held_rows(summary.to_csv(index=False), summary_path, skipped)
+    summary_path.write_text(text, encoding="utf-8")
     made = sum(per_dataset.values())
     print(f"\nSaved {made} figures under {out_dir}")
     print(f"Saved summary ({len(summary)} light-trial rows) -> {summary_path}")

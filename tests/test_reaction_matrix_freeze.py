@@ -177,3 +177,80 @@ def test_tvc_main_reads_the_freeze_from_config(tmp_path, monkeypatch):
     assert seen["frozen"] == {"Hex-Control-24-0.01"}
     tvc.main(base + ["--thaw-all"])
     assert seen["frozen"] == set()
+
+
+# --- the cross-dataset rate summary keeps held datasets' rows -----------------
+
+import scripts.analysis.envelope_visuals as ev  # noqa: E402
+
+_PANELS = {
+    # Different odors per dataset, so the summary's columns depend on which
+    # datasets are in it; the trained one repeats Hexanol (two presentations).
+    "Hex-Training-24-0.1": ("hexanol", "ethylbutyrate", "hexanol"),
+    "Alpha-Panel": ("3-octanol", "linalool", "ethylbutyrate"),
+    "Beta-Panel": ("applecidervinegar", "linalool"),
+}
+
+
+def _panel_predictions(path: Path, night: int) -> Path:
+    rows = []
+    for dataset, odors in _PANELS.items():
+        genotypes = ("GR5a-Old", "Orco") if dataset == "Beta-Panel" else ("GR5a-Old",)
+        for g, genotype in enumerate(genotypes):
+            for f in range(3):
+                for t, odor in enumerate(odors, start=1):
+                    hit = (f + t + g) % 2
+                    if dataset == "Alpha-Panel" and night == 3:
+                        hit = 1 - hit  # only Alpha-Panel changes on night 3
+                    rows.append({
+                        "dataset": dataset, "fly": f"{dataset}_{genotype}_f{f}", "fly_number": "1",
+                        "fly_type": genotype, "trial_label": f"testing_{t}_{odor}",
+                        "prediction": hit, "trial_type": "testing",
+                    })
+    pd.DataFrame(rows).to_csv(path, index=False)
+    return path
+
+
+def _summary_run(tmp_path, out, night, frozen=()):
+    cfg = rm.SpreadsheetMatrixConfig(
+        csv_path=_panel_predictions(tmp_path / f"preds_n{night}.csv", night),
+        out_dir=out,
+        latency_sec=2.4,
+        trial_orders=("trained-first",),
+        frozen_datasets=frozenset(frozen),
+    )
+    rm.generate_reaction_matrices_from_csv(cfg)
+    return out / "reaction_rates_summary_unordered.csv"
+
+
+@pytest.mark.parametrize("protocol", ["v2", "legacy"])
+def test_held_datasets_keep_their_summary_rows_night_after_night(tmp_path, protocol):
+    """Night 1 draws every dataset; on night 3 only Alpha-Panel changed and the
+    other two are held. The summary must still list the held ones -- with the
+    rows night 1 wrote -- and read exactly as a night that drew all three."""
+    ev.set_protocol(protocol)
+    out = tmp_path / "out"
+    _summary_run(tmp_path, out, night=1)
+    held = _summary_run(tmp_path, out, night=3, frozen=("Hex-Training-24-0.1", "Beta-Panel"))
+    reference = _summary_run(tmp_path, tmp_path / "ref", night=3)
+    assert held.read_bytes() == reference.read_bytes()
+    text = held.read_text()
+    assert "Beta-Panel [GR5a-Old]" in text and "Beta-Panel [Orco]" in text
+    assert text.splitlines()[1].startswith("Hex-Training-24-0.1,")  # ODOR_ORDER first
+
+
+def test_a_held_dataset_never_drawn_before_stays_out_of_the_summary(tmp_path):
+    ev.set_protocol("v2")
+    out = tmp_path / "out"
+    _summary_run(tmp_path, out, night=1, frozen=("Beta-Panel",))
+    summary = _summary_run(tmp_path, out, night=3, frozen=("Beta-Panel", "Hex-Training-24-0.1"))
+    names = [line.split(",")[0] for line in summary.read_text().splitlines()[1:]]
+    assert names == ["Hex-Training-24-0.1", "Alpha-Panel"]
+
+
+def test_every_dataset_held_leaves_the_summary_untouched(tmp_path):
+    ev.set_protocol("v2")
+    out = tmp_path / "out"
+    first = _summary_run(tmp_path, out, night=1).read_bytes()
+    summary = _summary_run(tmp_path, out, night=3, frozen=tuple(_PANELS))
+    assert summary.read_bytes() == first

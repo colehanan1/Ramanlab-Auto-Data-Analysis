@@ -6,8 +6,8 @@ Two things the pipeline must do:
 * offer ``--include-frozen`` so a run can rebuild ``model_predictions.csv`` as a
   complete record without editing config.
 
-``--thaw`` / ``--thaw-all`` already lift dataset freezes; they lift folder
-freezes too, because ``folder_freeze_rules`` consults them.
+``--thaw`` / ``--thaw-all`` rebuild datasets but keep folder freezes live:
+a rebuild must never revive a retired folder.
 """
 
 from __future__ import annotations
@@ -107,18 +107,18 @@ def test_resolve_frozen_folders_omits_datasets_with_nothing_frozen(tmp_path):
     assert got == {}
 
 
-def test_resolve_frozen_folders_honours_thaw_all(tmp_path):
+def test_resolve_frozen_folders_keeps_retirements_under_thaw_all(tmp_path):
     root = tmp_path / "Hex-Training-24-0.1"
     root.mkdir()
     _batch(root, "may_22_batch_1", "20260522")
     cfg = _Cfg(freeze_folders_before=date(2026, 6, 26))
     cfg._thaw_all = True
-    assert rw._resolve_frozen_folders(cfg, [root]) == {}
+    assert rw._resolve_frozen_folders(cfg, [root]) == {"Hex-Training-24-0.1": {"may_22_batch_1"}}
 
 
-def test_resolve_frozen_folders_skips_data_frozen_datasets(tmp_path):
-    """"Live datasets only": a data-frozen root is never walked, so it must not
-    even be listed -- its cached rows splice in whole."""
+def test_resolve_frozen_folders_skips_spliced_datasets(tmp_path):
+    """A spliced root is never walked, so it is not even resolved -- but a
+    data-frozen dataset that IS walked (a rebuild) keeps its retirements."""
     root = tmp_path / "EB-Control-24-0.1"
     root.mkdir()
     _batch(root, "april_11_batch_2", "20260411")
@@ -126,7 +126,8 @@ def test_resolve_frozen_folders_skips_data_frozen_datasets(tmp_path):
         freeze_folders_before=date(2026, 6, 26),
         overrides={"EB-Control-24-0.1": _Override(freeze_data=True)},
     )
-    assert rw._resolve_frozen_folders(cfg, [root]) == {}
+    assert rw._resolve_frozen_folders(cfg, [root], skip={"EB-Control-24-0.1"}) == {}
+    assert rw._resolve_frozen_folders(cfg, [root]) == {"EB-Control-24-0.1": {"april_11_batch_2"}}
 
 
 def test_resolve_frozen_folders_unions_the_config_list(tmp_path):

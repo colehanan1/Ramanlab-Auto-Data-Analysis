@@ -148,12 +148,38 @@ def _mt_cfg(**over):
     return {"dataset_mean_traces": block}
 
 
+#: The naive panels --with-naive draws (pubfig_naive_vs_trained.NAIVE_BY_CONC).
+_NAIVE = ("RandomPanel-Training-24-10", "RandomPanel-24-1", "RandomPanel-24-0.1")
+
+
 def test_mean_traces_drop_pair_frozen_on_both_arms():
+    """Every dataset the figure draws is frozen: both arms and, since
+    --with-naive is on by default, the naive panels."""
     cmds = rw._dataset_mean_traces_commands(
-        _mt_cfg(), _Settings(frozen=("Hex-Training-24-0.01", "Hex-Control-24-0.01")),
+        _mt_cfg(), _Settings(frozen=("Hex-Training-24-0.01", "Hex-Control-24-0.01", *_NAIVE)),
         python_exec="/usr/bin/python3", config_path=CONFIG,
     )
     assert all_flag_values(cmds, "--train-dataset") == {"EB-Training-24-1"}
+
+
+def test_mean_traces_redraw_a_frozen_pair_while_a_naive_panel_is_live():
+    """--with-naive also draws a RandomPanel naive arm. A pair whose two arms
+    are frozen still redraws while a naive panel is not -- e.g. the night
+    auto-freeze removes the panels' duplicate rows -- or the vs-naive figure
+    would keep showing the old naive rows."""
+    frozen = ("Hex-Training-24-0.01", "Hex-Control-24-0.01", "RandomPanel-24-1",
+              "RandomPanel-Training-24-10")  # RandomPanel-24-0.1 is live
+    cmds = rw._dataset_mean_traces_commands(
+        _mt_cfg(), _Settings(frozen=frozen),
+        python_exec="/usr/bin/python3", config_path=CONFIG,
+    )
+    assert "Hex-Training-24-0.01" in all_flag_values(cmds, "--train-dataset")
+    # Without the naive arm the two frozen arms are the whole figure.
+    cmds = rw._dataset_mean_traces_commands(
+        _mt_cfg(with_naive=False), _Settings(frozen=frozen),
+        python_exec="/usr/bin/python3", config_path=CONFIG,
+    )
+    assert "Hex-Training-24-0.01" not in all_flag_values(cmds, "--train-dataset")
 
 
 def test_mean_traces_keep_pair_when_one_arm_is_live():
@@ -228,3 +254,20 @@ def test_pubfig_commands_thaw_all_renders_everything():
         csv_path=Path("/tmp/preds/model_predictions.csv"), config_path=CONFIG,
     )
     assert len(all_flag_values(cmds, "--train-dataset")) == 2
+
+
+def test_an_unconfigured_naive_panel_does_not_redraw_a_frozen_pair():
+    """A naive panel the run does not configure cannot make a fully frozen
+    (published, figures: true) pair redraw: it is never in the figure-frozen
+    list, so counting it as a contributor redrew the pair -- from deduplicated
+    rows -- every night."""
+    datasets = ["Hex-Training-24-0.01", "Hex-Control-24-0.01", "RandomPanel-24-0.1",
+                "EB-Training-24-1", "EB-Control-24-1"]
+    # The pair and its one configured naive panel are frozen for figures;
+    # RandomPanel-24-1 / RandomPanel-Training-24-10 are not configured at all.
+    frozen = ("Hex-Training-24-0.01", "Hex-Control-24-0.01", "RandomPanel-24-0.1")
+    cmds = rw._dataset_mean_traces_commands(
+        _mt_cfg(), _Settings(frozen=frozen, datasets=datasets),
+        python_exec="/usr/bin/python3", config_path=CONFIG,
+    )
+    assert "Hex-Training-24-0.01" not in all_flag_values(cmds, "--train-dataset")

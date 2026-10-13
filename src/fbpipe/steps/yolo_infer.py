@@ -22,6 +22,7 @@ from ..utils.tables import read_table, write_table
 from ..utils.timestamps import pick_timestamp_column, pick_frame_column, to_seconds_series
 from ..utils.vision import xyxy_to_cxcywh
 from ..utils.yolo_results import collect_detections
+from ..utils.yolo_discovery import latest_session, raw_videos, superseded_videos, trial_folder_name
 from ..utils.video_writer import FFmpegFrameWriter
 from ..utils.distance_sanity import anisotropic_boundary_offsets, anisotropic_semi_axes
 from ..utils.rig_anchor import resolve_anchor
@@ -958,9 +959,12 @@ def main(cfg: Settings):
         for fly in iter_live_batch_dirs(cfg, root):
             # Per-batch gate widening (drawn gate polygon + ≥3-fly pairing cap).
             fly_cfg = apply_rig_gate_overrides(cfg, fly)
-            video_files = sorted(
-                (f for f in fly.iterdir() if f.suffix.lower() in (".mp4", ".avi")), key=str
-            )
+            video_files = raw_videos(fly)
+            # A trial recorded more than once (a restarted session) names one
+            # trial folder from every attempt: only the session its metadata is
+            # read from is processed (utils/yolo_discovery). The others keep
+            # their job slots.
+            superseded = superseded_videos(video_files)
 
             def _scan_video_eyes(path: Path, _cfg=cfg) -> np.ndarray:
                 """The warm-up scan for the batch template, on its own capture."""
@@ -997,12 +1001,22 @@ def main(cfg: Settings):
                         continue
                     first_track_id = Track._next_id
                 base = video_path.stem
+                folder_name = trial_folder_name(video_path)
+                if video_path in superseded:
+                    kept = latest_session(video_files, video_path)
+                    print(
+                        f"[YOLO] Skipping {video_path.name}: superseded by {kept.name} "
+                        f"(trial {folder_name} is processed from that video)"
+                        if kept is not None else
+                        f"[YOLO] Skipping {video_path.name}: trial {folder_name} was recorded "
+                        f"more than once and the session its metadata is read from has no "
+                        f"video here"
+                    )
+                    continue
                 # rig_3 is physically mirrored, so its anchor is on the other
                 # side. Resolved per video because one run can span both rigs.
                 AX, AY = resolve_anchor(video_path)
                 csv_file_path = fly / f"{base.replace('_preprocessed','')}.csv"
-                parts = base.split("_")
-                folder_name = "_".join(parts[1:7]) if len(parts)>=7 else base
                 out_dir = fly / folder_name
                 # A re-run's folder survives the discard when something else is in it.
                 if out_dir.exists() and not is_rerun:
@@ -1022,8 +1036,10 @@ def main(cfg: Settings):
 
                 scan_frames = 5
                 if template_state is None:
+                    # Only the sessions this batch analyses vote on the template: a
+                    # superseded restart (utils/yolo_discovery) may have re-mounted flies.
                     template_state = load_or_build_eye_template(
-                        fly, video_files, cfg, _scan_video_eyes
+                        fly, [v for v in video_files if v not in superseded], cfg, _scan_video_eyes
                     )
                     if template_state[0]:
                         print(

@@ -27,15 +27,22 @@ A frozen folder is skipped by the heavy per-trial steps and excluded from every
 figure, but its already-derived rows still land in the wide CSV marked
 ``frozen`` — the CSV stays a complete record, the plots do not.
 
-Two deliberate asymmetries:
+The rules are ALWAYS live: for a dataset frozen for data (its rows splice
+whole from the freeze cache, so its root is never walked and there is nothing
+to judge), for a ``--thaw``/``--thaw-all`` run and for a ``data: false``
+dataset alike. They used to switch off for the first two, so every rebuild of
+a frozen dataset revived its retired folders. The ``thawed``/``thaw_all``
+parameters are kept for callers and ignored.
 
-* **A data-frozen dataset is never folder-frozen.** ``freeze.data`` means its
-  root is never walked and its rows splice in whole from the cache; folder
-  freezing one of its batches would silently delete rows from that slice.
-* **An undated batch stays live**, with a printed warning — whether the
-  missing date is the recording date or the birth date. Both date rules can
-  only ever be reached by a positive match, so a failed lookup keeps data
-  rather than dropping it. Same fail-open stance as ``rig_gates``.
+``dataset_overrides.<ds>.freeze.cutoff_exempt_before`` exempts batches recorded
+before that date from the global recording cutoff -- for finished datasets
+recorded entirely before it. Their own ``folders:`` rules and the born-date
+window still apply.
+
+**An undated batch stays live**, with a printed warning — whether the missing
+date is the recording date or the birth date. Both date rules can only ever be
+reached by a positive match, so a failed lookup keeps data rather than
+dropping it. Same fail-open stance as ``rig_gates``.
 """
 
 from __future__ import annotations
@@ -56,6 +63,7 @@ __all__ = [
     "FolderRule",
     "born_cutoff",
     "born_keep_from",
+    "cutoff_exempt_before",
     "drop_frozen",
     "folder_freeze_rules",
     "frozen_folders_for_root",
@@ -105,10 +113,6 @@ _warned_undated: set[str] = set()
 _warned_unborn: set[str] = set()
 
 
-def _thawed(dataset: str, thawed: Iterable[str], thaw_all: bool) -> bool:
-    return bool(thaw_all) or dataset in {str(t) for t in (thawed or ())}
-
-
 def folder_freeze_rules(
     cfg: Any,
     dataset: str,
@@ -118,22 +122,15 @@ def folder_freeze_rules(
 ) -> tuple[Optional[date], tuple[FolderRule, ...]]:
     """The ``(cutoff, rules)`` in force for *dataset*.
 
-    ``(None, ())`` means nothing is folder-frozen here — because the dataset is
-    thawed, is frozen for DATA, or simply has no rules. Callers use that as a
-    cheap "skip the whole check" signal.
+    ``(None, ())`` means nothing is folder-frozen here: the dataset simply has
+    no rules. Callers use that as a cheap "skip the whole check" signal.
+    ``thawed``/``thaw_all`` are ignored -- the rules stay live under a thaw, and
+    for a dataset frozen for data too (see the module docstring).
 
     Recorded in the freeze fingerprint, so changing either input rebuilds a
     dataset's cached slice instead of serving rows filtered under the old rules.
     """
-    if _thawed(dataset, thawed, thaw_all):
-        return (None, ())
-
     override = (getattr(cfg, "dataset_overrides", None) or {}).get(dataset)
-    # "Live datasets only": a data-frozen dataset's root is never walked, so
-    # there are no folders to judge and its cached rows must splice in whole.
-    if override is not None and bool(getattr(override, "freeze_data", False)):
-        return (None, ())
-
     cutoff = getattr(cfg, "freeze_folders_before", None)
     rules: list[FolderRule] = []
     for entry in getattr(override, "freeze_folders", ()) or ():
@@ -165,15 +162,10 @@ def born_cutoff(
 
     Separate from :func:`folder_freeze_rules` rather than a third tuple slot so
     every existing ``cutoff, rules = folder_freeze_rules(...)`` caller keeps
-    working, but gated identically: thawed and data-frozen datasets see None.
+    working. Live under a thaw and for data-frozen datasets, like the others.
 
     Recorded in the freeze fingerprint alongside the other two inputs.
     """
-    if _thawed(dataset, thawed, thaw_all):
-        return None
-    override = (getattr(cfg, "dataset_overrides", None) or {}).get(dataset)
-    if override is not None and bool(getattr(override, "freeze_data", False)):
-        return None
     return getattr(cfg, "freeze_folders_born_on_or_after", None)
 
 
@@ -191,15 +183,20 @@ def born_keep_from(
     ``keep_folders_born_on_or_after`` closes it: flies born on or after this
     date are keepers again. Frozen iff ``freeze_cutoff <= born < keep_from``.
 
-    Gated exactly like :func:`born_cutoff` -- but the gating is moot, since a
-    dataset whose cutoff is None is not born-frozen either way.
+    Live under a thaw and for data-frozen datasets, like :func:`born_cutoff`.
     """
-    if _thawed(dataset, thawed, thaw_all):
-        return None
-    override = (getattr(cfg, "dataset_overrides", None) or {}).get(dataset)
-    if override is not None and bool(getattr(override, "freeze_data", False)):
-        return None
     return getattr(cfg, "keep_folders_born_on_or_after", None)
+
+
+def cutoff_exempt_before(cfg: Any, dataset: str) -> Optional[date]:
+    """*dataset*'s ``freeze.cutoff_exempt_before``, or None.
+
+    Batches recorded strictly before it ignore the global
+    ``freeze_folders_before`` cutoff. Recorded in the freeze fingerprint (only
+    when set), like the cutoff itself.
+    """
+    override = (getattr(cfg, "dataset_overrides", None) or {}).get(dataset)
+    return getattr(override, "cutoff_exempt_before", None)
 
 
 def _born_frozen(
@@ -273,7 +270,9 @@ def is_frozen_folder(
             )
         return False
     if cutoff is not None and batch_date < cutoff:
-        return True
+        exempt_before = cutoff_exempt_before(cfg, dataset)
+        if exempt_before is None or batch_date >= exempt_before:
+            return True
     return any(r.matches(path.name, batch_date) for r in bounded)
 
 
