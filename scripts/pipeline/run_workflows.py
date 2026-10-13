@@ -939,6 +939,16 @@ def _cache_walked_rows(settings, wide_block, paths, fingerprint_for, spliced, na
             print(f"[FREEZE] Could not cache {dataset}/{wide_block}: {exc}")
 
 
+def _plan_forces_combined(plan) -> bool:
+    """Whether tonight's auto-freeze plan needs the combined step despite its cache.
+
+    A rebuilt dataset's rows must be walked and cached before it can be
+    recorded frozen again; an adoption that removed duplicate rows from a
+    slice leaves them in the wide tables until those are rebuilt from it.
+    """
+    return plan is not None and any(d.commit or d.deduped for d in plan.decisions.values())
+
+
 def _should_skip_with_manifest(
     settings: Settings,
     category: str,
@@ -3475,6 +3485,13 @@ def _main_locked(args: argparse.Namespace, config_path: Path, data: dict, settin
                     yolo_targets.append(resolved)
                     planned_runs.append((resolved, dict(pipeline_expectation), True))
                     continue
+                if plan is None and (args.thaw_all or Path(resolved).name in set(args.thaw or ())):
+                    # --thaw without auto-freeze (its kill switch): rebuild whatever
+                    # the cache says. Folder rules now stay live under --thaw, so the
+                    # thaw no longer changes this dataset's pipeline key.
+                    yolo_targets.append(resolved)
+                    planned_runs.append((resolved, dict(pipeline_expectation), False))
+                    continue
                 skip_pipeline = _should_skip_with_manifest(
                     settings,
                     category="pipeline",
@@ -3672,13 +3689,10 @@ def _main_locked(args: argparse.Namespace, config_path: Path, data: dict, settin
                 expected=combined_expected,
                 force_flag=settings.force.combined,
             )
-            if skip_combined and plan is not None and any(
-                d.commit for d in plan.decisions.values()
-            ):
-                # A dataset is being rebuilt tonight: its rows must be walked and
-                # cached before it can be recorded frozen again.
+            if skip_combined and _plan_forces_combined(plan):
                 skip_combined = False
-                print("[FREEZE] combined → running despite its cache: datasets are being rebuilt.")
+                print("[FREEZE] combined → running despite its cache: datasets are being rebuilt "
+                      "or lost duplicate rows.")
             if skip_combined:
                 print(
                     "[analysis] combined analysis cached → skipping. Set force.combined=true to recompute."

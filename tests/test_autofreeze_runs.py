@@ -51,7 +51,6 @@ def make_batch(root: Path, batch: str, trials=("testing_1", "testing_2"), *, pro
                videos=False, born="2026-08-01", stamp="20260809", n=6):
     """A batch as the rig and the pipeline leave it."""
     d = root / batch
-    env = d / "angle_distance_rms_envelope"
     d.mkdir(parents=True, exist_ok=True)
     (d / "session_metadata.txt").write_text(f"Born (approx): {born}\nHost: Flybehavior2\n")
     for i, trial in enumerate(trials):
@@ -415,6 +414,39 @@ def test_auto_freeze_disabled_keeps_the_explicit_flags(world, monkeypatch):
         assert night.figures[ADOPT] == (True, True) and night.figures[SENS] == (False, False)
     settings = load_settings(cfg)
     assert af.load_record(af.scope_dir(settings.cache_dir, cfg), SENS) is None
+
+
+def test_thaw_reruns_the_per_trial_steps_with_auto_freeze_disabled(world, monkeypatch):
+    """The kill switch brings the explicit flags back, and with them the
+    pipeline cache: an unchanged dataset is skipped -- but --thaw must still
+    re-run it. Base invalidated that cache by dropping the folder rules for
+    the run; the rules now stay live, so the thaw itself bypasses it."""
+    cfg = write_config(world["tmp"], [ADOPT, TRAIN, SENS], world["overrides"],
+                       auto_freeze={"enabled": False},
+                       force={"pipeline": False, "combined": True, "yolo": False})
+    Night(monkeypatch, cfg)
+    assert Night(monkeypatch, cfg).per_trial() == []
+    assert Night(monkeypatch, cfg, "--thaw", SENS).per_trial() == [SENS]
+
+
+def test_a_dedupe_at_adoption_forces_the_combined_step():
+    """An adoption that removed duplicate rows from a slice leaves them in the
+    wide tables, so the combined step runs whatever its cache says (as for a
+    rebuild); otherwise, with force.combined false, the night's figures would
+    redraw from the duplicated rows and clear figures_pending."""
+    from types import SimpleNamespace as NS
+
+    plan = NS(decisions={"A": NS(commit=False, deduped={"combined_base": (4, 2)}),
+                         "B": NS(commit=False, deduped={})})
+    assert rw._plan_forces_combined(plan)
+    plan.decisions["A"].deduped = {}
+    assert not rw._plan_forces_combined(plan)
+    plan.decisions["B"].commit = True
+    assert rw._plan_forces_combined(plan)
+    assert not rw._plan_forces_combined(None)
+    import inspect
+
+    assert "_plan_forces_combined(plan)" in inspect.getsource(rw._main_locked)
 
 
 def test_the_plan_reaches_figure_subprocesses(world, monkeypatch):

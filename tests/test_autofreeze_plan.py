@@ -697,6 +697,21 @@ def test_a_trial_recorded_more_than_once_is_reported(scene):
     assert "the one its metadata is read from; none while that one has no video" in notice
 
 
+def test_an_empty_trial_folder_beside_its_video_is_reported(scene):
+    """A video OpenCV could not open: yolo_infer left its trial folder empty,
+    so it is never retried and never pending -- the run says so every time."""
+    _settle(scene)
+    stem = _stem(BATCH, "testing_2", "20260809_121500")
+    (scene.root(LIVE) / BATCH / f"{stem}.csv").write_text("frame,timestamp\n0,0\n")
+    (scene.root(LIVE) / BATCH / f"{stem}.mp4").write_bytes(b"not a video")
+    (scene.root(LIVE) / BATCH / "august_09_batch_1_testing_2").mkdir()
+    plan = scene.plan()
+    notice = next(n for n in plan.notices if "trial folder(s) are empty" in n)
+    assert notice.startswith(f"[FREEZE] {LIVE}: 1 trial folder(s) are empty")
+    assert f"{BATCH}/august_09_batch_1_testing_2" in notice
+    assert "remove the empty folder" in notice
+
+
 def test_untracked_trials_are_reported_and_never_thaw(scene):
     """Rig files, but no trial folder and no local video: the video was deleted
     before YOLO saw it (Hex-Control-24-0.1 august_27_batch_2_rig_2 x8). There is

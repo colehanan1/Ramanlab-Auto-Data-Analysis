@@ -1145,6 +1145,12 @@ def _trial_notices(plan: Plan, dataset: str, root: Path, trials: Any, unprocessa
             f"metadata is read from; none while that one has no video), and the secure cleanup keeps "
             f"every session's video -- move the aborted sessions' files aside to resolve"
         )
+    if getattr(trials, "unopened", None):
+        plan.notices.append(
+            f"[FREEZE] {dataset}: {len(trials.unopened)} trial folder(s) are empty beside their video -- "
+            f"YOLO could not open it (corrupt?): {_examples(trials.unopened)}; the video is kept locally "
+            f"and never retried -- re-push a good copy and remove the empty folder to have it processed"
+        )
     if trials.untracked:
         plan.notices.append(
             f"[FREEZE] {dataset}: {len(trials.untracked)} trial(s) have rig files but were never tracked "

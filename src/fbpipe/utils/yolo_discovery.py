@@ -201,6 +201,10 @@ class TrialReport:
     #: ``"<batch>/<trial>"`` with a rig CSV but no trial folder and no local
     #: video: never tracked, and nothing here YOLO could still process.
     untracked: list[str]
+    #: ``"<batch>/<trial>"`` whose trial folder is EMPTY beside its video:
+    #: yolo_infer creates the folder before it opens the video, so a video
+    #: OpenCV cannot open is never tried again, nor pending.
+    unopened: list[str] = dataclasses.field(default_factory=list)
 
 
 def trial_report(cfg: Any, root: str | Path) -> TrialReport:
@@ -217,8 +221,11 @@ def trial_report(cfg: Any, root: str | Path) -> TrialReport:
         for video in videos:
             if video in skipped:
                 continue
-            if not (batch / trial_folder_name(video)).exists():
+            trial = batch / trial_folder_name(video)
+            if not trial.exists():
                 report.pending.append(video)
+            elif trial.is_dir() and not any(trial.iterdir()):
+                report.unopened.append(f"{batch.name}/{trial.name}")
         for name, group in sorted(_session_groups(batch).items()):
             if len(group["stems"]) > 1:
                 report.collisions[f"{batch.name}/{name}"] = len(group["stems"])

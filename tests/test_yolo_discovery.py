@@ -235,6 +235,21 @@ def test_a_collision_group_is_pending_once_as_its_latest_video(tmp_path):
     assert yd.pending_videos(_Cfg(), root) == []
 
 
+def test_an_empty_trial_folder_beside_its_video_is_reported(tmp_path):
+    """yolo_infer creates the trial folder before it opens the video, so a
+    video OpenCV cannot open leaves an EMPTY folder: never pending again, and
+    the secure cleanup keeps the video for good. trial_report lists it."""
+    root = tmp_path / "IAA-Sensitivity-12-1"
+    batch = root / "october_06_batch_1"
+    video = _touch(batch / V.format(n=1, ext=".mp4"))
+    (batch / yd.trial_folder_name(video)).mkdir()
+    done = _touch(batch / V.format(n=2, ext=".mp4"))
+    _merged(batch / yd.trial_folder_name(done), yd.trial_folder_name(done))
+    report = yd.trial_report(_Cfg(), root)
+    assert report.pending == []
+    assert report.unopened == ["october_06_batch_1/october_06_batch_1_training_1"]
+
+
 def test_a_missing_root_has_no_pending_videos(tmp_path):
     assert yd.pending_videos(_Cfg(), tmp_path / "nope") == []
 
