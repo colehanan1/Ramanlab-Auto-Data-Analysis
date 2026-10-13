@@ -73,6 +73,9 @@ def test_main_fans_out_track_when_workers_configured(monkeypatch, tmp_path):
     settings = Settings(model_path="x", main_directories=[], yolo_num_workers=3, cache_dir=str(tmp_path))
     gcfg = GeometrySettings()
     monkeypatch.setattr("fbpipe.geometry.config.load_geometry_config", lambda p: (settings, gcfg))
+    # The wiring is under test, not the pending count: stub trial videos so `track` is not dropped as "nothing pending"
+    # (test_geometry_jobs.py pins that case).
+    monkeypatch.setattr(S, "pending_trials", lambda settings, gcfg: 5)
     seen = {}
     monkeypatch.setattr(GP, "fan_out_track", lambda cfg, n, *, settings, options: seen.update(n=n, opts=dict(options)) or 0)
     ran = []

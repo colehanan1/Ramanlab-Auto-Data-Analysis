@@ -21,7 +21,7 @@ from ..config import Settings
 from ..utils.frozen_folders import FROZEN_COLUMN
 from . import columns as C
 from .config import GeometrySettings
-from .steps import iter_batches, load_trial_entries
+from .steps import iter_tracked_jobs, load_trial_entries
 from .trial_meta import TrialInfo
 
 FLY_STATUS = {1: "alive", 0: "weak", -1: "dead"}
@@ -128,11 +128,13 @@ def fly_trial_metrics_for_batch(batch_dir: Path, dataset: str, frozen: bool, gcf
 
 
 def collect_fly_trial_metrics(settings: Settings, gcfg: GeometrySettings, *, include_frozen: bool = False) -> pd.DataFrame:
+    """Every tracked fly-trial of every batch job (frozen ones only with ``include_frozen``), read from each job's
+    ``out_dir`` -- in integrated mode the separate output tree, which holds nothing but ``geometry/``."""
     frames = []
-    for batch_dir, dataset, frozen in iter_batches(settings, live_only=False):
-        if frozen and not include_frozen:
+    for job in iter_tracked_jobs(settings, gcfg, live_only=False):
+        if job.frozen and not include_frozen:
             continue
-        part = fly_trial_metrics_for_batch(batch_dir, dataset, frozen, gcfg, settings)
+        part = fly_trial_metrics_for_batch(job.out_dir, job.dataset, job.frozen, gcfg, settings)
         if len(part):
             frames.append(part)
     if not frames:

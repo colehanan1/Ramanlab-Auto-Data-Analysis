@@ -5,7 +5,8 @@
 ``--config`` is a legacy ``config_abdomen*.yaml`` or an ``extends:`` overlay with an ``abdomen:``
 block (``config/config_new_abdomen.yaml``). Steps run in order: track -> normalize -> wide ->
 figures. ``list`` prints them. ``--annotated-video`` (the one-time backfill) writes the annotated
-mp4 per trial even where the config says tables only (the nightly).
+mp4 per trial even where the config says tables only (the nightly). ``track`` is dropped (no
+workers, no model load) when every trial video already has its meta JSON, unless ``--force``.
 """
 from __future__ import annotations
 
@@ -85,7 +86,9 @@ def fan_out_track(config_path: Path, n_workers: int, *, settings, options: Dict[
         logf.close()
         text = log_path.read_text(errors="ignore")
         tracked = text.count(" slot(s), ")
-        print(f"[GEOMETRY] worker {k + 1}/{n_workers}: {'OK' if rc == 0 else f'FAILED rc={rc}'} | tracked~{tracked}")
+        failed_videos = text.count("[GEOMETRY] failed ")
+        print(f"[GEOMETRY] worker {k + 1}/{n_workers}: {'OK' if rc == 0 else f'FAILED rc={rc}'} | "
+              f"tracked~{tracked} failed~{failed_videos}")
         if rc != 0:
             failed += 1
             print("\n".join(text.splitlines()[-15:]))
@@ -124,6 +127,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     names = list(args.steps or STEP_NAMES)
     options = {"force": args.force, "only_trial": args.only_trial, "max_frames": args.max_frames,
                "annotated_video": args.annotated_video}
+    if "track" in names and not args.force and steps.pending_trials(settings, gcfg) == 0:
+        # Workers each load the model before they look at a single video; with nothing to track that is all cost.
+        print("[GEOMETRY] track: nothing pending (every trial video already has its meta JSON); "
+              "no workers started, no model loaded (--force re-tracks)")
+        names = [n for n in names if n != "track"]
     n_workers = args.workers if args.workers is not None else int(getattr(settings, "yolo_num_workers", 1) or 1)
     if "track" in names and n_workers > 1 and not args.no_fan_out:
         failed = fan_out_track(Path(args.config), n_workers, settings=settings, options=options)

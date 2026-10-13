@@ -566,6 +566,9 @@ def launched(monkeypatch):
 @pytest.mark.parametrize("flags,want", [([], False), (["--annotated-video"], True)], ids=["nightly", "backfill"])
 def test_main_gives_every_track_worker_the_annotated_video_flag_only_when_asked(tmp_path, launched, flags, want):
     rig = Rig(tmp_path)
+    # one untracked trial video: with nothing pending `track` starts no workers (test_geometry_jobs.py)
+    (rig.flys_new / DATASETS[0] / "october_07_batch_2" / "output_october_07_batch_2_pretest_1_Citral_20261007_100000.mp4"
+     ).write_bytes(b"x")
     assert GP.main(["--config", str(rig.overlay), *flags, "track"]) == 0
     assert len(launched) == 3, "abdomen.yolo.num_workers, not the PER block's 1"
     assert all(("--annotated-video" in cmd) is want for cmd in launched)

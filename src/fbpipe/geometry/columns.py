@@ -83,6 +83,11 @@ def stats_path(geometry_dir: Path, slot: int) -> Path:
     return Path(geometry_dir) / f"fly{int(slot)}_geometry_stats.json"
 
 
+def source_path(geometry_dir: Path) -> Path:
+    """Integrated mode: where a batch's inputs came from (production dir, directory of its first video)."""
+    return Path(geometry_dir) / "source.json"
+
+
 def fly_slot_from_geometry_name(name: str) -> Optional[int]:
     m = _FLY_FILE_RE.search(str(name))
     return int(m.group("slot")) if m else None
