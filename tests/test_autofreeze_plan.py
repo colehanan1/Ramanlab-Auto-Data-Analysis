@@ -197,7 +197,7 @@ def test_adoption_needs_every_processed_batch_in_the_cached_rows(scene):
     assert "processed batch folder(s) missing from its cached rows (august_14_batch_1_rig_3)" in d.reasons[0]
 
 
-def test_adoption_removes_exact_duplicate_rows_losslessly(scene):
+def _doubled_rows():
     base = pd.DataFrame({
         "dataset": [FROZEN] * 3, "fly": [BATCH] * 3, "fly_number": [1, 2, 3],
         "trial_type": ["testing"] * 3, "trial_label": ["testing_1_hexanol"] * 3,
@@ -207,20 +207,82 @@ def test_adoption_removes_exact_duplicate_rows_losslessly(scene):
     # The doubled block the real slices carry, plus a same-key row with a
     # different value: that one is NOT a duplicate and must stay.
     collision = base.iloc[[0]].assign(dir_val_0=9.9)
-    rows = pd.concat([base, base, collision], ignore_index=True)
+    return pd.concat([base, base, collision], ignore_index=True), pd.concat([base, collision], ignore_index=True)
+
+
+def test_adoption_waits_for_a_video_yolo_has_not_processed(scene):
+    """A frozen-today dataset with a new video is not adopted as it is: the
+    video is something new, so the dataset is built once with it."""
+    scene.seed_slice(FROZEN)
+    scene.seed_slice(PARTNER)
+    stem = _stem(BATCH, "testing_2", "20260809_121500")
+    (scene.root(FROZEN) / BATCH / f"{stem}.csv").write_text("frame,timestamp\n0,0\n")
+    (scene.root(FROZEN) / BATCH / f"{stem}.mp4").write_bytes(b"video")
+    d = scene.plan().decisions[FROZEN]
+    assert d.decision == "thawed" and not d.adopted
+    assert d.reasons == ["no freeze record yet; 1 video(s) YOLO has not processed"]
+
+
+def test_a_record_from_another_root_is_rebuilt_once(scene):
+    """The dataset's folder moved (same name, other base): its record's inputs
+    describe the old folder, so they prove nothing -- rebuilt once."""
+    _settle(scene)
+    record = scene.record(LIVE)
+    record["root"] = str(scene.tmp / "elsewhere" / LIVE)
+    af.save_record(scene.scope(), LIVE, record)
+    d = scene.plan().decisions[LIVE]
+    assert d.decision == "thawed"
+    assert d.reasons == ["freeze record belongs to another root: rebuilt once"]
+
+
+def test_adoption_removes_exact_duplicate_rows_losslessly(scene):
+    rows, expect = _doubled_rows()
     scene.seed_slice(FROZEN, rows)
     scene.seed_slice(PARTNER)
     plan = scene.plan()
     d = plan.decisions[FROZEN]
     assert d.deduped == {"combined_base": (7, 4)}
-    assert d.figures_frozen is False  # its rows changed: figures redraw once
     kept = pd.read_parquet(_freeze.slice_dir(scene.settings.cache_dir, "combined_base", FROZEN) / "rows.parquet")
-    expect = pd.concat([base, collision], ignore_index=True)
     pd.testing.assert_frame_equal(kept, expect)
-    assert scene.record(FROZEN)["figures_pending"] is True
     # The slice stays valid under its fingerprint.
     kw = next(kw for b, n, kw in scene.blocks if FROZEN in n)
     assert _freeze.slice_status(scene.settings.cache_dir, "combined_base", FROZEN, scene.fingerprint(FROZEN, kw)) == (True, "")
+
+
+def test_a_deduped_dataset_with_frozen_figures_keeps_its_published_figures(scene):
+    """``figures: true`` means published: those figures were drawn before the
+    duplicates existed, and a redraw would re-score them with today's model.
+    The dedupe reaches the data only; the notice names the command that
+    redraws them from the deduplicated rows."""
+    rows, _ = _doubled_rows()
+    scene.seed_slice(FROZEN, rows)
+    scene.seed_slice(PARTNER)
+    plan = scene.plan()
+    d = plan.decisions[FROZEN]
+    assert d.deduped and d.figures_mode == "hold"
+    assert d.figures_frozen is True
+    assert "figures_pending" not in scene.record(FROZEN)
+    notice = next(n for n in plan.notices if n.startswith(f"[FREEZE] {FROZEN}:") and "duplicate" in n)
+    assert "3 exact duplicate row(s) removed" in notice
+    assert f"--figures-only --thaw {FROZEN}" in notice
+    plan.commit(combined_ran=True)
+    assert scene.plan().decisions[FROZEN].figures_frozen is True
+
+
+def test_a_deduped_dataset_whose_figures_were_live_redraws_them_once(scene):
+    """Without ``figures: true`` its figures were redrawn every night from the
+    duplicated rows, so they redraw once from the deduplicated ones."""
+    scene.overrides[FROZEN] = {"freeze": {"data": True}}
+    scene.reload()
+    rows, _ = _doubled_rows()
+    scene.seed_slice(FROZEN, rows)
+    scene.seed_slice(PARTNER)
+    plan = scene.plan()
+    d = plan.decisions[FROZEN]
+    assert d.deduped and d.figures_mode == "auto"
+    assert d.figures_frozen is False  # its rows changed: figures redraw once
+    assert scene.record(FROZEN)["figures_pending"] is True
+    assert not any(n.startswith(f"[FREEZE] {FROZEN}:") and "duplicate" in n for n in plan.notices)
     # After a successful run the figures are held again.
     plan.commit(combined_ran=True)
     assert "figures_pending" not in scene.record(FROZEN)
@@ -697,19 +759,22 @@ def test_a_trial_recorded_more_than_once_is_reported(scene):
     assert "the one its metadata is read from; none while that one has no video" in notice
 
 
-def test_an_empty_trial_folder_beside_its_video_is_reported(scene):
-    """A video OpenCV could not open: yolo_infer left its trial folder empty,
-    so it is never retried and never pending -- the run says so every time."""
+def test_a_trial_folder_without_a_merged_table_beside_its_video_is_reported(scene):
+    """A video OpenCV could not open: yolo_infer left its trial folder with no
+    merged table (here only the per-trial steps' _trial_meta.json), so it is
+    never retried and never pending -- the run says so every time."""
     _settle(scene)
     stem = _stem(BATCH, "testing_2", "20260809_121500")
     (scene.root(LIVE) / BATCH / f"{stem}.csv").write_text("frame,timestamp\n0,0\n")
     (scene.root(LIVE) / BATCH / f"{stem}.mp4").write_bytes(b"not a video")
-    (scene.root(LIVE) / BATCH / "august_09_batch_1_testing_2").mkdir()
+    trial = scene.root(LIVE) / BATCH / "august_09_batch_1_testing_2"
+    trial.mkdir()
+    (trial / "_trial_meta.json").write_text("{}")
     plan = scene.plan()
-    notice = next(n for n in plan.notices if "trial folder(s) are empty" in n)
-    assert notice.startswith(f"[FREEZE] {LIVE}: 1 trial folder(s) are empty")
+    notice = next(n for n in plan.notices if "no merged table" in n)
+    assert notice.startswith(f"[FREEZE] {LIVE}: 1 trial folder(s) hold no merged table beside their video")
     assert f"{BATCH}/august_09_batch_1_testing_2" in notice
-    assert "remove the empty folder" in notice
+    assert "move the trial folder aside" in notice
 
 
 def test_untracked_trials_are_reported_and_never_thaw(scene):

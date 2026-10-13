@@ -347,3 +347,64 @@ def test_sort_keys_the_pipeline_asks_for_actually_exist():
     for cmd in raster_cmds(trained_block()):
         for key in flag_values(cmd, "--sort-by"):
             assert key in bpr.SORT_KEYS, key
+
+
+# ── the training-AUC sidecar keeps held datasets' entries ────────────────────
+
+
+def _auc_night(tmp_path, monkeypatch, frozen):
+    """One _run_cohort_figures; each AUC run rewrites the sidecar with the
+    datasets it was given, as the real script does."""
+    import json
+    import subprocess
+
+    out = tmp_path / "Training-AUC-vs-Testing-Response"
+    block = trained_block(training_auc_out_dir=str(out),
+                          binarized_out_dir=str(tmp_path / "bin"),
+                          graded_out_dir=str(tmp_path / "graded"))
+    ran = []
+
+    def _run(cmd, env=None, capture_output=False):
+        if str(cmd[1]).endswith("training_auc_vs_control_response.py"):
+            names = flag_values(cmd, "--dataset")
+            ran.append(names)
+            out.mkdir(parents=True, exist_ok=True)
+            meta = {n: {"dataset": n, "n_flies": len(n)} for n in names}
+            (out / "training_auc_vs_control_response.json").write_text(
+                json.dumps(meta, indent=2, default=float), encoding="utf-8")
+        return subprocess.CompletedProcess(cmd, 0)
+
+    monkeypatch.setattr(rw.subprocess, "run", _run)
+    monkeypatch.setattr(rw, "_figure_frozen_datasets", lambda settings: list(frozen))
+    rw._run_cohort_figures(block, _Settings(), config_path=Path("/tmp/config_new.yaml"))
+    sidecar = out / "training_auc_vs_control_response.json"
+    return ran, json.loads(sidecar.read_text()) if sidecar.exists() else None
+
+
+def test_the_training_auc_sidecar_keeps_held_datasets(tmp_path, monkeypatch):
+    """Night 1 draws every cohort (the trained run, last, writes the sidecar);
+    on night 3 only Hex-Control-24-0.1 is redrawn. The entries of the held
+    datasets an earlier run wrote must stay."""
+    trained = ["EB-Training-24-1", "3Oct-Training-24-0.1",
+               "Hex-Training-24-0.01", "Hex-Training-24-0.1"]
+    ran, first = _auc_night(tmp_path, monkeypatch, frozen=())
+    assert ran == [DATASETS, trained]
+    assert list(first) == trained
+    held = [d for d in DATASETS + trained if d != "Hex-Control-24-0.1"]
+    ran, third = _auc_night(tmp_path, monkeypatch, frozen=held)
+    assert ran == [["Hex-Control-24-0.1"]]
+    assert third["Hex-Control-24-0.1"] == {"dataset": "Hex-Control-24-0.1", "n_flies": 18}
+    assert {k: third[k] for k in trained} == first
+
+
+def test_the_training_auc_sidecar_drops_datasets_no_longer_configured(tmp_path, monkeypatch):
+    _auc_night(tmp_path, monkeypatch, frozen=())
+    sidecar = tmp_path / "Training-AUC-vs-Testing-Response" / "training_auc_vs_control_response.json"
+    import json
+
+    meta = json.loads(sidecar.read_text())
+    meta["Gone-Training-24-1"] = {"dataset": "Gone-Training-24-1"}
+    sidecar.write_text(json.dumps(meta))
+    held = [d for d in DATASETS if d != "Hex-Control-24-0.1"] + list(meta)
+    _, third = _auc_night(tmp_path, monkeypatch, frozen=held)
+    assert "Gone-Training-24-1" not in third

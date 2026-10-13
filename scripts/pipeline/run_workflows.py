@@ -4442,6 +4442,63 @@ def _cohort_figures_expected(
     }
 
 
+#: The cross-cohort sidecar training_auc_vs_control_response.py rewrites from
+#: the datasets of each run of it.
+_TRAINING_AUC_SIDECAR = "training_auc_vs_control_response.json"
+
+
+def _held_training_auc_entries(analysis_cfg, settings) -> tuple[Path | None, dict]:
+    """``(sidecar, entries)``: what the training-AUC sidecar holds now for the
+    cohorts held this run (configured, but frozen for figures)."""
+    cfg = (analysis_cfg or {}).get("cohort_figures") or {}
+    out_dir = str(cfg.get("training_auc_out_dir", "") or "")
+    if not out_dir:
+        return None, {}
+    sidecar = Path(out_dir) / _TRAINING_AUC_SIDECAR
+    configured = {
+        str(d).strip()
+        for d in [*(cfg.get("datasets") or []), *(cfg.get("trained_raster_datasets") or [])]
+        if str(d).strip()
+    }
+    held = configured & set(_figure_frozen_datasets(settings))
+    if not held or not sidecar.is_file():
+        return sidecar, {}
+    try:
+        previous = json.loads(sidecar.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return sidecar, {}
+    if not isinstance(previous, dict):
+        return sidecar, {}
+    return sidecar, {k: v for k, v in previous.items() if k in held}
+
+
+def _keep_held_training_auc_entries(sidecar: Path | None, held: dict) -> None:
+    """Put the held cohorts' entries back into the training-AUC sidecar.
+
+    The script rewrites it from the datasets it drew; a held cohort is not
+    drawn, and under auto-freeze most cohorts sit out most nights, so without
+    this the sidecar would shrink to whatever was rebuilt.
+    """
+    if sidecar is None or not held or not sidecar.is_file():
+        return
+    try:
+        current = json.loads(sidecar.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return
+    if not isinstance(current, dict):
+        return
+    missing = {k: v for k, v in held.items() if k not in current}
+    if not missing:
+        return
+    sidecar.write_text(
+        json.dumps({**current, **missing}, indent=2, default=float), encoding="utf-8"
+    )
+    LOGGER.info(
+        "[analysis] cohort_figures: kept the training-AUC entries of %d held dataset(s)",
+        len(missing),
+    )
+
+
 def _run_cohort_figures(
     analysis_cfg: Mapping[str, Any] | None,
     settings: Any,
@@ -4464,6 +4521,7 @@ def _run_cohort_figures(
     env["PYTHONPATH"] = os.pathsep.join(
         filter(None, [str(REPO_ROOT / "src"), env.get("PYTHONPATH")])
     )
+    auc_sidecar, held_auc = _held_training_auc_entries(analysis_cfg, settings)
     for cmd in cmds:
         LOGGER.info("[analysis] cohort_figures → %s", " ".join(cmd))
         result = subprocess.run(cmd, env=env, capture_output=False)
@@ -4474,6 +4532,7 @@ def _run_cohort_figures(
                 "[analysis] cohort_figures command exited with code %d: %s",
                 result.returncode, " ".join(cmd),
             )
+    _keep_held_training_auc_entries(auc_sidecar, held_auc)
     LOGGER.info("[analysis] cohort_figures complete.")
 
 

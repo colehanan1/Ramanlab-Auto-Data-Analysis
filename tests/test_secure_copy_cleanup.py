@@ -212,3 +212,22 @@ def test_cleanup_off_deletes_nothing(tmp_path):
     _trial(fly, 9)
     ec.secure_copy_and_cleanup([str(source)], str(dest), perform_cleanup=False)
     assert mp4.exists()
+
+
+def test_a_processed_video_whose_secured_copy_differs_in_size_is_kept(tmp_path, capsys):
+    """The copy phase never overwrites an existing target, so a secured copy cut
+    short (an interrupted copy, a file still growing when it was copied) stays
+    short for good. Deleting the local video then would leave only the broken
+    copy: a processed video is deleted only when its secured copy has its size."""
+    source, dest, fly = _scene(tmp_path)
+    mp4 = _video(fly, 4)
+    _trial(fly, 4)
+    secured = dest / "Hex-Training" / "may_01_batch_1" / mp4.name
+    secured.parent.mkdir(parents=True)
+    secured.write_bytes(b"vid")  # truncated: 3 of 5 bytes
+
+    ec.secure_copy_and_cleanup([str(source)], str(dest), perform_cleanup=True)
+
+    assert mp4.exists() and secured.read_bytes() == b"vid"  # copy behaviour unchanged
+    out = capsys.readouterr().out
+    assert f"Keeping video (its secured copy is 3 bytes, the local file 5): {mp4}" in out

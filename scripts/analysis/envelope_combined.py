@@ -2736,10 +2736,10 @@ def secure_copy_and_cleanup(
                 print(f"Preserving non-month folder: {fly_folder}")
                 continue
             # Only prune video files (.mp4 / .h264) whose copy already exists in
-            # secured storage AND whose trial YOLO has fully processed. .h264 raw
-            # captures follow their trial's .mp4: a lone .h264 still awaits its
-            # remux and inference. Unprocessed videos are kept in retired
-            # folders too -- a folder can be un-retired later.
+            # secured storage with the same size AND whose trial YOLO has fully
+            # processed. .h264 raw captures follow their trial's .mp4: a lone
+            # .h264 still awaits its remux and inference. Unprocessed videos are
+            # kept in retired folders too -- a folder can be un-retired later.
             deleted_count = 0
             kept_unprocessed = 0
             for item in fly_folder.rglob("*"):
@@ -2751,6 +2751,16 @@ def secure_copy_and_cleanup(
                 secured_copy = dest_mirror / relative
                 if not secured_copy.is_file():
                     print(f"Keeping video (no secured copy): {item}")
+                    continue
+                # The copy phase never overwrites a target, so a secured copy
+                # cut short stays short: never delete the only intact copy.
+                secured_size, local_size = secured_copy.stat().st_size, item.stat().st_size
+                if secured_size != local_size:
+                    kept_unprocessed += 1
+                    print(
+                        f"Keeping video (its secured copy is {secured_size} bytes, the local "
+                        f"file {local_size}): {item}"
+                    )
                     continue
                 done, why = _video_yolo_done(item, fly_folder)
                 if not done:
@@ -2765,7 +2775,8 @@ def secure_copy_and_cleanup(
             if kept_unprocessed:
                 print(
                     f"  Kept {kept_unprocessed} video(s) in {fly_folder.name} that YOLO has not "
-                    f"fully processed or whose trial was recorded more than once (secured copies exist)"
+                    f"fully processed, whose trial was recorded more than once, or whose secured "
+                    f"copy differs in size (secured copies exist)"
                 )
 
     print("\nCleanup completed successfully.")

@@ -206,6 +206,70 @@ def _load_predictions(
     return df
 
 
+_GENOTYPE_ROW = _re.compile(r"^(.*) \[[^\]]+\]$")
+_PRESENTATION_COLUMN = _re.compile(r"^T(\d+)_(.*)$")
+
+
+def _summary_dataset(label: str) -> str:
+    """The dataset a summary row belongs to: ``X [genotype]`` -> ``X``."""
+    match = _GENOTYPE_ROW.match(str(label))
+    return match.group(1) if match else str(label)
+
+
+def _held_summary_rows(
+    csv_path: Path, held: set, order: str, known: dict
+) -> list[dict]:
+    """Long-form rows an earlier run wrote to *csv_path* for the *held* datasets.
+
+    A dataset frozen for figures is not redrawn, so its rates are not
+    recomputed -- but its row must not vanish from the cross-dataset summary
+    either: under auto-freeze most datasets sit out most nights, and a summary
+    rebuilt from the drawn datasets alone would shrink to whatever was rebuilt.
+    The rows go back through the same pivot as this run's, so the columns are
+    the union of both and keep their usual order. *known* maps a written column
+    to this run's ``(trial_num, odor_sent)``; a column only the held rows have
+    is read back from its name (``T<n>_`` prefix, underscores were spaces).
+    """
+    if not held or not csv_path.is_file():
+        return []
+    try:
+        previous = pd.read_csv(csv_path, dtype=str, keep_default_na=False)
+        rows: list[dict] = []
+        for record in previous.to_dict("records"):
+            label = str(record.pop("dataset"))
+            if _summary_dataset(label) not in held:
+                continue
+            for column, text in record.items():
+                text = str(text).strip()
+                if not text:
+                    continue
+                if column in known:
+                    trial_num, odor_sent = known[column]
+                else:
+                    match = _PRESENTATION_COLUMN.match(column)
+                    trial_num, odor_sent = (
+                        (int(match.group(1)), match.group(2).replace("_", " "))
+                        if match
+                        else (np.nan, column.replace("_", " "))
+                    )
+                rows.append({
+                    "dataset": label,
+                    "trial_order": order,
+                    "trial_num": trial_num,
+                    "odor_sent": odor_sent,
+                    "reaction_rate": float(text),
+                })
+    except Exception as exc:  # noqa: BLE001 -- a summary must never stop the figures
+        print(f"[WARN] reaction_matrix_csv: cannot read {csv_path} ({exc}); "
+              "held datasets' rows are not carried over.")
+        return []
+    if rows:
+        kept = sorted({r["dataset"] for r in rows})
+        print(f"[INFO] reaction_matrix_csv: keeping the earlier summary rows of held "
+              f"dataset(s): {', '.join(kept)}")
+    return rows
+
+
 def _collect_unordered_matrices(out_dir: Path) -> None:
     """Collect all unordered matrix PNGs into a single 'all' folder."""
     all_dir = out_dir / "all"
@@ -247,6 +311,7 @@ def generate_reaction_matrices_from_csv(cfg: SpreadsheetMatrixConfig) -> None:
 
     present = df["dataset_canon"].unique().tolist()
     frozen = {str(d) for d in (cfg.frozen_datasets or ())}
+    skipped: list = []
     if frozen:
         skipped = [d for d in present if str(d) in frozen]
         if skipped:
@@ -585,6 +650,20 @@ def generate_reaction_matrices_from_csv(cfg: SpreadsheetMatrixConfig) -> None:
             if order_stats.empty:
                 continue
 
+            order_suffix = _order_suffix(order)
+            csv_filename = f"reaction_rates_summary_{order_suffix}.csv"
+            csv_path = cfg.out_dir / csv_filename
+            # Datasets held this run keep the rows an earlier run wrote.
+            known = {}
+            for trial_num, odor_sent in zip(order_stats["trial_num"], order_stats["odor_sent"]):
+                written = (
+                    f"T{int(trial_num)}_{odor_sent}" if pd.notna(trial_num) else str(odor_sent)
+                ).replace(" ", "_")
+                known.setdefault(written, (trial_num, odor_sent))
+            carried = _held_summary_rows(csv_path, {str(d) for d in skipped}, order, known)
+            if carried:
+                order_stats = pd.concat([order_stats, pd.DataFrame(carried)], ignore_index=True)
+
             if "trial_num" in order_stats.columns:
                 order_stats["presentation"] = order_stats.apply(
                     lambda row: (
@@ -631,10 +710,6 @@ def generate_reaction_matrices_from_csv(cfg: SpreadsheetMatrixConfig) -> None:
             pivot.columns = [col.replace(' ', '_') for col in pivot.columns]
 
             # Save to CSV
-            order_suffix = _order_suffix(order)
-            csv_filename = f"reaction_rates_summary_{order_suffix}.csv"
-            csv_path = cfg.out_dir / csv_filename
-
             if should_write(csv_path, cfg.overwrite):
                 pivot.to_csv(csv_path, index=False, float_format="%.4f")
                 print(f"[INFO] Exported reaction rate summary to {csv_path}")

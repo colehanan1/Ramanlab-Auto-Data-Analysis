@@ -389,3 +389,20 @@ def test_a_wide_output_without_a_dataset_column_caches_nothing(tmp_path, monkeyp
     _run(s, main, train, walked={"LIVE", "EMPTY"})
     for ds in ("LIVE", "EMPTY"):
         assert not freeze.slice_dir(s.cache_dir, "combined_base", ds).exists()
+
+
+def test_auto_freeze_never_caches_an_exact_duplicate_row(tmp_path, monkeypatch):
+    """A fresh build emits each trial once; a repeated line could only come
+    from overlapping outputs, and caching it would splice it back every night."""
+    from fbpipe import autofreeze as af
+
+    monkeypatch.setattr(af, "_ACTIVE", {"schema": af.PLAN_SCHEMA, "run_id": "R1", "datasets": {}})
+    main, train = tmp_path / "wide.csv", tmp_path / "wide_training.csv"
+    live = _wide("LIVE", 4)
+    pd.concat([live, live.iloc[[1, 2]]], ignore_index=True).to_csv(main, index=False)
+    _wide("LIVE", 2, "training").to_csv(train, index=False)
+    s = _Settings(tmp_path, {}, ["LIVE"])
+    _run(s, main, train, walked={"LIVE"})
+    rows = pd.read_parquet(freeze.slice_dir(s.cache_dir, "combined_base", "LIVE") / "rows.parquet")
+    assert len(rows) == 6
+    assert not rows.duplicated().any()

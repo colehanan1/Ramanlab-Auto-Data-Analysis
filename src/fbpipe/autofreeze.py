@@ -25,7 +25,10 @@ freeze cache that fails the current fingerprint (a config edit that changes how
 rows are built) is rebuilt once -- with folder retirements and cutoffs live. A
 dataset frozen today (legacy ``data: true``) whose cache is valid is ADOPTED on
 its first run instead: its record is taken from the files as they are, and its
-cached rows lose their byte-identical duplicate rows (lossless) once.
+cached rows lose their byte-identical duplicate rows (lossless) once. That
+reaches its data only when its figures are ``figures: true`` (published, drawn
+before the duplicates existed): they stay as they are, and a notice names the
+command that redraws them. Figures that were redrawn every night redraw once.
 
 Records live under ``<cache_dir>/frozen/_auto/<config scope>/``, one JSON file
 per dataset, written atomically. A rebuilt dataset is marked ``thawing`` before
@@ -38,9 +41,9 @@ later is new to the next run. Cascades are reported, never acted on: a frozen
 pair arm whose partner got new data, and frozen datasets built under other
 per-trial code or settings, are listed with the command that rebuilds them. So
 are trials recorded more than once, trials with rig files but no trial folder
-and no local video, empty trial folders beside their video (one YOLO could not
-open), and adopted rows whose folder marks today's rules would change on a
-rebuild.
+and no local video, trial folders with no merged table beside their video (one
+YOLO could not open), and adopted rows whose folder marks today's rules would
+change on a rebuild.
 
 The plan is shared with figure subprocesses through ``FBPIPE_FREEZE_PLAN`` (a
 JSON file); ``fbpipe.freeze.freeze_flags`` and ``figure_frozen_from_raw`` consult
@@ -878,6 +881,10 @@ def _figures_frozen(d: Decision) -> bool:
     if d.figures_mode == "live":
         return False
     if d.decision == "frozen":
+        if d.figures_mode == "hold":
+            # ``figures: true``: published figures stay as they are, also when
+            # adoption removed duplicate rows (those reach the data only).
+            return True
         if d.deduped:
             return False  # its rows changed this run: redraw once
         return not (isinstance(d.record, dict) and d.record.get("figures_pending"))
@@ -1054,6 +1061,15 @@ def _adopt(plan: Plan, d: Decision, inputs: dict) -> None:
         if before != after:
             d.deduped[block] = (before, after)
     d.adopted = True
+    if d.deduped and d.figures_mode == "hold":
+        removed = sum(n0 - n1 for n0, n1 in d.deduped.values())
+        prefix = _REBUILD_PREFIX.format(config=_display_config(plan.config_path))
+        plan.notices.append(
+            f"[FREEZE] {d.dataset}: {removed} exact duplicate row(s) {'would be ' if plan.read_only else ''}"
+            f"removed from its cached data; its published figures stay as they are (freeze.figures: "
+            f"true) -- to redraw them from the deduplicated rows: {prefix} --figures-only --thaw "
+            f"{d.dataset}"
+        )
     if plan.read_only:
         return
     record = {
@@ -1070,7 +1086,9 @@ def _adopt(plan: Plan, d: Decision, inputs: dict) -> None:
         "provenance": {"code": plan.code, "settings": plan.settings_prov, "baseline": "adoption"},
         "deduped": {b: list(v) for b, v in d.deduped.items()},
     }
-    if d.deduped:
+    if d.deduped and d.figures_mode != "hold":
+        # Its figures were redrawn every night from the duplicated rows: once
+        # more from the deduplicated ones, then held.
         record["figures_pending"] = True
     save_record(plan.scope, d.dataset, record)
     d.record = record
@@ -1150,9 +1168,10 @@ def _trial_notices(plan: Plan, dataset: str, root: Path, trials: Any, unprocessa
         )
     if getattr(trials, "unopened", None):
         plan.notices.append(
-            f"[FREEZE] {dataset}: {len(trials.unopened)} trial folder(s) are empty beside their video -- "
-            f"YOLO could not open it (corrupt?): {_examples(trials.unopened)}; the video is kept locally "
-            f"and never retried -- re-push a good copy and remove the empty folder to have it processed"
+            f"[FREEZE] {dataset}: {len(trials.unopened)} trial folder(s) hold no merged table beside their "
+            f"video -- YOLO could not open or finish it (corrupt?): {_examples(trials.unopened)}; the video "
+            f"is kept locally and never retried -- re-push a good copy and move the trial folder aside to "
+            f"have it processed"
         )
     if trials.untracked:
         plan.notices.append(

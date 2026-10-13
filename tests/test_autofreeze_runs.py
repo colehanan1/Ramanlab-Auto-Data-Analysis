@@ -134,6 +134,7 @@ class Night:
         self.pipeline: list[tuple[str, tuple]] = []
         self.combined: list[str] = []
         self.figures: dict[str, tuple[bool, bool]] = {}
+        self.figure_frozen: set[str] = set()
         self.plan_env = None
         self.secure_cleanup = 0
         self.smb = 0
@@ -152,6 +153,8 @@ class Night:
             self.plan_env = os.environ.get(af.PLAN_ENV)
             for ds in settings.datasets:
                 self.figures[ds] = freeze_flags(settings, ds)
+            # What the figure steps skip, this run's --thaw honoured.
+            self.figure_frozen = set(rw._figure_frozen_datasets(settings))
             if fail_in == "reactions":
                 raise RuntimeError("a figure step crashed")
 
@@ -403,6 +406,20 @@ def test_figures_only_holds_the_lock_and_plans_nothing(world, monkeypatch):
     assert night.pipeline == [] and night.plan_env is None
     assert night.figures[ADOPT] == (True, True)  # the explicit flags, as before
     assert night.figures[SENS] == (False, False)
+
+
+def test_figures_only_with_thaw_redraws_one_held_dataset(world, monkeypatch):
+    """The command the dedupe notice names for a ``figures: true`` dataset:
+    --figures-only plans nothing and rebuilds no data, so the explicit flags
+    apply, and --thaw lifts the figure freeze of that one dataset."""
+    overrides = {ADOPT: {"freeze": {"data": True, "figures": True}},
+                 TRAIN: {"freeze": {"figures": True}}}
+    cfg = write_config(world["tmp"], [ADOPT, TRAIN, SENS], overrides)
+    Night(monkeypatch, cfg)
+    night = Night(monkeypatch, cfg, "--figures-only", "--thaw", ADOPT)
+    assert night.pipeline == [] and night.combined == [] and night.plan_env is None
+    assert ADOPT not in night.figure_frozen
+    assert TRAIN in night.figure_frozen  # every other held dataset stays held
 
 
 def test_auto_freeze_disabled_keeps_the_explicit_flags(world, monkeypatch):

@@ -31,6 +31,7 @@ Run::
 from __future__ import annotations
 
 import argparse
+import csv
 import re
 import sys
 from dataclasses import dataclass
@@ -321,6 +322,11 @@ def _naive_presentations(df: pd.DataFrame, dataset: str, odor: str) -> set[int]:
     }
 
 
+#: The skip reason of a comparison held because all three arms are frozen for
+#: figures; ``build_sweep`` keeps those comparisons' earlier stats rows.
+FROZEN_REASON = "frozen for figures (all three arms)"
+
+
 def sweep_comparisons(
     df: pd.DataFrame,
     *,
@@ -368,7 +374,7 @@ def sweep_comparisons(
             if frozen and {train, control, naive} <= frozen:
                 skipped.append({
                     **note, "naive": naive,
-                    "reason": "frozen for figures (all three arms)",
+                    "reason": FROZEN_REASON,
                 })
                 continue
             naive_present = _naive_presentations(frame, naive, odor)
@@ -890,6 +896,71 @@ def _frozen_datasets_from_config(config_path, *, thawed=(), thaw_all=False) -> f
     return frozenset(figure_frozen_from_raw(raw, thawed=thawed, thaw_all=thaw_all))
 
 
+def _comparison_key(cohort: str, odor: str, label: str) -> tuple[str, str, str]:
+    """``(cohort, odor, concentration)``: the stats rows of one sweep cell."""
+    concentration = parse_concentration(label)
+    conc = f"{concentration:g}%" if concentration is not None else ""
+    return str(cohort), str(odor), conc
+
+
+def _sweep_order(frame: pd.DataFrame, genotype: str) -> dict[tuple[str, str, str], int]:
+    """Each sweep cell's position, in the order ``sweep_comparisons`` visits them."""
+    if "fly_type" in frame.columns and genotype:
+        frame = frame[frame["fly_type"].astype(str).str.strip() == genotype]
+    order: dict[tuple[str, str, str], int] = {}
+    for train, _control, stem in training_control_pairs(frame):
+        train_rows = frame[frame["dataset_canon"].astype(str) == train]
+        for odor_display in sorted(set(train_rows["odor_display"].astype(str))):
+            key = _comparison_key(stem, base_odor(odor_display), odor_display)
+            order.setdefault(key, len(order))
+    return order
+
+
+def _with_held_stats(text: str, path: Path, held: set, order: dict) -> str:
+    """The stats *text*, plus the rows an earlier run wrote for *held* comparisons.
+
+    A comparison whose three arms are all frozen for figures is not redrawn and
+    its stats are not recomputed -- but its rows must not vanish from the table
+    either: under auto-freeze most cohorts sit out most nights, and a table
+    rebuilt from the drawn comparisons alone would shrink to whatever was
+    rebuilt. Line level, so carried rows keep their exact bytes, sorted back
+    into sweep order. A changed header carries nothing over.
+    """
+    if not held or not path.is_file():
+        return text
+    try:
+        old = path.read_text(encoding="utf-8").splitlines(keepends=True)
+    except OSError:
+        return text
+    new = text.splitlines(keepends=True)
+    if not old or old[0] != new[0]:
+        if old:
+            print("[naive_vs_trained] stats columns changed: held comparisons' rows "
+                  "are not carried over")
+        return text
+    header = next(csv.reader([new[0]]))
+    cols = [header.index(c) for c in ("cohort", "odor", "concentration", "presentation")]
+
+    def fields(line: str) -> tuple[tuple[str, str, str], int]:
+        f = next(csv.reader([line]))
+        try:
+            presentation = int(float(f[cols[3]]))
+        except ValueError:
+            presentation = 0
+        return (f[cols[0]], f[cols[1]], f[cols[2]]), presentation
+
+    carried = [line for line in old[1:] if line.strip() and fields(line)[0] in held]
+    if not carried:
+        return text
+
+    def position(line: str) -> tuple[int, int]:
+        key, presentation = fields(line)
+        return order.get(key, len(order)), presentation
+
+    print(f"[naive_vs_trained] keeping {len(carried)} stats row(s) of held comparisons")
+    return new[0] + "".join(sorted(new[1:] + carried, key=position))
+
+
 def build_sweep(
     *,
     predictions_csv: Path = PREDICTIONS_CSV,
@@ -955,7 +1026,16 @@ def build_sweep(
         if stats_frames else pd.DataFrame()
     )
     if not stats.empty:
-        stats.to_csv(out_dir / "naive_vs_trained_stats.csv", index=False)
+        stats_csv = out_dir / "naive_vs_trained_stats.csv"
+        held = {
+            _comparison_key(s["cohort"], s["odor"], s["label"])
+            for s in skipped if s.get("reason") == FROZEN_REASON
+        }
+        stats_csv.write_text(
+            _with_held_stats(stats.to_csv(index=False), stats_csv, held,
+                             _sweep_order(frame, genotype)),
+            encoding="utf-8",
+        )
     pd.DataFrame(skipped).to_csv(
         out_dir / "naive_vs_trained_skipped.csv", index=False
     )
