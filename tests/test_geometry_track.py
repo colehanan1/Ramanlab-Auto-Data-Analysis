@@ -174,6 +174,31 @@ def test_track_video_with_no_flies_returns_no_tables(video):
     assert res.tables == {} and res.frozen == [] and res.meta["n_frames_processed"] == 0
 
 
+def test_track_video_raises_when_the_video_opens_but_yields_no_frame(video, monkeypatch):
+    """A remux-damaged mp4 opens and then decodes nothing. That is a broken video, not a video without
+    flies: an empty result would let the caller record it as tracked and never look at it again."""
+    class NoFrames:
+        def isOpened(self):
+            return True
+
+        def get(self, prop):
+            return 0.0
+
+        def read(self):
+            return False, None
+
+        def release(self):
+            pass
+
+    def never(images, conf):
+        raise AssertionError("the detector must not be asked about a video without a single frame")
+
+    monkeypatch.setattr(T, "_open", lambda path: NoFrames())
+    with pytest.raises(RuntimeError, match="no decodable frame"):
+        T.track_video(video, _info(video), predict_fn=never, id_to_label=id_to_label_map(NAMES),
+                      settings=_settings(), gcfg=_gcfg())
+
+
 def test_slot_palette_matches_the_lab_per_fly_colours():
     import sys
     sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts" / "analysis"))

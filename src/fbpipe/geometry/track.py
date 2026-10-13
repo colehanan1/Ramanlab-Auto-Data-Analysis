@@ -288,7 +288,11 @@ def track_video(video_path: Path, info: TrialInfo, *, predict_fn: Callable[[list
                 id_to_label: Mapping[int, str], settings: Settings, gcfg: GeometrySettings,
                 max_frames: Optional[int] = None, annotated_path: Optional[Path] = None,
                 batch_size: Optional[int] = None) -> TrackResult:
-    """Track one trial video: warm-up -> frozen slots -> per-frame rows per slot."""
+    """Track one trial video: warm-up -> frozen slots -> per-frame rows per slot.
+
+    Raises ``RuntimeError`` for a video that cannot be opened or that yields no decodable frame. Both are broken
+    files, not videos without flies (those come back as an empty result), and the caller must not record them as
+    tracked."""
     t0 = time.time()
     video_path = Path(video_path)
     cap = _open(video_path)
@@ -308,6 +312,10 @@ def track_video(video_path: Path, info: TrialInfo, *, predict_fn: Callable[[list
             break
         warm.append(vg.to_model_frame(fr))
     cap.release()
+    if not warm:
+        # It opened but never produced a frame (a remux-damaged mp4 does this; warmup_frames >= 1 is validated).
+        # Without this the empty detections would read as "no flies" and the trial would be kept as done for good.
+        raise RuntimeError(f"no decodable frame in video: {video_path}")
     # Chunked like the main loop: a dynamic TensorRT engine rejects any batch above its profile.
     warm_results: List[object] = []
     for i in range(0, len(warm), batch_size):

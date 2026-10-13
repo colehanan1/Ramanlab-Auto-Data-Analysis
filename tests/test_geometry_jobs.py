@@ -18,6 +18,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Optional
 
+import cv2
 import pandas as pd
 import pytest
 
@@ -30,7 +31,7 @@ from fbpipe.geometry import stats as ST
 from fbpipe.geometry.config import GeometrySettings
 from fbpipe.geometry.trial_meta import trial_name_from_video
 from fbpipe.utils.frozen_folders import FolderRule
-from test_geometry_track import NAMES, fake_predict, video  # noqa: F401  (``video``: the synthetic 40-frame clip)
+from test_geometry_track import H, NAMES, W, fake_predict, video  # noqa: F401  (``video``: the synthetic 40-frame clip)
 
 DATASET = "IAA-X"
 BATCH = "october_07_batch_2"
@@ -50,8 +51,9 @@ def trial_stem(n: int, batch: str = BATCH) -> str:
 def add_trial(folder: Path, template: Path, batch: str, kind: str, n: int, odor: str, *, day: str,
               video: Optional[str] = "avi") -> Path:
     """One trial's sidecars in ``folder`` (the csv is the template's: ActiveOFM on for frames 10-19) and, per
-    ``video``, its video: "avi" a real 40-frame clip, "corrupt" a 0-byte mp4, None no video at all. The
-    video path is returned. (Names are built by hand: ``with_suffix`` would eat the dot of ``Hexanol-0.1``.)"""
+    ``video``, its video: "avi" a real 40-frame clip, "corrupt" a 0-byte mp4, "no_frames" a header-only avi that
+    opens but has no decodable frame, None no video at all. The video path is returned. (Names are built by
+    hand: ``with_suffix`` would eat the dot of ``Hexanol-0.1``.)"""
     folder.mkdir(parents=True, exist_ok=True)
     base = f"output_{batch}_{kind}_{n}_{odor}_{day}_{10 + n:02d}0000"
     shutil.copyfile(template.with_suffix(".csv"), folder / f"{base}.csv")
@@ -61,6 +63,8 @@ def add_trial(folder: Path, template: Path, batch: str, kind: str, n: int, odor:
         shutil.copyfile(template, folder / f"{base}.avi")
     elif video == "corrupt":
         (folder / f"{base}.mp4").write_bytes(b"")
+    elif video == "no_frames":
+        cv2.VideoWriter(str(folder / f"{base}.avi"), cv2.VideoWriter_fourcc(*"MJPG"), 40.0, (W, H)).release()
     return folder / f"{base}.{'mp4' if video == 'corrupt' else 'avi'}"
 
 
@@ -89,7 +93,8 @@ class Tree:
     trial 3 of BATCH, whose video exists only there. ``secured`` holds trials 1 and 2 of BATCH (video + sidecars) and
     a stale video of the out-of-window september batch. ``flys_Abdomen`` (the out base) starts empty."""
 
-    def __init__(self, root: Path, template: Path, *, corrupt: Optional[int] = None, folder: str = DATASET):
+    def __init__(self, root: Path, template: Path, *, corrupt: Optional[int] = None,
+                 no_frames: Optional[int] = None, folder: str = DATASET):
         self.root, self.template = root, template
         self.folder = folder                                  # the dataset's directory name on disk
         self.prod, self.secured, self.out_base = root / "flys_New", root / "secured", root / "flys_Abdomen"
@@ -106,7 +111,7 @@ class Tree:
             add_trial(self.batch_dir, template, BATCH, kind, n, odor, day=STAMP, video=None if on_mirror else "avi")
             if on_mirror:
                 add_trial(self.secured_batch, template, BATCH, kind, n, odor, day=STAMP,
-                          video="corrupt" if n == corrupt else "avi")
+                          video="corrupt" if n == corrupt else "no_frames" if n == no_frames else "avi")
         add_trial(self.secured / folder / "september_30_batch_1", template, "september_30_batch_1", "pretest", 1,
                   "Citral-1", day="20260930")
 
@@ -394,6 +399,41 @@ def test_a_corrupt_video_is_logged_and_counted_and_the_other_trials_still_tracke
     assert S.pending_trials(tree.settings(), tree.gcfg()) == 1
     again = S.run_track(tree.settings(), tree.gcfg())
     assert (again["tracked"], again["skipped"], again["failed"]) == (0, 2, 1)
+
+
+def test_a_video_that_opens_but_yields_no_frame_is_failed_and_retried_not_tracked(tmp_path, video, fake_model, capsys):
+    tree = Tree(tmp_path, video, no_frames=2)
+    clip = next(tree.secured_batch.glob("*_pretest_2_*.avi"))
+    cap = cv2.VideoCapture(str(clip))
+    assert cap.isOpened() and not cap.read()[0], "precondition: the clip opens, yet no frame can be decoded"
+    cap.release()
+    settings, gcfg = tree.settings(), tree.gcfg()
+    result = S.run_track(settings, gcfg)
+    assert (result["tracked"], result["skipped"], result["failed"]) == (2, 0, 1)
+    line = next(ln for ln in capsys.readouterr().out.splitlines() if ln.startswith("[GEOMETRY] failed "))
+    assert "_pretest_2_" in line and "no decodable frame" in line
+    assert tree.meta(1).is_file() and tree.meta(3).is_file()
+    assert not tree.meta(2).exists(), "no meta, so the trial is not 'done'"
+    assert list(C.iter_geometry_tables(tree.trial_dir(2))) == []
+    assert S.pending_trials(settings, gcfg) == 1
+    shutil.copyfile(video, clip)                              # the file is repaired or remuxed
+    again = S.run_track(settings, gcfg)
+    assert (again["tracked"], again["skipped"], again["failed"]) == (1, 2, 0)
+    assert tree.meta(2).is_file() and S.pending_trials(settings, gcfg) == 0
+
+
+def test_a_readable_video_with_no_flies_is_still_recorded_as_tracked(tree, fake_model, monkeypatch):
+    # Every frame decodes; the detector just finds nothing (an empty arena). That is a result, not a failure.
+    monkeypatch.setattr(D, "make_predict_fn",
+                        lambda model, **kw: lambda images, conf: [SimpleNamespace(obb=None) for _ in images])
+    settings, gcfg = tree.settings(), tree.gcfg()
+    result = S.run_track(settings, gcfg)
+    assert (result["tracked"], result["skipped"], result["failed"]) == (3, 0, 0)
+    for n in (1, 2, 3):
+        meta = json.loads(tree.meta(n).read_text(encoding="utf-8"))
+        assert meta["slots"] == [] and meta["n_frames_processed"] == 0 and meta["warmup"]["frames_used"] == 5
+        assert list(C.iter_geometry_tables(tree.trial_dir(n))) == []
+    assert S.pending_trials(settings, gcfg) == 0
 
 
 def test_normalize_wide_and_figures_carry_on_past_a_failed_video(tmp_path, video, fake_model):
