@@ -561,7 +561,7 @@ def main(argv=None) -> int:
     fig_dir = Path(fig_dir).expanduser()
     stats = FIG.compute_stats(fly_trial, fly, n_perm=mcfg.n_permutations)
     figures = FIG.render_figures(fly_trial, fly, fig_dir, n_perm=mcfg.n_permutations, stats=stats)
-    report = FIG.write_report(fly_trial, fly, exclusions, stats, fig_dir)
+    report = FIG.write_report(fly_trial, fly, exclusions, stats, fig_dir, figures=figures)
     print(f"[MOUNTING] {len(figures)} figure(s) and {report.name} -> {fig_dir}")
     return 0
 

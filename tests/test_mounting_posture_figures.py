@@ -9,6 +9,11 @@ Rules pinned here, on synthetic fly-trial / fly tables (the fly table is always 
   the within-fly permutation; every p is labelled "uncorrected";
 * displayed rates pool trials (a tercile of one 1-of-1 fly and one 0-of-9 fly is 10 %, never 50 %), and trials of a fly
   whose identity drifted never enter a pooled bar;
+* the response analyses use only scored trials (pretest + testing rows with a score), and the within-fly test shuffles
+  the state inside each fly's trials of one trial type, so a pretest-vs-testing difference cannot make its p small;
+* a comparison with fewer than 3 flies to compare is "Not enough data to tell" (never "No clear difference" or "Yes"),
+  and no figure or report says "1 flies" or "+nan points";
+* a figure that fails to build leaves no stale PNG behind, and the report names every figure that was not drawn;
 * titles are the question, and the plain-language answer is computed from the data (never hard-coded);
 * style: blue per-fly points, orange ``//`` for held / spontaneous states, filled marker = held back and hollow = held
   down, thin bars, no twin axes, no text over text, and the global matplotlib style is left alone;
@@ -260,23 +265,58 @@ def test_the_tercile_p_is_the_per_fly_stratified_permutation_of_response_rate_ag
     assert t["n_flies"] == 32
 
 
-def test_the_baseline_state_p_is_the_within_fly_permutation(data):
+def phased(df: pd.DataFrame) -> pd.DataFrame:
+    """The key the within-fly test shuffles inside: one group per fly and trial type."""
+    return df.assign(fly_phase=df["fly_id"] + "|" + df["trial_type"])
+
+
+def test_the_baseline_state_p_is_the_within_fly_permutation_inside_each_fly_and_trial_type(data):
     ft, base = data.ft, data.stats["baseline"]
-    scored = ft[ft["responded"].notna() & ft["held_subtype"].notna()].copy()
-    scored["held_any"] = (scored["held_subtype"] != "retracted").astype(float)
-    diff, p = M.within_fly_permutation(scored, state="held_any", outcome="responded", fly="fly_id", n=N_PERM, seed=0)
+    scored = phased(ft[ft["score"].notna() & ft["held_subtype"].notna()])
+    scored = scored.assign(held_any=(scored["held_subtype"] != "retracted").astype(float))
+    diff, p = M.within_fly_permutation(scored, state="held_any", outcome="responded", fly="fly_phase", n=N_PERM, seed=0)
     assert base["proboscis"]["diff"] == pytest.approx(diff) and base["proboscis"]["p_perm"] == p
-    spont = ft[ft["responded"].notna() & ft["spont_per_any"].notna()]
-    diff, p = M.within_fly_permutation(spont, state="spont_per_any", outcome="responded", fly="fly_id", n=N_PERM, seed=0)
+    spont = phased(ft[ft["score"].notna() & ft["spont_per_any"].notna()])
+    diff, p = M.within_fly_permutation(spont, state="spont_per_any", outcome="responded", fly="fly_phase", n=N_PERM, seed=0)
     assert base["spontaneous"]["diff"] == pytest.approx(diff) and base["spontaneous"]["p_perm"] == p
 
 
-def test_the_baseline_test_counts_only_the_flies_seen_in_both_states(data):
+def test_the_baseline_test_counts_the_flies_and_groups_seen_in_both_states(data):
     ft, test = data.ft, data.stats["baseline"]["spontaneous"]
-    use = ft[ft["responded"].notna() & ft["spont_per_any"].notna()]
-    both = use.groupby("fly_id")["spont_per_any"].nunique()
-    assert test["n_flies_both"] == int((both == 2).sum())
-    assert test["n_flies_both"] < use["fly_id"].nunique()                        # some flies were seen in one state only
+    use = phased(ft[ft["score"].notna() & ft["spont_per_any"].notna()])
+    both = use.groupby("fly_phase")["spont_per_any"].nunique()
+    in_both = use[use["fly_phase"].isin(both[both == 2].index)]
+    assert test["n_groups_both"] == int((both == 2).sum())
+    assert test["n_flies_both"] == in_both["fly_id"].nunique() < use["fly_id"].nunique()    # some flies never show both
+    assert test["n_trials_both"] == len(in_both)
+
+
+def phase_confound(n_flies=12) -> pd.DataFrame:
+    """Every fly has 16 pretest and 16 testing trials. The state (held out / spontaneous PER) and the response are both far
+    more common in testing than in pretest, but inside each trial type they are exactly unrelated (25 % / 25 % and
+    75 % / 75 %), so trial type alone drives the pooled difference of +25 points."""
+    rows = []
+    for k in range(n_flies):
+        for phase, n_on, n_on_responding, n_off_responding in (("pretest", 4, 1, 3), ("testing", 12, 9, 3)):
+            for t in range(16):
+                on = t < n_on
+                responded = t < n_on_responding if on else t - n_on < n_off_responding
+                rows.append(row(f"fly{k + 1}", trial_type=phase, trial_index=t, held_subtype="held_down" if on else "retracted",
+                                spont_per_any=float(on), responded=float(responded), score=3.0 * responded,
+                                trial_body_pitch_deg=float(k)))
+    return trial_table(rows)
+
+
+def test_a_trial_type_that_drives_both_state_and_response_does_not_give_a_small_p():
+    ft = phase_confound()
+    fly = fly_table(ft)
+    naive = ft.assign(held_any=(ft["held_subtype"] != "retracted").astype(float))
+    assert M.within_fly_permutation(naive, state="held_any", outcome="responded", fly="fly_id", n=2000, seed=0)[1] < 0.01
+    base = F.compute_stats(ft, fly, n_perm=2000, seed=0)["baseline"]    # shuffling inside a fly alone would call this a link
+    for key in ("proboscis", "spontaneous"):
+        assert base[key]["diff"] == pytest.approx(0.25), key                      # the pooled difference is still there ...
+        assert base[key]["p_perm"] > 0.3 and base[key]["verdict"] == "No clear difference", key     # ... but it is not an effect
+        assert base[key]["n_flies_both"] == 12 and base[key]["n_groups_both"] == 24
 
 
 def hand_built_states():
@@ -307,6 +347,52 @@ def test_a_held_forward_trial_gets_its_own_bar_and_counts_as_held_in_the_test():
     ft.loc[ft.index[0], "held_subtype"] = "held_forward"
     stats = F.compute_stats(ft, fly_table(ft), n_perm=N_PERM)["baseline"]["proboscis"]
     assert [b["state"] for b in stats["bars"]] == ["retracted", "held_down", "held_back", "held_forward"]
+
+
+def sparse_states(n_both: int) -> pd.DataFrame:
+    """Six flies; ``n_both`` of them are seen both held out and retracted (the response follows the state exactly), the others
+    only retracted, so only ``n_both`` flies can be compared."""
+    rows = []
+    for k in range(6):
+        for t in range(20):
+            on = k < n_both and t % 2 == 0
+            rows.append(row(f"fly{k + 1}", trial_index=t, held_subtype="held_down" if on else "retracted",
+                            spont_per_any=float(on), responded=float(on), score=3.0 * on, trial_body_pitch_deg=float(k)))
+    return trial_table(rows)
+
+
+@pytest.mark.parametrize("n_both, answer", [(0, "Not enough data to tell"), (1, "Not enough data to tell"),
+                                            (2, "Not enough data to tell"),
+                                            (3, "Yes — trials with the proboscis held out respond more often")])
+def test_a_baseline_comparison_needs_three_flies_that_have_both_states(n_both, answer):
+    ft = sparse_states(n_both)
+    pro = F.compute_stats(ft, fly_table(ft), n_perm=2000, seed=0)["baseline"]["proboscis"]
+    assert pro["n_flies_both"] == n_both and pro["verdict"] == answer
+    if n_both == 2:
+        assert pro["p_perm"] < 0.05                                  # the p alone would have said "Yes": the gate is the flies
+
+
+@pytest.mark.parametrize("n_both, wording", [(0, "no fly was seen in both states"),
+                                             (1, "1 fly has both states (needs at least 3)"),
+                                             (2, "2 flies have both states (needs at least 3)")])
+def test_the_baseline_note_says_one_fly_not_one_flies_and_never_nan(n_both, wording, tmp_path):
+    ft = sparse_states(n_both)
+    fly = fly_table(ft)
+    stats = F.compute_stats(ft, fly, n_perm=N_PERM)
+    figure = all_text(F.build_figures(ft, fly, stats)["baseline_state_vs_response"])
+    report = F.write_report(ft, fly, EXCLUSIONS, stats, tmp_path).read_text(encoding="utf-8")
+    assert wording in figure and "Not enough data to tell" in figure
+    assert ("fewer than 3 flies" in report) == (n_both > 0) and "Not enough data to tell" in report
+    for text in (figure, report):
+        assert not re.search(r"(?i)\bnan\b|\b1 flies\b", text), text
+
+
+def test_the_report_says_one_fly_for_a_single_fly_and_one_stratum_for_a_single_stratum(tmp_path):
+    ft = sparse_states(1)
+    fly = fly_table(ft)
+    report = F.write_report(ft, fly, EXCLUSIONS, F.compute_stats(ft, fly, n_perm=N_PERM), tmp_path).read_text(encoding="utf-8")
+    assert re.search(r"\b1 fly\b", report) and re.search(r"\b1 stratum\b", report)
+    assert not re.search(r"\b1 flies\b|\b1 strata\b", report)
 
 
 def test_the_pull_in_rates_pool_events_over_minutes_for_held_and_retracted_trials():
@@ -353,6 +439,40 @@ def test_trials_of_a_fly_whose_identity_drifted_never_enter_a_pooled_bar(data):
     assert stats["n_trials"] == data.stats["n_trials"] and stats["n_fly_trials"] == len(both)
 
 
+def counts(stats: dict) -> dict:
+    """Trials, flies and responders of every bar the response analyses draw (no NaN, so two of them compare with ==)."""
+    bars = [(b["n_trials"], b["n_flies"], b["n_responded"]) for b in stats["tercile"]["bins"]]
+    for panel in stats["baseline"].values():
+        bars += [(b["state"], b["n_trials"], b["n_flies"], b["n_responded"]) for b in panel["bars"]]
+    return bars
+
+
+def test_only_scored_pretest_and_testing_trials_enter_the_response_bars():
+    extra = trial_table([
+        row("fly2", trial_type="training", trial_index=0, score=3.0, responded=1.0, held_subtype="held_down",
+            spont_per_any=1.0, trial_body_pitch_deg=-2.0),                               # a training row that carries a score
+        row("fly2", trial_type="pretest", trial_index=0, score=np.nan, responded=1.0, held_subtype="held_down",
+            spont_per_any=1.0, trial_body_pitch_deg=-2.0),                               # a response with no score behind it
+        row("fly2", trial_type="testing", trial_index=0, score=3.0, responded=np.nan, held_subtype="held_down",
+            spont_per_any=1.0, trial_body_pitch_deg=-2.0)])                              # a score that was never binarised
+    for build in (hand_built_terciles, hand_built_states):
+        ft = build()
+        both = pd.concat([ft, extra], ignore_index=True)
+        before = F.compute_stats(ft, fly_table(ft), n_perm=N_PERM)
+        after = F.compute_stats(both, fly_table(both), n_perm=N_PERM)
+        assert counts(after) == counts(before), build.__name__
+    assert any(c[1] for c in counts(after) if len(c) == 4), "the states set has bars"      # so the comparison above has teeth
+
+
+def test_the_response_figures_and_the_report_say_pretest_plus_testing_trials(figures, report):
+    tercile, baseline = figures["response_by_mount_pitch_tercile"], figures["baseline_state_vs_response"]
+    assert "pretest + testing" in squash(" ".join(t.get_text() for t in tercile.texts))          # in the subtitle ...
+    assert "pretest + testing" in tercile.axes[0].get_xlabel()                                      # ... and on the axis
+    assert "pretest + testing" in squash(" ".join(t.get_text() for t in baseline.texts))
+    header = report.split("## Exclusions")[0]
+    assert "pretest + testing" in header and "trial type" in header and "scored trials" in header
+
+
 def test_trials_without_a_score_or_a_known_state_are_not_in_the_baseline_bars(data):
     ft, base = data.ft, data.stats["baseline"]
     n_state = int((ft["responded"].notna() & ft["held_subtype"].notna()).sum())
@@ -392,6 +512,10 @@ def test_p_values_are_printed_short_on_figures_and_longer_in_the_report():
     assert F.p_text(0.6123) == "p=0.61" and F.p_text(0.0123) == "p=0.012" and F.p_text(0.0004) == "p<0.001"
     assert F.p_text(float("nan")) == "p=n/a"
     assert F.p_text(0.0123, digits=4) == "p=0.0123" and F.p_text(0.00004, digits=4) == "p<0.0001"
+
+
+def test_a_missing_difference_is_n_a_never_nan_points():
+    assert F._points(0.0941, 1) == "+9.4 points" and F._points(-0.2) == "-20 points" and F._points(float("nan")) == "n/a"
 
 
 def test_the_n_labels_name_trials_and_flies():
@@ -713,14 +837,15 @@ def test_a_single_rig_single_fly_cohort_does_not_crash_the_figures(tmp_path):
     assert tuple(written) == NAMES
 
 
-def test_one_failing_figure_is_logged_and_does_not_stop_the_others(data, tmp_path, monkeypatch, caplog):
+def test_one_failing_figure_is_logged_with_its_traceback_and_does_not_stop_the_others(data, tmp_path, monkeypatch, caplog):
     def boom(*args, **kwargs):
         raise RuntimeError("synthetic failure")
     monkeypatch.setitem(F.BUILDERS, "mount_pitch_vs_held_out", boom)
     with caplog.at_level(logging.WARNING):
         written = F.render_figures(data.ft, data.fly, tmp_path, n_perm=N_PERM)
     assert tuple(written) == tuple(n for n in NAMES if n != "mount_pitch_vs_held_out")
-    assert "mount_pitch_vs_held_out" in caplog.text and "synthetic failure" in caplog.text
+    assert "mount_pitch_vs_held_out" in caplog.text and "RuntimeError: synthetic failure" in caplog.text
+    assert "Traceback (most recent call last)" in caplog.text                       # where it came from, not just what it said
     assert not (tmp_path / "mount_pitch_vs_held_out.png").exists()
 
 
@@ -820,17 +945,36 @@ def test_the_report_gives_the_pooled_counts_behind_every_bar(report, data):
         assert F.n_label(g["n_trials"], g["n_flies"]) in report
 
 
-def test_the_report_names_a_figure_that_is_missing_from_its_folder(data, tmp_path, monkeypatch):
+def test_a_figure_that_fails_to_build_leaves_no_stale_picture_and_the_report_names_it(data, tmp_path, monkeypatch):
+    first = F.render_figures(data.ft, data.fly, tmp_path, n_perm=N_PERM, stats=data.stats)
+    stale = tmp_path / "mount_pitch_vs_held_out.png"
+    assert tuple(first) == NAMES and stale.is_file()                                # last run's picture is on disk
     def boom(*args, **kwargs):
         raise RuntimeError("synthetic failure")
     monkeypatch.setitem(F.BUILDERS, "mount_pitch_vs_held_out", boom)
-    F.render_figures(data.ft, data.fly, tmp_path, n_perm=N_PERM, stats=data.stats)
-    text = F.write_report(data.ft, data.fly, EXCLUSIONS, data.stats, tmp_path).read_text(encoding="utf-8")
+    again = F.render_figures(data.ft, data.fly, tmp_path, n_perm=N_PERM, stats=data.stats)
+    assert tuple(again) == tuple(n for n in NAMES if n != "mount_pitch_vs_held_out")
+    assert not stale.exists()                                                       # ... and is gone, not vouched for
+    assert sorted(p.stem for p in tmp_path.glob("*.png")) == sorted(again)
+    text = F.write_report(data.ft, data.fly, EXCLUSIONS, data.stats, tmp_path, figures=again).read_text(encoding="utf-8")
     assert "Figures missing from this folder:** `mount_pitch_vs_held_out.png` (" in text
     monkeypatch.undo()
-    F.render_figures(data.ft, data.fly, tmp_path, n_perm=N_PERM, stats=data.stats)
+    fixed = F.render_figures(data.ft, data.fly, tmp_path, n_perm=N_PERM, stats=data.stats)
+    assert tuple(fixed) == NAMES and stale.is_file()
+    text = F.write_report(data.ft, data.fly, EXCLUSIONS, data.stats, tmp_path, figures=fixed).read_text(encoding="utf-8")
+    assert "Figures missing" not in text
+
+
+def test_a_report_written_without_the_list_of_figures_makes_no_claim_about_them(data, tmp_path):
     text = F.write_report(data.ft, data.fly, EXCLUSIONS, data.stats, tmp_path).read_text(encoding="utf-8")
     assert "Figures missing" not in text
+
+
+def test_rendering_removes_only_the_six_figures_of_a_previous_run(data, tmp_path):
+    (tmp_path / "notes.png").write_bytes(b"mine")
+    (tmp_path / "report.md").write_text("old", encoding="utf-8")
+    F.render_figures(data.ft, data.fly, tmp_path, n_perm=N_PERM, stats=data.stats)
+    assert (tmp_path / "notes.png").read_bytes() == b"mine" and (tmp_path / "report.md").read_text(encoding="utf-8") == "old"
 
 
 def test_the_report_has_a_mounting_section_that_comes_after_the_exclusions(report):

@@ -1468,6 +1468,19 @@ def test_main_draws_the_six_figures_and_writes_the_report_beside_them(cli):
     assert "no new-glue fly-trials in scope" not in report
 
 
+def test_a_figure_that_fails_in_main_leaves_no_stale_picture_and_the_report_names_it(cli, monkeypatch):
+    figs = cli.tree.root / "figs_out"
+    assert run_main(cli, "--predictions-csv", str(cli.preds)) == 0
+    assert {p.stem for p in figs.glob("*.png")} == FIGURES and "Figures missing" not in (figs / "report.md").read_text("utf-8")
+
+    def broken(*args, **kwargs):
+        raise RuntimeError("synthetic failure")
+    monkeypatch.setitem(MP.FIG.BUILDERS, "mount_pitch_per_fly", broken)
+    assert run_main(cli, "--predictions-csv", str(cli.preds)) == 0               # a bad figure never fails the run
+    assert {p.stem for p in figs.glob("*.png")} == FIGURES - {"mount_pitch_per_fly"}      # last run's picture is gone
+    assert "Figures missing from this folder:** `mount_pitch_per_fly.png`" in (figs / "report.md").read_text("utf-8")
+
+
 def test_main_counts_the_pending_trials_in_the_exclusions_and_the_report(cli, monkeypatch):
     seen = []
     monkeypatch.setattr(MP, "pending_trials", lambda settings, scope: seen.append(scope) or 7)
