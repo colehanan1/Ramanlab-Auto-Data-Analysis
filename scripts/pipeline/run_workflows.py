@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import hashlib
 import json
 import logging
@@ -837,6 +838,13 @@ def _write_freeze_cache(
             print(f"[FREEZE] Could not cache {dataset}/{wide_block}: {exc}")
 
 
+def _csv_field(line: bytes, at: int) -> Optional[str]:
+    try:
+        return next(csv.reader([line.decode("utf-8")]))[at]
+    except (IndexError, StopIteration, UnicodeDecodeError):
+        return None
+
+
 def _read_walked_rows(paths, names) -> list[pd.DataFrame]:
     """The rows of datasets *names* (None: every row) in each wide output.
 
@@ -846,6 +854,13 @@ def _read_walked_rows(paths, names) -> list[pd.DataFrame]:
     written value, and a slice holding that value would splice back a
     different last digit than the walk wrote -- the frozen night's table would
     not be byte-identical to the night that built it.
+
+    build_wide_csv writes ``dataset`` first. Were it another column, the
+    leading-field pick would match nothing and every walked dataset would be
+    cached empty, so each line's field is read with the csv module instead
+    (slower, same rows); an output with no ``dataset`` column raises, and the
+    caller caches nothing -- no dataset is recorded frozen from rows that
+    could not be told apart.
     """
     import io
 
@@ -863,7 +878,15 @@ def _read_walked_rows(paths, names) -> list[pd.DataFrame]:
             if keys is None:
                 body = fh.read()
             else:
-                body = b"".join(line for line in fh if line.startswith(keys))
+                columns = next(csv.reader([header.decode("utf-8-sig")]), [])
+                if "dataset" not in columns:
+                    raise ValueError(f"{p.name} has no 'dataset' column")
+                at = columns.index("dataset")
+                if at == 0:
+                    body = b"".join(line for line in fh if line.startswith(keys))
+                else:
+                    wanted = {str(n) for n in names}
+                    body = b"".join(line for line in fh if _csv_field(line, at) in wanted)
         if body:
             frames.append(pd.read_csv(io.BytesIO(header + body), float_precision="round_trip"))
     return frames

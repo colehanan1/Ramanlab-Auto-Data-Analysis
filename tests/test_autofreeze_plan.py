@@ -71,6 +71,14 @@ def _config(tmp_path, datasets, overrides, **top):
     return path
 
 
+def _rows(ds, batches):
+    return pd.DataFrame({"dataset": [ds] * len(batches), "fly": list(batches),
+                         "fly_number": [1] * len(batches), "trial_type": ["testing"] * len(batches),
+                         "trial_label": ["testing_1_hexanol"] * len(batches), "frozen": [False] * len(batches),
+                         "trace_len": [2] * len(batches), "dir_val_0": [0.1] * len(batches),
+                         "dir_val_1": [0.2] * len(batches)})
+
+
 class Scene:
     def __init__(self, tmp_path, monkeypatch, *, overrides=None, datasets=(FROZEN, PARTNER, LIVE), **top):
         isolate_env(monkeypatch)
@@ -101,12 +109,13 @@ class Scene:
         return rw._freeze_fingerprint(self.settings, ds, **kw)
 
     def seed_slice(self, ds, rows=None, fingerprint=None, run=None):
-        """Cache *ds*'s rows; *run* stamps them as written by that run's walk."""
+        """Cache *ds*'s rows; *run* stamps them as written by that run's walk.
+
+        By default one row per processed batch folder, as a real build emits.
+        """
         if rows is None:
-            rows = pd.DataFrame({"dataset": [ds], "fly": [BATCH], "fly_number": [1],
-                                 "trial_type": ["testing"], "trial_label": ["testing_1_hexanol"],
-                                 "frozen": [False], "trace_len": [2],
-                                 "dir_val_0": [0.1], "dir_val_1": [0.2]})
+            batches = sorted(af.processed_batches(self.root(ds)) | {BATCH}, key=lambda b: (b != BATCH, b))
+            rows = _rows(ds, batches)
         for block, names, kw in self.blocks:
             if ds in names:
                 _freeze.save_slice(self.settings.cache_dir, block, ds, rows,
@@ -181,7 +190,7 @@ def test_adoption_needs_every_processed_batch_in_the_cached_rows(scene):
     """A batch YOLO processed after the dataset was frozen never reached its
     rows: something new was added, so it is rebuilt, not adopted."""
     _batch(scene.root(FROZEN), "august_14_batch_1_rig_3")
-    scene.seed_slice(FROZEN)
+    scene.seed_slice(FROZEN, rows=_rows(FROZEN, [BATCH]))  # cached before that batch
     scene.seed_slice(PARTNER)
     d = scene.plan().decisions[FROZEN]
     assert d.decision == "thawed"
@@ -574,6 +583,66 @@ def test_an_empty_dataset_freezes_with_an_empty_cache(tmp_path, monkeypatch):
     plan.commit(combined_ran=True)
     assert s.record("RandomPanel-Control-24-10")["state"] == "frozen"
     assert s.plan(pairs=[]).decisions["RandomPanel-Control-24-10"].decision == "frozen"
+
+
+# --- a rebuild whose rows went missing is not recorded frozen --------------------------------
+
+
+def _rebuild_with(scene, ds, rows):
+    plan = scene.plan()
+    assert plan.decisions[ds].decision == "thawed"
+    scene.seed_slice(ds, rows=rows, run=plan.run_id)
+    return plan, plan.commit(combined_ran=True)
+
+
+def _line(lines, ds):
+    return next(line for line in lines if line.startswith(f"[FREEZE] {ds}:"))
+
+
+NEW_BATCH = "august_14_batch_1_rig_3"
+
+
+def test_a_rebuild_whose_rows_miss_a_processed_batch_stays_thawing(scene):
+    """combine logs and skips a trial it cannot read, and build_wide_csv drops
+    unreadable trials, so one bad night can lose a batch's rows. Frozen like
+    that, they would stay lost until new data arrived -- base re-walked a live
+    dataset every night. The rebuild is not recorded frozen and runs again;
+    after MAX_LOST_REBUILDS such rebuilds the dataset freezes, with a notice."""
+    assert af.MAX_LOST_REBUILDS == 2
+    _settle(scene)
+    _batch(scene.root(LIVE), NEW_BATCH)
+    _, lines = _rebuild_with(scene, LIVE, _rows(LIVE, [BATCH]))
+    assert "NOT refrozen" in _line(lines, LIVE) and NEW_BATCH in _line(lines, LIVE)
+    rec = scene.record(LIVE)
+    assert rec["state"] == "thawing" and rec["lost_rebuilds"] == 1
+    plan, lines = _rebuild_with(scene, LIVE, _rows(LIVE, [BATCH]))
+    assert "missed 1 processed batch folder(s)" in plan.decisions[LIVE].reasons[0]
+    rec = scene.record(LIVE)
+    assert rec["state"] == "frozen" and "lost_rebuilds" not in rec
+    assert _line(lines, LIVE).startswith(f"[FREEZE] {LIVE}: recorded frozen after its rebuild")
+    notice = next(line for line in lines if "recorded although" in line)
+    assert NEW_BATCH in notice and "after 2 rebuilds" in notice and f"--thaw {LIVE}" in notice
+    assert scene.plan().decisions[LIVE].decision == "frozen"
+
+
+def test_an_empty_rebuild_of_a_dataset_with_processed_trials_stays_thawing(scene):
+    """A wide build that emitted none of its rows caches an empty slice."""
+    _settle(scene)
+    _batch(scene.root(LIVE), NEW_BATCH)
+    _, lines = _rebuild_with(scene, LIVE, pd.DataFrame())
+    assert "NOT refrozen" in _line(lines, LIVE) and "2 processed batch folder(s)" in _line(lines, LIVE)
+    assert scene.record(LIVE)["state"] == "thawing"
+
+
+def test_a_complete_rebuild_after_a_lossy_one_is_recorded_frozen(scene):
+    _settle(scene)
+    _batch(scene.root(LIVE), NEW_BATCH)
+    _rebuild_with(scene, LIVE, _rows(LIVE, [BATCH]))
+    assert scene.record(LIVE)["lost_rebuilds"] == 1
+    _, lines = _rebuild_with(scene, LIVE, _rows(LIVE, [BATCH, NEW_BATCH]))
+    rec = scene.record(LIVE)
+    assert rec["state"] == "frozen" and "lost_rebuilds" not in rec
+    assert _line(lines, LIVE).startswith(f"[FREEZE] {LIVE}: recorded frozen after its rebuild")
 
 
 # --- cascades are reported, never acted on ----------------------------------------------------

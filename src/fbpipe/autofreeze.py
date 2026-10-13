@@ -66,6 +66,13 @@ PLAN_ENV = "FBPIPE_FREEZE_PLAN"
 #: and the video is reported. The secure cleanup keeps it either way.
 MAX_YOLO_ATTEMPTS = 2
 
+#: Rebuilds in a row whose cached rows miss a processed batch folder (combine
+#: logs and skips a trial it cannot read; build_wide_csv drops unreadable
+#: trials). Each is left ``thawing`` and rebuilt; the last one is recorded
+#: frozen anyway, with a notice, so rows that are truly not there do not
+#: rebuild the dataset every night.
+MAX_LOST_REBUILDS = 2
+
 #: Video containers are never inputs (``yolo_discovery`` decides pending videos).
 _VIDEO_SUFFIXES = (".mp4", ".avi", ".h264", ".mov", ".mkv", ".mpg", ".mpeg", ".m4v")
 
@@ -619,6 +626,22 @@ class Plan:
             if not ok:
                 lines.append(f"[FREEZE] {d.dataset}: NOT refrozen - cached rows not current ({why}); rebuilt next run")
                 continue
+            # A batch YOLO processed must have rows; a rebuild that lost them
+            # is rebuilt again rather than frozen without them.
+            missing = sorted(processed_batches(d.root) - _slice_flies(self, d.dataset)) \
+                if self.consulted(d.dataset) else []
+            tries = (int(d.record.get("lost_rebuilds") or 0) if isinstance(d.record, dict) else 0) + 1
+            lost = ""
+            if missing:
+                lost = (f"its rebuilt rows miss {len(missing)} processed batch folder(s) "
+                        f"({', '.join(missing[:3])}{', ...' if len(missing) > 3 else ''})")
+                if tries < MAX_LOST_REBUILDS:
+                    record = self._thawing_record(d, d.reasons)
+                    record.update(lost_rebuilds=tries, lost_batches=missing)
+                    save_record(self.scope, d.dataset, record)
+                    lines.append(f"[FREEZE] {d.dataset}: NOT refrozen - {lost} (a failed combine?); "
+                                 f"rebuilt next run ({tries}/{MAX_LOST_REBUILDS})")
+                    continue
             rows = self._rows_by_type(d.dataset)
             previous = (d.record or {}).get("rows") if isinstance(d.record, dict) else None
             record = {
@@ -647,6 +670,9 @@ class Plan:
                              f"removing data: false freezes it with no rebuild{change}")
             else:
                 lines.append(f"[FREEZE] {d.dataset}: recorded frozen after its rebuild{change}")
+            if lost:
+                lines.append(f"[FREEZE] {d.dataset}: recorded although {lost} after {tries} rebuilds -- check "
+                             f"those batches' trials, then --thaw {d.dataset}")
         return lines
 
     # -- reporting -----------------------------------------------------------
@@ -900,6 +926,11 @@ def _auto_decision(plan: Plan, d: Decision, record: Optional[dict], inputs: dict
     if record.get("schema") != RECORD_SCHEMA or record.get("state") == "unreadable":
         return False, "freeze record unreadable or from another version: rebuilt once"
     if record.get("state") == "thawing":
+        lost = record.get("lost_batches") or []
+        if record.get("lost_rebuilds"):
+            return False, (f"the previous rebuild missed {len(lost)} processed batch folder(s) "
+                           f"({', '.join(lost[:3])}): rebuilt again "
+                           f"({int(record['lost_rebuilds']) + 1}/{MAX_LOST_REBUILDS})")
         run = (record.get("thawing") or {}).get("run_id", "?")
         return False, f"the previous rebuild did not finish (run {run})"
     if Path(str(record.get("root", ""))) != Path(d.root):
