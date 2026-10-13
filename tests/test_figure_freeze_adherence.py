@@ -254,3 +254,20 @@ def test_pubfig_commands_thaw_all_renders_everything():
         csv_path=Path("/tmp/preds/model_predictions.csv"), config_path=CONFIG,
     )
     assert len(all_flag_values(cmds, "--train-dataset")) == 2
+
+
+def test_an_unconfigured_naive_panel_does_not_redraw_a_frozen_pair():
+    """A naive panel the run does not configure cannot make a fully frozen
+    (published, figures: true) pair redraw: it is never in the figure-frozen
+    list, so counting it as a contributor redrew the pair -- from deduplicated
+    rows -- every night."""
+    datasets = ["Hex-Training-24-0.01", "Hex-Control-24-0.01", "RandomPanel-24-0.1",
+                "EB-Training-24-1", "EB-Control-24-1"]
+    # The pair and its one configured naive panel are frozen for figures;
+    # RandomPanel-24-1 / RandomPanel-Training-24-10 are not configured at all.
+    frozen = ("Hex-Training-24-0.01", "Hex-Control-24-0.01", "RandomPanel-24-0.1")
+    cmds = rw._dataset_mean_traces_commands(
+        _mt_cfg(), _Settings(frozen=frozen, datasets=datasets),
+        python_exec="/usr/bin/python3", config_path=CONFIG,
+    )
+    assert "Hex-Training-24-0.01" not in all_flag_values(cmds, "--train-dataset")

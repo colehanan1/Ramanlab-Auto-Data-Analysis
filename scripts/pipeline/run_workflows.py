@@ -4174,7 +4174,12 @@ def _dataset_mean_traces_commands(
     if with_naive:
         from scripts.analysis.pubfig_naive_vs_trained import NAIVE_BY_CONC
 
-        naive_panels = tuple(NAIVE_BY_CONC.values())
+        # Only a panel this run configures can contribute: an unconfigured one is
+        # never figure-frozen, so counting it would redraw every frozen pair.
+        configured = set(getattr(settings, "datasets", ()) or ())
+        naive_panels = tuple(
+            p for p in NAIVE_BY_CONC.values() if not configured or p in configured
+        )
     for train, control, out_dir, batch in entries:
         if all(arm in frozen_figures for arm in (train, control, *naive_panels)):
             # Every contributor frozen for figures -> the pair is final. A frozen
