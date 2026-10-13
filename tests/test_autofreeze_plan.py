@@ -828,3 +828,36 @@ def test_a_dataset_no_wide_table_reads_freezes_after_one_build(scene):
     plan.commit(combined_ran=True)
     assert scene.record(LIVE)["state"] == "frozen"
     assert scene.plan().decisions[LIVE].decision == "frozen"
+
+
+# --- policy-only re-stamp: the two branches that must rebuild instead ----------
+
+def test_an_odor_remap_edit_rebuilds_rather_than_restamps(scene):
+    """An override that changes ROWS (odor_remap) is fingerprint drift: rebuild."""
+    _settle(scene)
+    scene.overrides[FROZEN]["odor_remap"] = {"Hexanol": "Hexanol (1%)"}
+    scene.reload()
+    plan = scene.plan()
+    d = plan.decisions[FROZEN]
+    assert d.decision == "thawed" and "fingerprint drift" in d.reasons[0]
+    assert not any("re-stamped" in n for n in plan.notices)
+
+
+def test_a_revived_folder_rebuilds_rather_than_restamps(scene):
+    """A folder the slice marks frozen that today's rules no longer retire must
+    come back through a rebuild, never a re-stamp of the cached marks."""
+    # Night 1 with BATCH retired by a folder rule: its cached row is marked frozen.
+    scene.overrides[FROZEN]["freeze"]["folders"] = [BATCH]
+    scene.reload()
+    rows = _rows(FROZEN, [BATCH])
+    rows["frozen"] = True
+    scene.seed_slice(FROZEN, rows)
+    scene.seed_slice(PARTNER)
+    scene.build_and_commit(scene.plan())
+    assert scene.plan().decisions[FROZEN].decision == "frozen"
+    # The user removes the retirement: BATCH must come back through a rebuild.
+    scene.overrides[FROZEN]["freeze"].pop("folders")
+    scene.reload()
+    d = scene.plan().decisions[FROZEN]
+    assert d.decision == "thawed", d.reasons
+    assert "differently" in d.reasons[0]
