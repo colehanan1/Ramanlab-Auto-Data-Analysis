@@ -12,6 +12,8 @@ if TYPE_CHECKING:  # imported lazily in _freeze_folders to avoid a cycle
 import yaml
 from dotenv import load_dotenv
 
+from .config_layers import resolve_layers
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_CONFIG_NAME = "config.yaml"
 DEFAULT_CONFIG_PATH = REPO_ROOT / "config" / DEFAULT_CONFIG_NAME
@@ -344,6 +346,7 @@ def _expand_datasets(data: dict) -> dict:
 def load_raw_config(config_path: str | Path) -> Dict[str, Any]:
     path = resolve_config_path(config_path)
     if path.exists():
+        path = resolve_layers(path).base_path    # an extends-overlay reads as its base
         with path.open("r", encoding="utf-8") as f:
             data = yaml.safe_load(f) or {}
         return _expand_datasets(data)
@@ -922,6 +925,7 @@ def load_settings(config_path: str | Path) -> Settings:
     p = resolve_config_path(config_path)
     data: Dict[str, Any] = {}
     if p.exists():
+        p = resolve_layers(p).base_path    # an extends-overlay reads as its base
         with open(p, "r", encoding="utf-8") as f:
             data = yaml.safe_load(f) or {}
         data = _expand_datasets(data)
