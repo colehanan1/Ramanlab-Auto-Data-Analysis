@@ -11,7 +11,10 @@ figure silently inherits rather than any file layout:
 * the score table's duplicate rule -- exact duplicates collapse, conflicting
   scores are dropped and counted;
 * the permutation tests -- shuffle only within a stratum (or within a fly), so a
-  stratum-level (fly-level) confound alone cannot produce a small p.
+  stratum-level (fly-level) confound alone cannot produce a small p;
+* the stratified risk difference -- the effect size that goes with them: a
+  Mantel-Haenszel-weighted mean of the within-stratum differences, so a stratum
+  confound cannot make it large either.
 """
 from __future__ import annotations
 
@@ -885,6 +888,98 @@ def test_the_within_fly_p_lies_on_the_permutation_grid():
     _, p = M.within_fly_permutation(df, state="state", outcome="outcome", fly="fly", n=199, seed=1)
     assert (p * 200) == pytest.approx(round(p * 200))
     assert 1 / 200 <= p <= 1.0
+
+
+# ---------------------------------------------------------------------------
+# Stratified (Mantel-Haenszel) risk difference
+# ---------------------------------------------------------------------------
+
+def _strata_table(rows):
+    return pd.DataFrame(rows, columns=["stratum", "state", "outcome"])
+
+
+def _two_strata():
+    """A: state 1 -> [1, 1], state 0 -> [1, 0] (n1 = n0 = 2, rates 1.0 / 0.5, weight 1, difference +0.5).
+    B: state 1 -> [0], state 0 -> [1, 0, 0, 0, 0, 0] (n1 = 1, n0 = 6, rates 0 / 1/6, weight 6/7, difference -1/6)."""
+    return _strata_table([("A", 1, 1.0), ("A", 1, 1.0), ("A", 0, 1.0), ("A", 0, 0.0),
+                          ("B", 1, 0.0), ("B", 0, 1.0), ("B", 0, 0.0), ("B", 0, 0.0), ("B", 0, 0.0), ("B", 0, 0.0),
+                          ("B", 0, 0.0)])
+
+
+def _rd(df):
+    return M.stratified_risk_difference(df, state="state", outcome="outcome", stratum="stratum")
+
+
+def test_the_stratified_risk_difference_is_the_mantel_haenszel_weighted_mean_of_the_stratum_differences():
+    # (1 * 0.5 + 6/7 * (-1/6)) / (1 + 6/7) = (5/14) / (13/7) = 5/26
+    assert _rd(_two_strata()) == pytest.approx(5 / 26)
+
+
+def test_the_pooled_difference_of_the_same_trials_is_a_different_number():
+    df = _two_strata()
+    pooled = df.loc[df["state"] == 1, "outcome"].mean() - df.loc[df["state"] == 0, "outcome"].mean()
+    assert pooled == pytest.approx(5 / 12) and _rd(df) != pytest.approx(pooled)
+
+
+def test_a_stratum_is_weighted_by_n1_n0_over_n1_plus_n0_not_by_its_size_or_equally():
+    small = [("X", 1, 1.0)] + [("X", 0, 0.0)] * 9                     # n1 = 1, n0 = 9: weight 0.9, difference +1
+    even = [("Y", 1, 0.0)] * 25 + [("Y", 1, 1.0)] * 25 + [("Y", 0, 0.0)] * 25 + [("Y", 0, 1.0)] * 25   # weight 25, difference 0
+    assert _rd(_strata_table(small + even)) == pytest.approx(0.9 / 25.9)
+    # n1 * n0 as the weight would give 9 / 2509, the number of trials 10 / 110 and equal weights 1 / 2
+
+
+def test_with_one_stratum_it_is_the_plain_difference_of_the_two_rates():
+    df = _strata_table([("A", 1, 1.0), ("A", 1, 0.0), ("A", 1, 1.0), ("A", 0, 0.0), ("A", 0, 1.0)])
+    assert _rd(df) == pytest.approx(2 / 3 - 1 / 2)
+
+
+def test_a_stratum_seen_in_only_one_state_does_not_count():
+    extra = _strata_table([("C", 1, 1.0), ("C", 1, 1.0), ("C", 1, 1.0), ("D", 0, 0.0), ("D", 0, 1.0)])
+    assert _rd(pd.concat([_two_strata(), extra], ignore_index=True)) == pytest.approx(5 / 26)
+
+
+def test_without_a_stratum_seen_in_both_states_there_is_no_difference():
+    df = _strata_table([("A", 1, 1.0), ("A", 1, 0.0), ("B", 0, 1.0), ("B", 0, 0.0)])
+    assert math.isnan(_rd(df)) and math.isnan(_rd(df.iloc[0:0]))
+
+
+def test_rows_with_a_missing_state_outcome_or_stratum_are_left_out_before_strata_are_judged():
+    messy = pd.concat([_two_strata(), _strata_table([
+        ("C", 1, np.nan), ("C", 0, 1.0), ("C", 0, 0.0),             # stratum C loses its only state-1 trial
+        ("E", np.nan, 1.0), ("E", 1, 1.0), ("E", 0, 0.0),           # E keeps a state-1 and a state-0 trial (the NaN row goes)
+        (None, 1, 1.0), (None, 0, 0.0)]).astype({"stratum": object})], ignore_index=True)
+    kept = pd.concat([_two_strata(), _strata_table([("E", 1, 1.0), ("E", 0, 0.0)])], ignore_index=True)
+    assert _rd(messy) == pytest.approx(_rd(kept))
+    assert _rd(kept) != pytest.approx(5 / 26)                        # E really counts (weight 1/2, difference +1)
+
+
+def test_the_order_of_the_rows_and_the_kind_of_stratum_label_do_not_matter():
+    df = _two_strata()
+    assert _rd(df.sample(frac=1.0, random_state=3)) == pytest.approx(_rd(df))
+    assert _rd(df.assign(stratum=df["stratum"].map({"A": 7, "B": 2}))) == pytest.approx(_rd(df))
+    assert _rd(df.assign(stratum=df["stratum"].map({"A": ("pretest", 1), "B": ("testing", 1)}))) == pytest.approx(_rd(df))
+
+
+def test_any_nonzero_state_counts_as_in_the_state_as_in_the_permutation_test():
+    df = _two_strata()
+    assert _rd(df.assign(state=df["state"] * 2)) == pytest.approx(_rd(df))
+
+
+def test_a_boolean_state_is_the_same_as_zero_one_for_the_stratified_difference():
+    df = _two_strata()
+    assert _rd(df.assign(state=df["state"].astype(bool))) == pytest.approx(_rd(df))
+
+
+def test_a_trial_type_confound_leaves_the_pooled_difference_large_and_the_stratified_one_zero():
+    """Pretest: state 25 % and response 25 %; testing: 75 % and 75 %; unrelated inside each, so only the type moves both."""
+    rows = []
+    for stratum, n_on, on_responding, off_responding in (("pretest", 4, 1, 3), ("testing", 12, 9, 3)):
+        for t in range(16):
+            on = t < n_on
+            rows.append((stratum, int(on), float(t < on_responding if on else t - n_on < off_responding)))
+    df = _strata_table(rows)
+    pooled = df.loc[df["state"] == 1, "outcome"].mean() - df.loc[df["state"] == 0, "outcome"].mean()
+    assert pooled == pytest.approx(0.25) and _rd(df) == pytest.approx(0.0, abs=1e-12)
 
 
 # ---------------------------------------------------------------------------

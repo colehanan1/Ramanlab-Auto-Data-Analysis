@@ -10,10 +10,12 @@ Rules pinned here, on synthetic fly-trial / fly tables (the fly table is always 
 * displayed rates pool trials (a tercile of one 1-of-1 fly and one 0-of-9 fly is 10 %, never 50 %), and trials of a fly
   whose identity drifted never enter a pooled bar;
 * the response analyses use only scored trials (pretest + testing rows with a score), and the within-fly test shuffles
-  the state inside each fly's trials of one trial type, so a pretest-vs-testing difference cannot make its p small;
+  the state inside each fly's trials of one trial type, so a pretest-vs-testing difference cannot make its p small; the
+  difference shown beside that p is the Mantel-Haenszel one over the same fly x trial-type groups (the bars stay pooled);
 * a comparison with fewer than 3 flies to compare is "Not enough data to tell" (never "No clear difference" or "Yes"),
   and no figure or report says "1 flies" or "+nan points";
-* a figure that fails to build leaves no stale PNG behind, and the report names every figure that was not drawn;
+* a figure that fails to build leaves no stale PNG behind, and so does a run with nothing in scope; the report names
+  every figure that was not drawn;
 * titles are the question, and the plain-language answer is computed from the data (never hard-coded);
 * style: blue per-fly points, orange ``//`` for held / spontaneous states, filled marker = held back and hollow = held
   down, thin bars, no twin axes, no text over text, and the global matplotlib style is left alone;
@@ -274,11 +276,23 @@ def test_the_baseline_state_p_is_the_within_fly_permutation_inside_each_fly_and_
     ft, base = data.ft, data.stats["baseline"]
     scored = phased(ft[ft["score"].notna() & ft["held_subtype"].notna()])
     scored = scored.assign(held_any=(scored["held_subtype"] != "retracted").astype(float))
-    diff, p = M.within_fly_permutation(scored, state="held_any", outcome="responded", fly="fly_phase", n=N_PERM, seed=0)
-    assert base["proboscis"]["diff"] == pytest.approx(diff) and base["proboscis"]["p_perm"] == p
+    pooled, p = M.within_fly_permutation(scored, state="held_any", outcome="responded", fly="fly_phase", n=N_PERM, seed=0)
+    assert base["proboscis"]["diff_pooled"] == pytest.approx(pooled) and base["proboscis"]["p_perm"] == p
     spont = phased(ft[ft["score"].notna() & ft["spont_per_any"].notna()])
-    diff, p = M.within_fly_permutation(spont, state="spont_per_any", outcome="responded", fly="fly_phase", n=N_PERM, seed=0)
-    assert base["spontaneous"]["diff"] == pytest.approx(diff) and base["spontaneous"]["p_perm"] == p
+    pooled, p = M.within_fly_permutation(spont, state="spont_per_any", outcome="responded", fly="fly_phase", n=N_PERM, seed=0)
+    assert base["spontaneous"]["diff_pooled"] == pytest.approx(pooled) and base["spontaneous"]["p_perm"] == p
+
+
+def test_the_difference_shown_is_the_mantel_haenszel_one_over_the_strata_the_test_shuffles_in(data):
+    ft, base = data.ft, data.stats["baseline"]
+    scored = phased(ft[ft["score"].notna() & ft["held_subtype"].notna()])
+    scored = scored.assign(held_any=(scored["held_subtype"] != "retracted").astype(float))
+    mh = M.stratified_risk_difference(scored, state="held_any", outcome="responded", stratum="fly_phase")
+    assert base["proboscis"]["diff"] == pytest.approx(mh)
+    assert base["proboscis"]["diff"] != pytest.approx(base["proboscis"]["diff_pooled"])      # this cohort tells them apart
+    spont = phased(ft[ft["score"].notna() & ft["spont_per_any"].notna()])
+    mh = M.stratified_risk_difference(spont, state="spont_per_any", outcome="responded", stratum="fly_phase")
+    assert base["spontaneous"]["diff"] == pytest.approx(mh)
 
 
 def test_the_baseline_test_counts_the_flies_and_groups_seen_in_both_states(data):
@@ -314,8 +328,9 @@ def test_a_trial_type_that_drives_both_state_and_response_does_not_give_a_small_
     assert M.within_fly_permutation(naive, state="held_any", outcome="responded", fly="fly_id", n=2000, seed=0)[1] < 0.01
     base = F.compute_stats(ft, fly, n_perm=2000, seed=0)["baseline"]    # shuffling inside a fly alone would call this a link
     for key in ("proboscis", "spontaneous"):
-        assert base[key]["diff"] == pytest.approx(0.25), key                      # the pooled difference is still there ...
-        assert base[key]["p_perm"] > 0.3 and base[key]["verdict"] == "No clear difference", key     # ... but it is not an effect
+        assert base[key]["diff_pooled"] == pytest.approx(0.25), key               # the pooled difference is large ...
+        assert base[key]["diff"] == pytest.approx(0.0, abs=1e-9), key             # ... and the one that goes with the p is nil
+        assert base[key]["p_perm"] > 0.3 and base[key]["verdict"] == "No clear difference", key
         assert base[key]["n_flies_both"] == 12 and base[key]["n_groups_both"] == 24
 
 
@@ -370,6 +385,22 @@ def test_a_baseline_comparison_needs_three_flies_that_have_both_states(n_both, a
     assert pro["n_flies_both"] == n_both and pro["verdict"] == answer
     if n_both == 2:
         assert pro["p_perm"] < 0.05                                  # the p alone would have said "Yes": the gate is the flies
+
+
+def test_the_figure_and_the_report_show_the_mantel_haenszel_difference_beside_the_pooled_bars(data, figures, report):
+    text = all_text(figures["baseline_state_vs_response"])
+    for key in ("proboscis", "spontaneous"):
+        panel = data.stats["baseline"][key]
+        assert f"within fly × phase (MH): {F._points(panel['diff'])}" in text, key
+        assert f"{F._points(panel['diff'], 1)} (Mantel–Haenszel" in report, key
+        assert f"pooled difference of the bars is {F._points(panel['diff_pooled'], 1)}" in report, key
+    assert "Mantel–Haenszel" in report.split("## Exclusions")[0]
+    assert "- Held out (any sub-type) minus retracted, within fly × trial type: " in report      # a sentence, not a fragment
+    assert "- Spontaneous PER minus none, within fly × trial type: " in report
+
+
+def test_a_difference_of_nothing_is_written_as_zero_points_never_minus_zero():
+    assert F._points(-1e-17) == "+0 points" and F._points(1e-17, 1) == "+0.0 points" and F._points(-0.0004, 1) == "+0.0 points"
 
 
 @pytest.mark.parametrize("n_both, wording", [(0, "no fly was seen in both states"),
@@ -524,13 +555,15 @@ def test_the_n_labels_name_trials_and_flies():
     assert F.n_flies_label(48) == "n=48 flies" and F.n_flies_label(1) == "n=1 fly"
 
 
-def test_wrapping_never_splits_an_n_label_or_a_p_value_from_its_uncorrected():
+def test_wrapping_never_splits_an_n_label_a_p_value_or_a_number_of_points():
     fig = F._new_figure(6.0, 3.0)
-    lines = F._wrap(fig, "word " * 30 + "n=12 trials / 3 flies and p=0.04 (uncorrected) end", 8.5, "normal", 3.0)
+    lines = F._wrap(fig, "word " * 30 + "n=12 trials / 3 flies and p=0.04 (uncorrected) and +9 points, -12.5 points end",
+                    8.5, "normal", 3.0)
     assert len(lines) > 3
     text = "\n".join(lines)
     assert "n=12\u00a0trials\u00a0/\u00a03\u00a0flies" in text and "p=0.04\u00a0(uncorrected)" in text
-    assert squash(text).endswith("n=12 trials / 3 flies and p=0.04 (uncorrected) end")
+    assert "+9\u00a0points" in text and "-12.5\u00a0points" in text
+    assert squash(text).endswith("n=12 trials / 3 flies and p=0.04 (uncorrected) and +9 points, -12.5 points end")
 
 
 def test_each_figure_title_is_a_question(figures):
@@ -854,6 +887,16 @@ def test_empty_input_draws_no_figure_and_creates_nothing(tmp_path, caplog):
     with caplog.at_level(logging.WARNING):
         assert F.render_figures(ft, fly, tmp_path / "out", n_perm=N_PERM) == {}
     assert not (tmp_path / "out").exists() and caplog.text == ""
+
+
+def test_with_nothing_in_scope_the_pictures_of_an_earlier_run_are_removed(data, tmp_path):
+    F.render_figures(data.ft, data.fly, tmp_path, n_perm=N_PERM, stats=data.stats)
+    (tmp_path / "notes.png").write_bytes(b"mine")
+    (tmp_path / "report.md").write_text("old", encoding="utf-8")
+    ft, fly = trial_table([]), pd.DataFrame(columns=MP.FLY_COLUMNS)
+    assert F.render_figures(ft, fly, tmp_path, n_perm=N_PERM) == {}
+    assert [p.name for p in tmp_path.glob("*.png")] == ["notes.png"]                 # the six are gone, nothing else is touched
+    assert (tmp_path / "notes.png").read_bytes() == b"mine" and (tmp_path / "report.md").read_text(encoding="utf-8") == "old"
 
 
 # ---------------------------------------------------------------------------

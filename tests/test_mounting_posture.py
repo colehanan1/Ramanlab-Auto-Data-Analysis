@@ -1524,6 +1524,18 @@ def test_main_with_nothing_in_scope_writes_the_empty_report_and_draws_nothing(tm
     assert list(figs.glob("*.png")) == []
 
 
+def test_main_with_nothing_in_scope_removes_the_pictures_of_an_earlier_run(tmp_path, monkeypatch):
+    monkeypatch.delenv("FLAGGED_FLIES_CSV", raising=False)
+    tree = variant(tmp_path)
+    preds = write_predictions(tree.root / "p.csv")
+    assert MP.main(["--config", str(write_configs(tree, preds))]) == 0
+    figs = tree.root / "mfigs"
+    assert {p.stem for p in figs.glob("*.png")} == FIGURES
+    assert MP.main(["--config", str(write_configs(tree, preds, cutoff=date(2030, 1, 1)))]) == 0      # now nothing is in scope
+    assert list(figs.glob("*.png")) == []                                         # the folder holds nothing the report omits
+    assert "no new-glue fly-trials in scope" in (figs / "report.md").read_text(encoding="utf-8")
+
+
 def test_main_without_a_figure_directory_writes_the_tables_but_no_figures_or_report(tmp_path, monkeypatch):
     monkeypatch.delenv("FLAGGED_FLIES_CSV", raising=False)
     tree = variant(tmp_path)

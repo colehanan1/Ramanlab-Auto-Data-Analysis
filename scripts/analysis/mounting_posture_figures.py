@@ -14,11 +14,13 @@ line under it:
 
 Inference uses the FLY as the unit: the per-fly scatters report Spearman rho / p and a permutation p stratified by
 dataset x rig, the tercile p is the same per-fly test of response rate vs pitch, and the baseline-state p shuffles the
-state inside each fly's trials of one trial type (so a pretest-vs-testing difference cannot make it small). The response
-analyses use only scored trials (pretest + testing trials that have a score). Bars pool TRIALS (never a mean of per-fly
-means) and say ``n=... trials / ... flies``. Every p-value is uncorrected, and says so; a comparison with fewer than
-three flies to compare is "Not enough data to tell". A figure that cannot be drawn (too few flies) is a placeholder that
-says why; one that fails to build leaves no picture behind and is named in the report.
+state inside each fly's trials of one trial type (so a pretest-vs-testing difference cannot make it small), and the
+difference shown beside it is the Mantel-Haenszel one over those same fly x trial-type groups (the bars stay pooled).
+The response analyses use only scored trials (pretest + testing trials that have a score). Bars pool TRIALS (never a
+mean of per-fly means) and say ``n=... trials / ... flies``. Every p-value is uncorrected, and says so; a comparison
+with fewer than three flies to compare is "Not enough data to tell". A figure that cannot be drawn (too few flies) is
+a placeholder that says why; one that fails to build leaves no picture behind and is named in the report, and a run
+with nothing in scope removes the pictures of an earlier one.
 
 ``compute_stats`` does all the arithmetic once; ``build_figures`` / ``render_figures`` and ``write_report`` only
 format it. ``write_report`` assembles ``report.md`` from section strings (``report_sections``) and takes
@@ -137,7 +139,9 @@ def n_label(trials: int, flies: int) -> str:
 
 def _points(diff: float, digits: int = 0) -> str:
     """A difference of two proportions in percentage points (``+9 points``); ``n/a`` when there is none."""
-    return f"{100 * diff:+.{digits}f} points" if np.isfinite(diff) else "n/a"
+    if not np.isfinite(diff):
+        return "n/a"
+    return f"{round(100 * diff, digits) + 0.0:+.{digits}f} points"                # + 0.0: a rounded -0.0 prints as +0
 
 
 def _group_n(group: Mapping) -> str:
@@ -265,20 +269,23 @@ def _bars(df: pd.DataFrame, states: Sequence[Tuple[str, pd.Series]]) -> List[dic
 
 
 def _within_fly(df: pd.DataFrame, state: str, *, n_perm: int, seed: int, up: str, down: str) -> dict:
-    """Pooled response difference (in state minus not) and its within-fly permutation p.
+    """The within-fly permutation p of a state vs response and the difference that goes with it.
 
     The state is shuffled inside each (fly, trial type) group, so a difference between pretest and testing (where state
     and response may both shift) cannot make the p small; only groups seen in both states count, and fewer than
-    ``MIN_FLIES`` flies among them is "Not enough data to tell" whatever the p.
+    ``MIN_FLIES`` flies among them is "Not enough data to tell" whatever the p. ``diff`` is the Mantel-Haenszel risk
+    difference over those same groups, so a pretest-vs-testing shift cannot inflate it either; ``diff_pooled`` is the
+    pooled difference of ``within_fly_permutation`` (what the bars show), kept for the report.
     """
     groups = df.assign(fly_phase=df["fly_id"].astype(str) + "|" + df["trial_type"].astype(str))
-    diff, p = M.within_fly_permutation(groups, state=state, outcome="responded", fly="fly_phase", n=n_perm, seed=seed)
+    diff_pooled, p = M.within_fly_permutation(groups, state=state, outcome="responded", fly="fly_phase", n=n_perm, seed=seed)
+    diff = M.stratified_risk_difference(groups, state=state, outcome="responded", stratum="fly_phase")
     states = groups.groupby("fly_phase")[state].nunique()
     used = groups[groups["fly_phase"].isin(states[states == 2].index)]
     n_flies = int(used["fly_id"].nunique())
     answer = verdict(p if n_flies >= MIN_FLIES else float("nan"), diff, up=up, down=down, none="No clear difference")
-    return {"diff": diff, "p_perm": p, "n_flies_both": n_flies, "n_groups_both": int(used["fly_phase"].nunique()),
-            "n_trials_both": int(len(used)), "verdict": answer}
+    return {"diff": diff, "diff_pooled": diff_pooled, "p_perm": p, "n_flies_both": n_flies,
+            "n_groups_both": int(used["fly_phase"].nunique()), "n_trials_both": int(len(used)), "verdict": answer}
 
 
 def _baseline_stats(trials: pd.DataFrame, *, n_perm: int, seed: int) -> dict:
@@ -377,13 +384,14 @@ def _new_figure(width: float, height: float) -> Figure:
     return fig
 
 
-_GLUE = re.compile(r"n=[\d,]+ (?:trials?|flies|fly)(?: / [\d,]+ (?:flies|fly))?|p[=<][\d.]+ \(uncorrected\)")
+_GLUE = re.compile(r"n=[\d,]+ (?:trials?|flies|fly)(?: / [\d,]+ (?:flies|fly))?|p[=<][\d.]+ \(uncorrected\)"
+                   r"|[+-]\d+(?:\.\d+)? points")
 
 
 def _wrap(fig: Figure, text: str, size: float, weight: str, max_in: float) -> List[str]:
     """*text* broken at spaces into lines no wider than *max_in* inches (measured with the real font).
 
-    An ``n=...`` label and a ``p=... (uncorrected)`` stay on one line (their spaces are non-breaking).
+    An ``n=...`` label, a ``p=... (uncorrected)`` and a ``+9 points`` stay on one line (their spaces are non-breaking).
     """
     renderer = fig.canvas.get_renderer()
     probe = fig.text(0, 0, "", fontsize=size, weight=weight)
@@ -599,7 +607,8 @@ def _panel_note(panel: dict, what: str) -> str:
     have = f"{_count(n, 'fly', 'flies')} {'has' if n == 1 else 'have'} both states"
     if n < MIN_FLIES:
         have += f" (needs at least {MIN_FLIES})"
-    return (f"{what}: {_points(panel['diff'])}; within-fly permutation {p_text(panel['p_perm'])} (uncorrected); {have}")
+    return (f"{what}, within fly × phase (MH): {_points(panel['diff'])}; within-fly permutation "
+            f"{p_text(panel['p_perm'])} (uncorrected); {have}")
 
 
 def _fig_baseline(trials, fly, stats):
@@ -610,8 +619,8 @@ def _fig_baseline(trials, fly, stats):
     fig = _new_figure(width, height)
     answer = f"Proboscis position: {pro['verdict']}\nSpontaneous PER: {spo['verdict']}"
     used = _title_block(fig, TITLES["baseline_state_vs_response"], answer,
-                        "Pooled pretest + testing trials; each test shuffles the state among a fly's trials of the same "
-                        "type (uncorrected p-values)")
+                        "Bars: pooled pretest + testing trials. Differences (MH = Mantel–Haenszel) and p-values "
+                        "(uncorrected): within fly × trial type, the state shuffled among a fly's trials of the same type")
     notes = [_wrap(fig, _panel_note(pro, "Held out minus retracted"), 8, "normal", widths[0]),
              _wrap(fig, _panel_note(spo, "Spontaneous PER minus none"), 8, "normal", widths[1])]
     axes_top = used + 0.28 + 0.14 * max(len(n) for n in notes) + 0.12
@@ -691,22 +700,29 @@ def build_figures(fly_trial: pd.DataFrame, fly: pd.DataFrame, stats: dict) -> Di
     return dict(iter_figures(fly_trial, fly, stats))
 
 
+def _remove_pictures(out: Path) -> None:
+    """Delete the six figures of an earlier run from *out* (those names only; nothing else, and nothing is created)."""
+    for name in NAMES:
+        (out / f"{name}.png").unlink(missing_ok=True)
+
+
 def render_figures(fly_trial: pd.DataFrame, fly: pd.DataFrame, out_dir, *, n_perm: int, seed: int = 0,
                    stats: Optional[dict] = None) -> Dict[str, Path]:
     """Write the six PNGs (300 dpi) into *out_dir*; returns ``{figure name: path}`` of those written.
 
-    Nothing is drawn, and nothing created or removed, when there are no fly-trials. Otherwise the six PNGs of an earlier run
-    are removed first, so a figure that fails to build leaves no stale picture behind for the report to point at: after the
-    call ``<name>.png`` exists exactly for the names returned. *stats* is ``compute_stats``' result when the caller has it
+    The six PNGs of an earlier run are removed first, so a figure that fails to build leaves no stale picture behind for
+    the report to point at: after the call ``<name>.png`` exists exactly for the names returned. With no fly-trials
+    nothing is drawn or created and those earlier pictures are removed too, so the folder never holds a figure the report
+    (which then says nothing is in scope) does not describe. *stats* is ``compute_stats``' result when the caller has it
     already (the report takes the same one); it is computed here otherwise.
     """
+    out = Path(out_dir).expanduser()
     if len(fly_trial) == 0:
+        _remove_pictures(out)
         return {}
     stats = stats if stats is not None else compute_stats(fly_trial, fly, n_perm=n_perm, seed=seed)
-    out = Path(out_dir).expanduser()
     out.mkdir(parents=True, exist_ok=True)
-    for name in NAMES:
-        (out / f"{name}.png").unlink(missing_ok=True)
+    _remove_pictures(out)
     written: Dict[str, Path] = {}
     for name, fig in iter_figures(fly_trial, fly, stats):
         path = out / f"{name}.png"
@@ -796,8 +812,11 @@ def _header(fly_trial: pd.DataFrame, stats: Mapping) -> str:
               "pretest + testing trials that have a score (training trials get none).",
               f"- Within-fly permutation p: the state label is shuffled among the trials of each fly of one trial type "
               f"(pretest or testing), so a pretest-vs-testing difference cannot create an association; only fly × "
-              f"trial-type groups seen in both states count; {stats['n_perm']} permutations, seed {stats['seed']}. The "
-              f"difference shown is the pooled one (not adjusted for trial type); only the p allows for it.",
+              f"trial-type groups seen in both states count; {stats['n_perm']} permutations, seed {stats['seed']}.",
+              "- The difference shown for each baseline-state comparison is the Mantel–Haenszel-weighted risk difference "
+              "over those same groups, Σ w (p1 − p0) / Σ w with w = n1·n0 / (n1 + n0), where p1 / p0 are the response "
+              "rates in the state / not in it: a pretest-vs-testing shift cannot inflate it. The bars are pooled rates "
+              "and keep that shift.",
               f"- \"Yes\" in a figure title means the permutation p is below {stats['alpha']} (uncorrected) with at least "
               f"{MIN_FLIES} flies to compare; fewer is \"Not enough data to tell\"."]
     return "\n".join(lines)
@@ -853,15 +872,18 @@ def _mounting_section(stats: Mapping, missing: Sequence[str] = ()) -> str:
         panel = stats["baseline"][key]
         if panel["n_groups_both"]:
             groups = _count(panel["n_groups_both"], "fly × trial-type group", "fly × trial-type groups")
-            used = (f"{_points(panel['diff'], 1)} pooled over {groups} of {_count(panel['n_flies_both'], 'fly', 'flies')} "
-                    f"seen in both states ({_count(panel['n_trials_both'], 'trial', 'trials')})")
+            used = (f"{_points(panel['diff'], 1)} (Mantel–Haenszel over {groups} of "
+                    f"{_count(panel['n_flies_both'], 'fly', 'flies')} seen in both states, "
+                    f"{_count(panel['n_trials_both'], 'trial', 'trials')}); the pooled difference of the bars is "
+                    f"{_points(panel['diff_pooled'], 1)}")
             if panel["n_flies_both"] < MIN_FLIES:
                 used += f"; fewer than {MIN_FLIES} flies, so no answer is drawn"
         else:
             used = "no fly was seen in both states, so there is nothing to compare"
         L += [f"**{title}** — {panel['verdict']}", "",
+              f"- {what[0].upper() + what[1:]}, within fly × trial type: {used}",
               f"- Within-fly permutation {p_text(panel['p_perm'], 4)} (uncorrected), shuffled inside each fly × trial-type "
-              f"group; {what}: {used}; {stats['n_perm']} permutations, seed {stats['seed']}", "",
+              f"group; {stats['n_perm']} permutations, seed {stats['seed']}", "",
               "| State | Trials / flies | Response rate |", "|---|---|---|"]
         L += [f"| {STATE_LABELS[b['state']]} | {_group_n(b)} | {100 * b['rate']:.1f}% |"
               for b in panel["bars"] if b["n_trials"]]

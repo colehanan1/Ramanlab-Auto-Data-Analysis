@@ -17,7 +17,8 @@ Conventions
   breaks a run, drops a pair, or is left out of a fraction.
 * Rates, medians and fractions are pooled by the caller; nothing here averages an
   average. The permutation tests shuffle only within their stratum (or fly), so a
-  stratum-level (fly-level) confound cannot produce a small p on its own.
+  stratum-level (fly-level) confound cannot produce a small p on its own; the
+  stratified risk difference is the effect size that goes with them.
 """
 from __future__ import annotations
 
@@ -378,6 +379,31 @@ def within_fly_permutation(df: pd.DataFrame, *, state: str, outcome: str, fly: s
             sum_on += block[:, :int(m.sum())].sum(axis=1)
         hits += int(np.count_nonzero(np.abs(pooled_diff(sum_on)) >= abs(observed) - slack))
     return observed, (1 + hits) / (n + 1)
+
+
+def stratified_risk_difference(df: pd.DataFrame, *, state: str, outcome: str, stratum: str) -> float:
+    """Mantel-Haenszel-weighted risk difference of *outcome* between the trials in and out of *state*, over *stratum*.
+
+    ``sum_k w_k (p1_k - p0_k) / sum_k w_k`` with ``w_k = n1_k n0_k / (n1_k + n0_k)``, k running over the strata that hold
+    both states and ``p1_k`` / ``p0_k`` being that stratum's mean outcome among the trials in / not in the state. A
+    confound that moves state and outcome together between strata (trial type, say) cancels here, as it does in a
+    permutation test that shuffles the state inside each stratum; the pooled difference does not cancel it. Trials
+    missing state, outcome or stratum are dropped first (as in :func:`within_fly_permutation`); NaN when no stratum has
+    both states.
+    """
+    values, flag = _f64(df[outcome]), _f64(df[state])
+    codes = pd.factorize(df[stratum])[0]                                   # -1 for a missing stratum
+    keep = np.isfinite(values) & np.isfinite(flag) & (codes >= 0)
+    values, on, codes = values[keep], flag[keep] != 0, codes[keep]
+    size = int(codes.max()) + 1 if codes.size else 0
+    n1, n0 = np.bincount(codes[on], minlength=size), np.bincount(codes[~on], minlength=size)
+    sum1 = np.bincount(codes[on], weights=values[on], minlength=size)
+    sum0 = np.bincount(codes[~on], weights=values[~on], minlength=size)
+    both = (n1 > 0) & (n0 > 0)
+    if not both.any():
+        return float("nan")
+    weight = n1[both] * n0[both] / (n1[both] + n0[both])
+    return float(np.sum(weight * (sum1[both] / n1[both] - sum0[both] / n0[both])) / weight.sum())
 
 
 # ---------------------------------------------------------------------------
