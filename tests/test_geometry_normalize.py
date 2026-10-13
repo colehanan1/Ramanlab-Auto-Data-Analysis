@@ -85,7 +85,10 @@ def test_normalize_batch_writes_stats_and_percent_columns(batch):
     assert stats["proboscis"]["global_max"] == pytest.approx(100.0)
     assert stats["proboscis"]["effective_max"] == pytest.approx(100.0)
     assert stats["abdomen_angle"]["min_deg"] == pytest.approx(120.0)
+    # 5 of the 45 angle frames sit at 178 deg, so the 5 % trim of the straight
+    # (resting) end lands on 178 anyway -- the trim only bites on a lone outlier.
     assert stats["abdomen_angle"]["max_deg"] == pytest.approx(178.0)
+    assert stats["abdomen_angle"]["raw_max"] == pytest.approx(178.0)
     assert stats["abdomen_angle"]["min_at"] == {"trial": "pretest_1_Hexanol", "frame": 25}
     assert stats["abdomen_angle"]["max_at"]["trial"] == "testing_1_Hexanol"
     assert stats["abdomen_angle"]["n_frames"] == 40 + 5
@@ -97,7 +100,10 @@ def test_normalize_batch_writes_stats_and_percent_columns(batch):
     assert list(a.columns) == C.PER_FRAME_COLUMNS + C.NORMALIZED_COLUMNS
     assert a[C.PRO_PCT].iloc[0] == pytest.approx(0.0)
     assert a[C.PRO_PCT].iloc[25] == pytest.approx(100.0)
-    assert np.isnan(a[C.PRO_PCT].iloc[26]), "below the floor -> NaN, not 0"
+    # Changed 2026-09-10: out-of-range values CLAMP instead of going missing, because a
+    # trimmed gmin puts ~5 % of frames below the floor by design. per_min_px still decides
+    # which frames define the SCALE, not which frames get a value.
+    assert a[C.PRO_PCT].iloc[26] == pytest.approx(0.0), "below the floor -> 0 %, not NaN"
     assert a[C.ABD_ANGLE_PCT].iloc[25] == pytest.approx(100.0)
     assert a[C.ABD_ANGLE_PCT].iloc[0] == pytest.approx(100.0 * (178.0 - 175.0) / (178.0 - 120.0))
     assert a[C.ABD_LEN_PCT].iloc[30] == pytest.approx(100.0 * 180.0 / stats["abdomen_length"]["rest_px"])
@@ -121,3 +127,75 @@ def test_normalize_is_idempotent_and_keeps_csv_when_switching_to_parquet(batch):
 def test_rest_falls_back_to_all_frames_when_pre_odor_is_short(batch):
     stats = N.normalize_batch(batch, _settings(), GeometrySettings(rest_min_samples=1000))["stats"][1]
     assert stats["abdomen_length"]["source"] == "all"
+
+
+# --------------------------------------------------------------------------- #
+# Robust (trimmed) scale endpoints -- user spec 2026-09-10
+#
+# One mis-tracked frame used to define a whole fly's scale. The RESTING end of each
+# signal is dense (the fly sits there most of the time), so a percentile there is
+# stable; the SIGNAL end is sparse and real -- above the 99th percentile of PER,
+# frames are 2.6x enriched for odor-on -- so it stays at the literal extreme.
+#
+#   PER    0 % = resting  -> trimmed to the per_trim_pct-th percentile of px
+#          100 % = extended -> literal max (never trimmed)
+#   ANGLE  0 % = straight (resting) -> trimmed to the (100-angle_trim_pct)-th pct of deg
+#          100 % = most curled      -> literal min (never trimmed)
+# --------------------------------------------------------------------------- #
+def _stats_for(pro, ang, gcfg):
+    n = len(pro)
+    info = TrialInfo(video=None, batch_dir="/b", dataset="d", trial_name="t", out_dir="/b/geometry/t",
+                     trial_type="testing", trial_index=1, odor="Hexanol", label="testing_1_Hexanol",
+                     n_frames=n, fps=40.0, has_odor=True, odor_on_frame=n, odor_off_frame=n,
+                     light_on_s=None, light_off_s=None, fly_type="GR5a-Old",
+                     sidecar_txt=None, sidecar_csv=None, recorded_at=None)
+    df = _table(np.asarray(pro, float), np.asarray(ang, float),
+                np.full(n, 150.0), np.full(n, 60.0))
+    return N.compute_slot_stats(1, [(info, df)], gcfg, _settings())
+
+
+def test_per_floor_is_trimmed_but_the_ceiling_stays_at_the_literal_max():
+    """100 resting frames at 40 px plus one real 120 px extension."""
+    pro = np.full(101, 40.0); pro[0] = 30.0; pro[100] = 120.0
+    ang = np.full(101, 170.0)
+    s = _stats_for(pro, ang, GeometrySettings(table_format="csv", rest_min_samples=1, per_trim_pct=5.0))
+    p = s["proboscis"]
+    assert p["global_min"] > 30.0, "the 30 px outlier no longer sets the floor"
+    assert p["global_min"] == pytest.approx(40.0), "the dense resting level does"
+    assert p["global_max"] == pytest.approx(120.0), "the real extension MUST survive the trim"
+    assert p["raw_min"] == pytest.approx(30.0) and p["raw_max"] == pytest.approx(120.0)
+
+
+def test_angle_straight_end_is_trimmed_but_the_curled_end_stays_at_the_literal_min():
+    """100 resting frames near straight plus one real deep curl."""
+    ang = np.full(101, 150.0); ang[0] = 179.0; ang[100] = 95.0
+    pro = np.full(101, 40.0)
+    s = _stats_for(pro, ang, GeometrySettings(table_format="csv", rest_min_samples=1, angle_trim_pct=5.0))
+    a = s["abdomen_angle"]
+    assert a["max_deg"] < 179.0, "the lone 179 deg frame no longer sets 0 %"
+    assert a["max_deg"] == pytest.approx(150.0), "the dense resting posture does"
+    assert a["min_deg"] == pytest.approx(95.0), "the real curl MUST survive the trim"
+    assert a["raw_max"] == pytest.approx(179.0) and a["raw_min"] == pytest.approx(95.0)
+
+
+def test_a_zero_trim_reproduces_the_untrimmed_literal_extremes():
+    pro = np.full(101, 40.0); pro[0] = 30.0; pro[100] = 120.0
+    ang = np.full(101, 150.0); ang[0] = 179.0; ang[100] = 95.0
+    s = _stats_for(pro, ang, GeometrySettings(table_format="csv", rest_min_samples=1,
+                                              per_trim_pct=0.0, angle_trim_pct=0.0))
+    assert s["proboscis"]["global_min"] == pytest.approx(30.0)
+    assert s["abdomen_angle"]["max_deg"] == pytest.approx(179.0)
+
+
+def test_frames_below_the_trimmed_per_floor_clamp_to_zero_rather_than_going_missing():
+    """The whole point of clamping: the ~5 % of frames under the floor stay in the trace."""
+    pro = np.full(101, 40.0); pro[0] = 30.0; pro[100] = 120.0
+    ang = np.full(101, 150.0)
+    gcfg = GeometrySettings(table_format="csv", rest_min_samples=1, per_trim_pct=5.0)
+    s = _stats_for(pro, ang, gcfg)
+    df = _table(pro, ang, np.full(101, 150.0), np.full(101, 60.0))
+    out = N.apply_slot_stats(df, s, gcfg)
+    pct = out[C.PRO_PCT].to_numpy(float)
+    assert pct[0] == pytest.approx(0.0), "the sub-floor frame is 0 %, not NaN"
+    assert pct[100] == pytest.approx(100.0)
+    assert np.isfinite(pct).all()

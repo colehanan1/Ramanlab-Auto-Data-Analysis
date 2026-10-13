@@ -106,7 +106,7 @@ def test_pretest_config_cycle_order(letter):
 @pytest.mark.parametrize("letter", LETTERS)
 def test_pretest_config_timings(letter):
     cyc = {c["cycle"]: c for c in expand_config(_load_pretest(letter))["cycles"]}
-    assert cyc[5]["delay_after"] == 1440      # 24 min rest after the naive panel
+    assert cyc[5]["delay_after"] == 1500      # 29 min flat of dark after the naive panel
     assert cyc[6]["repeat"] == 6              # 6 training trials
     assert cyc[6]["delay_after"] == 0         # post-test starts right after
 

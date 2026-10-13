@@ -18,6 +18,7 @@ so every other video's worker assignment is unchanged. Nothing is deleted.
 
 from __future__ import annotations
 
+import numpy as np
 import datetime as dt
 import os
 from pathlib import Path
@@ -39,6 +40,8 @@ SIDE = 1080
 STEM = "output_july_17_batch_1_training_1_EthylButyrate_20260717_{}.mp4"
 SESSIONS = ("093939", "102030", "115131")
 OTHER = "output_july_17_batch_1_training_2_EthylButyrate_20260717_121000.mp4"
+# Video lists handed to the batch eye template by the last _run (see _run).
+_TEMPLATE_CALLS: list[list[str]] = []
 TRIAL = "july_17_batch_1_training_1"
 
 
@@ -91,8 +94,26 @@ def _run(tmp_path, monkeypatch, *, workers=1, index=0, layout=None):
     monkeypatch.setattr(yolo_infer, "YOLO", lambda p: _FakeModel())
     monkeypatch.setattr(yolo_infer.torch.cuda, "is_available", lambda: False)
     monkeypatch.setattr(yolo_infer.cv2, "VideoCapture", _capture)
-    monkeypatch.setattr(yolo_infer, "_scan_initial_fly_count", lambda *a, **k: 1)
+    # One eye per video, with its proboscis paired. main() locks the eye boxes
+    # (and the batch eye template votes on them), so the stub returns
+    # positions and pairing, not just a count.
+    monkeypatch.setattr(
+        yolo_infer,
+        "_scan_initial_eye_boxes",
+        lambda *a, **k: (np.array([[20.0, 20.0, 30.0, 30.0]], np.float32), [True]),
+    )
     monkeypatch.setattr(yolo_infer, "_run_chunked_inference", _inference)
+    # The batch eye template opens every analysed video once more to vote on eye
+    # positions; these tests count the opens made to PROCESS a trial, so the
+    # template is off here (test_superseded_sessions_never_vote_on_the_eye_template
+    # covers which videos it is given).
+    template_calls = _TEMPLATE_CALLS
+    template_calls.clear()
+    monkeypatch.setattr(
+        yolo_infer,
+        "load_or_build_eye_template",
+        lambda batch_dir, videos, *a, **k: (template_calls.append([Path(v).name for v in videos]), (None, {}))[1],
+    )
     monkeypatch.setattr(yolo_infer, "_annotated_video_failure", lambda *a, **k: None)
     monkeypatch.setattr(vw, "_default_ffmpeg_bin", lambda: None)
     monkeypatch.setattr(vw, "_nvenc_available", lambda b: False)
@@ -179,3 +200,13 @@ def test_no_session_is_processed_while_the_metadata_session_has_no_video(
     out = capsys.readouterr().out
     assert f"[YOLO] Skipping {STEM.format('093939')}: trial {TRIAL} was recorded more than once" in out
     assert (batch / STEM.format("093939")).exists()
+
+
+def test_superseded_sessions_never_vote_on_the_eye_template(tmp_path, monkeypatch):
+    """Only the session a trial is processed from feeds the batch eye template."""
+    _run(tmp_path, monkeypatch)
+    calls = _TEMPLATE_CALLS
+    assert calls, "the template was never requested"
+    given = set(calls[0])
+    assert STEM.format("115131") in given and OTHER in given
+    assert not any(STEM.format(s) in given for s in SESSIONS if s != "115131")

@@ -150,6 +150,8 @@ _RC = {
 }
 
 _TRIAL_RE = re.compile(r"^(?:pretest|training|testing)_(\d+)_(.+)$", re.IGNORECASE)
+#: ``-1`` / ``-0.1`` / ``-10`` vial concentration; ``3-octonol`` is left alone.
+_CONC_SUFFIX_RE = re.compile(r"-\d+(?:\.\d+)?$")
 
 ODOR_SHORT = {
     "hexanol": "Hex",
@@ -220,11 +222,16 @@ def protocol_line(dataset: object, odor_label: object) -> str:
     )
 
 def parse_trial(label: object) -> tuple[int, str] | None:
-    """``"testing_8_hexanol"`` -> ``(8, "hexanol")``; ``None`` if unparseable."""
+    """``"testing_8_hexanol"`` -> ``(8, "hexanol")``; ``None`` if unparseable.
+
+    A trailing vial concentration (``"testing_5_isoamylacetate-1"``, written by
+    ~/odor_pins.txt from 2026-10-06 on) is dropped: it is the same odor, and
+    keeping it split IAA-Sensitivity-24-1 into two "conditioning odors".
+    """
     m = _TRIAL_RE.match(str(label).strip())
     if not m:
         return None
-    return int(m.group(1)), m.group(2).strip().lower()
+    return int(m.group(1)), _CONC_SUFFIX_RE.sub("", m.group(2).strip().lower())
 
 
 def odor_short(token: str) -> str:
@@ -310,6 +317,57 @@ def _with_trial_number(df: pd.DataFrame) -> pd.DataFrame:
     return df.dropna(subset=["_trial"])
 
 
+def keyed_presentations(
+    test: pd.DataFrame, token: str
+) -> tuple[pd.DataFrame, list[int], str, dict[int, list[int]]]:
+    """Each fly's test trials of ``token``, keyed so that the flies line up.
+
+    Returns ``(rows, keys, mode, slots)``: the odor's rows with a ``_key``
+    column, the keys in order, ``"fixed"`` or ``"per_fly"``, and the trial
+    numbers each key covers.
+
+    Fixed protocol -- every fly meets the odor on the same trials (Hex at 1 and
+    8): the key is the trial number, as it always was. A fly missing one of
+    them still counts as fixed and is dropped by the caller's inner join.
+
+    Randomized panel -- the *-Sensitivity-* post-test runs the panel in a new
+    order per fly, so the odor sits on a different trial for each: the key is
+    the fly's 1st, 2nd, ... presentation, wherever it fell. Keyed by trial
+    number instead, "IAA 1..7" was each fly's response to whatever odor
+    happened to sit on trials 1..7.
+    """
+    test = _with_trial_number(test)
+    odor = np.asarray([
+        (p[1] if (p := parse_trial(v)) is not None else "")
+        for v in test["trial_label"]
+    ], dtype=object)
+    rows = test[odor == token].copy()
+    if rows.empty:
+        return rows, [], "fixed", {}
+    rows["_trial"] = rows["_trial"].astype(int)
+
+    per_fly = rows.groupby(["fly", "fly_number"])["_trial"].apply(
+        lambda s: tuple(sorted(set(s)))
+    )
+    modal = per_fly.value_counts().idxmax()
+    if all(set(slots) <= set(modal) for slots in per_fly):
+        mode = "fixed"
+        rows["_key"] = rows["_trial"]
+        keys = [int(t) for t in modal]
+    else:
+        mode = "per_fly"
+        rows["_key"] = (
+            rows.groupby(["fly", "fly_number"])["_trial"]
+            .rank(method="dense").astype(int)
+        )
+        keys = list(range(1, len(modal) + 1))
+    slots = {
+        k: sorted(int(t) for t in rows.loc[rows["_key"] == k, "_trial"].unique())
+        for k in keys
+    }
+    return rows, keys, mode, slots
+
+
 def build_fly_table(
     training_df: pd.DataFrame,
     testing_df: pd.DataFrame,
@@ -330,8 +388,11 @@ def build_fly_table(
     if train.empty or test.empty:
         return pd.DataFrame()
 
-    token = str(odor_token).strip().lower() if odor_token else training_odor_token(train)
-    presentations = presentation_trials(test, token)
+    token = (
+        _CONC_SUFFIX_RE.sub("", str(odor_token).strip().lower())
+        if odor_token else training_odor_token(train)
+    )
+    test_cs, presentations, mode, slots = keyed_presentations(test, token)
     if not presentations:
         LOGGER.warning("%s: odor %r never presented at test", dataset, token)
         return pd.DataFrame()
@@ -355,9 +416,8 @@ def build_fly_table(
     ]
 
     # Testing side: score and PER for each presentation of the odor.
-    test = _with_trial_number(test)
     for trial in presentations:
-        sub = test[test["_trial"] == trial]
+        sub = test_cs[test_cs["_key"] == trial]
         scores = sub.groupby(["fly", "fly_number"])["score"].mean().rename(f"score_{trial}")
         pers = (
             sub.groupby(["fly", "fly_number"])["prediction"].max().rename(f"per_{trial}")
@@ -379,9 +439,14 @@ def build_fly_table(
     if testing_auc_df is not None:
         t_auc = _with_trial_number(_subset(testing_auc_df, dataset))
         if not t_auc.empty:
+            # Key the envelope rows through the scored rows' (fly, trial) map,
+            # so the AUC column is the very trial the score column came from.
+            t_auc["_trial"] = t_auc["_trial"].astype(int)
+            keymap = test_cs[["fly", "fly_number", "_trial", "_key"]].drop_duplicates()
+            t_auc = t_auc.merge(keymap, on=["fly", "fly_number", "_trial"], how="inner")
             t_auc["AUC-During"] = pd.to_numeric(t_auc["AUC-During"], errors="coerce")
             for trial in presentations:
-                sub = t_auc[t_auc["_trial"] == trial]
+                sub = t_auc[t_auc["_key"] == trial]
                 col = (
                     sub.groupby(["fly", "fly_number"])["AUC-During"]
                     .mean()
@@ -399,6 +464,8 @@ def build_fly_table(
     summary.attrs["dataset"] = dataset
     summary.attrs["odor_token"] = token
     summary.attrs["presentations"] = presentations
+    summary.attrs["presentation_mode"] = mode
+    summary.attrs["presentation_slots"] = slots
     summary.attrs["training_trials"] = training_trials
     summary.attrs["odor_short"] = odor_short(token)
     return summary
@@ -1878,104 +1945,135 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     args.out_dir.mkdir(parents=True, exist_ok=True)
 
     meta: dict[str, dict] = {}
+    failed: list[str] = []
     for requested in args.dataset:
-        dataset = resolve_dataset(training, requested)
-        if dataset != requested:
-            LOGGER.info("Resolved %r to %r", requested, dataset)
-        table = build_fly_table(
-            training, testing, dataset=dataset,
-            odor_token=args.odor_token or None, testing_auc_df=testing_auc,
-        )
-        if table.empty:
-            LOGGER.warning("No joinable flies for %s — skipping", dataset)
+        try:
+            entry = _render_dataset(args, training, testing, testing_auc, requested)
+        except Exception:
+            # One cohort raising must not cost every later cohort its figures:
+            # IAA-Sensitivity-24-1 once took IAA-Sensitivity-40-1 down with it.
+            LOGGER.exception("%s: figure set failed; continuing", requested)
+            failed.append(requested)
             continue
-        token = table.attrs["odor_token"]
-        label = odor_pretty(token)
-        LOGGER.info(
-            "%s: %d flies, conditioning trials %s, %s presented at test on %s",
-            dataset, len(table), table.attrs["training_trials"], label,
-            table.attrs["presentations"],
-        )
-
-        stem = dataset.replace("/", "_")
-        svg = not args.no_svg
-        # One folder per cohort, so a dataset's figures, per-fly CSV and stats
-        # travel together.
-        ds_dir = args.out_dir / stem
-        ds_dir.mkdir(parents=True, exist_ok=True)
-
-        # ---- The three plain-reading figures --------------------------- #
-        fig, overview_stats = figure_simple_overview(
-            table, dataset=dataset, odor_label=label, n_bins=args.bins
-        )
-        _save(fig, ds_dir, f"{stem}_01_training_extension_vs_test", svg=svg)
-
-        predictor_stats = []
-        for idx, pres in enumerate(table.attrs["presentations"]):
-            fig, payload = figure_trial_predictors(
-                table, presentation_index=idx, dataset=dataset, odor_label=label
-            )
-            _save(
-                fig, ds_dir,
-                f"{stem}_{idx + 2:02d}_which_training_trial_predicts_test_{pres}",
-                svg=svg,
-            )
-            predictor_stats.append(payload)
-
-        # ---- Detail versions, kept out of the cohort's main folder ------ #
-        detail_dir = ds_dir / "supplementary"
-        detail_dir.mkdir(parents=True, exist_ok=True)
-        fig, per_stats = figure_per(
-            table, dataset=dataset, odor_label=label, n_bins=args.bins
-        )
-        _save(fig, detail_dir, f"{stem}_per_vs_training_auc", svg=svg)
-
-        fig, score_stats = figure_score(
-            table, dataset=dataset, odor_label=label, n_bins=args.bins
-        )
-        _save(fig, detail_dir, f"{stem}_score_vs_training_auc", svg=svg)
-
-        fig, matrix_stats = figure_trial_matrix(
-            table, dataset=dataset, odor_label=label
-        )
-        _save(fig, detail_dir, f"{stem}_trial_matrix", svg=svg)
-
-        fig, profile_stats = figure_trial_profile(
-            table, dataset=dataset, odor_label=label
-        )
-        _save(fig, detail_dir, f"{stem}_trial_profile", svg=svg)
-
-        table.to_csv(ds_dir / f"{stem}_per_fly.csv", index=False)
-        meta[dataset] = {
-            "dataset": dataset,
-            "odor_token": token,
-            "odor": label,
-            "n_flies": int(len(table)),
-            "conditioning_trials": list(table.attrs["training_trials"]),
-            "testing_presentations": list(table.attrs["presentations"]),
-            "flies": [
-                {"fly": f, "fly_number": int(n)}
-                for f, n in zip(table["fly"], table["fly_number"])
-            ],
-            "overview": overview_stats,
-            "trial_predictors": predictor_stats,
-            "supplementary": {
-                "per": per_stats,
-                "score": score_stats,
-                "trial_matrix": matrix_stats,
-                "trial_profile": profile_stats,
-            },
-        }
-
-        per_ds = ds_dir / f"{stem}_stats.json"
-        per_ds.write_text(
-            json.dumps(meta[dataset], indent=2, default=float), encoding="utf-8"
-        )
-        LOGGER.info("Saved %s", per_ds)
+        if entry is not None:
+            meta[entry["dataset"]] = entry
 
     sidecar = args.out_dir / "training_auc_vs_control_response.json"
     sidecar.write_text(json.dumps(meta, indent=2, default=float), encoding="utf-8")
     LOGGER.info("Saved %s", sidecar)
+    if failed:
+        raise SystemExit(
+            f"{len(failed)} cohort(s) failed: {', '.join(failed)}"
+        )
+
+
+def _render_dataset(
+    args, training: pd.DataFrame, testing: pd.DataFrame,
+    testing_auc: Optional[pd.DataFrame], requested: str,
+) -> Optional[dict]:
+    """Every figure for one cohort; its stats entry, or None if no flies join."""
+    dataset = resolve_dataset(training, requested)
+    if dataset != requested:
+        LOGGER.info("Resolved %r to %r", requested, dataset)
+    table = build_fly_table(
+        training, testing, dataset=dataset,
+        odor_token=args.odor_token or None, testing_auc_df=testing_auc,
+    )
+    if table.empty:
+        LOGGER.warning("No joinable flies for %s — skipping", dataset)
+        return None
+    token = table.attrs["odor_token"]
+    label = odor_pretty(token)
+    LOGGER.info(
+        "%s: %d flies, conditioning trials %s, %s presented at test on %s "
+        "(%s; trials per presentation %s)",
+        dataset, len(table), table.attrs["training_trials"], label,
+        table.attrs["presentations"], table.attrs["presentation_mode"],
+        table.attrs["presentation_slots"],
+    )
+
+    stem = dataset.replace("/", "_")
+    svg = not args.no_svg
+    # One folder per cohort, so a dataset's figures, per-fly CSV and stats
+    # travel together.
+    ds_dir = args.out_dir / stem
+    ds_dir.mkdir(parents=True, exist_ok=True)
+
+    # ---- The three plain-reading figures --------------------------- #
+    fig, overview_stats = figure_simple_overview(
+        table, dataset=dataset, odor_label=label, n_bins=args.bins
+    )
+    _save(fig, ds_dir, f"{stem}_01_training_extension_vs_test", svg=svg)
+
+    predictor_stats = []
+    for idx, pres in enumerate(table.attrs["presentations"]):
+        fig, payload = figure_trial_predictors(
+            table, presentation_index=idx, dataset=dataset, odor_label=label
+        )
+        _save(
+            fig, ds_dir,
+            f"{stem}_{idx + 2:02d}_which_training_trial_predicts_test_{pres}",
+            svg=svg,
+        )
+        predictor_stats.append(payload)
+
+    # ---- Detail versions, kept out of the cohort's main folder ------ #
+    detail_dir = ds_dir / "supplementary"
+    detail_dir.mkdir(parents=True, exist_ok=True)
+    fig, per_stats = figure_per(
+        table, dataset=dataset, odor_label=label, n_bins=args.bins
+    )
+    _save(fig, detail_dir, f"{stem}_per_vs_training_auc", svg=svg)
+
+    fig, score_stats = figure_score(
+        table, dataset=dataset, odor_label=label, n_bins=args.bins
+    )
+    _save(fig, detail_dir, f"{stem}_score_vs_training_auc", svg=svg)
+
+    fig, matrix_stats = figure_trial_matrix(
+        table, dataset=dataset, odor_label=label
+    )
+    _save(fig, detail_dir, f"{stem}_trial_matrix", svg=svg)
+
+    fig, profile_stats = figure_trial_profile(
+        table, dataset=dataset, odor_label=label
+    )
+    _save(fig, detail_dir, f"{stem}_trial_profile", svg=svg)
+
+    table.to_csv(ds_dir / f"{stem}_per_fly.csv", index=False)
+    entry = {
+        "dataset": dataset,
+        "odor_token": token,
+        "odor": label,
+        "n_flies": int(len(table)),
+        "conditioning_trials": list(table.attrs["training_trials"]),
+        "testing_presentations": list(table.attrs["presentations"]),
+        # "fixed": the keys above are trial numbers. "per_fly": they are each
+        # fly's 1st, 2nd, ... presentation, on the trials listed here.
+        "presentation_mode": table.attrs["presentation_mode"],
+        "presentation_slots": {
+            str(k): v for k, v in table.attrs["presentation_slots"].items()
+        },
+        "flies": [
+            {"fly": f, "fly_number": int(n)}
+            for f, n in zip(table["fly"], table["fly_number"])
+        ],
+        "overview": overview_stats,
+        "trial_predictors": predictor_stats,
+        "supplementary": {
+            "per": per_stats,
+            "score": score_stats,
+            "trial_matrix": matrix_stats,
+            "trial_profile": profile_stats,
+        },
+    }
+
+    per_ds = ds_dir / f"{stem}_stats.json"
+    per_ds.write_text(
+        json.dumps(entry, indent=2, default=float), encoding="utf-8"
+    )
+    LOGGER.info("Saved %s", per_ds)
+    return entry
 
 
 if __name__ == "__main__":

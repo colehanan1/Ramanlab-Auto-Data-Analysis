@@ -3966,6 +3966,14 @@ def _main_locked(args: argparse.Namespace, config_path: Path, data: dict, settin
     LOGGER.info("=" * 70 + "\n")
     _run_data_secured_sync(data)
 
+    # Last of all: one line on the eye-drift QC report, kept in the module
+    # global the __main__ block adds to the "Pipeline Complete" ntfy (main()
+    # itself must return None; see LAST_EYE_QC_SUMMARY). Never raises.
+    global LAST_EYE_QC_SUMMARY
+    LAST_EYE_QC_SUMMARY = _eye_qc_summary(settings, figures_only=figures_only)
+    if LAST_EYE_QC_SUMMARY:
+        print(LAST_EYE_QC_SUMMARY)
+
 
 # Output folders are named for the cohort itself ("EB-24-1"). The hand-run sets
 # under Results/Figures carry a "_mean_traces_new" tail; set `dir_suffix` in the
@@ -5098,6 +5106,93 @@ def _run_data_secured_sync(raw_cfg: Dict[str, Any]) -> None:
     LOGGER.info("=" * 70 + "\n")
 
 
+#: The end-of-run eye-drift QC line of the last main() call ("" for none), for
+#: the "Pipeline Complete" ntfy the ``__main__`` block sends. It is not main()'s
+#: return value: the legacy scripts/run_workflows.py shim does
+#: ``raise SystemExit(main())``, and a SystemExit carrying any str -- even "" --
+#: exits with status 1, reporting every finished run as a failed one.
+LAST_EYE_QC_SUMMARY: str = ""
+
+
+def _eye_qc_summary(settings: Settings, *, figures_only: bool = False) -> str:
+    """One line on the eye-drift QC report, for the end-of-run log and ntfy.
+
+    The ``eye_drift_qc`` step upserts every trial x fly into one cumulative
+    report. This counts the flagged flies among the assessed ones and the
+    trials that could not be assessed, leaving out folders frozen right now.
+    Under ``--figures-only`` no QC ran, so the line says it comes from the
+    existing report and when that was written. A full run's line ends with
+    that time too: when the step could not update the report (a root-owned
+    report dir, a full disk), the counts are an earlier run's, and the time
+    keeps the "Pipeline Complete" ping from passing them off as this run's.
+    "" when eye QC is off, there is no report yet, or it cannot be read.
+    Never raises: it runs after everything else and must not change the run's
+    outcome.
+    """
+    try:
+        from fbpipe.config import resolve_eye_qc_report_dir
+        from fbpipe.steps.eye_drift_qc import (
+            FLAGGED_FILENAME,
+            REPORT_FILENAME,
+            _truthy,
+            frozen_row_mask,
+        )
+
+        if not getattr(getattr(settings, "eye_qc", None), "enabled", True):
+            return ""
+        report_dir = resolve_eye_qc_report_dir(settings)
+        report_path = report_dir / REPORT_FILENAME
+        if not report_path.is_file():
+            return ""
+        # Read whole and as text: a row pandas cannot split cleanly raises here
+        # instead of shifting the columns the counts come from.
+        report = pd.read_csv(report_path, dtype=str, keep_default_na=False)
+        missing = {"trial_dir", "status", "eye_qc_flag"} - set(report.columns)
+        if missing:
+            raise ValueError(f"no {', '.join(sorted(missing))} column")
+        report = report[
+            ~frozen_row_mask(
+                report,
+                settings,
+                thawed=getattr(settings, "_thawed", ()),
+                thaw_all=getattr(settings, "_thaw_all", False),
+            )
+        ]
+        if report.empty:
+            return ""
+
+        status = report["status"].str.strip()
+        assessed = status == "assessed"
+        n_assessed = int(assessed.sum())
+        n_flagged = int((assessed & _truthy(report["eye_qc_flag"])).sum())
+        flies = "trial-fly" if n_assessed == 1 else "trial-flies"
+        parts = [f"{n_flagged:,} of {n_assessed:,} assessed {flies} flagged"
+                 + (" (fly came loose?)" if n_flagged else "")]
+        # The other statuses are one row per trial, with fly_number blank.
+        for name, what in (
+            ("no_live_eye_columns", "not assessable (tables predate per-frame eye tracking)"),
+            ("no_eye_anchor", "without an eye anchor"),
+            ("empty", "with an empty table"),
+            ("read_error", "unreadable"),
+        ):
+            n_trials = report.loc[status == name, "trial_dir"].nunique()
+            if n_trials:
+                parts.append(f"{n_trials:,} trial{'' if n_trials == 1 else 's'} {what}")
+
+        written = time.strftime("%Y-%m-%d %H:%M", time.localtime(report_path.stat().st_mtime))
+        source, stamp = "", f" (report last written {written})"
+        if figures_only:
+            source, stamp = f" (--figures-only: from the existing {REPORT_FILENAME}, last written {written})", ""
+        return f"EYE-QC{source}: " + "; ".join(parts) + f" -> {report_dir / FLAGGED_FILENAME}{stamp}"
+    except Exception as exc:
+        LOGGER.warning(
+            "EYE-QC: could not summarise the eye-drift QC report (%s: %s); no summary line this run.",
+            type(exc).__name__,
+            exc,
+        )
+        return ""
+
+
 NTFY_TOPIC = "ramanlab-pipeline"
 
 def ntfy_notify(title, message, priority="default", tags=""):
@@ -5118,6 +5213,8 @@ elif __name__ == "__main__":  # pragma: no cover
     try:
         main()
         _message = "Pipeline finished successfully."
+        if LAST_EYE_QC_SUMMARY:
+            _message += f"\n\n{LAST_EYE_QC_SUMMARY}"
         if _RUN_SUMMARY:
             _message += "\n" + _RUN_SUMMARY
         ntfy_notify("Pipeline Complete", _message, tags="white_check_mark")

@@ -385,7 +385,14 @@ def _run_main(tmp_path, monkeypatch, *, ffmpeg_bin, videos=(VIDEO_NAME,)):
     monkeypatch.setattr(yolo_infer, "YOLO", lambda p: _FakeModel())
     monkeypatch.setattr(yolo_infer.torch.cuda, "is_available", lambda: False)
     monkeypatch.setattr(yolo_infer.cv2, "VideoCapture", _video_capture)
-    monkeypatch.setattr(yolo_infer, "_scan_initial_fly_count", lambda *a, **k: 1)
+    # One eye per video, with its proboscis paired. main() locks the eye boxes
+    # (and the batch eye template votes on them), so the stub returns
+    # positions and pairing, not just a count.
+    monkeypatch.setattr(
+        yolo_infer,
+        "_scan_initial_eye_boxes",
+        lambda *a, **k: (np.array([[20.0, 20.0, 30.0, 30.0]], np.float32), [True]),
+    )
     monkeypatch.setattr(yolo_infer, "_run_chunked_inference", _fake_inference)
     monkeypatch.setattr(vw, "_default_ffmpeg_bin", lambda: ffmpeg_bin)
     # Never open a real NVENC session from a test.

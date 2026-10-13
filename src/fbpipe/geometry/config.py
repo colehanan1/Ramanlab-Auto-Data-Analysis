@@ -35,6 +35,11 @@ class GeometrySettings:
     per_min_px: float = 10.0
     per_effective_max_floor_px: float = 95.0
     angle_pct_min_range_deg: float = 0.0
+    # Percentile trimmed off the RESTING end of each scale so one mis-tracked frame
+    # cannot define a fly's range. The SIGNAL end always stays at the literal extreme:
+    # above the 99th percentile of PER, frames are ~2.6x enriched for odor-on, i.e. real.
+    per_trim_pct: float = 5.0      # off the low (resting) end of the proboscis distance
+    angle_trim_pct: float = 5.0    # off the high (straight, resting) end of the abdomen angle
     rest_min_samples: int = 200
     limits: FlyGeometryLimits = field(default_factory=lambda: DEFAULT_LIMITS)
     annotated_video: bool = True
@@ -45,7 +50,7 @@ class GeometrySettings:
 
 
 def _num(raw: Mapping[str, Any], key: str, default: float, *, minimum: Optional[float] = None,
-         strict: bool = False, integer: bool = False) -> float:
+         maximum: Optional[float] = None, strict: bool = False, integer: bool = False) -> float:
     val = raw.get(key, default)
     try:
         val = int(val) if integer else float(val)
@@ -53,6 +58,8 @@ def _num(raw: Mapping[str, Any], key: str, default: float, *, minimum: Optional[
         raise ValueError(f"geometry.{key} must be a number, got {val!r}") from exc
     if minimum is not None and (val < minimum or (strict and val <= minimum)):
         raise ValueError(f"geometry.{key} must be {'>' if strict else '>='} {minimum}, got {val}")
+    if maximum is not None and val > maximum:
+        raise ValueError(f"geometry.{key} must be <= {maximum}, got {val}")
     return val
 
 
@@ -81,6 +88,8 @@ def parse_geometry_block(raw: Optional[Mapping[str, Any]]) -> GeometrySettings:
         per_min_px=_num(raw, "per_min_px", 10.0, minimum=0.0),
         per_effective_max_floor_px=_num(raw, "per_effective_max_floor_px", 95.0, minimum=0.0),
         angle_pct_min_range_deg=_num(raw, "angle_pct_min_range_deg", 0.0, minimum=0.0),
+        per_trim_pct=_num(raw, "per_trim_pct", 5.0, minimum=0.0, maximum=49.0),
+        angle_trim_pct=_num(raw, "angle_trim_pct", 5.0, minimum=0.0, maximum=49.0),
         rest_min_samples=int(_num(raw, "rest_min_samples", 200, minimum=1, integer=True)),
         limits=limits,
         annotated_video=bool(raw.get("annotated_video", True)),

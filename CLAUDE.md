@@ -69,8 +69,8 @@ directly.
 | Host | Tailscale IP | Script | LIGHT_PIN | Light drive | PiCode dir on Pi | venv |
 |---|---|---|---|---|---|---|
 | `behaviorlocust` (Pi 1) | `100.121.64.36` | `combinedv2_1_pi1.py` | 25 | Thorlabs TTL, digital only — all PWM stripped 2026-07-29 | `~/Documents/Cole/` (capital C) | `~/cam-env/bin/python` |
-| `flybehavior2` (Pi 2) | `100.93.23.70` | `combinedv2_1.py` + `phase_status.py` (must ship together) | 13 | LDD-L PWM, `--light-brightness` 15 | `~/Documents/cole/` (lowercase c) | `~/myenv/bin/python` |
-| `flybehavior3` (Pi 3) | `100.97.155.65` | `combinedv2_1_pi3.py` | — | LDD-L PWM at **30** — edited on the Pi; a plain `PiCode/` sync reverts it to 15 | — | — |
+| `flybehavior2` (Pi 2) | `100.93.23.70` | `combinedv2_1.py` + `phase_status.py` (must ship together) | 13 | LDD-L PWM, `--light-brightness` default 15 (was 10 until 2026-10-02) | `~/Documents/cole/` (lowercase c) | `~/myenv/bin/python` |
+| `flybehavior3` (Pi 3) | `100.97.155.65` | `combinedv2_1_pi3.py` | — | LDD-L PWM, `--light-brightness` default **30** in the repo since 2026-10-02 (pinned by `tests/test_light_brightness_defaults.py`) | `~/Documents/cole/` | `~/myenv/bin/python` |
 
 `ssh <host>` is keyless via `~/.ssh/pi_backup` (do not "fix" it back to
 `id_ed25519` — that breaks the backup cron). Address rigs by **tailnet IP**;

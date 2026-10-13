@@ -11,7 +11,6 @@ the numbers themselves, not just the shape:
 """
 
 import sys, os
-import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "PiCode"))
 from expand_config import expand_config, _ALL_ODOR_PINS, _PIN_DISPLAY, _DEFAULTS
@@ -57,11 +56,35 @@ def test_pretest_has_no_light_even_in_training_mode():
         assert "light_schedule" not in step
 
 
-def test_rest_after_pretest_is_24_minutes():
-    """1440 s, set 2026-08-28; was 1800."""
+def _dark_gap(from_cycle):
+    """Seconds the rig sits idle: last Stop Recording -> next Start Recording.
+
+    That is the panel's trailing inter-trial gap plus delay_after. Nothing is
+    being recorded during it.
+    """
+    trailing = from_cycle["steps"][-1]
+    assert trailing["name"] == "Baseline Period", trailing
+    return trailing["duration"] + from_cycle["delay_after"]
+
+
+def _odor_off_to_odor_on(from_cycle, to_cycle):
+    """Last odor OFF -> next odor ON. The protocol is specified on this basis."""
+    return _puff_to_puff(from_cycle, to_cycle) - 30      # drop the odor step itself
+
+
+def test_rest_after_pretest_is_29_minutes_of_dark():
+    """1500 s, set 2026-09-29; was 1470 earlier the same day, 1440 (2026-08-28),
+    1800 before that.
+
+    The spec is "30 s post odor + 29 min + 30 s pre odor = 30 min", measured
+    odor-OFF to odor-ON. So the RIG-IDLE stretch is a flat 29 min, and
+    pretest_wait is that minus the panel's trailing 240 s gap: 1740 - 240 = 1500.
+    Three different reference points, pinned separately below -- do not "simplify"
+    any of them into the others.
+    """
     cyc = _cycles(expand_config(_v2()))
-    assert cyc[PRETEST]["delay_after"] == 1440
-    assert _DEFAULTS["pretest_wait"] == 1440
+    assert cyc[PRETEST]["delay_after"] == 1500
+    assert _DEFAULTS["pretest_wait"] == 1500
 
 
 def _puff_to_puff(from_cycle, to_cycle):
@@ -81,18 +104,53 @@ def _puff_to_puff(from_cycle, to_cycle):
 def test_pretest_to_training_gap_is_built_like_the_standard_protocol():
     """Trailing ITI + delay_after + next baseline, exactly as training->testing.
 
-    Without the trailing inter-trial gap the rest is 240 s short, so the same
-    1440 s wait yields 25.5 min here and 29.5 min in the standard config.
+    Without the trailing inter-trial gap the rest would be 240 s short. The
+    composition is what this pins; the total is checked below.
     """
     cyc = _cycles(expand_config(_v2()))
-    assert _puff_to_puff(cyc[PRETEST], cyc[TRAINING]) == 30 + 30 + 240 + 1440 + 30
+    assert _puff_to_puff(cyc[PRETEST], cyc[TRAINING]) == 30 + 30 + 240 + 1500 + 30
 
 
-def test_pretest_to_training_matches_standard_training_to_testing():
+def test_rig_sits_idle_exactly_29_minutes_between_pretest_and_training():
+    """"29 minutes flat" = dark time, last video stopping to next video starting."""
+    cyc = _cycles(expand_config(_v2()))
+    assert _dark_gap(cyc[PRETEST]) == 1740
+    assert _dark_gap(cyc[PRETEST]) == 29 * 60
+
+
+def test_pretest_to_training_is_30_minutes_odor_off_to_odor_on():
+    """The spec as the user states it: 30 s post + 29 min + 30 s pre = 30 min."""
+    cyc = _cycles(expand_config(_v2()))
+    assert _odor_off_to_odor_on(cyc[PRETEST], cyc[TRAINING]) == 30 + 1740 + 30
+    assert _odor_off_to_odor_on(cyc[PRETEST], cyc[TRAINING]) == 1800
+
+
+def test_the_three_reference_points_stay_distinct():
+    """Guards against collapsing dark / odor-off-to-on / onset-to-onset.
+
+    They differ by exactly the 30 s odor step, and each has been the "30 minutes"
+    in some version of this protocol -- which is how the value drifted twice.
+    """
+    cyc = _cycles(expand_config(_v2()))
+    assert _dark_gap(cyc[PRETEST]) == 1740                                  # 29.0 min
+    assert _odor_off_to_odor_on(cyc[PRETEST], cyc[TRAINING]) == 1800        # 30.0 min
+    assert _puff_to_puff(cyc[PRETEST], cyc[TRAINING]) == 1830               # 30.5 min
+
+
+def test_pretest_rest_is_60_s_longer_than_the_standard_training_to_testing_wait():
+    """These two used to be identical; as of 2026-09-29 they deliberately differ.
+
+    The pre-test rest is pinned to a flat 29 min of dark (1500 s), while
+    the standard protocol's training->testing wait is still the old 1440 s,
+    giving 29.5 min. Nothing requires them to match -- but they were built to
+    match once, so a future edit that re-syncs them should be deliberate.
+    """
     plain = {"format": "v2", "experiment": {"trained_odor": "OFM_H"}}
     std = {c["cycle"]: c for c in expand_config(plain)["cycles"]}
     pre = _cycles(expand_config(_v2()))
-    assert _puff_to_puff(pre[PRETEST], pre[TRAINING]) == _puff_to_puff(std[1], std[2])
+    assert _puff_to_puff(pre[PRETEST], pre[TRAINING]) == 1830
+    assert _puff_to_puff(std[1], std[2]) == 1770
+    assert _DEFAULTS["wait_before_testing"] == 1440
 
 
 def test_pretest_panel_still_has_only_six_internal_gaps():

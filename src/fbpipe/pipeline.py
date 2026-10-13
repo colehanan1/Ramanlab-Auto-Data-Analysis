@@ -22,6 +22,7 @@ if USE_GPU:
         detect_dropped_frames,
         distance_normalize_ultra as distance_normalize,  # ULTRA: Batch processing
         distance_stats,
+        eye_drift_qc,
         move_videos,
         reject_bad_proboscis,
         rms_copy_filter,
@@ -37,6 +38,7 @@ else:
         detect_dropped_frames,
         distance_normalize,
         distance_stats,
+        eye_drift_qc,
         move_videos,
         reject_bad_proboscis,
         rms_copy_filter,
@@ -60,6 +62,7 @@ class Step:
 ORDERED_STEPS: tuple[Step, ...] = (
     Step("yolo", yolo_infer.main, "Run Ultralytics YOLO inference and export merged CSVs"),
     Step("check_light_stimulus", check_light_stimulus.main, "Confirm the LED light stimulus physically appeared on screen for its sensor-commanded window"),
+    Step("eye_drift_qc", eye_drift_qc.main, "Flag flies whose eye drifts off its frozen anchor (loose fly / shifted mount); report-only"),
     Step("curate_yolo_dataset", curate_yolo_dataset.main, "Identify problematic tracking and extract frames for labeling"),
     Step("reject_bad_proboscis", reject_bad_proboscis.main, "Blank impossible proboscis detections (geometry + velocity gates)"),
     Step("distance_stats", distance_stats.main, "Derive global class-2 distance bounds per fly"),

@@ -48,9 +48,24 @@ def _rest(values: Sequence[np.ndarray], fallback: Sequence[np.ndarray], min_samp
     return {"rest_px": None, "n_samples": 0, "source": "none"}
 
 
+def _trim_resting(values: np.ndarray, trim_pct: float, *, high_end: bool) -> float:
+    """The scale's RESTING endpoint, trimmed by ``trim_pct`` so one bad frame cannot set it.
+
+    ``high_end`` picks which tail is the resting one: the abdomen angle rests near
+    STRAIGHT (high degrees) while the proboscis rests RETRACTED (low pixels). The
+    opposite tail is the signal and is never passed through here.
+    """
+    if values.size == 0:
+        return float("nan")
+    if trim_pct <= 0:
+        return float(values.max() if high_end else values.min())
+    return float(np.percentile(values, 100.0 - trim_pct if high_end else trim_pct))
+
+
 def compute_slot_stats(slot: int, entries: Sequence[Tuple[TrialInfo, pd.DataFrame]], gcfg: GeometrySettings,
                        settings: Settings) -> dict:
     pro_all, ang_min, ang_max = [], (np.inf, None), (-np.inf, None)
+    ang_all: List[np.ndarray] = []
     n_ang = 0
     len_pre, len_all, wid_pre, wid_all = [], [], [], []
     for info, df in entries:
@@ -67,6 +82,7 @@ def compute_slot_stats(slot: int, entries: Sequence[Tuple[TrialInfo, pd.DataFram
                 ang_min = (float(ang[i_min]), {"trial": info.label, "frame": int(frames[i_min])})
             if ang[i_max] > ang_max[0]:
                 ang_max = (float(ang[i_max]), {"trial": info.label, "frame": int(frames[i_max])})
+            ang_all.append(ang[ok_ang])
             n_ang += int(ok_ang.sum())
         has_abd = np.isfinite(df[C.ABD_LEN].to_numpy(dtype=float))
         pre = pre_odor_mask(df, info, settings) & has_abd
@@ -75,16 +91,25 @@ def compute_slot_stats(slot: int, entries: Sequence[Tuple[TrialInfo, pd.DataFram
         wid_pre.append(df[C.ABD_WID].to_numpy(dtype=float)[pre])
         wid_all.append(df[C.ABD_WID].to_numpy(dtype=float)[has_abd])
     pro = np.concatenate(pro_all) if pro_all else np.array([])
-    gmin = float(pro.min()) if pro.size else None
+    # Resting endpoint trimmed, signal endpoint literal (see _trim_resting).
+    gmin = _trim_resting(pro, gcfg.per_trim_pct, high_end=False) if pro.size else None
     gmax = float(pro.max()) if pro.size else None
+    ang_pool = np.concatenate(ang_all) if ang_all else np.array([])
+    ang_hi = _trim_resting(ang_pool, gcfg.angle_trim_pct, high_end=True) if ang_pool.size else None
     return {
         "slot": int(slot),
         "n_trials": len(entries),
         "proboscis": {"global_min": gmin, "global_max": gmax,
                       "effective_max": None if gmax is None else max(gmax, gcfg.per_effective_max_floor_px),
+                      "raw_min": float(pro.min()) if pro.size else None,
+                      "raw_max": float(pro.max()) if pro.size else None,
+                      "trim_pct": gcfg.per_trim_pct, "trim_end": "low (resting)",
                       "n_frames": int(pro.size), "min_px": gcfg.per_min_px},
         "abdomen_angle": {"min_deg": None if ang_min[1] is None else ang_min[0],
-                          "max_deg": None if ang_max[1] is None else ang_max[0],
+                          "max_deg": ang_hi,
+                          "raw_min": None if ang_min[1] is None else ang_min[0],
+                          "raw_max": None if ang_max[1] is None else ang_max[0],
+                          "trim_pct": gcfg.angle_trim_pct, "trim_end": "high (straight, resting)",
                           "min_at": ang_min[1], "max_at": ang_max[1], "n_frames": n_ang,
                           "min_range_deg": gcfg.angle_pct_min_range_deg},
         "abdomen_length": _rest(len_pre, len_all, gcfg.rest_min_samples),

@@ -7,6 +7,7 @@ implementation (statsmodels, scipy), never against another function here.
 """
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
@@ -112,10 +113,26 @@ def _testing_auc_frame() -> pd.DataFrame:
         ("  training_1_hexanol  ", (1, "hexanol")),
         ("nonsense", None),
         ("training_x_hexanol", None),
+        # ~/odor_pins.txt appends the vial concentration to every label from
+        # 2026-10-06 on. The odor is the same odor; only the spelling moved.
+        ("testing_5_isoamylacetate-1", (5, "isoamylacetate")),
+        ("pretest_2_EthylButyrate-0.1", (2, "ethylbutyrate")),
+        ("testing_1_3-octonol-0.1", (1, "3-octonol")),
+        ("training_3_Hexanol-10", (3, "hexanol")),
     ],
 )
 def test_parse_trial(label, expected):
     assert mod.parse_trial(label) == expected
+
+
+def test_training_odor_token_pools_concentration_suffixed_labels():
+    """IAA-Sensitivity-24-1 carries both spellings; the modal pick must not
+    split the cohort into an "isoamylacetate" and an "isoamylacetate-1" half."""
+    train = pd.DataFrame({
+        "trial_label": ["training_1_isoamylacetate"] * 2
+        + ["training_1_isoamylacetate-1"] * 3,
+    })
+    assert mod.training_odor_token(train) == "isoamylacetate"
 
 
 def test_training_odor_token_is_the_modal_token():
@@ -214,6 +231,145 @@ def test_build_fly_table_empty_for_an_unknown_dataset():
         _training_frame(), _testing_frame(), dataset="Nope-24-1"
     )
     assert table.empty
+
+
+def test_build_fly_table_fixed_protocol_is_keyed_by_trial_number():
+    """Every fly meets the odor on the same trials: keys stay trial numbers,
+    so the control cohorts' columns and file names do not move."""
+    table = mod.build_fly_table(
+        _training_frame(), _testing_frame(), dataset=DATASET
+    )
+    assert table.attrs["presentation_mode"] == "fixed"
+    assert table.attrs["presentation_slots"] == {1: [1], 8: [8]}
+
+
+def test_build_fly_table_fixed_protocol_drops_a_fly_missing_a_presentation():
+    """A fly that never reached trial 8 is dropped, exactly as before, rather
+    than tipping the whole cohort into per-fly keying."""
+    test = _testing_frame()
+    test = test[~((test["fly"] == "day_1") & (test["fly_number"] == 1)
+                  & (test["trial_label"] == "testing_8_hexanol"))]
+    table = mod.build_fly_table(_training_frame(), test, dataset=DATASET)
+    assert table.attrs["presentation_mode"] == "fixed"
+    assert list(table.attrs["presentations"]) == [1, 8]
+    assert ("day_1", 1) not in set(zip(table["fly"], table["fly_number"]))
+    assert len(table) == 3
+
+
+def test_build_fly_table_pools_concentration_suffixed_test_labels():
+    """Flies recorded after the odor-pins switch spell it ``hexanol-0.1``."""
+    test = _testing_frame()
+    late = test["fly"] == "day_2"
+    test.loc[late, "trial_label"] = test.loc[late, "trial_label"] + "-0.1"
+    table = mod.build_fly_table(_training_frame(), test, dataset=DATASET)
+    assert list(table.attrs["presentations"]) == [1, 8]
+    assert len(table) == 4
+
+
+# A *-Sensitivity-* post-test panel: the same 3 odors for every fly, in a
+# different random order per fly, so the conditioning odor sits on a different
+# trial for each. fly -> {trial: (odor label, score)}
+_RANDOM_PANEL = {
+    ("oct_1", 1): {1: ("isoamylacetate-1", 5), 2: ("citral-1", 0), 3: ("hexanol-0.1", 0)},
+    ("oct_1", 2): {1: ("citral-1", 4), 2: ("isoamylacetate-1", 0), 3: ("hexanol-0.1", 4)},
+    ("oct_2", 1): {1: ("hexanol-0.1", 5), 2: ("citral-1", 5), 3: ("isoamylacetate-1", 1)},
+    ("oct_2", 2): {1: ("isoamylacetate-1", 3), 2: ("hexanol-0.1", 0), 3: ("citral-1", 0)},
+}
+_RANDOM_DATASET = "IAA-Sensitivity-12-1"
+
+
+def _random_panel_frames():
+    train, test, test_auc = [], [], []
+    for (fly, num), trials in _RANDOM_PANEL.items():
+        for t in (1, 2):
+            train.append({
+                "dataset": _RANDOM_DATASET, "fly": fly, "fly_number": num,
+                "trial_type": "training",
+                "trial_label": f"training_{t}_isoamylacetate-1",
+                "AUC-During": float(10 * t + num),
+            })
+        for trial, (odor, score) in trials.items():
+            label = f"testing_{trial}_{odor}"
+            test.append({
+                "dataset": _RANDOM_DATASET, "fly": fly, "fly_number": num,
+                "trial_type": "testing", "trial_label": label,
+                "score": score, "prediction": int(score >= 2),
+            })
+            test_auc.append({
+                "dataset": _RANDOM_DATASET, "fly": fly, "fly_number": num,
+                "trial_type": "testing", "trial_label": label,
+                "AUC-During": float(score) * 100.0,
+            })
+    return pd.DataFrame(train), pd.DataFrame(test), pd.DataFrame(test_auc)
+
+
+def test_build_fly_table_randomized_panel_scores_each_flys_own_presentation():
+    """Keyed by trial number, "IAA 1..3" would be every fly's response to
+    whatever odor happened to sit on trials 1..3 -- mostly not IAA."""
+    train, test, test_auc = _random_panel_frames()
+    table = mod.build_fly_table(
+        train, test, dataset=_RANDOM_DATASET, testing_auc_df=test_auc
+    )
+    assert table.attrs["odor_token"] == "isoamylacetate"
+    assert table.attrs["presentation_mode"] == "per_fly"
+    assert list(table.attrs["presentations"]) == [1]
+    assert table.attrs["presentation_slots"] == {1: [1, 2, 3]}
+    assert len(table) == 4
+
+    by_fly = table.set_index(["fly", "fly_number"])
+    expected = {fly: next(s for o, s in trials.values() if o.startswith("isoamyl"))
+                for fly, trials in _RANDOM_PANEL.items()}
+    for fly, score in expected.items():
+        assert by_fly.loc[fly, "score_1"] == score
+        assert by_fly.loc[fly, "per_1"] == int(score >= 2)
+        assert by_fly.loc[fly, "test_auc_1"] == pytest.approx(score * 100.0)
+    assert by_fly["mean_score"].tolist() == by_fly["score_1"].tolist()
+
+
+def test_trial_profile_renders_for_a_randomized_panel():
+    """The figure that raised KeyError: 'IAA 5' on IAA-Sensitivity-24-1."""
+    train, test, test_auc = _random_panel_frames()
+    table = mod.build_fly_table(
+        train, test, dataset=_RANDOM_DATASET, testing_auc_df=test_auc
+    )
+    fig, payload = mod.figure_trial_profile(
+        table, dataset=_RANDOM_DATASET, odor_label="Isoamyl Acetate"
+    )
+    assert payload
+    import matplotlib.pyplot as plt
+    plt.close(fig)
+
+
+def test_main_renders_later_cohorts_when_one_fails(tmp_path, monkeypatch):
+    """One cohort raising must not cost every cohort after it its figures --
+    that is how IAA-Sensitivity-40-1 never got a Training-AUC folder. The run
+    still exits non-zero so the pipeline logs the failure."""
+    train, test, test_auc = _random_panel_frames()
+    other = "IAA-Sensitivity-30-1"
+    train = pd.concat([train, train.assign(dataset=other)], ignore_index=True)
+    test = pd.concat([test, test.assign(dataset=other)], ignore_index=True)
+    monkeypatch.setattr(mod, "_load_inputs", lambda args: (train, test, None))
+
+    real = mod.figure_trial_profile
+
+    def flaky(table, *, dataset, odor_label):
+        if dataset == _RANDOM_DATASET:
+            raise RuntimeError("boom")
+        return real(table, dataset=dataset, odor_label=odor_label)
+
+    monkeypatch.setattr(mod, "figure_trial_profile", flaky)
+    with pytest.raises(SystemExit) as exc:
+        mod.main([
+            "--training-wide-csv", "unused", "--predictions-csv", "unused",
+            "--dataset", _RANDOM_DATASET, "--dataset", other,
+            "--out-dir", str(tmp_path), "--no-svg",
+        ])
+    assert exc.value.code not in (0, None)
+    assert (tmp_path / other / f"{other}_stats.json").exists()
+    sidecar = json.loads(
+        (tmp_path / "training_auc_vs_control_response.json").read_text()
+    )
+    assert list(sidecar) == [other]
 
 
 # ---------------------------------------------------------------------------

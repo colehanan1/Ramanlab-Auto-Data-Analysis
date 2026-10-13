@@ -11,6 +11,11 @@ design than a separate control cohort, and it demands paired statistics:
   * response rate (responded / did not) -> **McNemar's exact test**;
   * ordinal PER score                   -> **Wilcoxon signed-rank**.
 
+``--rate-test fisher`` swaps McNemar for Fisher's exact test on the 2x2
+(phase x responded) table, for figure sets that want the response rate tested
+as two independent proportions. The pipeline never passes it, so its figures
+keep McNemar.
+
 Both are paired per (fly, odor), so **n counts flies** — the fly is the unit
 that is paired. This is not the "never average an average" trial-pooling case
 used for unpaired cohort means: each fly contributes one pre value and one post
@@ -44,7 +49,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-from scipy.stats import binomtest, wilcoxon
+from scipy.stats import binomtest, fisher_exact, wilcoxon
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
@@ -247,6 +252,29 @@ def mcnemar_p(pre: Sequence[bool], post: Sequence[bool]) -> float | None:
     return float(binomtest(b, b + c, 0.5, alternative="two-sided").pvalue)
 
 
+def fisher_p(pre: Sequence[bool], post: Sequence[bool]) -> float | None:
+    """Two-sided Fisher's exact p on the phase x responded table.
+
+    Treats the two phases as independent samples, so it ignores the pairing
+    McNemar uses. None on empty input, matching :func:`mcnemar_p`.
+    """
+
+    pre_arr = np.asarray(pre, dtype=bool)
+    post_arr = np.asarray(post, dtype=bool)
+    if pre_arr.size == 0 or post_arr.size == 0:
+        return None
+    a, b = int(pre_arr.sum()), int(post_arr.sum())
+    table = [[a, pre_arr.size - a], [b, post_arr.size - b]]
+    return float(fisher_exact(table).pvalue)
+
+
+#: ``--rate-test`` choices -> (p-value function, name shown on the figure).
+RATE_TESTS = {
+    "mcnemar": (mcnemar_p, "exact McNemar"),
+    "fisher": (fisher_p, "Fisher's exact"),
+}
+
+
 def wilcoxon_p(pre: Sequence[float], post: Sequence[float]) -> float | None:
     """Two-sided Wilcoxon signed-rank p, or None when the test cannot run."""
 
@@ -272,9 +300,18 @@ def wilcoxon_p(pre: Sequence[float], post: Sequence[float]) -> float | None:
 
 
 def per_odor_summary(
-    paired: pd.DataFrame, *, binary_threshold: int = BINARY_THRESHOLD
+    paired: pd.DataFrame,
+    *,
+    binary_threshold: int = BINARY_THRESHOLD,
+    rate_test: str = "mcnemar",
 ) -> pd.DataFrame:
-    """Per-odor pre/post means, response percentages and paired p-values."""
+    """Per-odor pre/post means, response percentages and p-values.
+
+    ``rate_test`` picks the response-rate test from :data:`RATE_TESTS`.
+    """
+    if rate_test not in RATE_TESTS:
+        raise ValueError(f"rate_test must be one of {sorted(RATE_TESTS)}: {rate_test!r}")
+    rate_p = RATE_TESTS[rate_test][0]
 
     if paired.empty:
         return pd.DataFrame(columns=[
@@ -298,7 +335,7 @@ def per_odor_summary(
             "pct_pre": 100.0 * float(np.mean(resp_pre)),
             "pct_post": 100.0 * float(np.mean(resp_post)),
             "p_score": wilcoxon_p(pre, post),
-            "p_rate": mcnemar_p(resp_pre, resp_post),
+            "p_rate": rate_p(resp_pre, resp_post),
         })
     return pd.DataFrame(rows)
 
@@ -321,7 +358,7 @@ def _n_label(summary: pd.DataFrame) -> str:
     return f"n={min(counts)}–{max(counts)} flies"
 
 
-def build_grouped_bars(summary, *, cohort, kind, p_key):
+def build_grouped_bars(summary, *, cohort, kind, p_key, test_note=""):
     """Pre vs post bars, one group per odor. Returns ``(fig, ax)`` unsaved.
 
     ``kind`` is "score" or "rate"; it selects the value columns AND the fixed
@@ -370,7 +407,7 @@ def build_grouped_bars(summary, *, cohort, kind, p_key):
     metric = "Mean PER score" if is_score else "PER response rate"
     ax.set_title(
         f"{cohort} — {metric}, pre-test vs post-training\n"
-        f"{_n_label(summary)}, paired within fly",
+        f"{_n_label(summary)}, paired within fly{test_note}",
         loc="left", color=INK, pad=8,
     )
     ax.legend(loc="upper right", ncol=2, handlelength=1.1, handleheight=0.9,
@@ -384,9 +421,11 @@ def build_grouped_bars(summary, *, cohort, kind, p_key):
     return fig, ax
 
 
-def _grouped_bars(summary, *, cohort, kind, p_key, path):
+def _grouped_bars(summary, *, cohort, kind, p_key, path, test_note=""):
     with plt.rc_context(_RC_CONTEXT):
-        fig, _ax = build_grouped_bars(summary, cohort=cohort, kind=kind, p_key=p_key)
+        fig, _ax = build_grouped_bars(
+            summary, cohort=cohort, kind=kind, p_key=p_key, test_note=test_note
+        )
         path.parent.mkdir(parents=True, exist_ok=True)
         fig.savefig(path)
         plt.close(fig)
@@ -420,7 +459,7 @@ def _trained_odor_row(summary: pd.DataFrame, cohort: str) -> pd.Series | None:
     return None
 
 
-def _spotlight(summary, *, cohort, path):
+def _spotlight(summary, *, cohort, path, test_note=""):
     """The CS+ odor alone: score and response rate, side by side."""
     row = _trained_odor_row(summary, cohort)
     if row is None:
@@ -449,7 +488,7 @@ def _spotlight(summary, *, cohort, path):
 
         fig.suptitle(
             f"{cohort} — {row['odor']} (CS+)\n"
-            f"n={int(row['n_flies'])} flies, paired within fly",
+            f"n={int(row['n_flies'])} flies, paired within fly{test_note}",
             x=0.01, ha="left", color=INK,
         )
         fig.tight_layout()
@@ -623,6 +662,7 @@ def render_cohort(
     cohort: str,
     out_dir: Path,
     binary_threshold: int = BINARY_THRESHOLD,
+    rate_test: str = "mcnemar",
 ) -> list[Path]:
     """Write the whole pre-vs-post figure set for one cohort."""
 
@@ -630,9 +670,16 @@ def render_cohort(
         print(f"[pre-vs-post] {cohort}: no paired trials — nothing to draw.")
         return []
 
-    summary = per_odor_summary(paired, binary_threshold=binary_threshold)
+    summary = per_odor_summary(
+        paired, binary_threshold=binary_threshold, rate_test=rate_test
+    )
     out_dir = Path(out_dir)
     stem = _safe_dirname(cohort)
+    # Named only when it is not the default, so pipeline titles are unchanged.
+    rate_note = (
+        "" if rate_test == "mcnemar"
+        else f" · response rate: {RATE_TESTS[rate_test][1]} (unpaired)"
+    )
 
     written: list[Path] = []
     written.append(_grouped_bars(
@@ -641,10 +688,11 @@ def render_cohort(
     ))
     written.append(_grouped_bars(
         summary, cohort=cohort, kind="rate", p_key="p_rate",
-        path=out_dir / f"{stem}_rate_bars.png",
+        path=out_dir / f"{stem}_rate_bars.png", test_note=rate_note,
     ))
     for maybe in (
-        _spotlight(summary, cohort=cohort, path=out_dir / f"{stem}_trained_odor.png"),
+        _spotlight(summary, cohort=cohort, path=out_dir / f"{stem}_trained_odor.png",
+                   test_note=rate_note),
         _slopes(paired, summary, cohort=cohort, path=out_dir / f"{stem}_slopes.png"),
         _heatmap(paired, cohort=cohort, path=out_dir / f"{stem}_heatmap.png"),
     ):
@@ -671,6 +719,10 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--binary-threshold", type=int, default=BINARY_THRESHOLD)
     parser.add_argument("--flagged-flies-csv", default="")
     parser.add_argument("--threshold", type=float, default=None)
+    parser.add_argument(
+        "--rate-test", choices=sorted(RATE_TESTS), default="mcnemar",
+        help="Response-rate test: paired McNemar (default) or Fisher's exact.",
+    )
     return parser.parse_args(argv)
 
 
@@ -704,6 +756,7 @@ def main(argv: Sequence[str] | None = None) -> None:
             sub, cohort=cohort,
             out_dir=args.out_root / _safe_dirname(cohort),
             binary_threshold=args.binary_threshold,
+            rate_test=args.rate_test,
         )
         total += len(written)
         print(f"[pre-vs-post] {cohort}: wrote {len(written)} figure(s).")

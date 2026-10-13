@@ -28,6 +28,37 @@ def _as_bool(value, default: bool) -> bool:
     return bool(value)
 
 
+def _as_int(value, default: int, name: str) -> int:
+    """``int(value)`` with ``_as_float``'s leniency: an empty value or junk
+    (a bool included) falls back to ``default`` with a warning instead of
+    raising. A non-integral number is truncated, not rejected."""
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return default
+    if not isinstance(value, bool):
+        try:
+            return int(float(value))
+        except (TypeError, ValueError):
+            pass
+    print(f"[config] {name}: {value!r} is not a number; using the default {default}.")
+    return default
+
+
+def _as_float(value, default: float, name: str) -> float:
+    """``float(value)``; ``default`` for an empty value (``key:`` or a blank
+    string) and, with a printed warning, for anything that is not a number --
+    a bool included, rather than reading it as 1.0/0.0. Never raises, for
+    blocks whose typo must not abort a run."""
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return default
+    if not isinstance(value, bool):
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            pass
+    print(f"[config] {name}: {value!r} is not a number; using the default {default}.")
+    return default
+
+
 def _freeze_block(raw: object) -> dict:
     """Return the freeze mapping from a raw override block, or {} if absent or
     malformed (e.g. a hand-typed ``freeze: true`` instead of ``freeze: {data: true}``)."""
@@ -434,6 +465,29 @@ def get_dataset_override(cfg: "Settings", path: str | Path) -> "DatasetOverride"
     return DatasetOverride()
 
 
+def resolve_eye_qc_report_dir(cfg: "Settings") -> Path:
+    """Directory the eye-drift QC report is written to and read back from.
+
+    ``eye_qc.report_dir`` when set, else ``DEFAULT_EYE_QC_REPORT_DIR``. A path
+    inside Results/Figures is refused with a warning and replaced by the
+    default: that tree holds hand-run one-offs, and no pipeline step writes
+    there. A settings object without ``eye_qc`` (a duck-typed test stand-in)
+    gets the default too.
+    """
+    text = str(getattr(getattr(cfg, "eye_qc", None), "report_dir", "") or "").strip()
+    if not text:
+        return DEFAULT_EYE_QC_REPORT_DIR
+    path = Path(text).expanduser()
+    parts = path.parts
+    if any(parts[i:i + 2] == ("Results", "Figures") for i in range(len(parts) - 1)):
+        print(
+            f"[config] eye_qc.report_dir {path} is inside Results/Figures, which no "
+            f"pipeline step writes to; using {DEFAULT_EYE_QC_REPORT_DIR} instead."
+        )
+        return DEFAULT_EYE_QC_REPORT_DIR
+    return path
+
+
 @dataclass
 class ReactionMatrixSettings:
     out_dir: str = ""
@@ -584,6 +638,77 @@ class ProboscisFilterSettings:
     max_eye_prob_distance_px: float = 150.0
     up_divisor: float = 4.0
     max_jump_px: float = 80.0
+
+
+#: Where the eye-drift QC report goes when ``eye_qc.report_dir`` is empty. The
+#: repo has no Results-root setting (every figure block names its own absolute
+#: out_dir), so this is the config_new pipeline's output tree -- never
+#: Results/Figures, which holds hand-run one-offs.
+DEFAULT_EYE_QC_REPORT_DIR = Path(
+    "/home/ramanlab/Documents/cole/Results/New-Opto-Fly-Figures/Eye-Tracking-QC"
+)
+
+
+@dataclass
+class EyeQCSettings:
+    """Per-frame eye-position QC (report-only; distances keep the frozen anchor).
+
+    YOLO records where each fly's eye is detected in every frame and how far
+    that sits from the frozen anchor every distance, angle and gate uses. The
+    ``eye_drift_qc`` step flags a trial when the trailing median of that drift
+    over ``sustain_s`` exceeds ``max_drift_px`` -- a fly that came loose or a
+    shifted mount. A shift held for just over half that window is enough (an
+    unmatched frame counts as not over); a few-frame spike never is. It also
+    flags an eye that goes unmatched in more than ``max_missing_frac`` of
+    frames, or for longer than
+    ``max_missing_run_s`` in a row: an eye that jumps past ``match_radius_px``
+    reads as unmatched, not as drift, and late in a trial that is too few
+    frames for the fraction. Nothing is excluded: the flag is a report, a log
+    line and a phone ping. Good trials drift a median 0.4-0.9 px (max 2.7 px)
+    and match their eye in every frame, so both rules stand well clear of
+    detection jitter.
+
+    load_settings only coerces types and never raises on an odd value; the QC
+    step range-checks these itself.
+    """
+
+    enabled: bool = True
+    max_drift_px: float = 5.0        # flag when the median drift over sustain_s exceeds this
+    sustain_s: float = 0.5           # trailing-median window (a shift held just over half of it flags)
+    match_radius_px: float = 50.0    # per-frame eye detection must lie this close to its anchor
+    max_missing_frac: float = 0.2    # flag when the eye is unmatched in more than this fraction of frames ...
+    max_missing_run_s: float = 2.0   # ... or for longer than this in a row (it jumped past match_radius_px?)
+    draw_live_eye: bool = True       # hollow non-red marker at the live eye in the annotated mp4
+    report_dir: str = ""             # "" -> DEFAULT_EYE_QC_REPORT_DIR (see resolve_eye_qc_report_dir)
+
+
+@dataclass
+class EyeTemplateSettings:
+    """Batch-level eye anchor template (which fly slots a batch's trials get).
+
+    YOLO sizes each trial from its own first frames, so a fly whose eye sits
+    at the frame edge is found in some trials and missed in others -- and
+    because slots are numbered top-to-bottom, the miss renumbers every fly
+    below it. The template settles the slot set once per batch: a slot counts
+    when at least ``min_trials`` of the batch's trials saw an eye there, so
+    neither one spurious detection nor one lucky one can change a batch's fly
+    numbering. Each trial still keeps its own anchor wherever it detected one
+    and borrows the template's only for a slot it missed.
+
+    ``match_radius_px`` is how far a slot looks for this trial's own eye. It
+    is not ``eye_qc.match_radius_px`` (that is the per-frame QC search against
+    an already-frozen anchor) and not either 80 px tracker gate.
+
+    load_settings only coerces types and never raises on an odd value: every
+    pipeline subprocess loads settings, and one raise aborts the whole run.
+    """
+
+    enabled: bool = True
+    min_trials: int = 2              # a slot needs this many trials' corroboration
+    match_radius_px: float = 120.0   # slot -> this trial's own eye (clamped by slot spacing)
+    cluster_tol_min_px: float = 25.0 # detections this close across trials are one eye
+    cluster_tol_frac: float = 0.45   # ... growing to this fraction of the closest slot spacing
+    require_proboscis: bool = True   # a slot must pair a proboscis, not just show an eye
 
 
 @dataclass
@@ -804,6 +929,10 @@ class Settings:
 
     # Downstream proboscis rejection (geometry + velocity gates)
     proboscis_filter: ProboscisFilterSettings = field(default_factory=ProboscisFilterSettings)
+
+    # Per-frame eye-position QC (report-only; the frozen anchor never moves)
+    eye_qc: EyeQCSettings = field(default_factory=EyeQCSettings)
+    eye_template: EyeTemplateSettings = field(default_factory=EyeTemplateSettings)
 
     # Pseudolabel mining + export
     pseudolabel: PseudolabelSettings = field(default_factory=PseudolabelSettings)
@@ -1153,6 +1282,79 @@ def load_settings(config_path: str | Path) -> Settings:
         ),
     )
 
+    # per-frame eye-position QC (report-only). Lenient where the blocks around
+    # it are strict: every pipeline subprocess loads settings, so an empty or
+    # odd value falls back to the dataclass default instead of raising, and the
+    # QC step range-checks the thresholds itself. A bare ``eye_qc: false``
+    # turns it off; any other non-mapping block means all defaults.
+    eye_qc_cfg = data.get("eye_qc")
+    if isinstance(eye_qc_cfg, bool):
+        eye_qc_cfg = {"enabled": eye_qc_cfg}
+    elif not isinstance(eye_qc_cfg, dict):
+        eye_qc_cfg = {}
+    eye_qc_default = EyeQCSettings()
+
+    def _eye_qc_raw(key: str, env: Optional[str] = None) -> Any:
+        # A set, non-blank env var wins; an exported-but-empty one is no override.
+        env_value = os.getenv(env) if env else None
+        if env_value is not None and env_value.strip():
+            return env_value
+        return eye_qc_cfg.get(key)
+
+    def _eye_qc_float(key: str, env: str) -> float:
+        return _as_float(_eye_qc_raw(key, env), getattr(eye_qc_default, key), f"eye_qc.{key}")
+
+    eye_qc_report_dir = _eye_qc_raw("report_dir", "EYE_QC_REPORT_DIR")
+    eye_qc = EyeQCSettings(
+        enabled=_as_bool(_eye_qc_raw("enabled", "EYE_QC_ENABLED"), eye_qc_default.enabled),
+        max_drift_px=_eye_qc_float("max_drift_px", "EYE_QC_MAX_DRIFT_PX"),
+        sustain_s=_eye_qc_float("sustain_s", "EYE_QC_SUSTAIN_S"),
+        match_radius_px=_eye_qc_float("match_radius_px", "EYE_QC_MATCH_RADIUS_PX"),
+        max_missing_frac=_eye_qc_float("max_missing_frac", "EYE_QC_MAX_MISSING_FRAC"),
+        max_missing_run_s=_eye_qc_float("max_missing_run_s", "EYE_QC_MAX_MISSING_RUN_S"),
+        draw_live_eye=_as_bool(_eye_qc_raw("draw_live_eye"), eye_qc_default.draw_live_eye),
+        report_dir=(
+            eye_qc_default.report_dir
+            if eye_qc_report_dir is None
+            else str(eye_qc_report_dir).strip()
+        ),
+    )
+
+    # batch-level eye anchor template. Lenient like eye_qc above: a bare
+    # ``eye_template: false`` turns it off, any other non-mapping block means
+    # all defaults, and an odd value falls back rather than aborting the run.
+    eye_tpl_cfg = data.get("eye_template")
+    if isinstance(eye_tpl_cfg, bool):
+        eye_tpl_cfg = {"enabled": eye_tpl_cfg}
+    elif not isinstance(eye_tpl_cfg, dict):
+        eye_tpl_cfg = {}
+    eye_tpl_default = EyeTemplateSettings()
+
+    def _eye_tpl_raw(key: str, env: Optional[str] = None) -> Any:
+        env_value = os.getenv(env) if env else None
+        if env_value is not None and env_value.strip():
+            return env_value
+        return eye_tpl_cfg.get(key)
+
+    def _eye_tpl_float(key: str, env: str) -> float:
+        return _as_float(_eye_tpl_raw(key, env), getattr(eye_tpl_default, key), f"eye_template.{key}")
+
+    eye_template = EyeTemplateSettings(
+        enabled=_as_bool(_eye_tpl_raw("enabled", "EYE_TEMPLATE_ENABLED"), eye_tpl_default.enabled),
+        min_trials=_as_int(
+            _eye_tpl_raw("min_trials", "EYE_TEMPLATE_MIN_TRIALS"),
+            eye_tpl_default.min_trials,
+            "eye_template.min_trials",
+        ),
+        match_radius_px=_eye_tpl_float("match_radius_px", "EYE_TEMPLATE_MATCH_RADIUS_PX"),
+        cluster_tol_min_px=_eye_tpl_float("cluster_tol_min_px", "EYE_TEMPLATE_CLUSTER_TOL_MIN_PX"),
+        cluster_tol_frac=_eye_tpl_float("cluster_tol_frac", "EYE_TEMPLATE_CLUSTER_TOL_FRAC"),
+        require_proboscis=_as_bool(
+            _eye_tpl_raw("require_proboscis", "EYE_TEMPLATE_REQUIRE_PROBOSCIS"),
+            eye_tpl_default.require_proboscis,
+        ),
+    )
+
     # pseudolabel config
     pseudolabel_cfg = data.get("pseudolabel", {})
     if not isinstance(pseudolabel_cfg, dict):
@@ -1420,6 +1622,8 @@ def load_settings(config_path: str | Path) -> Settings:
         tracking=tracking,
         yolo_curation=yolo_curation,
         proboscis_filter=proboscis_filter,
+        eye_qc=eye_qc,
+        eye_template=eye_template,
         pseudolabel=pseudolabel,
         protocol=str(_get(data, "protocol", "legacy")),
         datasets=datasets_tuple,

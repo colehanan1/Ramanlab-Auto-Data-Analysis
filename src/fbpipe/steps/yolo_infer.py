@@ -10,24 +10,30 @@ import cv2
 import numpy as np
 import pandas as pd
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Sequence, Tuple
 from ultralytics import YOLO
 import torch
-import gc  # Add this import
+import gc
 
-from ..config import Settings, get_main_directories
+from ..config import EyeQCSettings, Settings, get_main_directories
+from ..utils import eye_template
 from ..utils.frozen_folders import iter_live_batch_dirs
-from ..utils.tables import read_table, write_table, table_path
+from ..utils.tables import read_table, write_table
 from ..utils.timestamps import pick_timestamp_column, pick_frame_column, to_seconds_series
 from ..utils.vision import xyxy_to_cxcywh
 from ..utils.yolo_results import collect_detections
 from ..utils.yolo_discovery import latest_session, raw_videos, superseded_videos, trial_folder_name
 from ..utils.video_writer import FFmpegFrameWriter
-from ..utils.distance_sanity import anisotropic_boundary_offsets
+from ..utils.distance_sanity import anisotropic_boundary_offsets, anisotropic_semi_axes
 from ..utils.rig_anchor import resolve_anchor
 from ..utils.rig_gates import apply_rig_gate_overrides
 from ..utils.track import MultiObjectTracker, SingleClassTracker, Track
-from ..utils.multi_fly import EyeAnchorManager, StablePairing, enforce_zero_iou_and_topk
+from ..utils.multi_fly import (
+    EyeAnchorManager,
+    StablePairing,
+    enforce_zero_iou_and_topk,
+    match_live_eyes,
+)
 from ..utils.columns import (
     EYE_CLASS,
     PROBOSCIS_CLASS,
@@ -43,6 +49,12 @@ logging.getLogger("ultralytics").setLevel(logging.WARNING)
 
 SINGLE_TRACK_CLASSES = tuple(c for c in (1,) if c not in (EYE_CLASS, PROBOSCIS_CLASS))
 ALL_TRACKED_CLASSES = SINGLE_TRACK_CLASSES + (EYE_CLASS, PROBOSCIS_CLASS)
+
+# Live-eye QC marker on the annotated video: a thin cyan ring. Never red or
+# magenta (check_light_stimulus measures the frame's redness on this mp4), and
+# no text or drift-dependent styling (human scorers watch this video blinded).
+LIVE_EYE_MARKER_BGR = (255, 255, 0)
+LIVE_EYE_MARKER_RADIUS_PX = 6
 
 def _flow_nudge(prev_gray, gray, box_xyxy, flow_skip_edge: int, flow_params: dict):
     if prev_gray is None: return box_xyxy
@@ -72,18 +84,27 @@ def _prepare_single_class_input(
     return boxes[[best_idx]], scores[[best_idx]], selected_corners
 
 
-def _scan_initial_fly_count(
+def _scan_initial_eye_boxes(
     cap,
     max_frames: int,
     target_size: Tuple[int, int],
     settings: Settings,
     predict_fn,
-):
-    """Infer the number of flies present using the first ``max_frames`` frames."""
+) -> Tuple[np.ndarray, List[bool]]:
+    """Return the eye boxes locked from the first ``max_frames`` frames, and
+    whether each one had a proboscis inside its gate.
+
+    The batch eye template needs the positions, not just the count: it votes
+    them across the batch's trials and lends a trial the ones it missed. It
+    needs the pairing too, because an eye alone is not a measurable fly -- a
+    fly clipped by the frame edge can show an eye while its proboscis never
+    enters the shot.
+    """
 
     eye_mgr = EyeAnchorManager(max_eyes=settings.max_flies, zero_iou_eps=settings.zero_iou_epsilon)
     frames_checked = 0
     target_w, target_h = target_size
+    prob_centres: List[Tuple[float, float]] = []
 
     while frames_checked < max_frames:
         ok, frame = cap.read()
@@ -106,12 +127,98 @@ def _scan_initial_fly_count(
         )
 
         eye_mgr.try_update_from_dets(cls2_boxes, cls2_scores)
+
+        # Every proboscis seen during the scan, matched against the final
+        # anchors below. Collected rather than matched per frame because the
+        # manager re-sorts its anchors top-to-bottom when it confirms.
+        for box in dets.get(PROBOSCIS_CLASS, {}).get("boxes", np.zeros((0, 4), np.float32)):
+            pcx, pcy, _, _ = xyxy_to_cxcywh(np.asarray(box, dtype=np.float32))
+            prob_centres.append((float(pcx), float(pcy)))
+
         frames_checked += 1
 
         if eye_mgr.confirmed:
             break
 
-    return len(eye_mgr.anchor_ids)
+    if not eye_mgr.anchors_xyxy:
+        return np.zeros((0, 4), np.float32), []
+
+    boxes = np.stack(eye_mgr.anchors_xyxy, axis=0).astype(np.float32)
+    n_eyes = boxes.shape[0]
+    paired = [
+        any(
+            _eye_prob_pair_is_valid(eye_xy, prob_xy, settings, n_eyes)
+            for prob_xy in prob_centres
+        )
+        for eye_xy in eye_mgr.get_centers()
+    ]
+    return boxes, paired
+
+
+def _scan_initial_fly_count(cap, max_frames, target_size, settings, predict_fn) -> int:
+    """How many flies the first ``max_frames`` frames show."""
+
+    boxes, _ = _scan_initial_eye_boxes(cap, max_frames, target_size, settings, predict_fn)
+    return int(boxes.shape[0])
+
+
+def load_or_build_eye_template(
+    batch_dir: Path,
+    video_paths: Sequence[Path],
+    settings: Settings,
+    scan_boxes: Callable[[Path], np.ndarray],
+) -> Tuple[Optional[List[eye_template.TemplateSlot]], Dict[Path, np.ndarray]]:
+    """Resolve the batch's fly slot set before any of its videos is processed.
+
+    Returns the slots and whatever this call scanned, so the main loop reuses
+    its own videos' scans instead of paying for them twice. A cached template
+    costs no scans at all -- which matters because every worker slicing the
+    batch would otherwise re-scan all of its videos.
+
+    ``None`` means "no usable template": the block is off, the batch is empty,
+    or no slot cleared ``min_trials`` (a one-trial batch can never corroborate
+    anything). The caller then sizes the trial from its own frames, exactly as
+    before this existed.
+    """
+    tpl_cfg = getattr(settings, "eye_template", None)
+    if tpl_cfg is None or not tpl_cfg.enabled or not video_paths:
+        return None, {}
+
+    path = eye_template.template_path(batch_dir)
+    cached = eye_template.load_template(path, min_trials=tpl_cfg.min_trials)
+    if cached is not None:
+        return (cached or None), {}
+
+    scanned: Dict[Path, np.ndarray] = {}
+    paired: Dict[str, List[bool]] = {}
+    for video_path in sorted(video_paths, key=str):
+        boxes, flags = scan_boxes(video_path)
+        scanned[video_path] = boxes
+        paired[video_path.name] = list(flags)
+
+    slots = eye_template.build_template(
+        {p.name: boxes for p, boxes in scanned.items()},
+        min_trials=tpl_cfg.min_trials,
+        cluster_tol_min_px=tpl_cfg.cluster_tol_min_px,
+        cluster_tol_frac=tpl_cfg.cluster_tol_frac,
+        trial_paired=paired,
+        require_proboscis=tpl_cfg.require_proboscis,
+    )
+    try:
+        eye_template.save_template(path, slots, tpl_cfg.min_trials)
+    except OSError as exc:  # a read-only mirror must not abort the run
+        print(f"[YOLO] could not cache the eye template in {batch_dir}: {exc}")
+    return (slots or None), scanned
+
+
+def _template_slot_count(
+    slots: Optional[Sequence[eye_template.TemplateSlot]], settings: Settings
+) -> Optional[int]:
+    """How many fly slots the template gives a trial, capped by ``max_flies``."""
+
+    if not slots:
+        return None
+    return min(len(slots), int(settings.max_flies))
 
 
 def _active_proboscis_track_limit(active_max_flies: int) -> int:
@@ -170,12 +277,109 @@ def _eye_prob_distance_is_valid(
     return distance_px <= _max_valid_eye_prob_distance_px(settings, active_max_flies)
 
 
+def _eye_prob_pair_is_valid(
+    eye_xy: Tuple[float, float],
+    prob_xy: Tuple[float, float],
+    settings: Settings,
+    active_max_flies: int,
+) -> bool:
+    """May this proboscis be paired with this eye?
+
+    The circular >=3-fly cap AND the anisotropic ``proboscis_filter`` gate that
+    reject_bad_proboscis enforces downstream. Checking the gate only downstream
+    is too late: by then a proboscis sitting outside one eye's gate has already
+    been locked to that eye, and its real owner never gets it.
+    """
+    dx = float(prob_xy[0]) - float(eye_xy[0])
+    dy = float(prob_xy[1]) - float(eye_xy[1])
+    if not _eye_prob_distance_is_valid(float(np.hypot(dx, dy)), settings, active_max_flies):
+        return False
+    pf = getattr(settings, "proboscis_filter", None)
+    if pf is None or not getattr(pf, "enabled", False):
+        return True
+    max_px = float(getattr(pf, "max_eye_prob_distance_px", 0) or 0)
+    if max_px <= 0:
+        return True
+    a, b = anisotropic_semi_axes(dx, dy, max_px, float(getattr(pf, "up_divisor", 4.0)))
+    return (dx / a) ** 2 + (dy / float(b)) ** 2 <= 1.0
+
+
+def _proboscis_gate_active(settings: Settings) -> bool:
+    pf = getattr(settings, "proboscis_filter", None)
+    return bool(
+        pf is not None
+        and getattr(pf, "enabled", False)
+        and float(getattr(pf, "max_eye_prob_distance_px", 0) or 0) > 0
+    )
+
+
+def _eye_prob_gate_depth(
+    eye_xy: Tuple[float, float],
+    prob_xy: Tuple[float, float],
+    settings: Settings,
+    active_max_flies: int,
+) -> float:
+    """How deep a proboscis sits in this eye's anisotropic gate: 0 at the eye,
+    1 at the gate's edge, inf when the pair is not allowed at all.
+
+    The pairing cost. Comparing depths, not raw distances, is what separates
+    close flies: 55 px under the lower eye is shallow for it (~0.2) but deep for
+    an eye 178 px higher (~0.8), while anything above an eye is costly because
+    the gate's upward reach is only max_px / up_divisor.
+    """
+    if not _eye_prob_pair_is_valid(eye_xy, prob_xy, settings, active_max_flies):
+        return math.inf
+    pf = settings.proboscis_filter
+    dx = float(prob_xy[0]) - float(eye_xy[0])
+    dy = float(prob_xy[1]) - float(eye_xy[1])
+    a, b = anisotropic_semi_axes(
+        dx, dy, float(pf.max_eye_prob_distance_px), float(getattr(pf, "up_divisor", 4.0))
+    )
+    return float(math.sqrt((dx / a) ** 2 + (dy / float(b)) ** 2))
+
+
 def _clear_proboscis_match(row: Dict[str, float], idx: int) -> None:
     row[f"cls8_{idx}_track_id"] = np.nan
     row[f"cls8_{idx}_x"] = np.nan
     row[f"cls8_{idx}_y"] = np.nan
     row[f"dist_eye_{idx}_cls8_{idx}"] = np.nan
     row[f"angle_eye_{idx}_cls8_vs_anchor"] = np.nan
+
+
+def _live_eye_match_radius(eye_qc) -> float:
+    """``eye_qc.match_radius_px`` when it is a finite positive number, else the default.
+
+    load_settings passes odd numbers through for the QC step to range-check, but
+    here a radius that matches nothing would record every eye as missing -- for
+    good, since YOLO never re-runs a processed trial.
+    """
+    try:
+        radius = float(getattr(eye_qc, "match_radius_px", math.nan))
+    except (TypeError, ValueError):
+        radius = math.nan
+    if math.isfinite(radius) and radius > 0:
+        return radius
+    return EyeQCSettings().match_radius_px
+
+
+def _set_live_eye(
+    row: Dict[str, float],
+    idx: int,
+    live_xy: Optional[Tuple[float, float]],
+    anchor_xy: Optional[Tuple[float, float]] = None,
+) -> None:
+    """Slot ``idx``'s per-frame (live) eye centre and its drift from the frozen
+    anchor ``anchor_xy``; NaN when the slot has no anchor or its eye went
+    unmatched. QC only: every distance, angle and gate keeps the frozen anchor."""
+    if live_xy is None or anchor_xy is None:
+        row[f"eye_{idx}_live_x"] = np.nan
+        row[f"eye_{idx}_live_y"] = np.nan
+        row[f"eye_{idx}_drift_px"] = np.nan
+        return
+    lx, ly = live_xy
+    row[f"eye_{idx}_live_x"] = lx
+    row[f"eye_{idx}_live_y"] = ly
+    row[f"eye_{idx}_drift_px"] = float(np.hypot(lx - anchor_xy[0], ly - anchor_xy[1]))
 
 
 def _process_frame(
@@ -223,6 +427,9 @@ def _process_frame(
 
     cls2_boxes = dets.get(EYE_CLASS, {}).get("boxes", np.zeros((0, 4), np.float32))
     cls2_scores = dets.get(EYE_CLASS, {}).get("scores", np.zeros((0,), np.float32))
+    # Every eye detection, kept for the live-eye QC before top-k thins them: a
+    # confident false positive can push a real eye out of the top k.
+    raw_eye_boxes = cls2_boxes
     cls2_boxes, cls2_scores = enforce_zero_iou_and_topk(
         cls2_boxes,
         cls2_scores,
@@ -232,6 +439,17 @@ def _process_frame(
     eye_mgr.try_update_from_dets(cls2_boxes, cls2_scores)
     eye_centers = eye_mgr.get_centers()
     eye_ids = eye_mgr.anchor_ids
+
+    # Per-frame (live) eye position, QC only: where each anchor's eye is
+    # detected this frame. Matched against whatever anchors exist, confirmed or
+    # not, so the frames before confirmation are recorded too.
+    eye_qc = getattr(settings, "eye_qc", None)
+    track_live_eye = bool(getattr(eye_qc, "enabled", False))
+    live_eyes = (
+        match_live_eyes(eye_centers, raw_eye_boxes, _live_eye_match_radius(eye_qc))
+        if track_live_eye
+        else []
+    )
 
     cls8_boxes = dets.get(PROBOSCIS_CLASS, {}).get("boxes", np.zeros((0, 4), np.float32))
     cls8_scores = dets.get(PROBOSCIS_CLASS, {}).get("scores", np.zeros((0,), np.float32))
@@ -244,12 +462,32 @@ def _process_frame(
             if track.time_since_update > 0:
                 track.box_xyxy = _flow_nudge(prev_gray, gray, track.box_xyxy, settings.flow_skip_edge, flow_params)
 
-    pairer.step(eye_ids, eye_centers, tracks8)
+    if _proboscis_gate_active(settings):
+        # Pair all eyes jointly by gate depth each frame: flies mounted close
+        # have overlapping gates, and pairing eye by eye let the upper eye keep
+        # the lower fly's proboscis (october_07_batch_2_pretest_5).
+        pairer.step(
+            eye_ids,
+            eye_centers,
+            tracks8,
+            cost=lambda eye_xy, prob_xy: _eye_prob_gate_depth(
+                eye_xy, prob_xy, settings, active_max_flies
+            ),
+        )
+    else:
+        pairer.step(
+            eye_ids,
+            eye_centers,
+            tracks8,
+            accept=lambda eye_xy, prob_xy: _eye_prob_pair_is_valid(
+                eye_xy, prob_xy, settings, active_max_flies
+            ),
+        )
 
     eye_mgr.draw(frame)
-    # Draw the proboscis geometry gate around each eye: any proboscis outside
-    # this anisotropic blob (generous left/down, tight right/up) is rejected
-    # downstream (see ProboscisFilterSettings).
+    # Draw the proboscis geometry gate around each eye: a proboscis outside
+    # this anisotropic blob (generous left/right/down, tight up) is never paired
+    # with that eye, and reject_bad_proboscis enforces it again downstream.
     pf = getattr(settings, "proboscis_filter", None)
     gate_max_px = float(getattr(pf, "max_eye_prob_distance_px", 0) or 0)
     if gate_max_px > 0:
@@ -305,6 +543,8 @@ def _process_frame(
             row[f"eye_{idx}_track_id"] = eye_id
             row[f"eye_{idx}_x"] = ex
             row[f"eye_{idx}_y"] = ey
+            if track_live_eye:
+                _set_live_eye(row, idx, live_eyes[idx], (ex, ey))
             row[f"dist_eye_{idx}_anchor"] = float(np.hypot(ex - AX, ey - AY))
 
             c8_id = pairer.eye_to_cls8.get(eye_id)
@@ -313,7 +553,7 @@ def _process_frame(
                 track = cls8_by_id[int(c8_id)]
                 cx, cy, _, _ = xyxy_to_cxcywh(track.box_xyxy)
                 distance_px = float(np.hypot(cx - ex, cy - ey))
-                if _eye_prob_distance_is_valid(distance_px, settings, active_max_flies):
+                if _eye_prob_pair_is_valid((ex, ey), (cx, cy), settings, active_max_flies):
                     row[f"cls8_{idx}_x"] = float(cx)
                     row[f"cls8_{idx}_y"] = float(cy)
                     row[f"dist_eye_{idx}_cls8_{idx}"] = distance_px
@@ -340,10 +580,25 @@ def _process_frame(
             row[f"eye_{idx}_track_id"] = np.nan
             row[f"eye_{idx}_x"] = np.nan
             row[f"eye_{idx}_y"] = np.nan
+            if track_live_eye:
+                _set_live_eye(row, idx, None)
             _clear_proboscis_match(row, idx)
             row[f"dist_eye_{idx}_anchor"] = np.nan
             if single_track_class is not None:
                 row[f"distance_class{single_track_class}_eye_{idx}"] = np.nan
+
+    # Live-eye marker last, so nothing covers it: the same thin ring at any
+    # drift (see LIVE_EYE_MARKER_BGR for why it is cyan and wordless).
+    if track_live_eye and getattr(eye_qc, "draw_live_eye", False):
+        for live in live_eyes:
+            if live is not None:
+                cv2.circle(
+                    frame,
+                    (int(live[0]), int(live[1])),
+                    LIVE_EYE_MARKER_RADIUS_PX,
+                    LIVE_EYE_MARKER_BGR,
+                    1,
+                )
 
     return frame, row, gray
 
@@ -513,6 +768,12 @@ def _export_per_fly_csvs(
             PROBOSCIS_DISTANCE_COL: df[f"dist_eye_{idx}_cls8_{idx}"],
             distance_eye_anchor_col: df[f"dist_eye_{idx}_anchor"],
             angle_eye_prob_anchor_col: df[f"angle_eye_{idx}_cls8_vs_anchor"],
+            # Per-frame (live) eye centre and its drift from the frozen anchor
+            # above: QC only, nothing measures from them. NaN floats when the
+            # merged table has none (eye_qc disabled).
+            "eye_live_x": df.get(f"eye_{idx}_live_x", np.nan),
+            "eye_live_y": df.get(f"eye_{idx}_live_y", np.nan),
+            "eye_drift_px": df.get(f"eye_{idx}_drift_px", np.nan),
         }
 
         if single_track_class is not None:
@@ -677,6 +938,13 @@ def main(cfg: Settings):
             pass
         print(f"[YOLO] worker {worker_index+1}/{num_workers}: every {num_workers}th video, {_t} CPU threads")
 
+    live_eye_radius = _live_eye_match_radius(cfg.eye_qc)
+    if cfg.eye_qc.enabled and live_eye_radius != cfg.eye_qc.match_radius_px:
+        print(
+            f"[YOLO] eye_qc.match_radius_px={cfg.eye_qc.match_radius_px!r} is not a positive "
+            f"number; matching per-frame eyes within {live_eye_radius:g} px instead."
+        )
+
     roots = get_main_directories(cfg)
     _job_idx = -1
     force_libx264 = False  # set by an NVENC failure, for the rest of this process
@@ -697,6 +965,24 @@ def main(cfg: Settings):
             # read from is processed (utils/yolo_discovery). The others keep
             # their job slots.
             superseded = superseded_videos(video_files)
+
+            def _scan_video_eyes(path: Path, _cfg=cfg) -> np.ndarray:
+                """The warm-up scan for the batch template, on its own capture."""
+                probe = cv2.VideoCapture(str(path))
+                if not probe.isOpened():
+                    print(f"[YOLO] Cannot open {path} for the batch eye template")
+                    return np.zeros((0, 4), np.float32), []
+                try:
+                    pw = int(probe.get(cv2.CAP_PROP_FRAME_WIDTH)) or 1080
+                    ph = int(probe.get(cv2.CAP_PROP_FRAME_HEIGHT)) or 1080
+                    size = (1080, 1080) if (pw, ph) != (1080, 1080) else (pw, ph)
+                    return _scan_initial_eye_boxes(probe, 5, size, _cfg, predict_fn)
+                finally:
+                    probe.release()
+
+            # Built on the first video this worker actually processes in the
+            # batch, so a batch it owns nothing in costs nothing.
+            template_state: Optional[Tuple[Optional[List[eye_template.TemplateSlot]], Dict[Path, np.ndarray]]] = None
             # A trial whose annotated video failed is re-run once, right away, with
             # libx264 (NVENC is what dies when VRAM runs out); when that video fails
             # too, the trial keeps its tables without one. Secure cleanup prunes
@@ -749,7 +1035,27 @@ def main(cfg: Settings):
                 target_w, target_h = (1080, 1080) if (original_w, original_h) != (1080, 1080) else (original_w, original_h)
 
                 scan_frames = 5
-                detected_flies = _scan_initial_fly_count(cap, scan_frames, (target_w, target_h), cfg, predict_fn)
+                if template_state is None:
+                    # Only the sessions this batch analyses vote on the template: a
+                    # superseded restart (utils/yolo_discovery) may have re-mounted flies.
+                    template_state = load_or_build_eye_template(
+                        fly, [v for v in video_files if v not in superseded], cfg, _scan_video_eyes
+                    )
+                    if template_state[0]:
+                        print(
+                            f"[YOLO] {fly.name}: batch eye template has "
+                            f"{len(template_state[0])} fly slot(s) "
+                            f"(seen in {[s.n_trials_seen for s in template_state[0]]} trials, "
+                            f"proboscis paired in {[s.n_trials_paired for s in template_state[0]]})."
+                        )
+                template_slots, template_scans = template_state
+
+                eye_boxes = template_scans.pop(video_path, None)
+                if eye_boxes is None:
+                    eye_boxes, _ = _scan_initial_eye_boxes(
+                        cap, scan_frames, (target_w, target_h), cfg, predict_fn
+                    )
+                detected_flies = int(eye_boxes.shape[0])
                 if not cap.set(cv2.CAP_PROP_POS_FRAMES, 0):
                     cap.release()
                     cap = cv2.VideoCapture(str(video_path))
@@ -757,7 +1063,31 @@ def main(cfg: Settings):
                         print(f"[YOLO] Cannot reopen {video_path} after warm-up scan")
                         continue
 
-                if detected_flies == 0:
+                # The batch template, where there is one, decides the slot set:
+                # a fly this trial's first frames missed still gets its slot, at
+                # its number, so fly1 means the same fly in every trial.
+                seeded_anchor_boxes = None
+                template_count = _template_slot_count(template_slots, cfg)
+                if template_count is not None:
+                    active_max_flies = template_count
+                    seeded_anchor_boxes, borrowed = eye_template.seed_anchor_boxes(
+                        template_slots[:active_max_flies],
+                        eye_boxes,
+                        cfg.eye_template.match_radius_px,
+                    )
+                    if any(borrowed):
+                        missing = [i + 1 for i, b in enumerate(borrowed) if b]
+                        print(
+                            f"[YOLO] {video_path.name}: {active_max_flies} fly slots from the "
+                            f"batch template; fly {missing} not detected in the first "
+                            f"{scan_frames} frames, anchor borrowed from the template."
+                        )
+                    else:
+                        print(
+                            f"[YOLO] {video_path.name}: {active_max_flies} fly slots from the "
+                            f"batch template, all detected in this trial."
+                        )
+                elif detected_flies == 0:
                     print(
                         f"[YOLO] {video_path.name}: no eyes detected in first {scan_frames} frames; "
                         f"using configured max ({cfg.max_flies})."
@@ -849,6 +1179,8 @@ def main(cfg: Settings):
                     for cls in SINGLE_TRACK_CLASSES
                 }
                 eye_mgr = EyeAnchorManager(max_eyes=active_max_flies, zero_iou_eps=cfg.zero_iou_epsilon)
+                if seeded_anchor_boxes is not None:
+                    eye_mgr.seed_from_boxes(seeded_anchor_boxes)
                 cls8_tracker = _build_proboscis_tracker(cfg, active_max_flies)
                 pairer = StablePairing(max_pairs=active_max_flies)
 

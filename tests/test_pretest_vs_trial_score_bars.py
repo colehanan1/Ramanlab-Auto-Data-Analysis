@@ -15,7 +15,6 @@ One presentation per odor in the pre-test, so there is exactly ONE baseline
 exposure — not the naive panel's two.
 """
 
-from pathlib import Path
 
 import matplotlib
 
@@ -149,7 +148,68 @@ def test_a_cohort_with_no_baseline_at_all_still_gets_two():
 def test_the_sensitivity_cohorts_are_registered():
     keys = set(nvt.PRETEST_COHORTS)
     assert {"Hex-Sensitivity-24-0.1", "IAA-Sensitivity-24-1",
-            "3Oct-Sensitivity-24-0.1"} <= keys
+            "3Oct-Sensitivity-24-0.1", "IAA-Sensitivity-40-1"} <= keys
+
+
+@pytest.mark.parametrize("hours", [1, 6, 12, 18, 30])
+def test_the_iaa_starvation_series_is_registered(hours):
+    spec = nvt.PRETEST_COHORTS[f"IAA-Sensitivity-{hours}-1"]
+    assert spec.odor == "Isoamyl Acetate"
+    assert spec.concentration == "1%"
+    assert spec.pretest_baseline is True
+
+
+def test_the_1h_3oct_cohort_is_registered():
+    """config_new lists it under pretest_score_bars.datasets; unregistered,
+    its `--dataset` flag exits the step with code 2 for every cohort."""
+    spec = nvt.PRETEST_COHORTS["3Oct-Sensitivity-1-0.1"]
+    assert spec.odor == "3-Octanol"
+    assert spec.concentration == "0.1%"
+    assert spec.pretest_baseline is True
+
+
+# ── odor_pins labels ("isoamylacetate-1") ─────────────────────────────────
+
+
+def _pins_scores(displays):
+    """One fly per display spelling, each with a pre-test, a test and a
+    conditioning row -- the shape every bar builder reads."""
+    rows = []
+    for fn, display in enumerate(displays, start=1):
+        for phase, idx in (("pretest", 4), ("testing", 2)):
+            rows.append({
+                "dataset": "IAA-Sensitivity-12-1",
+                "dataset_canon": "IAA-Sensitivity-12-1",
+                "fly": "oct_9", "fly_number": fn, "trial_num": idx,
+                "odor_display": display, "trial_type": phase,
+                "score": 3, "occurrence": 1,
+            })
+    return pd.DataFrame(rows)
+
+
+def _iaa_spec(**kw):
+    base = dict(dataset="IAA-Sensitivity-12-1", odor="Isoamyl Acetate",
+                concentration="1%", naive_dataset=None, pretest_baseline=True)
+    base.update(kw)
+    return nvt.CohortSpec(**base)
+
+
+def test_odor_pins_labels_reach_every_bar():
+    """From 2026-10-06 the label carries the vial: ``isoamylacetate-1`` never
+    mapped to "Isoamyl Acetate", so IAA-1/12/18/30 drew no figure at all."""
+    scores = _pins_scores(["Isoamyl Acetate", "isoamylacetate-1"])
+    spec = _iaa_spec()
+    assert nvt.naive_bar(scores, spec, 1).n == 2
+    assert [b.n for b in nvt.testing_scores(scores, spec)] == [2]
+
+
+def test_a_different_vial_of_the_same_odor_is_not_merged():
+    """The hex-test panel carries two hexanol vials; stripping the suffix
+    alone would pool them. The cohort's own concentration decides."""
+    scores = _pins_scores(["isoamylacetate-1", "isoamylacetate-0.1"])
+    assert [b.n for b in nvt.testing_scores(scores, _iaa_spec())] == [1]
+    assert [b.n for b in nvt.testing_scores(
+        scores, _iaa_spec(concentration="0.1%"))] == [1]
 
 
 def test_every_sensitivity_cohort_uses_its_own_pretest():
@@ -163,6 +223,7 @@ def test_each_sensitivity_cohort_names_its_cs_plus_odor():
         "Hex-Sensitivity-24-0.1": "Hexanol",
         "IAA-Sensitivity-24-1": "Isoamyl Acetate",
         "3Oct-Sensitivity-24-0.1": "3-Octanol",
+        "IAA-Sensitivity-40-1": "Isoamyl Acetate",
     }
     for key, odor in expected.items():
         assert nvt.PRETEST_COHORTS[key].odor == odor

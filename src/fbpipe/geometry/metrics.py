@@ -97,16 +97,23 @@ def velocity_gate(xy: Sequence, max_jump_px: float) -> np.ndarray:
 
 
 def proboscis_pct(d: Sequence, gmin: float, gmax: float, floor: float) -> np.ndarray:
-    """Production's proboscis percentage (``distance_normalize``): values outside
-    [gmin, gmax] are NaN; the denominator uses ``max(gmax, floor)``."""
+    """Proboscis percentage: 0 at ``gmin``, 100 at ``max(gmax, floor)``.
+
+    Deliberately diverges from ``fbpipe.steps.distance_normalize`` in ONE respect:
+    production NaNs anything outside ``[gmin, gmax]``, but ``gmin`` here is a trimmed
+    percentile, so ~``per_trim_pct`` % of frames sit below it by construction and
+    NaN-ing them would blank the very resting baseline the trim exists to stabilise.
+    Out-of-range values therefore CLAMP to 0 / 100 (user spec 2026-09-10). A missing
+    detection stays NaN -- absent is not the same as resting.
+    """
     d = np.asarray(d, dtype=float)
     eff = max(float(gmax), float(floor))
     out = np.full(d.shape, np.nan, dtype=float)
-    inr = np.isfinite(d) & (d >= gmin) & (d <= gmax)
+    fin = np.isfinite(d)
     if eff != gmin:
-        out[inr] = 100.0 * (d[inr] - gmin) / (eff - gmin)
+        out[fin] = np.clip(100.0 * (d[fin] - gmin) / (eff - gmin), 0.0, 100.0)
     else:
-        out[inr] = 0.0
+        out[fin] = 0.0
     return out
 
 
