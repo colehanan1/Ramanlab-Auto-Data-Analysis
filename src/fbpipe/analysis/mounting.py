@@ -2,7 +2,8 @@
 
 NumPy / pandas / SciPy only: no file I/O and no pipeline imports, so the table
 builder and the figure scripts share one definition of every quantity and a test
-can pin each one.
+can pin each one. The same module owns the ``mounting:`` settings block
+(:class:`MountingSettings`), so every threshold has one default and one parser.
 
 Conventions
 -----------
@@ -21,6 +22,10 @@ Conventions
 from __future__ import annotations
 
 import math
+import re
+from dataclasses import dataclass, fields
+from datetime import date, datetime
+from pathlib import Path
 from typing import Mapping, Optional
 
 import numpy as np
@@ -399,3 +404,110 @@ def dedupe_predictions(df: pd.DataFrame) -> tuple[pd.DataFrame, dict[str, int]]:
     repeat = rows.duplicated(subset=_PRED_KEY, keep="first").to_numpy()
     counts["same_score_duplicates"] = int(repeat.sum())
     return rows.loc[~repeat].reset_index(drop=True), counts
+
+
+# ---------------------------------------------------------------------------
+# Settings: the ``mounting:`` block of an abdomen overlay
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class MountingSettings:
+    """The ``mounting:`` block; every default is the value the overlay template ships with."""
+    enabled: bool = True
+    csv_out_dir: str = ""
+    out_dir: str = ""
+    abdomen_out_dir: str = ""
+    batch_date_from: Optional[date] = None
+    rest_quantile: float = 0.10
+    retracted_ref_eu: Optional[float] = None       # None = per rig, from the flies' most-retracted trials
+    held_margin_eu: float = 0.25
+    held_frac_min: float = 0.8
+    held_back_deg: float = -10.0
+    held_forward_deg: float = 10.0
+    event_rise_eu: float = 0.30
+    event_drop_eu: float = 0.30
+    event_min_s: float = 0.3
+    identity_tol_px: float = 25.0
+    eye_match_px: float = 25.0
+    binary_threshold: float = 2.0
+    n_permutations: int = 10000
+    curl_rise_deg: float = 10.0
+    curl_min_s: float = 0.3
+    tip_move_eu_s: float = 0.5
+    speed_smooth_frames: int = 5
+    abd_min_tracked_frac: float = 0.5
+
+
+def _number(block: Mapping, key: str, *, lo=None, hi=None, lo_open=False, hi_open=False, integer=False):
+    """``block[key]`` (or the dataclass default) as a finite float / int inside the given bounds; ValueError otherwise."""
+    value = block.get(key, getattr(MountingSettings, key))
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+        raise ValueError(f"mounting.{key} must be a finite number, got {value!r}")
+    if integer and float(value) != int(value):
+        raise ValueError(f"mounting.{key} must be a whole number, got {value!r}")
+    number = int(value) if integer else float(value)
+    if lo is not None and not (number > lo if lo_open else number >= lo):
+        raise ValueError(f"mounting.{key} must be {'>' if lo_open else '>='} {lo}, got {value!r}")
+    if hi is not None and not (number < hi if hi_open else number <= hi):
+        raise ValueError(f"mounting.{key} must be {'<' if hi_open else '<='} {hi}, got {value!r}")
+    return number
+
+
+def _date(raw, what: str) -> Optional[date]:
+    """A date, a datetime or an ISO ``YYYY-MM-DD`` string; None stays None."""
+    if raw is None:
+        return None
+    if isinstance(raw, datetime):
+        return raw.date()
+    if isinstance(raw, date):
+        return raw
+    if isinstance(raw, str) and re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", raw.strip()):
+        try:
+            return date.fromisoformat(raw.strip())
+        except ValueError:
+            pass                                    # right shape, not a calendar day
+    raise ValueError(f"{what} must be a date (YYYY-MM-DD), got {raw!r}")
+
+
+def _path(block: Mapping, key: str) -> str:
+    raw = block.get(key)
+    if raw is None:
+        return ""
+    if not isinstance(raw, str):
+        raise ValueError(f"mounting.{key} must be a path, got {raw!r}")
+    return str(Path(raw.strip()).expanduser()) if raw.strip() else ""
+
+
+def parse_mounting_block(block: Mapping, *, default_batch_date_from: Optional[date] = None) -> MountingSettings:
+    """The overlay's ``mounting:`` block as :class:`MountingSettings`; an unknown key or a value out of range is a ValueError.
+
+    ``batch_date_from`` takes the abdomen block's cut-off (``default_batch_date_from``) when the block does not set it.
+    """
+    if not isinstance(block, Mapping):
+        raise ValueError(f"mounting block must be a mapping, got {block!r}")
+    known = [f.name for f in fields(MountingSettings)]
+    unknown = sorted(str(k) for k in block if k not in known)
+    if unknown:
+        raise ValueError(f"mounting has unknown key(s): {unknown}; expected a subset of {sorted(known)}")
+    enabled = block.get("enabled", True)
+    if not isinstance(enabled, bool):
+        raise ValueError(f"mounting.enabled must be true or false, got {enabled!r}")
+    ref = None if block.get("retracted_ref_eu") is None else _number(block, "retracted_ref_eu", lo=0.0)
+    back = _number(block, "held_back_deg")
+    forward = _number(block, "held_forward_deg", lo=back)
+    num = lambda key, **bounds: _number(block, key, **bounds)        # noqa: E731  (one-line bound specs below)
+    return MountingSettings(
+        enabled=enabled, csv_out_dir=_path(block, "csv_out_dir"), out_dir=_path(block, "out_dir"),
+        abdomen_out_dir=_path(block, "abdomen_out_dir"),
+        batch_date_from=(_date(block.get("batch_date_from"), "mounting.batch_date_from")
+                         or _date(default_batch_date_from, "default_batch_date_from")),
+        rest_quantile=num("rest_quantile", lo=0.0, hi=1.0, lo_open=True, hi_open=True), retracted_ref_eu=ref,
+        held_margin_eu=num("held_margin_eu", lo=0.0), held_frac_min=num("held_frac_min", lo=0.0, hi=1.0, lo_open=True),
+        held_back_deg=back, held_forward_deg=forward,
+        event_rise_eu=num("event_rise_eu", lo=0.0, lo_open=True), event_drop_eu=num("event_drop_eu", lo=0.0, lo_open=True),
+        event_min_s=num("event_min_s", lo=0.0, lo_open=True),
+        identity_tol_px=num("identity_tol_px", lo=0.0), eye_match_px=num("eye_match_px", lo=0.0),
+        binary_threshold=num("binary_threshold"), n_permutations=num("n_permutations", lo=1, integer=True),
+        curl_rise_deg=num("curl_rise_deg", lo=0.0, lo_open=True), curl_min_s=num("curl_min_s", lo=0.0, lo_open=True),
+        tip_move_eu_s=num("tip_move_eu_s", lo=0.0), speed_smooth_frames=num("speed_smooth_frames", lo=1, integer=True),
+        abd_min_tracked_frac=num("abd_min_tracked_frac", lo=0.0, hi=1.0))
