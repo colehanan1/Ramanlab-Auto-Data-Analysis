@@ -17,8 +17,8 @@ show up as a new file in the next one; symlinks are resolved for that check). ``
 
 ``compare`` exits 0 (unchanged), 1 (differs) or 2 (it refused, or a file was unusable). It refuses snapshots that cannot
 honestly be compared, because each would end in a false "identical": any empty snapshot, snapshots taken from other
-roots or with other ``--exclude`` globs (a wrong noise snapshot turns every path missing from it into "noise"), and the
-same file given twice. And it prints every path it ignored as noise, with counts per extension, svg and pdf last: those
+roots or with other ``--exclude`` globs (a wrong noise snapshot turns every path missing from it into "noise"; a trailing
+slash is no part of a glob, so ``x*/`` and ``x*`` count as the same one), and the same file given twice. And it prints every path it ignored as noise, with counts per extension, svg and pdf last: those
 are rewritten with fresh ids and dates on every run, so what matters is whether a PNG, CSV or parquet is on the list.
 
 A digest is a function of what a file CONTAINS, not of how it was written:
@@ -324,7 +324,10 @@ def _require_comparable(named: Sequence[tuple]) -> None:
     reference = named[0][2]
     for label, (_, _, snapshot) in zip(who[1:], named[1:]):
         for field, what in (("roots", "root(s)"), ("exclude", "--exclude glob(s)")):
-            theirs, ours = sorted(set(snapshot[field])), sorted(set(reference[field]))
+            # A trailing slash is no part of a glob (``digest_tree`` strips it), so ``x*/`` and ``x*`` are one exclude:
+            # refusing the pair would cost a re-run of the snapshot, over a typo, for nothing.
+            theirs, ours = (sorted({g.rstrip("/") if field == "exclude" else g for g in values})
+                            for values in (snapshot[field], reference[field]))
             if theirs != ours:
                 raise ValueError(f"{label}: taken with other {what} than {who[0]}: {theirs} against {ours}; "
                                  "snapshots of different trees cannot be compared")

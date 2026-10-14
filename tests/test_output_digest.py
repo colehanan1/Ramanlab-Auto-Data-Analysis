@@ -19,7 +19,7 @@ compare B with A ignoring every path that already differs between A and A'. Pinn
   it could still say "identical" wrongly) and says "(noise removed)" only when a noise snapshot was given;
 * ``compare`` refuses (exit 2) snapshots that cannot honestly be compared: one that is empty, one taken from other roots
   or with other ``--exclude`` globs (a wrong noise snapshot would turn every path missing from it into "noise" and
-  print a false "identical"), or the same file given twice;
+  print a false "identical"; ``x*/`` and ``x*`` are the same glob), or the same file given twice;
 * ``snapshot`` never overwrites an existing ``--out`` without ``--force`` (A.json is the irreplaceable reference) and
   checks that ``--out`` lies outside the roots after resolving symlinks.
 """
@@ -821,6 +821,38 @@ def test_cli_compare_accepts_snapshots_that_list_the_same_roots_and_excludes_in_
     b = _snapshot(tmp_path / "B.json", two, one, exclude=("deeper", "*.txt", "*.txt"))
     result = _run("compare", a, b)
     assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize("a_globs, b_globs", [(("deep*/",), ("deep*",)), (("deep*//",), ("deep*",)),
+                                              (("deep*",), ("deep*/",)), (("deep*/", "*.txt/"), ("*.txt", "deep*"))],
+                         ids=["slash vs none", "two slashes vs none", "none vs slash", "two globs, both slashed"])
+def test_cli_compare_accepts_exclude_globs_that_differ_only_by_a_trailing_slash(tmp_path, a_globs, b_globs):
+    """``digest_tree`` already reads ``x*/`` as ``x*``, so a snapshot taken with either spelling holds the same digests;
+    refusing the pair over the typo would cost a re-run of the ~100 minute snapshot for nothing."""
+    tree = _tree(tmp_path / "tree")
+    a = _snapshot(tmp_path / "A.json", tree, exclude=a_globs)
+    b = _snapshot(tmp_path / "B.json", tree, exclude=b_globs)
+    assert json.loads(a.read_text())["digests"] == json.loads(b.read_text())["digests"]
+    result = _run("compare", a, b)
+    assert result.returncode == 0, result.stderr
+    assert "identical" in result.stdout
+
+
+def test_cli_compare_takes_a_noise_snapshot_whose_exclude_glob_only_differs_by_a_slash(tmp_path):
+    tree = _tree(tmp_path / "tree")
+    a = _snapshot(tmp_path / "A.json", tree, exclude=("deeper",))
+    rerun = _snapshot(tmp_path / "A2.json", tree, exclude=("deeper/",))
+    (tree / "wide.csv").write_text("fly,t0,t1\nA,9.9,1.5\nB,2.5,3.0\n")
+    b = _snapshot(tmp_path / "B.json", tree, exclude=("deeper",))
+    assert _run("compare", a, b, "--noise", rerun).returncode == 1, "the real difference is still found"
+
+
+def test_cli_compare_still_refuses_exclude_globs_that_really_differ_whatever_their_slashes(tmp_path):
+    tree = _tree(tmp_path / "tree")
+    a = _snapshot(tmp_path / "A.json", tree, exclude=("deeper/",))
+    b = _snapshot(tmp_path / "B.json", tree, exclude=("sub/",))
+    refused = _run("compare", a, b)
+    assert refused.returncode == 2 and "--exclude" in refused.stderr and "identical" not in refused.stdout
 
 
 @pytest.mark.parametrize("empty_one", ["A", "B", "noise"])

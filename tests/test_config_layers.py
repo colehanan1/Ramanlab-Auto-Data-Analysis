@@ -71,3 +71,29 @@ def test_live_config_new_passes_through_unchanged():
     if not live.is_file():
         pytest.skip("config/config_new.yaml is gitignored and absent")
     assert resolve_layers(resolve_config_path(live)).base_path == resolve_config_path(live)
+
+def test_load_layered_is_exactly_the_base_with_the_overlays_blocks_added(tmp_path):
+    base = _w(tmp_path / "config_new.yaml", BASE)
+    abdomen = {"enabled": True, "out_base": "/x/flys_Abdomen", "geometry": {"table_format": "parquet", "trace_max_s": 60}}
+    one = _w(tmp_path / "one.yaml", {"extends": "config_new.yaml", "abdomen": abdomen})
+    assert load_layered(one) == {**yaml.safe_load(base.read_text()), "abdomen": abdomen}, "nothing else, nothing less"
+    mounting = {"enabled": False, "held_margin_eu": 0.4}
+    both = _w(tmp_path / "both.yaml", {"extends": "config_new.yaml", "abdomen": abdomen, "mounting": mounting})
+    assert load_layered(both) == {**BASE, "abdomen": abdomen, "mounting": mounting}
+    assert "extends" not in load_layered(both), "the merged config is the base's, not another overlay"
+    assert yaml.safe_load(base.read_text()) == BASE, "reading the layers does not touch the base"
+
+def test_a_plain_config_reached_through_a_symlink_keeps_the_path_it_was_given(tmp_path, monkeypatch):
+    """PER children get this very string as ``--config`` (three cache keys embed it, and one script writes it into its
+    JSON), so a plain config is never resolved: only an overlay's base is, because there the user never typed it."""
+    real = tmp_path / "real"; real.mkdir()
+    cfg = tmp_path / "cfg"; cfg.mkdir()
+    target = _w(real / "config_new.yaml", BASE)
+    link = cfg / "config_new.yaml"; link.symlink_to(target)
+    layers = resolve_layers(link)
+    assert str(layers.base_path) == str(link) != str(target.resolve()) and not layers.is_layered
+    assert layers.path == link and dict(layers.overlay) == {}
+    monkeypatch.chdir(tmp_path)
+    relative = resolve_layers(Path("cfg/config_new.yaml"))
+    assert str(relative.base_path) == "cfg/config_new.yaml", "a relative path stays relative, spelled as given"
+
