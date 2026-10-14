@@ -30,7 +30,9 @@ abdomen:
   batch_date_from: 2026-10-06        # only batches recorded on or after this day (mounting uses it too)
   datasets: []                       # empty = every config_new dataset
   slot_seeds: production             # abdomen fly N == production fly N
-  max_hours: 10                      # time budget for the whole stage; a command still running at the end is killed
+  # Time budget for the whole stage; a command still running at the end is killed. `track` stops early enough to
+  # leave the commands after it a tail of min(30 min, a tenth of this) to read what it tracked.
+  max_hours: 10
   # inference_batch_size must stay <= the engine's max batch (8); num_workers = parallel track processes
   yolo: {conf_thres: 0.25, inference_batch_size: 8, engine_supports_batch: true, max_flies: 5, num_workers: 3}
   geometry:
@@ -74,4 +76,4 @@ mounting:
   curl_min_s: 0.3                    # ... lasting >= 0.3 s
   tip_move_eu_s: 0.5                 # "moving" = tip speed > 0.5 eye units / s
   speed_smooth_frames: 5             # rolling median before differencing (detection jitter)
-  abd_min_tracked_frac: 0.5          # abdomen metrics NaN when the bend angle is tracked in < 50 % of the window
+  abd_min_tracked_frac: 0.5          # abdomen metrics NaN when the bend angle is tracked in < 50 % of the window (0 < x <= 1)
