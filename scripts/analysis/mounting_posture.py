@@ -28,6 +28,13 @@ Into ``--abdomen-out-dir`` (default ``mounting.abdomen_out_dir``) go the six ``A
 Read-only on production, the secured mirror and the geometry tree. The definitions live in
 ``fbpipe.analysis.mounting``; the stimulus windows come from the geometry meta, never from
 ``load_trial_metadata`` (which writes a ``_trial_meta.json`` beside production on a cache miss).
+
+A fly-trial is joined to production only when both are of ONE recording. A restarted session records a trial again under
+the same name, so the sidecar the geometry meta names (``trial.sidecar_txt``, ``_preprocessed`` dropped) must be the one
+production's ``_trial_meta.json`` names (read as plain JSON); a trial whose sessions differ is dropped
+(``session_mismatch``), one with nothing to compare is kept and counted (``session_unverified``). A trial whose tracking
+stopped before 99 % of its video (``n_frames_processed`` against ``n_frames_video`` in the geometry meta) is dropped
+(``truncated_video``); production's table is never length-checked, it is routinely a few dozen frames shorter.
 """
 import argparse
 import dataclasses
@@ -97,7 +104,10 @@ FLY_COLUMNS = ["dataset", "batch", "fly_number", "fly_id", "rig", "n_trials", "m
                "held_subtype_dominant", "proboscis_state_dominant", *RATES, *TRIAL_MEDIANS, "n_coupling_trials", *POOLED]
 STATE_ORDER = ("retracted", "held_down", "held_back", "held_forward")        # also the tie-break for the dominant state
 COUNTS = ("n_batches", "n_trials", "n_fly_trials", "eye_mismatch", "non_square_frame", "warmup_slots",
-          "no_production_table", "unreadable_geometry", "flagged_flies", "flagged_fly_trials")
+          "no_production_table", "unreadable_geometry", "flagged_flies", "flagged_fly_trials", "truncated_video",
+          "session_mismatch", "session_unverified")
+PRODUCTION_META = "_trial_meta.json"      # production's per-trial metadata cache: only ever READ, and as plain JSON
+TRUNCATED_BELOW = 0.99                    # a trial whose tracking stopped before this fraction of its video is dropped
 
 
 # ---------------------------------------------------------------------------
@@ -165,11 +175,66 @@ def _read_meta(path: Path) -> Optional[dict]:
 # Production tracks
 # ---------------------------------------------------------------------------
 
+def _production_folders(job, gcfg, trial: str) -> list:
+    """The folders production's output for *trial* can be in, best first: its own trial folder, then the same folder in
+    each secured mirror."""
+    return [job.prod_dir / trial, *(Path(b) / job.root_name / job.name / trial for b in gcfg.video_bases)]
+
+
+def _session_stem(path) -> str:
+    """The recording session a sidecar (or video) path names: its stem with any ``_preprocessed`` dropped, the way
+    ``fbpipe.utils.yolo_discovery`` reads a session."""
+    return Path(str(path)).stem.replace("_preprocessed", "")
+
+
+def _production_session(job, gcfg, trial: str) -> Optional[str]:
+    """The session production processed *trial* from: the stem of ``sidecar_txt`` in the first ``_trial_meta.json`` of
+    ``_production_folders`` that names one; None when none does. A plain ``json.load``: ``load_trial_metadata`` would
+    WRITE a ``_trial_meta.json`` beside production on a cache miss, and this analysis writes nothing there."""
+    for folder in _production_folders(job, gcfg, trial):
+        try:
+            with open(folder / PRODUCTION_META, encoding="utf-8") as fh:
+                sidecar = json.load(fh).get("sidecar_txt")
+        except (OSError, ValueError, AttributeError):
+            continue                                  # absent, unreadable, not JSON, not an object
+        if isinstance(sidecar, str) and sidecar.strip():
+            return _session_stem(sidecar)
+    return None
+
+
+def _session_state(job, gcfg, trial: str, meta: dict, known: dict) -> str:
+    """``"same"``, ``"different"`` or ``"unknown"``: whether the video the geometry tracked is the recording production
+    processed. A restarted session records a trial again under one trial name; the video tracked here and the tables and
+    score production holds are then of one recording only if the sidecar named in the geometry meta is the one named in
+    production's ``_trial_meta.json``. ``"unknown"`` when either side names none. *known* memoises per trial (a trial's
+    flies share it)."""
+    key = (job.root_name, job.name, trial)
+    if key not in known:
+        sidecar = (meta.get("trial") or {}).get("sidecar_txt")
+        geometry = _session_stem(sidecar) if isinstance(sidecar, str) and sidecar.strip() else None
+        production = _production_session(job, gcfg, trial)
+        if geometry is None or production is None:
+            known[key] = "unknown"
+        else:
+            known[key] = "same" if geometry == production else "different"
+    return known[key]
+
+
+def _truncated(meta: dict) -> bool:
+    """Whether tracking stopped short: the geometry meta's ``n_frames_processed`` is under ``TRUNCATED_BELOW`` of its
+    ``n_frames_video``, both known and positive. (Production's table is not compared: it is routinely a few dozen frames
+    shorter than the video, which is no truncation.)"""
+    try:
+        processed, video = float(meta["n_frames_processed"]), float(meta["n_frames_video"])
+    except (KeyError, TypeError, ValueError):
+        return False
+    return processed > 0 and video > 0 and processed < TRUNCATED_BELOW * video
+
+
 def _production_table(job, gcfg, trial: str, slot: int) -> Optional[pd.DataFrame]:
     """The primary ``<trial>_fly{N}_distances`` table (never ``RMS_calculations/updated_*``, which lack ``x_anchor`` and
     ``eye_live_*``): the production trial folder first, then the same folder in each secured mirror."""
-    folders = [job.prod_dir / trial, *(Path(b) / job.root_name / job.name / trial for b in gcfg.video_bases)]
-    for folder in folders:
+    for folder in _production_folders(job, gcfg, trial):
         for suffix in (".parquet", ".csv"):
             try:
                 path = folder / f"{trial}_fly{slot}_distances{suffix}"
@@ -277,14 +342,26 @@ def _first_finite_pair(x: np.ndarray, y: np.ndarray) -> tuple:
     return (float(x[ok][0]), float(y[ok][0])) if ok.any() else (np.nan, np.nan)
 
 
-def _fly_trial(job, rig: str, trial: str, meta: dict, slot: int, path: Path, gcfg, mcfg, exc: dict) -> Optional[tuple]:
+def _fly_trial(job, rig: str, trial: str, meta: dict, slot: int, path: Path, gcfg, mcfg, exc: dict,
+               sessions: Optional[dict] = None) -> Optional[tuple]:
     """One geometry slot of one trial joined to its production track: ``(row, pre-stimulus distance, pooled frames,
     placebo trace)``.
 
-    None when the slot drops out (counted in ``exc``): unreadable geometry, no production table, or a geometry eye
-    further than ``eye_match_px`` from the production anchor. Only a 1080-square frame (``sx == sy == 1``) has eye
-    units; any other keeps its angle metrics and gets NaN for every eye-unit one.
+    None when the slot drops out (counted in ``exc``): tracking that stopped short of its video (``truncated_video``), a
+    video of another recording than the one production processed (``session_mismatch``: a restarted session records the
+    trial again under the same name), unreadable geometry, no production table, or a geometry eye further than
+    ``eye_match_px`` from the production anchor. A trial with no session to compare (production has no
+    ``_trial_meta.json`` for it, or either side names no sidecar) is kept and counted in ``session_unverified``.
+    Only a 1080-square frame (``sx == sy == 1``) has eye units; any other keeps its angle metrics and gets NaN for every
+    eye-unit one. *sessions* memoises the session check per trial.
     """
+    if _truncated(meta):
+        exc["truncated_video"] += 1
+        return None
+    session = _session_state(job, gcfg, trial, meta, {} if sessions is None else sessions)
+    if session == "different":
+        exc["session_mismatch"] += 1
+        return None
     try:
         table = _table(path, [C.FRAME, C.EYE_SCALE, *GEOMETRY.values()])
     except (OSError, ValueError):
@@ -329,6 +406,8 @@ def _fly_trial(job, rig: str, trial: str, meta: dict, slot: int, path: Path, gcf
            **state, **abdomen}
     trace = (M.PlaceboTrial(g["bend"].copy(), win.onset, win.offset, win.fps) if win.known
              else M.PlaceboTrial(np.empty(0), None, None, win.fps))       # a copy: the table is not kept alive for it
+    if session == "unknown":
+        exc["session_unverified"] += 1                                    # counted once the fly-trial is kept
     return row, pre_dist, pooled, trace
 
 
@@ -464,6 +543,7 @@ def build_fly_trial_table(settings, gcfg, mcfg, predictions_csv) -> tuple:
     flagged = load_flagged_fly_exclusions(settings.flagged_flies_csv) if settings.flagged_flies_csv else set()
     scope = _scope(gcfg, mcfg)
     rows, pre_dist, traces, chunks, flagged_seen = [], [], [], defaultdict(lambda: defaultdict(list)), set()
+    sessions: dict = {}                                                   # per trial: do geometry and production agree?
     for job in iter_batch_jobs(settings, scope, live_only=True):
         exc["n_batches"] += 1
         rig = read_batch_host(job.prod_dir) or rig_token(job.name) or "unknown"
@@ -474,7 +554,7 @@ def build_fly_trial_table(settings, gcfg, mcfg, predictions_csv) -> tuple:
                 exc["flagged_fly_trials"] += 1
             elif gcfg.slot_seeds == "production" and meta.get("slot_source") != "production":
                 exc["warmup_slots"] += 1                                  # numbered by warm-up order: not production's fly N
-            elif (joined := _fly_trial(job, rig, trial, meta, slot, path, gcfg, mcfg, exc)) is not None:
+            elif (joined := _fly_trial(job, rig, trial, meta, slot, path, gcfg, mcfg, exc, sessions)) is not None:
                 row, pre, pooled, trace = joined
                 rows.append(row)
                 pre_dist.append(pre)

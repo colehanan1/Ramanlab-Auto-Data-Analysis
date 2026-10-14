@@ -6,6 +6,10 @@ Rules pinned here, on a synthetic production + geometry + secured-mirror tree un
 * the join -- production fly N is geometry fly N, and a geometry eye further than ``eye_match_px`` from the
   production anchor drops the row (counted); a fly whose anchor wanders keeps its trial rows but leaves the fly
   table and the rig reference (counted);
+* one recording -- a fly-trial is joined to production only when the sidecar the geometry meta names is the session
+  production's ``_trial_meta.json`` names (a restarted trial can have two videos under one name): a different session is
+  dropped and counted, a trial with nothing to compare is kept and counted, a track that stopped short of its video is
+  dropped and counted, and the length of production's table is never compared;
 * units and windows -- eye units are pixels over the geometry ``eye_scale_px``; the stimulus window comes from
   the geometry meta, so nothing is ever written next to production;
 * gates -- an unknown rest, rig reference, pre-window or poorly tracked tip gives NaN, never a guess;
@@ -118,11 +122,17 @@ def frames(r):
     return (r["prod_edit"](prod) if "prod_edit" in r else prod), geo
 
 
+def session_stem(batch, kind, idx, stamp="20261007_100000"):
+    """The recording session of a trial, as the rig names its sidecar."""
+    return f"output_{batch}_{kind}_{idx}_Citral-1_{stamp}"
+
+
 def trial_meta(batch, kind, idx):
     info = TrialInfo(video=None, batch_dir=batch, dataset=DATASET, trial_name=f"{batch}_{kind}_{idx}", out_dir="",
                      trial_type=kind, trial_index=idx, odor="Citral-1", label=f"{kind}_{idx}_Citral-1", n_frames=N,
                      fps=FPS, has_odor=True, odor_on_frame=ONSET, odor_off_frame=OFFSET, light_on_s=None,
-                     light_off_s=None, fly_type="GR5a-Old", sidecar_txt=None, sidecar_csv=None,
+                     light_off_s=None, fly_type="GR5a-Old",
+                     sidecar_txt=f"/secured/{batch}/{session_stem(batch, kind, idx)}.txt", sidecar_csv=None,
                      recorded_at="20261007_100000")
     return {"pipeline": "fbpipe.geometry", "schema_version": 1, "trial": info.to_dict(),
             "frame": {"width": 1080, "height": 1080, "model_w": 1080, "model_h": 1080, "sx": 1.0, "sy": 1.0,
@@ -141,10 +151,12 @@ class Tree:
         self.mirror.mkdir()
 
     def write_batch(self, batch, day, *, host=HOST, edits=None, meta_edits=None, all_edit=None, mirror_only=(),
-                    no_prod=()):
+                    no_prod=(), prod_sessions=None):
         """A production batch (metadata + a dated sidecar stub) and its geometry. ``edits[(fly, kind, idx)]`` and
         ``all_edit`` change a recipe, ``meta_edits[(kind, idx)]`` a trial's meta; ``mirror_only`` puts a production
-        table in the secured mirror instead of the batch, ``no_prod`` writes none at all."""
+        table in the secured mirror instead of the batch, ``no_prod`` writes none at all. Production has no
+        ``_trial_meta.json`` unless ``prod_sessions[(kind, idx)]`` asks for one: ``"same"`` names the session the
+        geometry meta names, a dict is written as the JSON, any other string verbatim."""
         bdir = self.ds / batch
         bdir.mkdir()
         (bdir / "session_metadata.txt").write_text(
@@ -171,6 +183,13 @@ class Tree:
             if (kind, idx) in (meta_edits or {}):
                 meta_edits[(kind, idx)](meta)
             C.meta_path(tdir, trial).write_text(json.dumps(meta), encoding="utf-8")
+            if (kind, idx) in (prod_sessions or {}):
+                content = prod_sessions[(kind, idx)]
+                if content == "same":
+                    content = {"sidecar_txt": f"{bdir}/{session_stem(batch, kind, idx)}.txt"}
+                (bdir / trial).mkdir(exist_ok=True)
+                (bdir / trial / "_trial_meta.json").write_text(
+                    content if isinstance(content, str) else json.dumps(content), encoding="utf-8")
 
     def settings(self, flagged=None, freeze=()):
         over = {DATASET: DatasetOverride(freeze_folders=tuple(FolderRule(f) for f in freeze))} if freeze else {}
@@ -373,8 +392,10 @@ def test_every_column_is_filled_somewhere_in_the_base_scenario(base):
 
 def test_the_exclusion_counts_of_a_clean_tree_are_zero(base):
     for key in ("eye_mismatch", "non_square_frame", "warmup_slots", "no_production_table", "unreadable_geometry",
-                "flagged_flies", "flagged_fly_trials", "prediction_conflicts", "prediction_same_score_duplicates"):
+                "flagged_flies", "flagged_fly_trials", "prediction_conflicts", "prediction_same_score_duplicates",
+                "session_mismatch", "truncated_video"):
         assert base.exc[key] == 0, key
+    assert base.exc["session_unverified"] == 6, "kept, but the fixture's production has no _trial_meta.json to compare"
     assert base.exc["identity_drift"] == [] and base.exc["predictions_missing"] is False
 
 
@@ -720,6 +741,95 @@ def test_the_rms_calculations_copies_are_never_read(tmp_path):
     primary.rename(copy)
     ft, exc, _ = tables(tree)
     assert len(ft) == 5 and exc["no_production_table"] == 1
+
+
+# ---- restarted and truncated trials must not mis-join -----------------------------------------------------
+
+STAMP_2 = "20261007_130000"                                    # a later recording of the same trial
+
+
+def wrong_session(kind, idx):
+    """Production processed another recording of the trial than the one the abdomen video is of."""
+    return {"sidecar_txt": f"/prod/{session_stem(NEW, kind, idx, STAMP_2)}.txt"}
+
+
+def test_a_trial_tracked_from_another_session_than_production_processed_is_dropped_and_counted(tmp_path):
+    tree = variant(tmp_path, prod_sessions={("pretest", 1): "same", ("testing", 1): wrong_session("testing", 1),
+                                            ("testing", 2): "same"})
+    ft, exc, fly = tables(tree)
+    assert len(ft) == 4 and exc["session_mismatch"] == 2, "both flies of the trial: they are fly-trials"
+    assert set(zip(ft["trial_type"], ft["trial_index"])) == {("pretest", 1), ("testing", 2)}
+    assert exc["session_unverified"] == 0 and exc["n_trials"] == 3 and exc["n_fly_trials"] == 4
+    assert exc["no_production_table"] == 0 and exc["eye_mismatch"] == 0, "dropped for the session, nothing else"
+    assert len(fly) == 2, "the flies keep their other trials"
+
+
+def test_the_session_is_compared_by_stem_so_the_directory_and_a_preprocessed_suffix_do_not_matter(tmp_path):
+    stem = session_stem(NEW, "testing", 1)
+    tree = variant(tmp_path,
+                   prod_sessions={("pretest", 1): "same", ("testing", 1): {"sidecar_txt": f"/elsewhere/{stem}.txt"},
+                                  ("testing", 2): {"sidecar_txt": f"/prod/{session_stem(NEW, 'testing', 2)}.txt"}},
+                   meta_edits={("pretest", 1): lambda m: m["trial"].update(
+                       sidecar_txt=f"/mirror/{session_stem(NEW, 'pretest', 1)}_preprocessed.txt"),
+                       ("testing", 2): lambda m: m["trial"].update(
+                           sidecar_txt=f"/mirror/{session_stem(NEW, 'testing', 2)}_preprocessed.txt")})
+    ft, exc, _ = tables(tree)
+    assert len(ft) == 6 and exc["session_mismatch"] == 0 and exc["session_unverified"] == 0
+
+
+@pytest.mark.parametrize("production", [None, {}, {"sidecar_txt": None}, {"sidecar_txt": ""}, "{not json", "[1, 2]"],
+                         ids=["no file", "no sidecar key", "null sidecar", "blank sidecar", "not json", "not an object"])
+def test_a_trial_whose_production_session_is_unknown_is_kept_and_counted_as_unverified(tmp_path, production):
+    prod_sessions = {key: "same" for key in (("pretest", 1), ("testing", 2))}
+    if production is not None:
+        prod_sessions[("testing", 1)] = production
+    ft, exc, _ = tables(variant(tmp_path, prod_sessions=prod_sessions))
+    assert len(ft) == 6 and exc["session_unverified"] == 2 and exc["session_mismatch"] == 0
+
+
+def test_a_geometry_meta_that_names_no_sidecar_is_kept_and_counted_as_unverified(tmp_path):
+    tree = variant(tmp_path, prod_sessions={key: "same" for key in TRIALS},
+                   meta_edits={("testing", 1): lambda m: m["trial"].update(sidecar_txt=None)})
+    ft, exc, _ = tables(tree)
+    assert len(ft) == 6 and exc["session_unverified"] == 2 and exc["session_mismatch"] == 0
+
+
+def test_the_session_check_only_reads_production_it_never_writes_a_trial_meta(tmp_path):
+    tree = variant(tmp_path, prod_sessions={("pretest", 1): "same", ("testing", 1): wrong_session("testing", 1)})
+    watched = (tree.prod, tree.mirror, tree.out)
+    before = snapshot(*watched)
+    tables(tree)
+    assert snapshot(*watched) == before
+    assert sorted(p.parent.name for p in tree.root.rglob("_trial_meta.json")) == [f"{NEW}_pretest_1", f"{NEW}_testing_1"]
+
+
+@pytest.mark.parametrize("processed, video, kept", [
+    (395, 400, False), (350, 400, False), (396, 400, True), (400, 400, True), (400, 500, False), (495, 500, True),
+    (400, None, True), (400, 0, True), (0, 400, True), (None, 400, True), ("x", 400, True)])
+def test_a_trial_whose_tracking_stopped_short_of_the_video_is_dropped_and_counted(tmp_path, processed, video, kept):
+    def stopped(m):
+        m["n_frames_processed"], m["n_frames_video"] = processed, video
+    ft, exc, _ = tables(variant(tmp_path, meta_edits={("testing", 1): stopped}))
+    assert (len(ft), exc["truncated_video"]) == ((6, 0) if kept else (4, 2))
+
+
+def test_a_production_table_a_few_dozen_frames_shorter_than_the_video_is_not_a_truncated_video(tmp_path):
+    """Real production tables are routinely 1 to 39 frames shorter than the video, so the frame counts of the two are
+    never compared: only the geometry meta's own processed frames against the video's."""
+    short = {(fly, "testing", 1): (lambda r: r.update(prod_edit=lambda prod: prod.iloc[:365])) for fly in FLIES}
+    def full(m):
+        m["n_frames_processed"], m["n_frames_video"] = N, N
+    ft, exc, _ = tables(variant(tmp_path, edits=short, meta_edits={("testing", 1): full}))
+    assert len(ft) == 6 and exc["truncated_video"] == 0
+
+
+def test_a_truncated_trial_is_counted_once_even_when_its_session_also_differs(tmp_path):
+    def stopped(m):
+        m["n_frames_processed"], m["n_frames_video"] = 100, 400
+    tree = variant(tmp_path, meta_edits={("testing", 1): stopped},
+                   prod_sessions={("testing", 1): wrong_session("testing", 1)})
+    ft, exc, _ = tables(tree)
+    assert len(ft) == 4 and exc["truncated_video"] == 2 and exc["session_mismatch"] == 0
 
 
 def test_a_corrupt_geometry_table_is_counted_and_dropped(tmp_path):

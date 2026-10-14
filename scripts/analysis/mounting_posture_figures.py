@@ -790,6 +790,12 @@ EXCLUSION_LABELS = {
     "warmup_slots": ("Warm-up slots", "slot numbered by warm-up order, not production's fly N: fly-trial dropped"),
     "no_production_table": ("No production table", "no `<trial>_fly{N}_distances` table found: fly-trial dropped"),
     "unreadable_geometry": ("Unreadable geometry", "geometry table or meta that could not be read: dropped"),
+    "truncated_video": ("Truncated video", "tracking stopped before 99% of the video's frames (`n_frames_processed` against "
+                                           "`n_frames_video`): fly-trial dropped"),
+    "session_mismatch": ("Session mismatch", "the video tracked is another recording of the trial than the one production "
+                                             "processed (a restarted session): fly-trial dropped"),
+    "session_unverified": ("Session unverified", "production's `_trial_meta.json` or the geometry meta names no sidecar, "
+                                                 "so the recording could not be checked: fly-trial kept"),
     "flagged_flies": ("Flagged flies", "removed before anything was computed"),
     "flagged_fly_trials": ("Flagged fly-trials", "trials of the flagged flies"),
     "identity_drift": ("Identity drift", "production anchor wanders between trials: trial rows kept, fly left out of "

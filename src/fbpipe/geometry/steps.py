@@ -33,6 +33,7 @@ from ..config import Settings, get_main_directories, infer_dataset_for_path
 from ..utils.frozen_folders import is_frozen_folder, iter_live_batch_dirs
 from ..utils.rig_gates import read_batch_date
 from ..utils.run_locks import per_run_active
+from ..utils.yolo_discovery import superseded_videos
 from . import columns as C
 from .config import GeometrySettings
 from .trial_meta import TrialInfo, protocol_sort_key, trial_info_for_video, trial_name_from_video
@@ -138,14 +139,23 @@ def videos_for_job(job: BatchJob, gcfg: GeometrySettings) -> List[Path]:
 
     Legacy: the batch dir's own. Integrated: production holds no mp4s, so each trial's video is the first one found
     in ``<video_base>/<root folder>/<batch>`` (``gcfg.video_bases`` order), then in the local production batch --
-    decided per trial, so a batch whose videos are only partly on the mirror still yields every trial."""
+    decided per trial, so a batch whose videos are only partly on the mirror still yields every trial.
+
+    A trial recorded more than once (a restarted session) has one video per attempt in a source. Production's YOLO
+    processes only the attempt its metadata is read from, so the abdomen tracks must come from that one to pair with
+    its tables: each source drops the videos ``fbpipe.utils.yolo_discovery.superseded_videos`` names, BEFORE the
+    first-source-wins choice. A superseded video is never tracked -- not even when no other source has the trial, and
+    when the session production processed has no video in a source, that source gives the trial up to the next one."""
     if not gcfg.out_base:
         return iter_videos(job.prod_dir)
     by_trial: Dict[str, Path] = {}
     for source in [Path(base) / job.root_name / job.name for base in gcfg.video_bases] + [job.prod_dir]:
         if source.is_dir():
-            for video in iter_videos(source):
-                by_trial.setdefault(trial_name_from_video(video), video)
+            videos = iter_videos(source)
+            superseded = superseded_videos(videos)
+            for video in videos:
+                if video not in superseded:
+                    by_trial.setdefault(trial_name_from_video(video), video)
     return sorted(by_trial.values(), key=lambda p: p.name)
 
 

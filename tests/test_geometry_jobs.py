@@ -4,8 +4,9 @@ In integrated mode (``GeometrySettings.out_base``) the steps enumerate the PRODU
 (sidecars and session_metadata.txt, no mp4s), take each trial's video from the secured mirror first
 and from the local batch second, and write every output to
 ``<out_base>/<dataset folder>/<batch>/geometry/``. Pinned here: which batches are walked (cut-off
-date, dataset subset, freeze judged on the production dir), where each trial's video comes from, that
-the read-only trees are never written, that one bad video is logged and counted instead of stopping
+date, dataset subset, freeze judged on the production dir), where each trial's video comes from (never a
+superseded attempt of a restarted trial: production's YOLO skips those, so they are dropped per source before the
+first source wins), that the read-only trees are never written, that one bad video is logged and counted instead of stopping
 the batch, that normalize/wide/figures need nothing but ``geometry/``, that a track with nothing
 pending spawns no workers and loads no model, and that the integrated track stops at the next video
 while a PER run holds the shared run lock (resumable, nothing half-written). Legacy mode (no
@@ -13,6 +14,7 @@ while a PER run holds the shared run lock (resumable, nothing half-written). Leg
 """
 import dataclasses
 import json
+import os
 import shutil
 from datetime import date
 from pathlib import Path
@@ -306,6 +308,60 @@ def test_a_batch_missing_on_the_mirror_falls_back_to_its_local_videos(tree, tmp_
     videos = S.videos_for_job(tree.job(), gcfg)
     assert [v.parent for v in videos] == [tree.batch_dir] and trial_name_from_video(videos[0]) == trial_stem(3)
     assert S.videos_for_job(tree.job(RIG_BATCH), tree.gcfg()) == []
+
+
+def newest_session(folder: Path, n: int, odor: str, day: str) -> None:
+    """Make the sidecar of attempt *day* of trial *n* the newest in *folder*: the session production's metadata is read
+    from (``find_sidecar`` takes the most recently modified), so the one production's YOLO processes."""
+    for txt in folder.glob(f"output_{BATCH}_pretest_{n}_{odor}_*.txt"):
+        stamp = 2_000_000_000 if day in txt.name else 1_000_000_000
+        os.utime(txt, (stamp, stamp))
+
+
+def trial_videos(videos, n: int) -> list:
+    return [v for v in videos if trial_name_from_video(v) == trial_stem(n)]
+
+
+def test_a_restarted_trial_is_tracked_from_the_session_production_processed_not_the_first_one_by_name(tree):
+    """Every attempt at a trial names one trial folder, and production's YOLO processes the session its metadata is read
+    from. The abdomen tracks must pair with those tables, so that is the video that is tracked -- not the first by name,
+    which is the aborted attempt when the restart came later."""
+    aborted = next(tree.secured_batch.glob(f"output_{BATCH}_pretest_1_*.avi"))
+    restart = add_trial(tree.secured_batch, tree.template, BATCH, "pretest", 1, "Citral-1", day="20261008")
+    assert aborted.name < restart.name, "precondition: first-by-name would pick the aborted attempt"
+    newest_session(tree.secured_batch, 1, "Citral-1", "20261008")
+    videos = S.videos_for_job(tree.job(), tree.gcfg())
+    assert trial_videos(videos, 1) == [restart]
+    assert [trial_name_from_video(v) for v in videos] == [trial_stem(n) for n in (1, 2, 3)]
+
+
+def test_the_older_attempt_wins_when_it_is_the_session_production_processed(tree):
+    first = next(tree.secured_batch.glob(f"output_{BATCH}_pretest_1_*.avi"))
+    add_trial(tree.secured_batch, tree.template, BATCH, "pretest", 1, "Citral-1", day="20261008")
+    newest_session(tree.secured_batch, 1, "Citral-1", "20261007")           # the metadata still says the first one
+    assert trial_videos(S.videos_for_job(tree.job(), tree.gcfg()), 1) == [first]
+
+
+def test_a_source_that_holds_only_a_superseded_attempt_hands_the_trial_to_the_next_source(tree):
+    """The mirror has the aborted attempt's video; the restart's video (the session production processed) is only in the
+    local batch. The mirror's video is superseded -- production's YOLO would skip it -- so it must not win the trial."""
+    add_trial(tree.secured_batch, tree.template, BATCH, "pretest", 1, "Citral-1", day="20261008", video=None)
+    restart = add_trial(tree.batch_dir, tree.template, BATCH, "pretest", 1, "Citral-1", day="20261008")
+    newest_session(tree.secured_batch, 1, "Citral-1", "20261008")
+    newest_session(tree.batch_dir, 1, "Citral-1", "20261008")
+    videos = S.videos_for_job(tree.job(), tree.gcfg())
+    assert trial_videos(videos, 1) == [restart]
+    assert [v.parent for v in videos] == [tree.batch_dir, tree.secured_batch, tree.batch_dir]
+
+
+def test_a_superseded_video_is_never_tracked_even_when_no_source_has_the_real_session(tree, fake_model):
+    add_trial(tree.secured_batch, tree.template, BATCH, "pretest", 1, "Citral-1", day="20261008", video=None)
+    newest_session(tree.secured_batch, 1, "Citral-1", "20261008")
+    settings, gcfg = tree.settings(), tree.gcfg()
+    videos = S.videos_for_job(tree.job(), gcfg)
+    assert trial_videos(videos, 1) == [] and [trial_name_from_video(v) for v in videos] == [trial_stem(2), trial_stem(3)]
+    assert S.pending_trials(settings, gcfg) == 2
+    assert S.run_track(settings, gcfg)["tracked"] == 2 and not tree.meta(1).exists()
 
 
 def test_video_paths_are_built_from_the_root_folder_name_not_the_dataset_label(tmp_path, video):
