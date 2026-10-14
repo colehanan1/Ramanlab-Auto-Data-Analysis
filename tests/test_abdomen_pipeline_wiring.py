@@ -10,9 +10,14 @@ budget, each in its own process group, and never raises: a failed command is a w
 command) when it would write outside ``Results/New-Opto-Fly-Figures`` or inside the hand-run ``Results/Figures``.
 ``--abdomen-only`` runs just that stage, before any PER work and without either lock. A full run takes the shared
 PER lock inside main's whole-run lock (``run_lock``) for its PER work only, and the stage runs after both are let go:
-it may take hours and the next PER run must not wait behind it. Pinned here: the pure command builders, ``main()``'s
-source order and lock behaviour, the stage with a fake Popen, the flags and the ntfy. (The PER call trace itself is
-pinned in test_layered_parity.py.)
+it may take hours and the next PER run must not wait behind it. The driver imports the mounting analysis only when it
+builds the mounting command, so a broken analysis module cannot stop a plain nightly. ``track`` is the long command: when
+others follow it, it gets the budget less a tail of ``min(30 min, a tenth of the budget)``, so a timed-out track still
+leaves time for normalize, the stats and the mounting analysis to read what it tracked. A killed driver must not orphan
+the stage: SIGTERM / SIGHUP make the driver raise (so the group of the running command is killed and the lock freed) and
+every command is spawned to die with its parent (``PR_SET_PDEATHSIG``), which also covers SIGKILL. Pinned here: the pure
+command builders, ``main()``'s source order and lock behaviour, the stage with a fake Popen and with real processes, the
+flags and the ntfy. (The PER call trace itself is pinned in test_layered_parity.py.)
 """
 from __future__ import annotations
 
@@ -32,7 +37,7 @@ import sys
 import time
 import types
 from pathlib import Path
-from types import MappingProxyType
+from types import MappingProxyType, SimpleNamespace
 
 import pytest
 import yaml
@@ -323,16 +328,22 @@ def test_an_empty_predictions_path_drops_only_the_mounting_command(caplog):
 # ---- the stage: fakes --------------------------------------------------------------------------------------
 
 class _Proc:
-    """A subprocess.Popen stand-in. ``mode`` is an exit code, "timeout" (the first wait times out; the process is
-    gone after SIGTERM), "ignores SIGTERM" (it also outlives the grace wait and dies on SIGKILL) or a
-    KeyboardInterrupt to raise from the first wait."""
+    """A subprocess.Popen stand-in. ``mode`` is an exit code, "timeout" (the first wait times out after the whole
+    allowance has passed; the process is gone after SIGTERM), "ignores SIGTERM" (it also outlives the grace wait and
+    dies on SIGKILL), a KeyboardInterrupt to raise from the first wait, ``("signal", n)`` (the driver is sent signal n
+    during the first wait) or ``("signal twice", n)`` (and once more during the grace wait after SIGTERM)."""
 
     def __init__(self, procs, pid, mode, elapse):
         self.procs, self.pid, self.mode, self.elapse, self.returncode, self.waits = procs, pid, mode, elapse, None, []
 
     def wait(self, timeout=None):
         self.waits.append(timeout)
-        if isinstance(self.mode, KeyboardInterrupt):
+        if isinstance(self.mode, tuple):
+            kind, signum = self.mode
+            if len(self.waits) == 1 or (kind == "signal twice" and len(self.waits) == 2):
+                os.kill(os.getpid(), signum)                       # the handler under test raises right here
+            self.returncode = -15
+        elif isinstance(self.mode, KeyboardInterrupt):
             if len(self.waits) == 1:
                 raise self.mode
             self.returncode = -15
@@ -342,6 +353,7 @@ class _Proc:
         else:
             stubborn = self.mode == "ignores SIGTERM"
             if len(self.waits) == 1 or (stubborn and len(self.waits) == 2):
+                self.procs.clock.now += timeout                    # it ran, or was given, this long before the timeout
                 raise subprocess.TimeoutExpired("cmd", timeout)
             self.returncode = -9 if stubborn else -15
         return self.returncode
@@ -457,7 +469,7 @@ def test_the_stage_reads_workers_python_and_budget_from_the_block(tmp_path, proc
     block = {"enabled": True, "python": "/cam/bin/python", "yolo": {"num_workers": 2}, "max_hours": 2}
     _run(tmp_path, _layers(tmp_path, block))
     assert procs.calls == _expected(tmp_path, python_exec="/cam/bin/python", n_workers=2)
-    assert procs.procs[0].waits == [7200.0], "the first command may use the whole budget"
+    assert procs.procs[0].waits == [6480.0], "track gets the 2 h budget less its tail (a tenth of it: 720 s)"
 
 
 def test_figures_only_and_the_abdomen_video_flag_reach_the_stage_commands(tmp_path, procs):
@@ -519,17 +531,20 @@ def test_a_nonzero_exit_is_a_warning_and_the_next_commands_still_run(tmp_path, m
     assert "track rc=1" in result["summary"] and "abdomen_geometry_stats rc=3" in result["summary"]
 
 
-def test_a_timeout_kills_the_process_group_and_ends_the_stage(tmp_path, monkeypatch, caplog):
+def test_a_timeout_kills_the_process_group_of_track_which_leaves_its_tail_to_the_commands_after_it(
+        tmp_path, monkeypatch, caplog):
     procs = _Procs(monkeypatch, script=["timeout"])
     with caplog.at_level(logging.INFO):
         result = _run(tmp_path)
     assert procs.killed == [(4201, signal.SIGTERM)], "the whole group of the first command, not just its leader"
-    assert procs.procs[0].waits == [36000.0, 30.0], "the default budget is 10 h; then 30 s of grace after SIGTERM"
+    assert procs.procs[0].waits == [34200.0, 30.0], "10 h less the 30 min tail; then 30 s of grace after SIGTERM"
     assert result["timed_out"] is True and result["commands"][0]["timed_out"] is True
-    assert len(procs.calls) == 1, "the budget is spent: nothing else is started"
-    assert [c["ran"] for c in result["commands"]] == [True, False, False]
+    assert len(procs.calls) == 3, "the tail is still there: normalize and the stats read what track did get done"
+    assert [p.waits for p in procs.procs[1:]] == [[1800.0], [1800.0]]
+    assert [c["ran"] for c in result["commands"]] == [True, True, True]
     assert any(r.levelname == "WARNING" and "track" in r.getMessage() for r in caplog.records)
-    assert "track TIMED OUT" in result["summary"] and "normalize+wide+figures not run" in result["summary"]
+    assert result["summary"] == ("ABDOMEN: track TIMED OUT (killed); normalize+wide+figures rc=0; "
+                                 "abdomen_geometry_stats rc=0")
 
 
 def test_a_process_that_ignores_sigterm_is_killed(tmp_path, monkeypatch):
@@ -542,7 +557,42 @@ def test_a_process_that_ignores_sigterm_is_killed(tmp_path, monkeypatch):
 def test_the_commands_share_one_time_budget(tmp_path, monkeypatch):
     procs = _Procs(monkeypatch, elapse=[3000.0, 100.0, 0.0])            # one hour in all; the first uses 50 minutes
     _run(tmp_path, _layers(tmp_path, {"enabled": True, "max_hours": 1}))
-    assert [p.waits for p in procs.procs] == [[3600.0], [600.0], [500.0]]
+    assert [p.waits for p in procs.procs] == [[3240.0], [600.0], [500.0]], "track: the hour less its 360 s tail"
+
+
+@pytest.mark.parametrize("hours, tail", [(10, 1800.0), (5, 1800.0), (3, 1080.0), (1, 360.0), (0.01, 3.6)])
+def test_the_tail_kept_from_track_is_a_tenth_of_the_budget_but_never_more_than_half_an_hour(
+        tmp_path, procs, hours, tail):
+    _run(tmp_path, _layers(tmp_path, {"enabled": True, "max_hours": hours}))
+    total = hours * 3600.0
+    assert procs.procs[0].waits == [pytest.approx(total - tail)]
+    assert [p.waits for p in procs.procs[1:]] == [[pytest.approx(total)]] * 2, "nothing is held back from the others"
+
+
+def test_the_commands_after_a_timed_out_track_share_what_is_left_and_the_budget_still_ends_the_stage(
+        tmp_path, monkeypatch):
+    procs = _Procs(monkeypatch, script=["timeout", "timeout", 0])        # normalize also runs into the end of the budget
+    result = _run(tmp_path, _layers(tmp_path, {"enabled": True, "max_hours": 1}))
+    assert [p.waits[0] for p in procs.procs] == [3240.0, 360.0], "track at the hour less its tail, normalize at the end"
+    assert len(procs.calls) == 2 and [c["ran"] for c in result["commands"]] == [True, True, False]
+    assert "track TIMED OUT (killed); normalize+wide+figures TIMED OUT (killed); abdomen_geometry_stats not run" \
+        in result["summary"]
+
+
+def test_track_as_the_last_command_gets_the_whole_remaining_budget(tmp_path, monkeypatch):
+    track_last = [NORMALIZE, TRACK]
+    monkeypatch.setattr(rw, "_abdomen_commands", lambda *args, **kwargs: track_last)
+    procs = _Procs(monkeypatch, elapse=[600.0, 0.0])
+    result = _run(tmp_path, _layers(tmp_path, {"enabled": True, "max_hours": 1}))
+    assert [p.waits for p in procs.procs] == [[3600.0], [3000.0]], "nothing follows track: no tail is held back"
+    assert [c["label"] for c in result["commands"]] == ["normalize+wide+figures", "track"]
+
+
+def test_track_alone_gets_the_whole_budget(tmp_path, monkeypatch):
+    monkeypatch.setattr(rw, "_abdomen_commands", lambda *args, **kwargs: [TRACK])
+    procs = _Procs(monkeypatch)
+    _run(tmp_path, _layers(tmp_path, {"enabled": True, "max_hours": 1}))
+    assert [p.waits for p in procs.procs] == [[3600.0]]
 
 
 def test_a_budget_that_is_used_up_starts_nothing_more(tmp_path, monkeypatch):
@@ -603,6 +653,147 @@ def test_ctrl_c_during_a_command_still_stops_its_process_group_and_frees_the_loc
     assert procs.killed == [(4201, signal.SIGTERM)], "a stage must not outlive the run that started it"
     with abdomen_lock(tmp_path / "cache") as got:
         assert got is True
+
+
+# ---- the stage: a killed driver must not orphan its commands ------------------------------------------------
+
+def test_every_stage_command_is_spawned_to_die_with_the_driver(tmp_path, procs, monkeypatch):
+    sentinel = object()
+    monkeypatch.setattr(rw, "die_with_parent_preexec", lambda: sentinel)
+    _run(tmp_path, _layers(tmp_path, mounting=MOUNTING))
+    assert len(procs.kwargs) == 4
+    for kwargs in procs.kwargs:
+        assert kwargs["preexec_fn"] is sentinel and kwargs["start_new_session"] is True
+
+
+@pytest.fixture
+def protected_signals():
+    """A no-op Python handler for SIGTERM and SIGHUP, so that a test that sends one to itself cannot kill pytest when the
+    code under test installs no handler of its own. ``hits`` lists what reached it; the old handlers come back after."""
+    hits = []
+    old = {sig: signal.signal(sig, lambda signum, frame: hits.append(signum)) for sig in (signal.SIGTERM, signal.SIGHUP)}
+    protector = {sig: signal.getsignal(sig) for sig in old}
+    yield SimpleNamespace(hits=hits, protector=protector)
+    for sig, handler in old.items():
+        signal.signal(sig, handler)
+
+
+def test_sigterm_and_sighup_are_handled_only_while_the_stage_runs(tmp_path, monkeypatch, protected_signals):
+    seen = []
+
+    class Probe(_Procs):
+        def _popen(self, cmd, **kwargs):
+            seen.append({sig: signal.getsignal(sig) for sig in (signal.SIGTERM, signal.SIGHUP)})
+            return super()._popen(cmd, **kwargs)
+
+    Probe(monkeypatch)
+    assert {sig: signal.getsignal(sig) for sig in (signal.SIGTERM, signal.SIGHUP)} == protected_signals.protector
+    _run(tmp_path)
+    for during in seen:
+        for sig, handler in during.items():
+            assert callable(handler) and handler is not protected_signals.protector[sig], "the stage's own handler"
+    assert {sig: signal.getsignal(sig) for sig in (signal.SIGTERM, signal.SIGHUP)} == protected_signals.protector
+
+
+@pytest.mark.parametrize("sig", [signal.SIGTERM, signal.SIGHUP], ids=["SIGTERM", "SIGHUP"])
+def test_a_signal_to_the_driver_kills_the_group_of_the_running_command_and_frees_the_lock(
+        tmp_path, monkeypatch, protected_signals, sig):
+    procs = _Procs(monkeypatch, script=[("signal", sig)])
+    with pytest.raises(SystemExit) as stop:
+        _run(tmp_path)
+    assert stop.value.code == 128 + sig, "the exit status a shell reports for a signal death"
+    assert procs.killed == [(4201, signal.SIGTERM)], "the whole group, by the finally of the command's wait"
+    assert len(procs.calls) == 1, "nothing else is started"
+    assert protected_signals.hits == [], "the stage's handler took it, not whatever was there before"
+    assert {s: signal.getsignal(s) for s in (signal.SIGTERM, signal.SIGHUP)} == protected_signals.protector
+    with abdomen_lock(tmp_path / "cache") as got:
+        assert got is True
+
+
+def test_a_second_signal_while_the_group_is_being_killed_does_not_interrupt_the_kill(
+        tmp_path, monkeypatch, protected_signals):
+    procs = _Procs(monkeypatch, script=[("signal twice", signal.SIGTERM)])
+    with pytest.raises(SystemExit) as stop:
+        _run(tmp_path)
+    assert stop.value.code == 128 + signal.SIGTERM
+    assert procs.procs[0].waits == [34200.0, 30.0], "the grace wait ran to its end"
+    assert procs.procs[0].returncode == -15 and procs.killed == [(4201, signal.SIGTERM)]
+
+
+def test_the_handlers_come_back_when_the_stage_fails_on_its_own_too(tmp_path, monkeypatch, protected_signals):
+    _Procs(monkeypatch, script=[OSError("disk gone")])
+    assert _run(tmp_path)["error"].startswith("OSError")
+    assert {s: signal.getsignal(s) for s in (signal.SIGTERM, signal.SIGHUP)} == protected_signals.protector
+
+
+def test_a_stage_that_never_starts_leaves_the_signals_alone(tmp_path, procs, protected_signals):
+    with abdomen_lock(tmp_path / "cache"):
+        _run(tmp_path)                                        # skipped: the lock is held
+    assert {s: signal.getsignal(s) for s in (signal.SIGTERM, signal.SIGHUP)} == protected_signals.protector
+
+
+def _driver_script(tmp_path: Path, python: Path) -> str:
+    """A driver-like process: it runs the real stage, one enabled abdomen block, with *python* as the interpreter."""
+    return "\n".join([
+        "import sys",
+        "from pathlib import Path",
+        "from types import MappingProxyType",
+        f"sys.path[:0] = [{str(rw.REPO_ROOT / 'src')!r}, {str(rw.REPO_ROOT)!r}]",
+        "from fbpipe.config import ReactionPredictionSettings, Settings",
+        "from fbpipe.config_layers import ConfigLayers",
+        "from scripts.pipeline import run_workflows as rw",
+        f"tmp = Path({str(tmp_path)!r})",
+        "settings = Settings(model_path='m.pt', main_directories=[], cache_dir=str(tmp / 'cache'),",
+        "                    reaction_prediction=ReactionPredictionSettings(output_csv='/x/p.csv'))",
+        f"block = {{'enabled': True, 'python': {str(python)!r}, 'max_hours': 1}}",
+        "layers = ConfigLayers(tmp / 'config_new_abdomen.yaml', tmp / 'config_new.yaml',",
+        "                      MappingProxyType({'abdomen': block}))",
+        "print('driver ready', flush=True)",
+        "rw._run_abdomen_stages(layers, settings)",
+        "print('stage returned', flush=True)",
+    ])
+
+
+@pytest.mark.parametrize("sig", [signal.SIGTERM, signal.SIGHUP], ids=["SIGTERM", "SIGHUP"])
+def test_a_driver_sent_sigterm_or_sighup_takes_its_stage_command_and_that_commands_children_down(
+        tmp_path, fake_python, sig):
+    """A real driver-like process runs the real stage with a fake interpreter whose track command starts a ``sleep`` of its
+    own (a child in the command's process group). A signal to the driver must leave neither behind, and the lock free."""
+    env = dict(os.environ, MPLBACKEND="Agg", FBPIPE_DISABLE_NTFY="1")
+    driver = subprocess.Popen([sys.executable, "-c", _driver_script(tmp_path, fake_python)], env=env,
+                              stdout=subprocess.PIPE, text=True)
+    sleeper = command = None
+    try:
+        line = ""
+        while line.strip() != "driver ready":                          # importing the driver prints its own lines first
+            line = driver.stdout.readline()
+            assert line, "the driver exited before it was ready"
+        pidfile = tmp_path / "sleep.pid"
+        deadline = time.monotonic() + 30
+        while not (pidfile.exists() and pidfile.read_text().strip()) and time.monotonic() < deadline:
+            time.sleep(0.05)
+        sleeper = int(pidfile.read_text())
+        command = int(Path(f"/proc/{sleeper}/stat").read_text().rsplit(")", 1)[1].split()[1])      # its parent: the command
+        assert _alive(sleeper) and _alive(command)
+        driver.send_signal(sig)
+        assert driver.wait(timeout=30) == 128 + sig
+        deadline = time.monotonic() + 10
+        while (_alive(sleeper) or _alive(command)) and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert not _alive(command), "the stage command outlived the driver"
+        assert not _alive(sleeper), "the command's own child outlived the driver"
+        with abdomen_lock(tmp_path / "cache") as got:
+            assert got is True, "the abdomen lock is free again"
+    finally:
+        if driver.poll() is None:
+            driver.kill()
+        driver.wait()
+        for pid in (sleeper, command):
+            if pid and _alive(pid):
+                try:
+                    os.kill(pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
 
 
 def test_the_summary_is_one_line(tmp_path, procs):
@@ -682,7 +873,7 @@ def test_a_failed_abdomen_command_does_not_stop_the_mounting_command_from_readin
 def test_the_mounting_command_shares_the_one_time_budget(tmp_path, monkeypatch):
     procs = _Procs(monkeypatch, elapse=[3000.0, 100.0, 0.0, 0.0])
     _run(tmp_path, _layers(tmp_path, {"enabled": True, "max_hours": 1}, mounting=MOUNTING))
-    assert [p.waits for p in procs.procs] == [[3600.0], [600.0], [500.0], [500.0]]
+    assert [p.waits for p in procs.procs] == [[3240.0], [600.0], [500.0], [500.0]]
 
 
 def test_a_budget_used_up_before_the_mounting_command_starts_nothing_more(tmp_path, monkeypatch):
@@ -870,7 +1061,9 @@ def test_a_real_process_gets_exactly_the_mounting_command_line_last_and_its_fail
     assert "[abdomen] mounting_posture exited with code 2" in _warnings(caplog)
 
 
-def test_a_real_timeout_kills_the_whole_process_group_including_what_the_command_started(tmp_path, fake_python):
+def test_a_real_timeout_kills_the_whole_process_group_including_what_the_command_started(
+        tmp_path, fake_python, monkeypatch):
+    monkeypatch.setattr(rw, "ABDOMEN_TAIL_FRACTION", 0.5)              # a roomy tail, so a loaded machine cannot eat it
     result = _run(tmp_path, _layers(tmp_path, {"enabled": True, "python": str(fake_python), "max_hours": 0.0006}))
     sleeper = int((tmp_path / "sleep.pid").read_text())
     deadline = time.monotonic() + 5
@@ -878,7 +1071,8 @@ def test_a_real_timeout_kills_the_whole_process_group_including_what_the_command
         time.sleep(0.05)
     assert result["timed_out"] is True and result["commands"][0]["returncode"] == -signal.SIGTERM
     assert not _alive(sleeper), "the track command's own child must not outlive the stage"
-    assert len((tmp_path / "argv.log").read_text().splitlines()) == 1, "the spent budget starts nothing else"
+    assert len((tmp_path / "argv.log").read_text().splitlines()) == 3, "the tail is left to the commands after track"
+    assert [c["returncode"] for c in result["commands"]] == [-signal.SIGTERM, 0, 0]
     with abdomen_lock(tmp_path / "cache") as got:
         assert got is True
 

@@ -728,6 +728,27 @@ def test_force_tracks_even_when_every_trial_already_has_a_meta(tree, fake_model,
     assert len(fake_model) == 1
 
 
+def test_the_fan_out_workers_are_spawned_to_die_with_their_parent(tmp_path, monkeypatch):
+    """The stage kills a stage command's process group on a timeout or a SIGTERM of the driver, but nothing can catch a
+    SIGKILL: when that takes the geometry process, its workers must go with it (``PR_SET_PDEATHSIG``) instead of running on
+    with no deadline."""
+    sentinel, spawned = object(), []
+
+    class FakePopen:
+        def __init__(self, cmd, **kwargs):
+            spawned.append(kwargs)
+            self.pid = 1
+
+        def wait(self):
+            return 0
+
+    monkeypatch.setattr(GP, "die_with_parent_preexec", lambda: sentinel)
+    monkeypatch.setattr(GP.subprocess, "Popen", FakePopen)
+    settings = Settings(model_path="x", main_directories=[], cache_dir=str(tmp_path))
+    assert GP.fan_out_track(Path("c.yaml"), 3, settings=settings, options={}) == 0
+    assert [kwargs["preexec_fn"] for kwargs in spawned] == [sentinel] * 3
+
+
 def test_the_fan_out_summary_reports_each_workers_failed_videos(tmp_path, monkeypatch, capsys):
     class FakePopen:
         def __init__(self, cmd, **kwargs):

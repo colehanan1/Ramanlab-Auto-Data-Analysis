@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 from .geometry import steps
+from .utils.process_guard import die_with_parent_preexec
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -78,7 +79,11 @@ def fan_out_track(config_path: Path, n_workers: int, *, settings, options: Dict[
     for k, (cmd, env) in enumerate(worker_commands(config_path, n_workers, options=options)):
         log_path = logdir / f"worker_{k}.log"
         logf = open(log_path, "w")
-        procs.append((k, subprocess.Popen(cmd, cwd=str(REPO_ROOT), env=env, stdout=logf, stderr=subprocess.STDOUT), logf, log_path))
+        # preexec_fn: a worker dies with this process (PR_SET_PDEATHSIG), so a SIGKILL of the geometry process, which no
+        # handler can catch, does not leave it running with no deadline.
+        worker = subprocess.Popen(cmd, cwd=str(REPO_ROOT), env=env, stdout=logf, stderr=subprocess.STDOUT,
+                                  preexec_fn=die_with_parent_preexec())
+        procs.append((k, worker, logf, log_path))
         print(f"[GEOMETRY] worker {k + 1}/{n_workers} pid={procs[-1][1].pid} -> {log_path}")
     failed = 0
     for k, proc, logf, log_path in procs:

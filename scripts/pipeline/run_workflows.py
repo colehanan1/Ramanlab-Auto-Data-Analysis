@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import csv
 import hashlib
 import json
@@ -13,6 +14,7 @@ import re
 import signal
 import subprocess
 import sys
+import threading
 import time
 import urllib.request
 from dataclasses import replace as dc_replace
@@ -57,6 +59,7 @@ from fbpipe.config_layers import OVERLAY_BLOCKS, ConfigLayers, resolve_layers
 from fbpipe.pipeline import ORDERED_STEPS
 from fbpipe.steps import predict_reactions
 from fbpipe.utils.data_secured_sync import sync_data_secured
+from fbpipe.utils.process_guard import die_with_parent_preexec
 from fbpipe.utils.run_lock import RunLockTimeout, run_lock
 from fbpipe.utils.run_locks import abdomen_lock, acquire_per_run_lock, release_run_lock
 from fbpipe.utils.smb_copy import copy_to_smb
@@ -5217,6 +5220,8 @@ def _run_data_secured_sync(raw_cfg: Dict[str, Any]) -> None:
 ABDOMEN_MAX_HOURS_DEFAULT = 10.0     # abdomen.max_hours when the block does not say
 ABDOMEN_NUM_WORKERS_DEFAULT = 3      # abdomen.yolo.num_workers, the geometry loader's own default
 ABDOMEN_TERM_GRACE_S = 30.0          # between SIGTERM and SIGKILL of a command that ran out of time
+ABDOMEN_TAIL_MAX_S = 1800.0          # the most a timed-out track can cost the commands after it ...
+ABDOMEN_TAIL_FRACTION = 0.1          # ... and the fraction of the whole budget it keeps back for them (the smaller wins)
 
 #: The only place the mounting command may send its figure and report directories: the config_new pipeline's own
 #: output root (the trailing separator keeps ``New-Opto-Fly-Figures-BACKUP-...`` out). The hand-run sets in the
@@ -5419,14 +5424,48 @@ def _terminate_process_group(proc: Any) -> None:
         )
 
 
+@contextlib.contextmanager
+def _stage_signals_raise():
+    """While the stage runs, SIGTERM and SIGHUP make the driver raise ``SystemExit(128 + signal)`` (the status a shell
+    reports for a death by that signal) instead of dying on the spot.
+
+    The stage's commands run in sessions of their own, so a driver that is simply killed leaves them running with no
+    deadline and the abdomen lock freed under them. Raising lets the ``finally`` of :func:`_run_budgeted` kill the group
+    of the command that is running and the lock be released. The first signal raises; one that arrives while the group is
+    being killed is ignored, so the kill is not cut short. The previous handlers come back afterwards. (SIGKILL cannot be
+    caught: every command is also spawned to die with its parent, see ``process_guard``.) Outside the main thread signals
+    cannot be handled, and nothing is installed.
+    """
+    if threading.current_thread() is not threading.main_thread():
+        yield
+        return
+    fired: list[int] = []
+
+    def handler(signum, frame):
+        if fired:
+            return
+        fired.append(signum)
+        raise SystemExit(128 + signum)
+
+    previous: dict[int, Any] = {}
+    try:
+        for signum in (signal.SIGTERM, signal.SIGHUP):
+            previous[signum] = signal.signal(signum, handler)
+        yield
+    finally:
+        for signum, old in previous.items():
+            signal.signal(signum, signal.SIG_DFL if old is None else old)
+
+
 def _run_budgeted(cmd: Sequence[str], env: Mapping[str, str], seconds: float) -> tuple[int | None, bool]:
     """Run *cmd* in a session of its own and wait at most *seconds*; ``(returncode, timed_out)``.
 
     The own session makes the command's process group killable as one: the track step fans out worker processes of
-    its own, and killing the parent alone would orphan them. Whatever ends this function early (a timeout, Ctrl-C),
-    the group does not outlive it.
+    its own, and killing the parent alone would orphan them. Whatever ends this function early (a timeout, Ctrl-C, a
+    SIGTERM or SIGHUP of the driver, see :func:`_stage_signals_raise`), the group does not outlive it; and the command is
+    spawned to die with the driver (``die_with_parent_preexec``), which also covers a SIGKILL of the driver.
     """
-    proc = subprocess.Popen(list(cmd), env=dict(env), start_new_session=True)
+    proc = subprocess.Popen(list(cmd), env=dict(env), start_new_session=True, preexec_fn=die_with_parent_preexec())
     try:
         try:
             return proc.wait(timeout=seconds), False
@@ -5498,28 +5537,38 @@ def _run_abdomen_commands(
         env["PYTHONPATH"] = os.pathsep.join(
             filter(None, [str(REPO_ROOT / "src"), env.get("PYTHONPATH")])
         )
-        deadline = time.monotonic() + max_hours * 3600.0      # one budget for the whole stage
-        for cmd in commands:
-            label = _abdomen_command_label(cmd)
-            entry = {"label": label, "returncode": None, "timed_out": False, "ran": False}
-            result["commands"].append(entry)
-            remaining = deadline - time.monotonic()
-            if result["timed_out"] or remaining <= 0:
-                LOGGER.warning(
-                    "[abdomen] %s not run: the %.1f h budget (abdomen.max_hours) is used up", label, max_hours
-                )
-                continue
-            LOGGER.info("[abdomen] %s → %s", label, " ".join(cmd))
-            returncode, timed_out = _run_budgeted(cmd, env, remaining)
-            entry.update(ran=True, returncode=returncode, timed_out=timed_out)
-            if timed_out:
-                result["timed_out"] = True
-                LOGGER.warning(
-                    "[abdomen] %s timed out with the %.1f h budget (abdomen.max_hours) and was killed; "
-                    "what it did not get to resumes next run", label, max_hours
-                )
-            elif returncode != 0:
-                LOGGER.warning("[abdomen] %s exited with code %d", label, returncode)
+        total = max_hours * 3600.0
+        deadline = time.monotonic() + total                    # one budget for the whole stage
+        # What a timed-out track must leave for the commands after it (normalize, the stats, the mounting analysis read
+        # what it tracked): a tenth of the budget, at most half an hour. They share it; the last one ends at the deadline.
+        tail = min(ABDOMEN_TAIL_MAX_S, ABDOMEN_TAIL_FRACTION * total)
+        with _stage_signals_raise():
+            for i, cmd in enumerate(commands):
+                label = _abdomen_command_label(cmd)
+                entry = {"label": label, "returncode": None, "timed_out": False, "ran": False}
+                result["commands"].append(entry)
+                remaining = deadline - time.monotonic()
+                keeps_tail = label == "track" and i < len(commands) - 1
+                allowed = remaining - tail if keeps_tail else remaining
+                if allowed <= 0:
+                    LOGGER.warning(
+                        "[abdomen] %s not run: the %.1f h budget (abdomen.max_hours) is used up", label, max_hours
+                    )
+                    continue
+                LOGGER.info("[abdomen] %s → %s", label, " ".join(cmd))
+                returncode, timed_out = _run_budgeted(cmd, env, allowed)
+                entry.update(ran=True, returncode=returncode, timed_out=timed_out)
+                if timed_out:
+                    result["timed_out"] = True
+                    share = (f"its share of the {max_hours:.1f} h budget (abdomen.max_hours, less the {tail:.0f} s kept "
+                             "for the commands after it)" if keeps_tail
+                             else f"the {max_hours:.1f} h budget (abdomen.max_hours)")
+                    LOGGER.warning(
+                        "[abdomen] %s timed out with %s and was killed; what it did not get to resumes next run",
+                        label, share
+                    )
+                elif returncode != 0:
+                    LOGGER.warning("[abdomen] %s exited with code %d", label, returncode)
 
 
 def _run_abdomen_stages(
@@ -5534,10 +5583,14 @@ def _run_abdomen_stages(
     mounting-posture analysis (which needs only a runnable ``mounting:`` block, not an enabled ``abdomen:`` one).
 
     The commands run one after another, each in a process group of its own, against ONE ``abdomen.max_hours``
-    budget (default 10 h): a command that outlasts it gets SIGTERM, ``ABDOMEN_TERM_GRACE_S`` later SIGKILL, and
-    nothing more is started. A non-zero exit is a warning and the next command still runs (a failed track must not
-    stop the figures of what was tracked). The stage is skipped, with a log line, when there is nothing to run,
-    for ``--folder`` runs, and while another abdomen run holds ``abdomen.lock``.
+    budget (default 10 h): a command that outlasts its allowance gets SIGTERM, ``ABDOMEN_TERM_GRACE_S`` later SIGKILL,
+    and once the budget is spent nothing more is started. ``track`` is the long command, so when others follow it its
+    allowance is the budget less a tail of ``min(ABDOMEN_TAIL_MAX_S, ABDOMEN_TAIL_FRACTION x budget)``: a track that is
+    killed still leaves normalize, the stats and the mounting analysis time to read what it tracked, and they share what
+    is left. A non-zero exit is a warning and the next command still runs (a failed track must not stop the figures of
+    what was tracked). A SIGTERM or SIGHUP of the driver kills the running command's group and frees the lock
+    (:func:`_stage_signals_raise`), and every command dies with the driver even on a SIGKILL. The stage is skipped, with
+    a log line, when there is nothing to run, for ``--folder`` runs, and while another abdomen run holds ``abdomen.lock``.
 
     Never raises on anything that goes wrong in the stage or its configuration: a PER run that has finished
     must not be failed by it. Returns ``{"ran", "skipped_reason", "error", "timed_out", "commands", "summary"}``
