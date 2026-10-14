@@ -1,17 +1,23 @@
 """run_workflows hands the abdomen/mounting overlay to its own stage and keeps PER on config_new.yaml.
 
-``config_new_abdomen.yaml`` is ``extends: config_new.yaml`` plus an ``abdomen:`` block. ``main()`` reads it through
-``resolve_layers``: every PER reader and child gets the BASE file, only ``_run_abdomen_stages`` gets the overlay.
-The stage builds three commands (track; normalize + wide + figures; the stats report), runs them one after another
-against ONE ``abdomen.max_hours`` budget, each in its own process group, and never raises: a failed command is a
-warning, a held ``abdomen.lock`` or a ``--folder`` run skips the stage. ``--abdomen-only`` runs just that stage,
-before any PER work and without the PER lock; a full run holds the shared PER lock for its PER work and lets go of
-it right before the stage. Pinned here: the pure command builder, ``main()``'s source order, the stage with a fake
-Popen, the flags and the ntfy. (The PER call trace itself is pinned in test_layered_parity.py.)
+``config_new_abdomen.yaml`` is ``extends: config_new.yaml`` plus an ``abdomen:`` block and/or a ``mounting:`` block.
+``main()`` reads it through ``resolve_layers``: every PER reader and child gets the BASE file, only
+``_run_abdomen_stages`` gets the overlay. The stage builds up to four commands (track; normalize + wide + figures;
+the stats report; the mounting-posture analysis), runs them one after another against ONE ``abdomen.max_hours``
+budget, each in its own process group, and never raises: a failed command is a warning, a held ``abdomen.lock`` or a
+``--folder`` run skips the stage. The mounting command only reads what the others wrote, so it does not depend on
+``abdomen.enabled``, survives ``--figures-only``, and may be the stage's only command; it is refused (a warning, no
+command) when it would write outside ``Results/New-Opto-Fly-Figures`` or inside the hand-run ``Results/Figures``.
+``--abdomen-only`` runs just that stage, before any PER work and without the PER lock; a full run holds the shared
+PER lock for its PER work and lets go of it right before the stage. Pinned here: the pure command builders,
+``main()``'s source order, the stage with a fake Popen, the flags and the ntfy. (The PER call trace itself is pinned
+in test_layered_parity.py.)
 """
 from __future__ import annotations
 
+import argparse
 import ast
+import dataclasses
 import inspect
 import logging
 import os
@@ -22,6 +28,7 @@ import stat
 import subprocess
 import sys
 import time
+import types
 from pathlib import Path
 from types import MappingProxyType
 
@@ -29,7 +36,7 @@ import pytest
 import yaml
 
 from fbpipe import geometry_pipeline
-from fbpipe.config import Settings
+from fbpipe.config import ReactionPredictionSettings, Settings
 from fbpipe.config_layers import ConfigLayers, LayeredConfigError
 from fbpipe.utils.run_locks import abdomen_lock
 from scripts.pipeline import run_workflows as rw
@@ -39,25 +46,56 @@ LIVE = Path(__file__).resolve().parents[1] / "config" / "config_new.yaml"
 OVERLAY = Path("/cfg/config_new_abdomen.yaml")
 PY = "/venv/bin/python"
 STATS = str(rw.REPO_ROOT / "scripts" / "analysis" / "abdomen_geometry_stats.py")
+MOUNTING_SCRIPT = str(rw.REPO_ROOT / "scripts" / "analysis" / "mounting_posture.py")
 
 GEOMETRY = [PY, "-m", "fbpipe.geometry_pipeline", "--config", str(OVERLAY)]
 TRACK = GEOMETRY + ["--workers", "3", "track"]
 NORMALIZE = GEOMETRY + ["normalize", "wide", "figures"]
 STATS_CMD = [PY, STATS, "--config", str(OVERLAY)]
 
+# Strings only: the builder is pure and every Popen here is a fake, so none of these paths is ever touched.
+NEW_OPTO = "/home/ramanlab/Documents/cole/Results/New-Opto-Fly-Figures"
+HAND_RUN = "/home/ramanlab/Documents/cole/Results/Figures"
+PREDICTIONS = "/home/ramanlab/Documents/cole/Data/CSVs-New-Opto-Flys/model_predictions.csv"
+MOUNTING_TABLES = "/home/ramanlab/Documents/cole/Data/CSVs-New-Opto-Flys/Mounting-Posture"
+MOUNTING = {
+    "enabled": True,
+    "out_dir": f"{NEW_OPTO}/Mounting-Posture",
+    "abdomen_out_dir": f"{NEW_OPTO}/Abdomen-Movement",
+    "csv_out_dir": MOUNTING_TABLES,
+}
+BOTH = {"abdomen": {"enabled": True}, "mounting": MOUNTING}
+ABSENT = object()                                  # "the key is not in the block", as opposed to None / ""
 
-def _cmds(overlay=None, **over):
+
+def _mounting_cmd(python=PY, overlay=OVERLAY, predictions=PREDICTIONS) -> list[str]:
+    return [str(python), MOUNTING_SCRIPT, "--config", str(overlay), "--predictions-csv", predictions,
+            "--out-dir", f"{NEW_OPTO}/Mounting-Posture", "--abdomen-out-dir", f"{NEW_OPTO}/Abdomen-Movement",
+            "--csv-out-dir", MOUNTING_TABLES]
+
+
+MOUNTING_CMD = _mounting_cmd()
+
+
+def _base_settings(output_csv: str = PREDICTIONS, **reaction) -> Settings:
+    """What ``load_settings(config_new.yaml)`` returns, reduced to the one thing the mounting command reads."""
+    return Settings(model_path="m.pt", main_directories=[],
+                    reaction_prediction=ReactionPredictionSettings(output_csv=output_csv, **reaction))
+
+
+def _cmds(overlay=None, settings=None, **over):
     kwargs = dict(python_exec=PY, overlay_path=OVERLAY, figures_only=False, annotated_video=False, n_workers=3)
     kwargs.update(over)
-    return rw._abdomen_commands({"abdomen": {"enabled": True}} if overlay is None else overlay, **kwargs)
+    overlay = {"abdomen": {"enabled": True}} if overlay is None else overlay
+    return rw._abdomen_commands(overlay, _base_settings() if settings is None else settings, **kwargs)
 
 
 # ---- the command builder ----------------------------------------------------------------------------------
 
 @pytest.mark.parametrize("overlay", [{}, None, {"mounting": {"enabled": True}}, {"abdomen": None},
                                      {"abdomen": {"enabled": False}}])
-def test_no_commands_without_an_enabled_abdomen_block(overlay):
-    assert rw._abdomen_commands(overlay, python_exec=PY, overlay_path=OVERLAY, figures_only=False,
+def test_no_commands_without_an_enabled_abdomen_block_or_a_complete_mounting_block(overlay):
+    assert rw._abdomen_commands(overlay, _base_settings(), python_exec=PY, overlay_path=OVERLAY, figures_only=False,
                                 annotated_video=False, n_workers=3) == []
 
 
@@ -86,9 +124,183 @@ def test_the_worker_count_and_interpreter_are_the_callers():
 
 
 def test_every_command_gets_the_overlay_and_never_the_base_config():
-    for cmd in _cmds():
+    for cmd in _cmds(BOTH):
         assert cmd[cmd.index("--config") + 1] == str(OVERLAY)
         assert "config_new.yaml" not in " ".join(cmd)
+
+
+# ---- the mounting command ---------------------------------------------------------------------------------
+
+def _mounting(block=None, settings=None, **over):
+    """``rw._mounting_command`` for an overlay whose ``mounting:`` block is *block* (default: MOUNTING)."""
+    kwargs = dict(python_exec=PY, overlay_path=OVERLAY)
+    kwargs.update(over)
+    return rw._mounting_command({"mounting": MOUNTING if block is None else block},
+                                _base_settings() if settings is None else settings, **kwargs)
+
+
+def _with(**changes):
+    """MOUNTING with *changes* applied; ``ABSENT`` removes the key."""
+    block = {**MOUNTING, **changes}
+    return {key: value for key, value in block.items() if value is not ABSENT}
+
+
+def _warnings(caplog) -> list[str]:
+    return [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+
+
+def test_the_mounting_command_is_exactly_the_script_with_the_overlay_the_predictions_and_the_three_directories():
+    assert Path(MOUNTING_SCRIPT).is_file()
+    assert _mounting() == [
+        PY, MOUNTING_SCRIPT,
+        "--config", str(OVERLAY),
+        "--predictions-csv", PREDICTIONS,
+        "--out-dir", "/home/ramanlab/Documents/cole/Results/New-Opto-Fly-Figures/Mounting-Posture",
+        "--abdomen-out-dir", "/home/ramanlab/Documents/cole/Results/New-Opto-Fly-Figures/Abdomen-Movement",
+        "--csv-out-dir", "/home/ramanlab/Documents/cole/Data/CSVs-New-Opto-Flys/Mounting-Posture",
+    ]
+
+
+def test_the_pipelines_figure_root_is_the_new_opto_directory_with_a_trailing_separator():
+    assert rw.MOUNTING_FIGURES_ROOT == "/home/ramanlab/Documents/cole/Results/New-Opto-Fly-Figures/"
+
+
+def test_the_mounting_command_reads_the_output_csv_of_the_base_settings():
+    settings = _base_settings(output_csv="/pred/model_predictions.csv", data_csv="/wide/all_rows.csv")
+    cmd = _mounting(settings=settings)
+    assert cmd[cmd.index("--predictions-csv") + 1] == "/pred/model_predictions.csv"
+    assert "/wide/all_rows.csv" not in cmd
+
+
+def test_the_mounting_command_runs_under_the_callers_interpreter_expanded_like_the_others():
+    assert _mounting(python_exec="~/cam-env/bin/python")[0] == str(Path("~/cam-env/bin/python").expanduser())
+
+
+def test_a_mounting_block_without_an_enabled_key_counts_as_enabled():
+    assert _mounting(_with(enabled=ABSENT)) == MOUNTING_CMD
+
+
+@pytest.mark.parametrize("overlay", [{}, None, {"abdomen": {"enabled": True}}, {"mounting": None},
+                                     {"mounting": {**MOUNTING, "enabled": False}}],
+                         ids=["empty", "none", "abdomen only", "empty block", "disabled"])
+def test_no_mounting_command_without_an_enabled_mounting_block_and_nothing_to_warn_about(overlay, caplog):
+    with caplog.at_level(logging.INFO):
+        assert rw._mounting_command(overlay, _base_settings(), python_exec=PY, overlay_path=OVERLAY) is None
+    assert _warnings(caplog) == [], "the user asked for nothing"
+
+
+@pytest.mark.parametrize("settings", [_base_settings(""), _base_settings("   "), types.SimpleNamespace(), None],
+                         ids=["empty", "blank", "no reaction_prediction", "no settings"])
+def test_no_mounting_command_without_a_predictions_csv_and_the_warning_says_which(settings, caplog):
+    with caplog.at_level(logging.INFO):
+        assert rw._mounting_command({"mounting": MOUNTING}, settings, python_exec=PY, overlay_path=OVERLAY) is None
+    assert len(_warnings(caplog)) == 1 and "reaction_prediction.output_csv" in _warnings(caplog)[0]
+
+
+@pytest.mark.parametrize("key", ["out_dir", "abdomen_out_dir", "csv_out_dir"])
+@pytest.mark.parametrize("value", [ABSENT, None, "", "  "], ids=["absent", "none", "empty", "blank"])
+def test_no_mounting_command_when_a_directory_is_missing_and_the_warning_names_it(key, value, caplog):
+    with caplog.at_level(logging.INFO):
+        assert _mounting(_with(**{key: value})) is None
+    assert len(_warnings(caplog)) == 1 and f"mounting.{key}" in _warnings(caplog)[0]
+
+
+@pytest.mark.parametrize("change", [{"enabled": "yes"}, {"rest_quantile": 7}, {"typo_key": 1}, {"out_dir": 5}],
+                         ids=["enabled is not a bool", "value out of range", "unknown key", "path is not a string"])
+def test_a_mounting_block_that_does_not_parse_is_a_warning_and_no_command_never_an_error(change, caplog):
+    with caplog.at_level(logging.INFO):
+        assert _mounting(_with(**change)) is None
+    assert len(_warnings(caplog)) == 1 and "mounting" in _warnings(caplog)[0]
+
+
+@pytest.mark.parametrize("key, value", [
+    ("out_dir", f"{HAND_RUN}/Mounting-Posture"),
+    ("abdomen_out_dir", f"{HAND_RUN}/Abdomen-Movement"),
+    ("out_dir", "/tmp/mounting"),
+    ("abdomen_out_dir", f"{NEW_OPTO}-BACKUP-pre-born-cutoff-2026-08-26/Abdomen-Movement"),
+    ("out_dir", NEW_OPTO),
+    ("abdomen_out_dir", NEW_OPTO + "/"),
+    ("out_dir", f"{NEW_OPTO}/../Figures/Mounting-Posture"),
+    ("abdomen_out_dir", f"{NEW_OPTO}/Abdomen-Movement/../../../elsewhere"),
+    ("out_dir", "Results/New-Opto-Fly-Figures/Mounting-Posture"),
+    ("csv_out_dir", f"{HAND_RUN}/tables"),
+    ("csv_out_dir", HAND_RUN),
+    ("csv_out_dir", f"{NEW_OPTO}/../Figures/tables"),
+    ("csv_out_dir", "Results/Figures/tables"),
+], ids=["hand-run figures dir", "hand-run abdomen dir", "outside every root", "sibling sharing the prefix text",
+        "the root itself", "the root with a slash", "walks into Results/Figures", "walks out of the root",
+        "relative path", "tables in Results/Figures", "Results/Figures itself", "tables walk into Results/Figures",
+        "relative tables in Results/Figures"])
+def test_a_directory_the_pipeline_must_not_write_to_is_refused_with_one_warning_naming_it(key, value, caplog):
+    with caplog.at_level(logging.INFO):
+        assert _mounting(_with(**{key: value})) is None
+    assert len(_warnings(caplog)) == 1 and f"mounting.{key}" in _warnings(caplog)[0]
+
+
+def test_every_refused_directory_is_warned_about_not_just_the_first(caplog):
+    with caplog.at_level(logging.INFO):
+        assert _mounting(_with(out_dir="/tmp/a", abdomen_out_dir="/tmp/b", csv_out_dir=f"{HAND_RUN}/c")) is None
+    warnings = _warnings(caplog)
+    assert len(warnings) == 3
+    for key in ("out_dir", "abdomen_out_dir", "csv_out_dir"):
+        assert sum(f"mounting.{key}" in w for w in warnings) == 1
+
+
+@pytest.mark.parametrize("key, value, passed", [
+    ("out_dir", f"{NEW_OPTO}/Mounting-Posture/nested", f"{NEW_OPTO}/Mounting-Posture/nested"),
+    ("abdomen_out_dir", f"{NEW_OPTO}/Abdomen-Movement/", f"{NEW_OPTO}/Abdomen-Movement"),
+    ("out_dir", f"{NEW_OPTO}/a/../Mounting-Posture", f"{NEW_OPTO}/Mounting-Posture"),
+    ("abdomen_out_dir", f"{NEW_OPTO}/a/../Abdomen-Movement", f"{NEW_OPTO}/Abdomen-Movement"),
+    ("csv_out_dir", "/tmp/anywhere/tables", "/tmp/anywhere/tables"),
+    ("csv_out_dir", "/tmp/anywhere/a/../tables", "/tmp/anywhere/tables"),
+    ("csv_out_dir", "tables/mounting", "tables/mounting"),
+], ids=["nested", "trailing slash", "figure dot-dot that stays inside", "abdomen dot-dot that stays inside",
+        "tables anywhere else", "tables dot-dot", "relative tables"])
+def test_a_directory_inside_the_allowed_places_is_passed_as_the_path_that_was_checked(key, value, passed):
+    cmd = _mounting(_with(**{key: value}))
+    assert cmd is not None
+    assert cmd[cmd.index("--" + key.replace("_", "-")) + 1] == passed, "what is checked is what runs"
+
+
+# ---- the command builder: the mounting command's place -----------------------------------------------------
+
+def test_the_mounting_command_is_the_fourth_command_after_the_stats():
+    assert _cmds(BOTH) == [TRACK, NORMALIZE, STATS_CMD, MOUNTING_CMD]
+
+
+def test_figures_only_keeps_the_mounting_command_because_it_only_reads():
+    assert _cmds(BOTH, figures_only=True) == [NORMALIZE, STATS_CMD, MOUNTING_CMD]
+
+
+@pytest.mark.parametrize("abdomen", [ABSENT, None, {"enabled": False}], ids=["no block", "empty block", "disabled"])
+def test_the_mounting_command_does_not_depend_on_the_abdomen_block(abdomen):
+    overlay = {"mounting": MOUNTING} if abdomen is ABSENT else {"abdomen": abdomen, "mounting": MOUNTING}
+    assert _cmds(overlay) == [MOUNTING_CMD]
+    assert _cmds(overlay, figures_only=True) == [MOUNTING_CMD]
+
+
+def test_the_track_flags_never_reach_the_mounting_command():
+    cmds = _cmds(BOTH, annotated_video=True, n_workers=5)
+    assert cmds[0] == GEOMETRY + ["--workers", "5", "--annotated-video", "track"]
+    assert cmds[3] == MOUNTING_CMD
+
+
+def test_the_mounting_command_gets_the_interpreter_the_abdomen_commands_get():
+    cmds = _cmds(BOTH, python_exec="~/cam-env/bin/python")
+    assert {cmd[0] for cmd in cmds} == {str(Path("~/cam-env/bin/python").expanduser())} and len(cmds) == 4
+
+
+def test_a_refused_mounting_block_leaves_the_abdomen_commands_alone(caplog):
+    overlay = {"abdomen": {"enabled": True}, "mounting": _with(out_dir=f"{HAND_RUN}/Mounting-Posture")}
+    with caplog.at_level(logging.INFO):
+        assert _cmds(overlay) == [TRACK, NORMALIZE, STATS_CMD]
+    assert len(_warnings(caplog)) == 1
+
+
+def test_an_empty_predictions_path_drops_only_the_mounting_command(caplog):
+    with caplog.at_level(logging.INFO):
+        assert _cmds(BOTH, settings=_base_settings("")) == [TRACK, NORMALIZE, STATS_CMD]
+    assert len(_warnings(caplog)) == 1
 
 
 # ---- the stage: fakes --------------------------------------------------------------------------------------
@@ -166,31 +378,35 @@ def procs(monkeypatch):
 @pytest.fixture(autouse=True)
 def _isolated_from_the_developers_shell_and_the_previous_test(monkeypatch):
     monkeypatch.delenv("CACHE_DIR", raising=False)         # load_settings lets it override cache_dir, where the locks live
+    monkeypatch.delenv("REACTION_OUTPUT_CSV", raising=False)    # ... and the predictions CSV the mounting command reads
     monkeypatch.setattr(rw, "LAST_ABDOMEN_SUMMARY", "")    # main() and the stage set these; restore them afterwards
     monkeypatch.setattr(rw, "LAST_RUN_ABDOMEN_ONLY", False)
 
 
-def _settings(tmp_path) -> Settings:
-    return Settings(model_path="m.pt", main_directories=[], cache_dir=str(tmp_path / "cache"))
+def _settings(tmp_path, output_csv: str = PREDICTIONS) -> Settings:
+    return dataclasses.replace(_base_settings(output_csv), cache_dir=str(tmp_path / "cache"))
 
 
 def _layers(tmp_path, abdomen=None, **blocks) -> ConfigLayers:
+    """An overlay with the given blocks plus an enabled ``abdomen:`` block (``abdomen=False``: no such block)."""
     overlay = dict(blocks)
-    overlay["abdomen"] = {"enabled": True} if abdomen is None else abdomen
+    if abdomen is not False:
+        overlay["abdomen"] = {"enabled": True} if abdomen is None else abdomen
     return ConfigLayers(tmp_path / "config_new_abdomen.yaml", tmp_path / "config_new.yaml", MappingProxyType(overlay))
 
 
-def _run(tmp_path, layers=None, **kw):
+def _run(tmp_path, layers=None, settings=None, **kw):
     kwargs = dict(figures_only=False, folder=None, annotated_video=False)
     kwargs.update(kw)
-    return rw._run_abdomen_stages(layers or _layers(tmp_path), _settings(tmp_path), **kwargs)
+    return rw._run_abdomen_stages(layers or _layers(tmp_path), settings or _settings(tmp_path), **kwargs)
 
 
 def _expected(tmp_path, **over):
+    """The three abdomen commands the builder gives for the default stage (no mounting block)."""
     kwargs = dict(python_exec=sys.executable, overlay_path=tmp_path / "config_new_abdomen.yaml", figures_only=False,
                   annotated_video=False, n_workers=3)
     kwargs.update(over)
-    return rw._abdomen_commands({"abdomen": {"enabled": True}}, **kwargs)
+    return rw._abdomen_commands({"abdomen": {"enabled": True}}, _settings(tmp_path), **kwargs)
 
 
 # ---- the stage: behaviour ----------------------------------------------------------------------------------
@@ -268,7 +484,7 @@ def test_a_folder_run_skips_the_stage(tmp_path, procs):
     assert result["skipped_reason"] == "folder" and result["ran"] is False and procs.calls == []
 
 
-def test_a_disabled_block_leaves_nothing_to_run(tmp_path, procs):
+def test_a_disabled_abdomen_block_and_an_unrunnable_mounting_block_leave_nothing_to_run(tmp_path, procs):
     result = _run(tmp_path, _layers(tmp_path, {"enabled": False}, mounting={"enabled": True}))
     assert result["skipped_reason"] == "nothing to run" and procs.calls == []
 
@@ -376,6 +592,148 @@ def test_the_summary_is_one_line(tmp_path, procs):
     assert rw.LAST_ABDOMEN_SUMMARY == result["summary"]
 
 
+# ---- the stage: the mounting command -----------------------------------------------------------------------
+
+def _overlay_path(tmp_path) -> Path:
+    return tmp_path / "config_new_abdomen.yaml"
+
+
+def test_the_stage_runs_the_mounting_command_fourth_in_its_own_session_like_the_others(tmp_path, procs):
+    result = _run(tmp_path, _layers(tmp_path, mounting=MOUNTING))
+    assert procs.calls == [*_expected(tmp_path), _mounting_cmd(sys.executable, _overlay_path(tmp_path))]
+    assert [c["label"] for c in result["commands"]] == [
+        "track", "normalize+wide+figures", "abdomen_geometry_stats", "mounting_posture"]
+    assert [c["returncode"] for c in result["commands"]] == [0, 0, 0, 0]
+    for kwargs in procs.kwargs:
+        assert kwargs["start_new_session"] is True and kwargs["env"]["MPLBACKEND"] == "Agg"
+    assert result["summary"] == ("ABDOMEN: track rc=0; normalize+wide+figures rc=0; abdomen_geometry_stats rc=0; "
+                                 "mounting_posture rc=0")
+    assert rw.LAST_ABDOMEN_SUMMARY == result["summary"]
+
+
+def test_a_mounting_block_alone_is_enough_for_the_stage_to_run(tmp_path, procs):
+    result = _run(tmp_path, _layers(tmp_path, False, mounting=MOUNTING))
+    assert procs.calls == [_mounting_cmd(sys.executable, _overlay_path(tmp_path))]
+    assert result["skipped_reason"] == "" and result["error"] == "" and result["ran"] is True
+    assert [c["label"] for c in result["commands"]] == ["mounting_posture"]
+    assert procs.procs[0].waits == [36000.0], "no abdomen block: the default 10 h budget"
+    assert procs.kwargs[0]["start_new_session"] is True
+    assert result["summary"] == "ABDOMEN: mounting_posture rc=0"
+
+
+def test_a_disabled_abdomen_block_still_supplies_the_interpreter_and_the_budget(tmp_path, procs):
+    block = {"enabled": False, "python": "/cam/bin/python", "max_hours": 2}
+    result = _run(tmp_path, _layers(tmp_path, block, mounting=MOUNTING))
+    assert procs.calls == [_mounting_cmd("/cam/bin/python", _overlay_path(tmp_path))]
+    assert procs.procs[0].waits == [7200.0] and result["ran"] is True
+
+
+def test_the_mounting_command_still_runs_under_figures_only(tmp_path, procs):
+    _run(tmp_path, _layers(tmp_path, False, mounting=MOUNTING), figures_only=True)
+    assert procs.calls == [_mounting_cmd(sys.executable, _overlay_path(tmp_path))]
+    procs.calls.clear()
+    _run(tmp_path, _layers(tmp_path, mounting=MOUNTING), figures_only=True)
+    mounting = _mounting_cmd(sys.executable, _overlay_path(tmp_path))
+    assert procs.calls == [*_expected(tmp_path, figures_only=True), mounting]
+    assert len(procs.calls) == 3, "track is dropped; the mounting command is not"
+
+
+@pytest.mark.parametrize("abdomen", [False, {"enabled": True}], ids=["mounting alone", "with the abdomen commands"])
+def test_a_folder_run_skips_the_mounting_command_with_the_rest(tmp_path, procs, abdomen):
+    result = _run(tmp_path, _layers(tmp_path, abdomen, mounting=MOUNTING), folder="Hex-Training-24")
+    assert result["skipped_reason"] == "folder" and procs.calls == []
+
+
+def test_a_nonzero_mounting_exit_is_a_warning_like_the_others(tmp_path, monkeypatch, caplog):
+    procs = _Procs(monkeypatch, script=[0, 0, 0, 2])
+    with caplog.at_level(logging.INFO):
+        result = _run(tmp_path, _layers(tmp_path, mounting=MOUNTING))
+    assert len(procs.calls) == 4 and [c["returncode"] for c in result["commands"]] == [0, 0, 0, 2]
+    assert _warnings(caplog) == ["[abdomen] mounting_posture exited with code 2"]
+    assert result["summary"].endswith("mounting_posture rc=2") and result["error"] == ""
+
+
+def test_a_failed_abdomen_command_does_not_stop_the_mounting_command_from_reading_what_exists(tmp_path, monkeypatch):
+    procs = _Procs(monkeypatch, script=[1, 1, 1, 0])
+    result = _run(tmp_path, _layers(tmp_path, mounting=MOUNTING))
+    assert len(procs.calls) == 4 and procs.calls[3][1] == MOUNTING_SCRIPT
+    assert [c["returncode"] for c in result["commands"]] == [1, 1, 1, 0]
+
+
+def test_the_mounting_command_shares_the_one_time_budget(tmp_path, monkeypatch):
+    procs = _Procs(monkeypatch, elapse=[3000.0, 100.0, 0.0, 0.0])
+    _run(tmp_path, _layers(tmp_path, {"enabled": True, "max_hours": 1}, mounting=MOUNTING))
+    assert [p.waits for p in procs.procs] == [[3600.0], [600.0], [500.0], [500.0]]
+
+
+def test_a_budget_used_up_before_the_mounting_command_starts_nothing_more(tmp_path, monkeypatch):
+    procs = _Procs(monkeypatch, elapse=[0.0, 0.0, 4000.0])              # the stats end 400 s past the hour
+    result = _run(tmp_path, _layers(tmp_path, {"enabled": True, "max_hours": 1}, mounting=MOUNTING))
+    assert len(procs.calls) == 3 and result["timed_out"] is False
+    assert [c["ran"] for c in result["commands"]] == [True, True, True, False]
+    assert "mounting_posture not run" in result["summary"]
+
+
+def test_a_mounting_command_that_outlasts_the_budget_is_killed_with_its_group(tmp_path, monkeypatch):
+    procs = _Procs(monkeypatch, script=[0, 0, 0, "timeout"])
+    result = _run(tmp_path, _layers(tmp_path, mounting=MOUNTING))
+    assert procs.killed == [(4204, signal.SIGTERM)] and result["timed_out"] is True
+    assert result["commands"][3]["timed_out"] is True and "mounting_posture TIMED OUT" in result["summary"]
+
+
+def test_the_mounting_command_runs_under_the_exclusive_abdomen_lock(tmp_path, monkeypatch):
+    seen = []
+
+    class Probe(_Procs):
+        def _popen(self, cmd, **kwargs):
+            with abdomen_lock(tmp_path / "cache") as got:
+                seen.append(got)
+            return super()._popen(cmd, **kwargs)
+
+    Probe(monkeypatch)
+    _run(tmp_path, _layers(tmp_path, False, mounting=MOUNTING))
+    assert seen == [False], "another abdomen run cannot start while the mounting command reads the outputs"
+    with abdomen_lock(tmp_path / "cache") as got:
+        assert got is True
+
+
+def test_a_held_abdomen_lock_holds_back_a_mounting_only_stage_too(tmp_path, procs):
+    with abdomen_lock(tmp_path / "cache") as got:
+        assert got is True
+        result = _run(tmp_path, _layers(tmp_path, False, mounting=MOUNTING))
+    assert result["skipped_reason"] == "locked" and procs.calls == []
+
+
+def test_a_refused_mounting_block_alone_leaves_nothing_to_run_and_says_why(tmp_path, procs, caplog):
+    block = _with(abdomen_out_dir=f"{HAND_RUN}/Abdomen-Movement")
+    with caplog.at_level(logging.INFO):
+        result = _run(tmp_path, _layers(tmp_path, False, mounting=block))
+    assert result["skipped_reason"] == "nothing to run" and procs.calls == [] and result["ran"] is False
+    assert any(w.startswith("[mounting]") and "mounting.abdomen_out_dir" in w for w in _warnings(caplog))
+
+
+def test_a_refused_mounting_block_does_not_stop_the_abdomen_commands(tmp_path, procs, caplog):
+    block = _with(out_dir="/tmp/not-the-pipelines-root")
+    with caplog.at_level(logging.INFO):
+        result = _run(tmp_path, _layers(tmp_path, mounting=block))
+    assert procs.calls == _expected(tmp_path) and result["error"] == ""
+    assert any("mounting.out_dir" in w for w in _warnings(caplog))
+
+
+def test_an_empty_predictions_path_leaves_a_mounting_only_stage_with_nothing_to_run(tmp_path, procs, caplog):
+    with caplog.at_level(logging.INFO):
+        result = _run(tmp_path, _layers(tmp_path, False, mounting=MOUNTING), settings=_settings(tmp_path, ""))
+    assert result["skipped_reason"] == "nothing to run" and procs.calls == []
+    assert any("reaction_prediction.output_csv" in w for w in _warnings(caplog))
+
+
+def test_a_mounting_block_that_does_not_parse_never_raises_out_of_the_stage(tmp_path, procs, caplog):
+    with caplog.at_level(logging.INFO):
+        result = _run(tmp_path, _layers(tmp_path, mounting=_with(typo_key=1)))
+    assert procs.calls == _expected(tmp_path), "a typo in the mounting block must not cost the multi-hour tracking"
+    assert result["error"] == "" and any("typo_key" in w for w in _warnings(caplog))
+
+
 # ---- the commands against the real CLI and real processes --------------------------------------------------
 
 def test_the_module_commands_parse_with_the_geometry_clis_own_parser():
@@ -385,6 +743,28 @@ def test_the_module_commands_parse_with_the_geometry_clis_own_parser():
     later = parser.parse_args(_cmds()[1][3:])
     assert later.config == str(OVERLAY) and later.steps == ["normalize", "wide", "figures"]
     assert later.workers is None and later.annotated_video is False
+
+
+def test_the_mounting_command_parses_with_the_scripts_own_parser(monkeypatch):
+    """A flag the script does not know exits 2 -- a warning in the stage -- and the analysis would silently never
+    run. The script builds its parser inside ``main``, so parsing is observed there and stopped right after."""
+    from scripts.analysis import mounting_posture
+
+    class Parsed(Exception):
+        pass
+
+    real, seen = argparse.ArgumentParser.parse_args, []
+
+    def parse_then_stop(self, args=None, namespace=None):
+        seen.append(real(self, args, namespace))
+        raise Parsed
+
+    monkeypatch.setattr(argparse.ArgumentParser, "parse_args", parse_then_stop)
+    with pytest.raises(Parsed):
+        mounting_posture.main(_cmds(BOTH)[3][2:])
+    (parsed,) = seen
+    assert (parsed.config, parsed.predictions_csv, parsed.out_dir, parsed.abdomen_out_dir, parsed.csv_out_dir) == (
+        str(OVERLAY), PREDICTIONS, MOUNTING["out_dir"], MOUNTING["abdomen_out_dir"], MOUNTING["csv_out_dir"])
 
 
 FAKE_PYTHON = """#!/bin/bash
@@ -427,6 +807,18 @@ def test_real_processes_get_exactly_the_planned_command_lines_and_a_failure_does
         f"{rw.REPO_ROOT / 'scripts' / 'analysis' / 'abdomen_geometry_stats.py'} --config {overlay}",
     ]
     assert [c["returncode"] for c in result["commands"]] == [3, 3]
+
+
+def test_a_real_process_gets_exactly_the_mounting_command_line_last_and_its_failure_is_only_a_warning(
+        tmp_path, fake_python, monkeypatch, caplog):
+    monkeypatch.setenv("FAKE_EXIT", "2")
+    layers = _layers(tmp_path, {"enabled": True, "python": str(fake_python)}, mounting=MOUNTING)
+    with caplog.at_level(logging.INFO):
+        result = _run(tmp_path, layers, figures_only=True)
+    logged = (tmp_path / "argv.log").read_text().splitlines()
+    assert len(logged) == 3 and logged[-1] == " ".join(_mounting_cmd(fake_python, _overlay_path(tmp_path))[1:])
+    assert [c["returncode"] for c in result["commands"]] == [2, 2, 2] and result["error"] == ""
+    assert "[abdomen] mounting_posture exited with code 2" in _warnings(caplog)
 
 
 def test_a_real_timeout_kills_the_whole_process_group_including_what_the_command_started(tmp_path, fake_python):
@@ -495,9 +887,11 @@ def test_the_abdomen_stage_follows_the_data_secured_sync_and_only_runs_for_an_ov
 
 # ---- main(): --abdomen-only --------------------------------------------------------------------------------
 
-def _configs(tmp_path, overlay=None):
-    """A minimal base config_new.yaml and the overlay that extends it (default: an enabled abdomen block)."""
+def _configs(tmp_path, overlay=None, **base_extra):
+    """A minimal base config_new.yaml (plus *base_extra* keys) and the overlay that extends it (default: an enabled
+    abdomen block)."""
     base = {"protocol": "v2", "model_path": "m.pt", "datasets": [], "cache_dir": str(tmp_path / "cache")}
+    base.update(base_extra)
     (tmp_path / "config_new.yaml").write_text(yaml.safe_dump(base), encoding="utf-8")
     overlay = {"extends": "config_new.yaml", "abdomen": {"enabled": True}} if overlay is None else overlay
     (tmp_path / "config_new_abdomen.yaml").write_text(yaml.safe_dump(overlay), encoding="utf-8")
@@ -542,10 +936,36 @@ def test_abdomen_only_runs_the_real_stage_on_the_overlay_with_a_fake_popen(tmp_p
     _, overlay = _configs(tmp_path, {"extends": "config_new.yaml",
                                      "abdomen": {"enabled": True, "yolo": {"num_workers": 2}}})
     assert rw.main(["--config", str(overlay), "--abdomen-only", "--abdomen-video"]) is None
-    assert procs.calls == rw._abdomen_commands({"abdomen": {"enabled": True}}, python_exec=sys.executable,
-                                               overlay_path=overlay, figures_only=False, annotated_video=True,
-                                               n_workers=2)
+    assert procs.calls == rw._abdomen_commands({"abdomen": {"enabled": True}}, _base_settings(),
+                                               python_exec=sys.executable, overlay_path=overlay, figures_only=False,
+                                               annotated_video=True, n_workers=2)
     assert rw.LAST_ABDOMEN_SUMMARY.startswith("ABDOMEN: track rc=0") and rw.LAST_RUN_ABDOMEN_ONLY is True
+
+
+@pytest.mark.parametrize("flags", [[], ["--figures-only"]], ids=["full", "figures-only"])
+def test_abdomen_only_on_a_mounting_only_overlay_runs_the_mounting_command_on_the_base_predictions(
+        tmp_path, procs, flags):
+    _, overlay = _configs(tmp_path, {"extends": "config_new.yaml", "mounting": MOUNTING},
+                          reaction_prediction={"output_csv": PREDICTIONS})
+    assert rw.main(["--config", str(overlay), "--abdomen-only", *flags]) is None
+    assert procs.calls == [_mounting_cmd(sys.executable, overlay)], "the overlay is --config; the CSV is the base's"
+    assert rw.LAST_ABDOMEN_SUMMARY == "ABDOMEN: mounting_posture rc=0" and rw.LAST_RUN_ABDOMEN_ONLY is True
+
+
+def test_abdomen_only_with_both_blocks_runs_the_mounting_command_after_the_abdomen_ones(tmp_path, procs):
+    _, overlay = _configs(tmp_path, {"extends": "config_new.yaml", "abdomen": {"enabled": True}, "mounting": MOUNTING},
+                          reaction_prediction={"output_csv": PREDICTIONS})
+    rw.main(["--config", str(overlay), "--abdomen-only", "--figures-only"])
+    assert [cmd[1] for cmd in procs.calls] == ["-m", STATS, MOUNTING_SCRIPT]
+    assert procs.calls[-1] == _mounting_cmd(sys.executable, overlay)
+
+
+def test_abdomen_only_without_a_predictions_csv_in_the_base_config_warns_and_runs_nothing(tmp_path, procs, caplog):
+    _, overlay = _configs(tmp_path, {"extends": "config_new.yaml", "mounting": MOUNTING})
+    with caplog.at_level(logging.INFO):
+        assert rw.main(["--config", str(overlay), "--abdomen-only"]) is None
+    assert procs.calls == [] and "reaction_prediction.output_csv" in " ".join(_warnings(caplog))
+    assert rw.LAST_ABDOMEN_SUMMARY.startswith("ABDOMEN: skipped")
 
 
 def test_abdomen_only_on_a_plain_config_exits_naming_the_missing_block(tmp_path, monkeypatch):

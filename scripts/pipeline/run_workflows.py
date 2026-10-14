@@ -47,6 +47,7 @@ for path in (str(SRC_ROOT), str(REPO_ROOT)):
 # fly_dir/trial_dir/file depth (>=3 parts). Bumping invalidates v1 caches.
 STATE_VERSION = 2
 
+from fbpipe.analysis.mounting import parse_mounting_block
 from fbpipe.analysis.threshold import ThresholdRule
 from fbpipe.config import Settings, discover_flagged_directories, load_settings, resolve_config_path, _expand_datasets
 from fbpipe.config_layers import OVERLAY_BLOCKS, ConfigLayers, LayeredConfigError, resolve_layers
@@ -4324,6 +4325,11 @@ ABDOMEN_MAX_HOURS_DEFAULT = 10.0     # abdomen.max_hours when the block does not
 ABDOMEN_NUM_WORKERS_DEFAULT = 3      # abdomen.yolo.num_workers, the geometry loader's own default
 ABDOMEN_TERM_GRACE_S = 30.0          # between SIGTERM and SIGKILL of a command that ran out of time
 
+#: The only place the mounting command may send its figure and report directories: the config_new pipeline's own
+#: output root (the trailing separator keeps ``New-Opto-Fly-Figures-BACKUP-...`` out). The hand-run sets in the
+#: sibling ``Results/Figures`` are never a pipeline step's to write.
+MOUNTING_FIGURES_ROOT = "/home/ramanlab/Documents/cole/Results/New-Opto-Fly-Figures/"
+
 _GEOMETRY_STEPS = ("track", "normalize", "wide", "figures")
 
 
@@ -4332,8 +4338,82 @@ def _block_enabled(block: Any) -> bool:
     return isinstance(block, Mapping) and bool(block.get("enabled", True))
 
 
+def _refused_mounting_dir(key: str, path: str, *, figures: bool) -> str:
+    """Why the mounting command may not write to *path* (``mounting.<key>``, already normalised), or ``""`` if it may.
+
+    Nothing inside ``Results/Figures`` is ever a pipeline step's to write, the tables included. The two figure
+    directories (*figures*) must also lie below ``MOUNTING_FIGURES_ROOT``.
+    """
+    parts = Path(path).parts
+    if any(pair == ("Results", "Figures") for pair in zip(parts, parts[1:])):
+        return f"mounting.{key} = {path!r} is inside Results/Figures, which only hand-run figure sets may use"
+    if figures and not path.startswith(MOUNTING_FIGURES_ROOT):
+        return f"mounting.{key} = {path!r} is not below {MOUNTING_FIGURES_ROOT}"
+    return ""
+
+
+def _mounting_command(
+    overlay: Mapping[str, Any] | None,
+    settings: Any,
+    *,
+    python_exec: str,
+    overlay_path: Path | str,
+) -> list[str] | None:
+    """The ``mounting_posture.py`` command, or None when it should not run.
+
+    Pure, like ``_pretest_vs_test_command``, and it never raises: whatever is wrong with the block is a warning and
+    None, so a typo here cannot cost the abdomen tracking that shares its stage. None without an enabled
+    ``mounting:`` block (silently: nothing was asked for) and, with a warning that says why, when the block does not
+    parse, when the base config has no ``reaction_prediction.output_csv``, when ``out_dir`` / ``abdomen_out_dir`` /
+    ``csv_out_dir`` is missing, or when one of them is a place no pipeline step may write
+    (:func:`_refused_mounting_dir`).
+
+    The script gets the OVERLAY as ``--config`` (it reads the abdomen output tree from it) and the base config's
+    predictions CSV. The three directories are passed as flags, not left to the script's own defaults from the same
+    block, so that the value that was checked is the value that runs: normalised, so a ``..`` cannot lead somewhere
+    other than where the check looked.
+    """
+    block = (overlay or {}).get("mounting")
+    if not _block_enabled(block):
+        return None
+    try:
+        mounting = parse_mounting_block(block)
+    except ValueError as exc:
+        LOGGER.warning("[mounting] not run: the mounting block is invalid (%s)", exc)
+        return None
+    predictions = str(getattr(getattr(settings, "reaction_prediction", None), "output_csv", "") or "")
+    if not predictions.strip():
+        LOGGER.warning("[mounting] not run: reaction_prediction.output_csv is empty in the base config")
+        return None
+    configured = {
+        "out_dir": mounting.out_dir, "abdomen_out_dir": mounting.abdomen_out_dir, "csv_out_dir": mounting.csv_out_dir,
+    }
+    missing = [f"mounting.{key}" for key, value in configured.items() if not value]
+    if missing:
+        LOGGER.warning("[mounting] not run: %s not set", ", ".join(missing))
+        return None
+    dirs = {key: os.path.normpath(value) for key, value in configured.items()}
+    refusals = [
+        _refused_mounting_dir(key, value, figures=key in ("out_dir", "abdomen_out_dir")) for key, value in dirs.items()
+    ]
+    if any(refusals):
+        for reason in filter(None, refusals):
+            LOGGER.warning("[mounting] not run: %s", reason)
+        return None
+    return [
+        str(Path(python_exec).expanduser()),
+        str(REPO_ROOT / "scripts" / "analysis" / "mounting_posture.py"),
+        "--config", str(overlay_path),
+        "--predictions-csv", predictions,
+        "--out-dir", dirs["out_dir"],
+        "--abdomen-out-dir", dirs["abdomen_out_dir"],
+        "--csv-out-dir", dirs["csv_out_dir"],
+    ]
+
+
 def _abdomen_commands(
     overlay: Mapping[str, Any] | None,
+    settings: Any,
     *,
     python_exec: str,
     overlay_path: Path | str,
@@ -4341,29 +4421,34 @@ def _abdomen_commands(
     annotated_video: bool,
     n_workers: int,
 ) -> list[list[str]]:
-    """The abdomen stage's commands in the order they run; ``[]`` when the overlay has no enabled ``abdomen:`` block.
+    """The abdomen stage's commands in the order they run; ``[]`` when there is nothing to run.
 
     Pure, like ``_pretest_vs_test_command``: nothing runs unless the user wrote the block. Every command is handed
     the OVERLAY as ``--config`` -- the geometry loader takes the ``abdomen:`` block from it and the production
-    settings from its base. ``--annotated-video`` (the one-time backfill) goes to ``track`` alone, the only step
-    that writes videos; ``figures_only`` drops ``track``, since restyling figures must not load the model.
+    settings from its base. The three geometry commands need an enabled ``abdomen:`` block. ``--annotated-video``
+    (the one-time backfill) goes to ``track`` alone, the only step that writes videos; ``figures_only`` drops
+    ``track``, since restyling figures must not load the model. The mounting command (:func:`_mounting_command`,
+    which reads the BASE *settings*) comes last whenever it can be built: it only reads what the others wrote, so it
+    needs no enabled ``abdomen:`` block and ``figures_only`` does not drop it.
     """
-    if not _block_enabled((overlay or {}).get("abdomen")):
-        return []
+    overlay = overlay or {}
     py = str(Path(python_exec).expanduser())
     config = str(overlay_path)
     geometry = [py, "-m", "fbpipe.geometry_pipeline", "--config", config]
     commands: list[list[str]] = []
-    if not figures_only:
-        track = geometry + ["--workers", str(int(n_workers))]
-        if annotated_video:
-            track.append("--annotated-video")
-        commands.append(track + ["track"])
-    commands.append(geometry + ["normalize", "wide", "figures"])
-    commands.append(
-        [py, str(REPO_ROOT / "scripts" / "analysis" / "abdomen_geometry_stats.py"), "--config", config]
-    )
-    # Commands that read the abdomen outputs (the mounting-posture analysis) are appended here, after the stats.
+    if _block_enabled(overlay.get("abdomen")):
+        if not figures_only:
+            track = geometry + ["--workers", str(int(n_workers))]
+            if annotated_video:
+                track.append("--annotated-video")
+            commands.append(track + ["track"])
+        commands.append(geometry + ["normalize", "wide", "figures"])
+        commands.append(
+            [py, str(REPO_ROOT / "scripts" / "analysis" / "abdomen_geometry_stats.py"), "--config", config]
+        )
+    mounting = _mounting_command(overlay, settings, python_exec=py, overlay_path=overlay_path)
+    if mounting is not None:
+        commands.append(mounting)
     return commands
 
 
@@ -4387,7 +4472,7 @@ def _positive_number(value: Any, what: str, *, integer: bool = False) -> float |
 
 
 _ABDOMEN_SKIP_TEXT = {
-    "nothing to run": "no enabled abdomen block",
+    "nothing to run": "no abdomen or mounting command to run",
     "folder": "--folder run",
     "locked": "another abdomen run holds abdomen.lock",
 }
@@ -4469,14 +4554,17 @@ def _run_abdomen_commands(
         result["skipped_reason"] = reason
         LOGGER.log(level, "[abdomen] stage skipped: %s", _ABDOMEN_SKIP_TEXT[reason])
 
-    block = layers.overlay.get("abdomen")
-    if not _block_enabled(block):
+    if not any(_block_enabled(layers.overlay.get(name)) for name in OVERLAY_BLOCKS):
         skip("nothing to run")
         return
     if folder:
         skip("folder")                   # a partial PER pass: the multi-hour stage waits for a full run
         return
 
+    # The abdomen block also sets the interpreter and the budget of a stage that only runs the mounting command
+    # (its `enabled` aside); without the block the defaults apply.
+    abdomen = layers.overlay.get("abdomen")
+    block = abdomen if isinstance(abdomen, Mapping) else {}
     python = block.get("python")
     if python is not None and not isinstance(python, str):
         raise ValueError(f"abdomen.python must be a path, got {python!r}")
@@ -4491,6 +4579,7 @@ def _run_abdomen_commands(
     max_hours = _positive_number(ABDOMEN_MAX_HOURS_DEFAULT if hours is None else hours, "abdomen.max_hours")
     commands = _abdomen_commands(
         layers.overlay,
+        settings,
         python_exec=python or sys.executable,
         overlay_path=layers.path,
         figures_only=figures_only,
@@ -4542,7 +4631,8 @@ def _run_abdomen_stages(
     folder: str | None = None,
     annotated_video: bool = False,
 ) -> dict[str, Any]:
-    """Run the overlay's abdomen stage after PER: ``track``; ``normalize wide figures``; the stats report.
+    """Run the overlay's abdomen stage after PER: ``track``; ``normalize wide figures``; the stats report; the
+    mounting-posture analysis (which needs only a runnable ``mounting:`` block, not an enabled ``abdomen:`` one).
 
     The commands run one after another, each in a process group of its own, against ONE ``abdomen.max_hours``
     budget (default 10 h): a command that outlasts it gets SIGTERM, ``ABDOMEN_TERM_GRACE_S`` later SIGKILL, and
