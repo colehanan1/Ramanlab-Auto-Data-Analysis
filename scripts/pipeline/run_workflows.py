@@ -50,7 +50,7 @@ STATE_VERSION = 2
 from fbpipe.analysis.mounting import parse_mounting_block
 from fbpipe.analysis.threshold import ThresholdRule
 from fbpipe.config import Settings, discover_flagged_directories, load_settings, resolve_config_path, _expand_datasets
-from fbpipe.config_layers import OVERLAY_BLOCKS, ConfigLayers, LayeredConfigError, resolve_layers
+from fbpipe.config_layers import OVERLAY_BLOCKS, ConfigLayers, resolve_layers
 from fbpipe.pipeline import ORDERED_STEPS
 from fbpipe.steps import predict_reactions
 from fbpipe.utils.data_secured_sync import sync_data_secured
@@ -4361,11 +4361,11 @@ def _mounting_command(
 ) -> list[str] | None:
     """The ``mounting_posture.py`` command, or None when it should not run.
 
-    Pure, like ``_pretest_vs_test_command``, and it never raises: whatever is wrong with the block is a warning and
-    None, so a typo here cannot cost the abdomen tracking that shares its stage. None without an enabled
-    ``mounting:`` block (silently: nothing was asked for) and, with a warning that says why, when the block does not
-    parse, when the base config has no ``reaction_prediction.output_csv``, when ``out_dir`` / ``abdomen_out_dir`` /
-    ``csv_out_dir`` is missing, or when one of them is a place no pipeline step may write
+    Pure, like ``_pretest_vs_test_command``, and it never raises on what the block holds: whatever is wrong with
+    it is a warning and None, so a typo here cannot cost the abdomen tracking that shares its stage. None without
+    an enabled ``mounting:`` block (silently: nothing was asked for) and, with a warning that says why, when the
+    block does not parse, when the base config has no ``reaction_prediction.output_csv``, when ``out_dir`` /
+    ``abdomen_out_dir`` / ``csv_out_dir`` is missing, or when one of them is a place no pipeline step may write
     (:func:`_refused_mounting_dir`).
 
     The script gets the OVERLAY as ``--config`` (it reads the abdomen output tree from it) and the base config's
@@ -4378,8 +4378,10 @@ def _mounting_command(
         return None
     try:
         mounting = parse_mounting_block(block)
-    except ValueError as exc:
-        LOGGER.warning("[mounting] not run: the mounting block is invalid (%s)", exc)
+    except Exception as exc:
+        # Not only ValueError: Path.expanduser raises RuntimeError for "~nouser/x", math.isfinite OverflowError for an
+        # int beyond the float range. Any of them is a bad value in the block, never a reason to fail the run.
+        LOGGER.warning("[mounting] not run: the mounting block is invalid (%s: %s)", type(exc).__name__, exc)
         return None
     predictions = str(getattr(getattr(settings, "reaction_prediction", None), "output_csv", "") or "")
     if not predictions.strip():
@@ -4654,7 +4656,10 @@ def _run_abdomen_stages(
             layers, settings, result,
             figures_only=figures_only, folder=folder, annotated_video=annotated_video,
         )
-    except (LayeredConfigError, OSError, yaml.YAMLError, subprocess.SubprocessError, ValueError) as exc:
+    except Exception as exc:
+        # Every Exception, not a list of the expected ones: Path.expanduser raises RuntimeError for an
+        # `abdomen.python: ~nouser/py`, and nothing the stage or its config does may fail the finished PER run.
+        # (KeyboardInterrupt and SystemExit are not Exceptions and still propagate.)
         result["error"] = f"{type(exc).__name__}: {exc}"
         LOGGER.warning("[abdomen] stage failed (%s); PER outputs are not affected", result["error"])
     result["ran"] = any(command["ran"] for command in result["commands"])

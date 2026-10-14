@@ -213,6 +213,21 @@ def test_a_mounting_block_that_does_not_parse_is_a_warning_and_no_command_never_
     assert len(_warnings(caplog)) == 1 and "mounting" in _warnings(caplog)[0]
 
 
+@pytest.mark.parametrize("key", ["out_dir", "abdomen_out_dir", "csv_out_dir"])
+def test_a_directory_whose_home_does_not_exist_is_a_warning_naming_the_error_never_an_exception(key, caplog):
+    """``Path.expanduser`` raises RuntimeError -- not ValueError -- for ``~name`` when ``name`` is no user."""
+    with caplog.at_level(logging.INFO):
+        assert _mounting(_with(**{key: "~zzzznouser/x"})) is None
+    assert len(_warnings(caplog)) == 1 and "RuntimeError" in _warnings(caplog)[0]
+
+
+def test_a_number_beyond_the_float_range_is_a_warning_naming_the_error_never_an_exception(caplog):
+    """``math.isfinite`` raises OverflowError -- not ValueError -- for an int too large for a float."""
+    with caplog.at_level(logging.INFO):
+        assert _mounting(_with(n_permutations=10**400)) is None
+    assert len(_warnings(caplog)) == 1 and "OverflowError" in _warnings(caplog)[0]
+
+
 @pytest.mark.parametrize("key, value", [
     ("out_dir", f"{HAND_RUN}/Mounting-Posture"),
     ("abdomen_out_dir", f"{HAND_RUN}/Abdomen-Movement"),
@@ -553,7 +568,9 @@ def test_a_bad_block_value_is_a_warning_and_nothing_runs(tmp_path, procs, caplog
 
 
 @pytest.mark.parametrize("exc", [OSError("disk gone"), LayeredConfigError("bad overlay"), yaml.YAMLError("bad yaml"),
-                                 subprocess.SubprocessError("popen"), ValueError("bad value")])
+                                 subprocess.SubprocessError("popen"), ValueError("bad value"),
+                                 RuntimeError("Could not determine home directory."),
+                                 OverflowError("int too large to convert to float"), KeyError("missing")])
 def test_the_stage_never_raises(tmp_path, monkeypatch, caplog, exc):
     procs = _Procs(monkeypatch, script=[exc])
     with caplog.at_level(logging.INFO):
@@ -732,6 +749,36 @@ def test_a_mounting_block_that_does_not_parse_never_raises_out_of_the_stage(tmp_
         result = _run(tmp_path, _layers(tmp_path, mounting=_with(typo_key=1)))
     assert procs.calls == _expected(tmp_path), "a typo in the mounting block must not cost the multi-hour tracking"
     assert result["error"] == "" and any("typo_key" in w for w in _warnings(caplog))
+
+
+@pytest.mark.parametrize("change, error", [
+    ({"out_dir": "~zzzznouser/x"}, "RuntimeError"),
+    ({"csv_out_dir": "~zzzznouser/x"}, "RuntimeError"),
+    ({"n_permutations": 10**400}, "OverflowError"),
+], ids=["no such home in out_dir", "no such home in csv_out_dir", "int beyond the float range"])
+def test_a_mounting_value_that_raises_no_value_error_costs_only_the_mounting_command(
+        tmp_path, procs, caplog, change, error):
+    with caplog.at_level(logging.INFO):
+        result = _run(tmp_path, _layers(tmp_path, mounting=_with(**change)))
+    assert procs.calls == _expected(tmp_path) and len(procs.calls) == 3, "the abdomen commands all still run"
+    assert [c["label"] for c in result["commands"]] == ["track", "normalize+wide+figures", "abdomen_geometry_stats"]
+    assert result["error"] == "" and any(w.startswith("[mounting]") and error in w for w in _warnings(caplog))
+
+
+def test_a_mounting_only_stage_with_such_a_value_has_nothing_to_run_and_does_not_raise(tmp_path, procs, caplog):
+    with caplog.at_level(logging.INFO):
+        result = _run(tmp_path, _layers(tmp_path, False, mounting=_with(out_dir="~zzzznouser/x")))
+    assert result["skipped_reason"] == "nothing to run" and procs.calls == [] and result["error"] == ""
+    assert any("RuntimeError" in w for w in _warnings(caplog))
+
+
+def test_an_abdomen_interpreter_whose_home_does_not_exist_is_a_warning_and_nothing_runs_not_an_exception(
+        tmp_path, procs, caplog):
+    with caplog.at_level(logging.INFO):
+        result = _run(tmp_path, _layers(tmp_path, {"enabled": True, "python": "~zzzznouser/py"}, mounting=MOUNTING))
+    assert procs.calls == [] and result["ran"] is False and result["error"].startswith("RuntimeError:")
+    assert any(r.levelname == "WARNING" and "RuntimeError" in r.getMessage() for r in caplog.records)
+    assert rw.LAST_ABDOMEN_SUMMARY.startswith("ABDOMEN: stopped: RuntimeError")
 
 
 # ---- the commands against the real CLI and real processes --------------------------------------------------
@@ -966,6 +1013,16 @@ def test_abdomen_only_without_a_predictions_csv_in_the_base_config_warns_and_run
         assert rw.main(["--config", str(overlay), "--abdomen-only"]) is None
     assert procs.calls == [] and "reaction_prediction.output_csv" in " ".join(_warnings(caplog))
     assert rw.LAST_ABDOMEN_SUMMARY.startswith("ABDOMEN: skipped")
+
+
+def test_abdomen_only_with_an_unreadable_mounting_value_returns_normally_after_the_abdomen_commands(
+        tmp_path, procs, caplog):
+    blocks = {"extends": "config_new.yaml", "abdomen": {"enabled": True}, "mounting": _with(out_dir="~zzzznouser/x")}
+    _, overlay = _configs(tmp_path, blocks, reaction_prediction={"output_csv": PREDICTIONS})
+    with caplog.at_level(logging.INFO):
+        assert rw.main(["--config", str(overlay), "--abdomen-only", "--figures-only"]) is None
+    assert [cmd[1] for cmd in procs.calls] == ["-m", STATS], "normalize and the stats ran; mounting was dropped"
+    assert any("RuntimeError" in w for w in _warnings(caplog))
 
 
 def test_abdomen_only_on_a_plain_config_exits_naming_the_missing_block(tmp_path, monkeypatch):
