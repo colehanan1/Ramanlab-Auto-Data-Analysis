@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 
 PICODE = Path(__file__).resolve().parent.parent / "PiCode"
-SCRIPTS = ["combinedv2_1.py", "combinedv2_1_pi1.py"]  # Task 7 adds _pi3.py
+SCRIPTS = ["combinedv2_1.py", "combinedv2_1_pi1.py", "combinedv2_1_pi3.py"]
 
 
 @pytest.fixture(scope="module", params=SCRIPTS)
