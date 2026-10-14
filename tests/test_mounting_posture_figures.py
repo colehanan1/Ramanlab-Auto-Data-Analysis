@@ -5,8 +5,15 @@ Rules pinned here, on synthetic fly-trial / fly tables (the fly table is always 
 * the six PNGs of the Design are written at 300 dpi, and every figure carries an ``n=`` label (``n=… trials / … flies``
   for pooled-trial bars, ``n=… flies`` for per-fly plots);
 * the fly is the unit of inference: per-fly scatters use the FLY table's rig-centred pitch, their permutation p is
-  stratified by dataset x rig, the tercile p is the per-fly test of response rate vs pitch, and the baseline-state p is
-  the within-fly permutation; every p is labelled "uncorrected";
+  stratified by dataset x BATCH (flies of one batch share the mounting day, the glue session and the starvation, so only
+  they are interchangeable; a batch nests a rig) and decides every verdict, the dataset x rig p is printed beside it as a
+  secondary number, the tercile p is the per-fly test of response rate vs pitch, and the baseline-state p is the
+  within-fly permutation (whose limits -- odor and trial position are ignored -- the report says); a stratified test in
+  which no stratum holds two flies has nothing to shuffle and is "Not enough data to tell"; every p is labelled
+  "uncorrected";
+* the report records what produced it: the time (UTC), every mounting setting, and for each rig the retracted reference
+  it used, how many flies it came from, whether it was configured, and a WARNING when most of the rig's flies never rest
+  below it;
 * displayed rates pool trials (a tercile of one 1-of-1 fly and one 0-of-9 fly is 10 %, never 50 %), and trials of a fly
   whose identity drifted never enter a pooled bar;
 * the response analyses use only scored trials (pretest + testing rows with a score), and the within-fly test shuffles
@@ -24,6 +31,7 @@ Rules pinned here, on synthetic fly-trial / fly tables (the fly table is always 
 """
 from __future__ import annotations
 
+import dataclasses
 import logging
 import re
 import sys
@@ -69,15 +77,17 @@ def trial_table(rows) -> pd.DataFrame:
     return df.reindex(columns=MP.FLY_TRIAL_COLUMNS)
 
 
-def row(fly_id, rig="R", dataset="D", **cols):
-    batch, number = "b1", int(fly_id.split("fly")[-1])
+def row(fly_id, rig="R", dataset="D", batch="b1", **cols):
+    number = int(fly_id.split("fly")[-1])
     return {"dataset": dataset, "batch": batch, "fly_number": number, "fly_id": f"{dataset}/{batch}/{fly_id}", "rig": rig,
             "trial_type": "testing", "identity_consistent": True, **cols}
 
 
-def cohort(seed=1, per_cell=8, *, tilt=0.0, hold=0.0, respond=0.0) -> pd.DataFrame:
+def cohort(seed=1, per_cell=8, *, tilt=0.0, hold=0.0, respond=0.0, batches=1) -> pd.DataFrame:
     """Flies with unbalanced trial counts; ``tilt`` / ``hold`` / ``respond`` make the spontaneous-PER, held-out and
-    response probabilities rise with how head-up the fly is mounted relative to its rig (0 = no relation)."""
+    response probabilities rise with how head-up the fly is mounted relative to its rig (0 = no relation). Each
+    (dataset, rig) cell is one batch, or ``batches`` of them (flies alternate), so the batch strata can differ from the
+    rig strata."""
     rng = np.random.default_rng(seed)
     rows = []
     for cell, (dataset, rig) in enumerate(CELLS):
@@ -85,6 +95,7 @@ def cohort(seed=1, per_cell=8, *, tilt=0.0, hold=0.0, respond=0.0) -> pd.DataFra
             dev = rng.normal(0.0, 4.0)
             z = dev / 4.0
             lean_back = rng.random()
+            batch = f"batch_{cell}" if batches == 1 else f"batch_{cell}_{k % batches}"
             for t in range(int(rng.integers(5, 14))):
                 held = rng.random() < 1 / (1 + np.exp(1.2 - hold * z))
                 spont = rng.random() < np.clip(0.2 + tilt * z, 0.02, 0.95)
@@ -93,8 +104,8 @@ def cohort(seed=1, per_cell=8, *, tilt=0.0, hold=0.0, respond=0.0) -> pd.DataFra
                 known = rng.random() > 0.05
                 kind = "pretest" if t < 2 else "testing"
                 rows.append({
-                    "dataset": dataset, "batch": f"batch_{cell}", "fly_number": k + 1,
-                    "fly_id": f"{dataset}/batch_{cell}/fly{k + 1}", "rig": rig, "trial": f"t{t}", "trial_type": kind,
+                    "dataset": dataset, "batch": batch, "fly_number": k + 1,
+                    "fly_id": f"{dataset}/{batch}/fly{k + 1}", "rig": rig, "trial": f"t{t}", "trial_type": kind,
                     "trial_index": t, "identity_consistent": True,
                     "trial_body_pitch_deg": RIG_SHIFT[rig] + dev + rng.normal(0.0, 0.5),
                     "rest_eu": rng.uniform(0.4, 0.8), "pre_min": 0.5, "stim_min": float(rng.choice([1 / 15, 0.5])),
@@ -180,13 +191,96 @@ def test_the_per_fly_scatters_use_the_rig_centred_pitch_of_the_fly_table(data):
     assert abs(rho - raw_rho) > 0.05                              # the cohort's rig offsets make the two differ
 
 
-def test_the_scatter_permutation_p_is_stratified_by_dataset_and_rig(data):
+def batch_strata(fly) -> np.ndarray:
+    return (fly["dataset"] + " | " + fly["batch"]).to_numpy()
+
+
+def rig_strata(fly) -> np.ndarray:
+    return (fly["dataset"] + " | " + fly["rig"]).to_numpy()
+
+
+def test_the_scatter_permutation_p_is_stratified_by_dataset_and_batch_with_dataset_and_rig_beside_it(data):
     fly = data.fly
-    strata = (fly["dataset"] + " | " + fly["rig"]).to_numpy()
     for key, column in (("spontaneous", "spont_per_frac"), ("held_out", "held_out_frac")):
-        expected = M.stratified_permutation_p(fly["mount_pitch_centred_deg"], fly[column], strata, n=N_PERM, seed=0)
-        assert data.stats[key]["p_perm"] == expected
+        by_batch = M.stratified_permutation_p(fly["mount_pitch_centred_deg"], fly[column], batch_strata(fly), n=N_PERM, seed=0)
+        by_rig = M.stratified_permutation_p(fly["mount_pitch_centred_deg"], fly[column], rig_strata(fly), n=N_PERM, seed=0)
+        assert data.stats[key]["p_perm"] == by_batch and data.stats[key]["p_perm_rig"] == by_rig
         assert data.stats[key]["n_strata"] == 4 and data.stats[key]["n_strata_shuffled"] == 4
+
+
+def test_batches_inside_a_rig_are_separate_strata_and_the_rig_strata_are_counted_apart():
+    ft = cohort(seed=7, tilt=0.30, respond=0.15, batches=2)                 # 8 batches, two in each of the 4 rig cells
+    fly = fly_table(ft)
+    stats = F.compute_stats(ft, fly, n_perm=N_PERM, seed=0)
+    for key, column in (("spontaneous", "spont_per_frac"), ("held_out", "held_out_frac"), ("tercile", "response_rate")):
+        s = stats[key]
+        assert s["p_perm"] == M.stratified_permutation_p(fly["mount_pitch_centred_deg"], fly[column], batch_strata(fly),
+                                                        n=N_PERM, seed=0), key
+        assert s["p_perm_rig"] == M.stratified_permutation_p(fly["mount_pitch_centred_deg"], fly[column], rig_strata(fly),
+                                                            n=N_PERM, seed=0), key
+        assert (s["n_strata"], s["n_strata_shuffled"]) == (8, 8) and (s["n_strata_rig"], s["n_strata_rig_shuffled"]) == (4, 4), key
+
+
+def batch_confound():
+    """Twelve flies of one dataset and rig in two batches: pitch and spontaneous PER both rise from B1 to B2 (the second
+    batch was mounted more head-up on another day), but inside each batch the two are unrelated, so only a test that
+    shuffles within the batch sees there is nothing."""
+    rows = []
+    for batch, offset, pitches, ranks in (("B1", 0, [-3.0, -2.6, -2.2, -1.8, -1.4, -1.0], [3, 6, 1, 5, 2, 4]),
+                                          ("B2", 6, [1.0, 1.4, 1.8, 2.2, 2.6, 3.0], [2, 5, 3, 6, 1, 4])):
+        for k, (pitch, rank) in enumerate(zip(pitches, ranks)):
+            n_spont = rank - 1 if batch == "B1" else rank + 4         # B1: 0-5 of 10 trials, B2: 5-10
+            for t in range(10):
+                rows.append(row(f"fly{offset + k + 1}", batch=batch, trial_body_pitch_deg=pitch, trial_index=t,
+                                spont_per_any=float(t < n_spont), spont_per_events=float(t < n_spont)))
+    return trial_table(rows)
+
+
+def test_a_batch_effect_on_both_pitch_and_outcome_does_not_make_the_answer_yes():
+    ft = batch_confound()
+    fly = fly_table(ft)
+    s = F.compute_stats(ft, fly, n_perm=2000, seed=0)["spontaneous"]
+    assert s["p_perm_rig"] < 0.05, "shuffled over the whole rig, the batch shift alone reads as a link"
+    assert s["p_perm"] > 0.3 and s["verdict"] == "No clear link", "shuffled inside each batch there is nothing"
+    assert (s["n_strata"], s["n_strata_rig"]) == (2, 1)
+
+
+def singleton_batches():
+    """Four flies, one per batch (one dataset, one rig): every stratum holds a single fly, so nothing can be shuffled."""
+    rows = []
+    for k in range(4):
+        for t in range(6):
+            held = t <= k
+            rows.append(row(f"fly{k + 1}", batch=f"B{k}", trial_body_pitch_deg=float(k), trial_index=t,
+                            spont_per_any=float(held), spont_per_events=float(held),
+                            held_subtype="held_down" if held else "retracted", held_out=float(held),
+                            responded=float(t <= k + 1), score=3.0 * float(t <= k + 1)))
+    return trial_table(rows)
+
+
+def test_with_no_batch_holding_two_flies_every_per_fly_test_is_not_enough_data_never_no_clear_link():
+    ft = singleton_batches()
+    fly = fly_table(ft)
+    stats = F.compute_stats(ft, fly, n_perm=N_PERM)
+    for key in ("spontaneous", "held_out", "tercile"):
+        s = stats[key]
+        assert s["n_flies"] == 4 and s["n_strata"] == 4 and s["n_strata_shuffled"] == 0, key
+        assert s["p_perm"] == 1.0 and s["rho"] == pytest.approx(1.0), key         # the permutation had nothing to move ...
+        assert s["verdict"].startswith("Not enough data to tell"), key              # ... so it must not say "No clear link"
+        assert "dataset × batch" in s["verdict"] and "No clear" not in s["verdict"], key
+    figs = F.build_figures(ft, fly, stats)
+    assert "Not enough data to tell" in all_text(figs["mount_pitch_vs_spontaneous_per"])
+    assert "Not enough data to tell" in all_text(figs["response_by_mount_pitch_tercile"])
+    assert "No clear" not in all_text(figs["mount_pitch_vs_spontaneous_per"])
+
+
+def test_one_batch_with_two_flies_is_enough_to_shuffle_and_the_answer_is_a_real_one():
+    ft = singleton_batches()
+    ft["batch"] = ft["batch"].replace({"B1": "B0"})                              # flies 1 and 2 now share a batch
+    fly = fly_table(ft)
+    s = F.compute_stats(ft, fly, n_perm=N_PERM)["spontaneous"]
+    assert s["n_strata"] == 3 and s["n_strata_shuffled"] == 1
+    assert not s["verdict"].startswith("Not enough data to tell")
 
 
 def strata_confound():
@@ -207,7 +301,7 @@ def test_the_answer_follows_the_stratified_p_not_the_pooled_spearman_p():
     ft = strata_confound()
     fly = fly_table(ft)
     stats = F.compute_stats(ft, fly, n_perm=2000, seed=0)["spontaneous"]
-    strata = (fly["dataset"] + " | " + fly["rig"]).to_numpy()
+    strata = batch_strata(fly)
     pooled = M.stratified_permutation_p(fly["mount_pitch_centred_deg"], fly["spont_per_frac"], ["all"] * len(fly),
                                         n=2000, seed=0)
     assert stats["p"] < 0.05 and pooled < 0.05                    # pooled over the datasets the two look related
@@ -260,9 +354,10 @@ def test_the_tercile_trial_counts_are_the_scored_trials_of_the_flies_in_each_thi
 
 def test_the_tercile_p_is_the_per_fly_stratified_permutation_of_response_rate_against_pitch(data):
     fly, t = data.fly, data.stats["tercile"]
-    strata = (fly["dataset"] + " | " + fly["rig"]).to_numpy()
-    assert t["p_perm"] == M.stratified_permutation_p(fly["mount_pitch_centred_deg"], fly["response_rate"], strata,
-                                                     n=N_PERM, seed=0)
+    assert t["p_perm"] == M.stratified_permutation_p(fly["mount_pitch_centred_deg"], fly["response_rate"],
+                                                     batch_strata(fly), n=N_PERM, seed=0)
+    assert t["p_perm_rig"] == M.stratified_permutation_p(fly["mount_pitch_centred_deg"], fly["response_rate"],
+                                                         rig_strata(fly), n=N_PERM, seed=0)
     assert t["rho"] == pytest.approx(M.spearman(fly["mount_pitch_centred_deg"], fly["response_rate"])[0])
     assert t["n_flies"] == 32
 
@@ -604,7 +699,8 @@ def test_the_subtitle_carries_rho_p_the_permutation_p_and_n_flies(figures, data)
     s = data.stats["spontaneous"]
     text = all_text(figures["mount_pitch_vs_spontaneous_per"])
     assert f"ρ={s['rho']:.2f}" in text and f"{F.p_text(s['p'])} (uncorrected)" in text
-    assert f"permutation {F.p_text(s['p_perm'])} (uncorrected)" in text and "n=32 flies" in text
+    assert f"permutation {F.p_text(s['p_perm'])} (uncorrected) within dataset × batch" in text and "n=32 flies" in text
+    assert f"secondary {F.p_text(s['p_perm_rig'])} (uncorrected) within dataset × rig" in text
 
 
 def test_the_tercile_answer_comes_from_the_per_fly_test(figures, data):
@@ -612,7 +708,8 @@ def test_the_tercile_answer_comes_from_the_per_fly_test(figures, data):
     assert t["p_perm"] < 0.05 and t["rho"] > 0
     text = all_text(figures["response_by_mount_pitch_tercile"])
     assert "Yes — flies tilted more head-up respond more often" in text
-    assert f"{F.p_text(t['p_perm'])} (uncorrected" in text
+    assert f"{F.p_text(t['p_perm'])} (uncorrected) within dataset × batch" in text
+    assert f"secondary {F.p_text(t['p_perm_rig'])} (uncorrected) within dataset × rig" in text
 
 
 # ---------------------------------------------------------------------------
@@ -927,6 +1024,100 @@ def report(data, tmp_path_factory):
     return path.read_text(encoding="utf-8")
 
 
+# ---- run information: what produced the report ---------------------------------------------------------------
+
+WARNING_TEXT = ("Flybehavior3: 3 of 4 identity-consistent flies have their lowest trial rest at or above the retracted "
+                "reference plus held_margin_eu (0.30 + 0.25 = 0.55 eu); the reference may sit at the held-out level, and "
+                "held-out flies would be labelled retracted")
+RUN_INFO = {
+    "generated_utc": "2026-10-14T09:30:05Z",
+    "settings": {**{k: v for k, v in dataclasses.asdict(MCFG).items()}, "batch_date_from": "2026-10-06",
+                 "csv_out_dir": "/x/CSVs/Mounting-Posture", "retracted_ref_eu": None},
+    "retracted_ref": {
+        "Flybehavior2": {"retracted_ref_eu": 0.52, "n_flies": 9, "from_config": False, "n_flies_at_held_level": 1,
+                         "warning": False},
+        "Flybehavior3": {"retracted_ref_eu": 0.3, "n_flies": 4, "from_config": True, "n_flies_at_held_level": 3,
+                         "warning": True},
+        "unknown": {"retracted_ref_eu": None, "n_flies": 0, "from_config": False, "n_flies_at_held_level": 0,
+                    "warning": False}},
+    "warnings": [WARNING_TEXT]}
+
+
+@pytest.fixture(scope="module")
+def run_report(data, tmp_path_factory):
+    exclusions = {**EXCLUSIONS, "run_info": RUN_INFO}
+    return F.write_report(data.ft, data.fly, exclusions, data.stats, tmp_path_factory.mktemp("run_report")).read_text(
+        encoding="utf-8")
+
+
+def run_section(text: str) -> str:
+    return text.split("## Run information")[1].split("\n## ")[0]
+
+
+def test_the_report_has_a_run_information_section_between_the_header_and_the_exclusions(run_report):
+    assert run_report.index("# Mounting posture report") < run_report.index("## Run information") \
+        < run_report.index("## Exclusions") < run_report.index("## Mounting")
+
+
+def test_the_run_information_gives_the_generation_time_in_utc(run_report):
+    assert "2026-10-14T09:30:05Z" in run_section(run_report) and "UTC" in run_section(run_report)
+
+
+def test_the_run_information_lists_every_mounting_setting_with_its_value(run_report):
+    section = run_section(run_report)
+    for f in dataclasses.fields(M.MountingSettings):
+        assert f"`{f.name}`" in section, f.name
+    for needle in ("| `rest_quantile` | 0.1 |", "| `held_margin_eu` | 0.25 |", "| `n_permutations` | 10000 |",
+                   "| `enabled` | true |", "| `retracted_ref_eu` | null |", "| `batch_date_from` | 2026-10-06 |",
+                   "| `csv_out_dir` | /x/CSVs/Mounting-Posture |"):
+        assert needle in section, needle
+
+
+def test_the_run_information_gives_each_rigs_reference_its_source_and_the_flies_behind_it(run_report):
+    lines = {rig: next(ln for ln in run_section(run_report).splitlines() if ln.startswith(f"| {rig} "))
+             for rig in ("Flybehavior2", "Flybehavior3", "unknown")}
+    assert "0.52" in lines["Flybehavior2"] and "derived" in lines["Flybehavior2"] and "| 9 |" in lines["Flybehavior2"]
+    assert "0.30" in lines["Flybehavior3"] and "configured" in lines["Flybehavior3"] and "| 4 |" in lines["Flybehavior3"]
+    assert "| 3 |" in lines["Flybehavior3"], "the flies at the held-out level"
+    assert "n/a" in lines["unknown"] and "| 0 |" in lines["unknown"]
+
+
+def test_a_reference_warning_is_a_warning_line_in_the_report_before_the_numbers(run_report):
+    assert f"**WARNING:** {WARNING_TEXT}" in run_report
+    assert run_report.index("**WARNING:**") < run_report.index("## Exclusions")
+    assert run_report.count("**WARNING:**") == 1
+
+
+def test_a_report_without_a_reference_warning_has_no_warning_line(data, tmp_path):
+    quiet = {**RUN_INFO, "warnings": [], "retracted_ref": {k: {**v, "warning": False} for k, v in RUN_INFO["retracted_ref"].items()}}
+    text = F.write_report(data.ft, data.fly, {**EXCLUSIONS, "run_info": quiet}, data.stats, tmp_path).read_text(encoding="utf-8")
+    assert "WARNING" not in text and "## Run information" in text
+
+
+def test_the_run_info_is_not_one_of_the_exclusion_counters(run_report):
+    exclusions = run_report.split("## Exclusions")[1].split("\n## ")[0]
+    assert "run_info" not in exclusions and "(`run_info`) |" not in run_report
+    for key in EXCLUSIONS:
+        assert f"`{key}`" in exclusions, key
+
+
+def test_a_report_of_exclusions_without_run_info_has_no_run_information_section(report):
+    assert "## Run information" not in report
+
+
+def test_the_run_information_is_there_when_nothing_is_in_scope(tmp_path):
+    ft, fly = trial_table([]), pd.DataFrame(columns=MP.FLY_COLUMNS)
+    text = F.write_report(ft, fly, {**EXCLUSIONS, "run_info": RUN_INFO}, F.compute_stats(ft, fly, n_perm=N_PERM),
+                          tmp_path).read_text(encoding="utf-8")
+    assert "no new-glue fly-trials in scope" in text and "## Run information" in text and "2026-10-14T09:30:05Z" in text
+
+
+def test_the_sections_of_a_report_with_run_info_are_header_run_information_exclusions_mounting(data):
+    sections = F.report_sections(data.ft, data.fly, {**EXCLUSIONS, "run_info": RUN_INFO}, data.stats)
+    assert [s.splitlines()[0] for s in sections] == ["# Mounting posture report", "## Run information", "## Exclusions",
+                                                     "## Mounting"]
+
+
 def test_the_report_is_written_as_report_md_in_the_figure_directory(data, tmp_path):
     path = F.write_report(data.ft, data.fly, EXCLUSIONS, data.stats, tmp_path / "new")
     assert path == tmp_path / "new" / "report.md" and path.is_file()
@@ -972,8 +1163,26 @@ def test_the_report_gives_every_permutation_p_and_what_was_shuffled(report, data
               s["baseline"]["proboscis"]["p_perm"], s["baseline"]["spontaneous"]["p_perm"]):
         assert F.p_text(p, digits=4) in report
     assert "within-fly" in report.lower()
-    assert re.search(rf"Stratified permutation p: .*dataset × rig.*{N_PERM} permutations, seed 0", report)
+    assert re.search(rf"Stratified permutation p: .*dataset × batch.*{N_PERM} permutations, seed 0", report)
     assert re.search(rf"Within-fly permutation p: .*{N_PERM} permutations, seed 0", report)
+    for key in ("spontaneous", "held_out", "tercile"):                     # the secondary dataset x rig p of each scatter
+        assert F.p_text(s[key]["p_perm_rig"], digits=4) in report, key
+    assert report.count("within dataset × batch strata") >= 3 and report.count("within dataset × rig strata") >= 3
+
+
+def test_the_header_says_why_batch_is_the_stratum_and_the_dataset_rig_p_only_secondary(report):
+    header = report.split("## Exclusions")[0]
+    assert "shuffled among flies of the same dataset × batch" in header
+    assert "Flies of one batch share the mounting day, the glue session and the starvation" in header
+    assert "only flies of the same batch are interchangeable" in header
+    assert "decides every \"Yes\"" in header and "dataset × rig is printed beside it as a secondary number" in header
+
+
+def test_the_header_states_what_the_within_fly_permutation_ignores(report):
+    header = report.split("## Exclusions")[0]
+    assert "shuffles the state among a fly's trials of one trial type" in header
+    assert "ignores which odor a trial had and where it sat in the session" in header
+    assert "Odor order is fixed per protocol" in header
 
 
 def test_the_report_says_uncorrected_next_to_the_p_values_and_in_the_header(report):

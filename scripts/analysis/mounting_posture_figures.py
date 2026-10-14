@@ -13,9 +13,13 @@ line under it:
 6. ``pullins_held_vs_retracted``         pull-ins per minute before / during the stimulus, held vs retracted (descriptive).
 
 Inference uses the FLY as the unit: the per-fly scatters report Spearman rho / p and a permutation p stratified by
-dataset x rig, the tercile p is the same per-fly test of response rate vs pitch, and the baseline-state p shuffles the
-state inside each fly's trials of one trial type (so a pretest-vs-testing difference cannot make it small), and the
-difference shown beside it is the Mantel-Haenszel one over those same fly x trial-type groups (the bars stay pooled).
+dataset x BATCH (flies of one batch share the mounting day, the glue session and the starvation, so only they are
+interchangeable; a batch nests a rig) that alone decides the verdict, with the dataset x rig p printed beside it as a
+secondary number; a stratified test in which no stratum holds two flies has nothing to shuffle and reads "Not enough data
+to tell". The tercile p is the same per-fly test of response rate vs pitch, and the baseline-state p shuffles the
+state inside each fly's trials of one trial type (so a pretest-vs-testing difference cannot make it small; it ignores the
+odor and the trial's position, which the report says), and the difference shown beside it is the Mantel-Haenszel one over
+those same fly x trial-type groups (the bars stay pooled).
 The response analyses use only scored trials (pretest + testing trials that have a score). Bars pool TRIALS (never a
 mean of per-fly means) and say ``n=... trials / ... flies``. Every p-value is uncorrected, and says so; a comparison
 with fewer than three flies to compare is "Not enough data to tell". A figure that cannot be drawn (too few flies) is
@@ -184,7 +188,14 @@ def scored_trials(trials: pd.DataFrame) -> pd.DataFrame:
     return trials[trials["trial_type"].isin(SCORED_TYPES) & trials["score"].notna() & trials["responded"].notna()]
 
 
+def dataset_batch_strata(fly: pd.DataFrame) -> np.ndarray:
+    """The strata the verdicts shuffle within: dataset x batch. Flies of one batch share the mounting day, the glue session
+    and the starvation, so only they are interchangeable; a batch is recorded on one rig, so this nests the rig."""
+    return (fly["dataset"].astype(str) + " | " + fly["batch"].astype(str)).to_numpy()
+
+
 def dataset_rig_strata(fly: pd.DataFrame) -> np.ndarray:
+    """dataset x rig: the coarser strata, printed as a secondary number beside the dataset x batch one."""
     return (fly["dataset"].astype(str) + " | " + fly["rig"].astype(str)).to_numpy()
 
 
@@ -226,18 +237,31 @@ def rig_answer(rigs: Sequence[dict], what: str = "mounting angle", span: str = "
 
 def scatter_stats(fly: pd.DataFrame, column: str, *, n_perm: int, seed: int, up: str, down: str,
                   none: str = "No clear link", x: str = "mount_pitch_centred_deg") -> dict:
-    """Per-fly *x* (default: the rig-centred pitch) vs *column*: Spearman rho / p, the dataset x rig stratified permutation
-    p (x shuffled within each stratum), n."""
-    x, y, strata = float_column(fly, x), float_column(fly, column), dataset_rig_strata(fly)
+    """Per-fly *x* (default: the rig-centred pitch) vs *column*: Spearman rho / p and two stratified permutation p's (x
+    shuffled within each stratum), n.
+
+    ``p_perm`` shuffles within dataset x BATCH strata and alone drives the verdict (the flies of one batch share the
+    mounting day, the glue session and the starvation, so only they are interchangeable); ``p_perm_rig`` shuffles within
+    dataset x rig, the coarser strata, and is a secondary number. ``n_strata`` / ``n_strata_shuffled`` count the batch
+    strata (all, and those holding at least two flies, the only ones the shuffle can move), ``n_strata_rig*`` the rig ones.
+    When NO batch stratum holds two flies there is nothing to shuffle: the p is 1 by construction, and the verdict is
+    "Not enough data to tell", never "No clear link".
+    """
+    x, y = float_column(fly, x), float_column(fly, column)
+    batch, rig = dataset_batch_strata(fly), dataset_rig_strata(fly)
     done = np.isfinite(x) & np.isfinite(y)
     rho, p = M.spearman(x, y)
-    p_perm = M.stratified_permutation_p(x, y, strata, n=n_perm, seed=seed)
-    sizes = pd.Series(strata[done]).value_counts()
+    p_perm = M.stratified_permutation_p(x, y, batch, n=n_perm, seed=seed)
+    p_perm_rig = M.stratified_permutation_p(x, y, rig, n=n_perm, seed=seed)
+    sizes, rig_sizes = pd.Series(batch[done]).value_counts(), pd.Series(rig[done]).value_counts()
     answer = verdict(p_perm, rho, up=up, down=down, none=none)
     if not np.isfinite(p_perm) and done.sum() >= MIN_FLIES:
         answer += " (every fly has the same value of one of the two)"
-    return {"n_flies": int(done.sum()), "rho": rho, "p": p, "p_perm": p_perm, "n_strata": int(len(sizes)),
-            "n_strata_shuffled": int((sizes > 1).sum()), "verdict": answer}
+    elif done.sum() >= MIN_FLIES and not (sizes > 1).any():
+        answer = "Not enough data to tell (no dataset × batch has two flies to shuffle)"
+    return {"n_flies": int(done.sum()), "rho": rho, "p": p, "p_perm": p_perm, "p_perm_rig": p_perm_rig,
+            "n_strata": int(len(sizes)), "n_strata_shuffled": int((sizes > 1).sum()),
+            "n_strata_rig": int(len(rig_sizes)), "n_strata_rig_shuffled": int((rig_sizes > 1).sum()), "verdict": answer}
 
 
 def _tercile_stats(fly: pd.DataFrame, trials: pd.DataFrame, *, n_perm: int, seed: int) -> dict:
@@ -554,7 +578,8 @@ def _scatter_axes(ax, x: np.ndarray, y: np.ndarray, ylabel: str) -> None:
 
 def scatter_numbers(s: dict) -> str:
     return (f"{rho_text(s['rho'])}, {p_text(s['p'])} (uncorrected); stratified permutation {p_text(s['p_perm'])} "
-            f"(uncorrected); {n_flies_label(s['n_flies'])}")
+            f"(uncorrected) within dataset × batch; secondary {p_text(s['p_perm_rig'])} (uncorrected) within dataset × rig; "
+            f"{n_flies_label(s['n_flies'])}")
 
 
 def _subtype_scatter(fig: Figure, ax, fly: pd.DataFrame, x: np.ndarray, y: np.ndarray, done: np.ndarray) -> None:
@@ -611,7 +636,8 @@ def _fig_tercile(trials, fly, stats):
     width, height, bottom = 6.8, 5.5, 1.3
     fig = new_figure(width, height)
     numbers = (f"per-fly {rho_text(t['rho'])}, {p_text(t['p'])} (uncorrected); stratified permutation "
-               f"{p_text(t['p_perm'])} (uncorrected); bars pool the pretest + testing trials, {group_n(t)}")
+               f"{p_text(t['p_perm'])} (uncorrected) within dataset × batch; secondary {p_text(t['p_perm_rig'])} "
+               f"(uncorrected) within dataset × rig; bars pool the pretest + testing trials, {group_n(t)}")
     top = title_block(fig, TITLES["response_by_mount_pitch_tercile"], t["verdict"], numbers)
     ax, bar_w = bar_axes(fig, 0.95, bottom, width - 1.25, height - top - bottom - 0.1, len(t["bins"]))
     ceiling = headroom([100 * b["rate"] for b in t["bins"]])
@@ -824,11 +850,53 @@ def _cell(value) -> str:
     return str(value).replace("|", "\\|")
 
 
+def _setting_cell(value) -> str:
+    """A mounting setting as the config spells it: true / false / null, numbers without trailing zeros, "(empty)" for ""."""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if value is None:
+        return "null"
+    if isinstance(value, float):
+        return f"{value:g}"
+    return str(value).replace("|", "\\|") or "(empty)"
+
+
+def _run_information_section(run_info: Mapping) -> str:
+    """``## Run information``: when the report was made (UTC), a WARNING line for each rig whose retracted reference may sit
+    at the held-out level, the reference of each rig (value, source, flies behind it, flies at the held-out level) and every
+    mounting setting used. The same data is ``run_info`` in ``exclusions.json``."""
+    lines = ["## Run information", "",
+             f"Generated {run_info.get('generated_utc', 'n/a')} (UTC). The same information is in `exclusions.json` under "
+             "`run_info`.", ""]
+    for text in run_info.get("warnings") or []:
+        lines += [f"**WARNING:** {text}", ""]
+    refs = run_info.get("retracted_ref") or {}
+    lines += ["### Retracted reference per rig", "",
+              "A trial is held out when at least `held_frac_min` of its pre-stimulus frames lie at least `held_margin_eu` "
+              "above its rig's retracted reference. The reference is the configured `retracted_ref_eu`, else the median "
+              "over the rig's identity-consistent flies of each fly's lowest trial rest.", "",
+              "| Rig | Retracted reference (eu) | Source | Identity-consistent flies | Flies whose lowest rest is at or above "
+              "reference + `held_margin_eu` |", "|---|---|---|---|---|"]
+    for rig, info in refs.items():
+        ref = info.get("retracted_ref_eu")
+        source = ("configured (`mounting.retracted_ref_eu`)" if info.get("from_config")
+                  else "derived (median of the flies' lowest trial rest)")
+        lines.append(f"| {rig} | {'n/a' if ref is None else f'{ref:.2f}'} | {source} | {info.get('n_flies', 0)} | "
+                     f"{info.get('n_flies_at_held_level', 0)} |")
+    if not refs:
+        lines.append("| (no rig in scope) | n/a | n/a | 0 | 0 |")
+    lines += ["", "### Settings used (the `mounting:` block)", "", "| Setting | Value |", "|---|---|"]
+    lines += [f"| `{name}` | {_setting_cell(value)} |" for name, value in (run_info.get("settings") or {}).items()]
+    return "\n".join(lines)
+
+
 def _exclusions_section(exclusions: Mapping) -> str:
     lines = ["## Exclusions", "",
              "What was left out of the tables and why. Counts are fly-trials unless said otherwise.", "",
              "| What | Count | Meaning |", "|---|---|---|"]
     for key, value in exclusions.items():
+        if key == "run_info":
+            continue                                  # not a counter: it has a section of its own
         label, note = EXCLUSION_LABELS.get(key, (key.replace("_", " ").capitalize(), "not described by this report"))
         if key == "pending_trials" and value is None:
             note = "could not be counted (the error is in the row below)"
@@ -858,12 +926,20 @@ def _header(fly_trial: pd.DataFrame, stats: Mapping) -> str:
               "rig, so pitch is compared within rig: the scatters and terciles use the rig-centred pitch (fly value minus "
               "the median of its rig).",
               f"- Spearman ρ / p: per fly, asymptotic p. Stratified permutation p: the pitch is shuffled among flies of "
-              f"the same dataset × rig, two-sided on |ρ|, {stats['n_perm']} permutations, seed {stats['seed']}.",
+              f"the same dataset × batch, two-sided on |ρ|, {stats['n_perm']} permutations, seed {stats['seed']}. This "
+              f"p decides every \"Yes\" in a figure title. Flies of one batch share the mounting day, the glue session "
+              f"and the starvation, so only flies of the same batch are interchangeable (a batch is recorded on one "
+              f"rig, so this keeps the rigs apart too). The same permutation within dataset × rig is printed beside it "
+              f"as a secondary number.",
               "- The response analyses (tercile bars, baseline-state bars and their tests) use only scored trials: "
               "pretest + testing trials that have a score (training trials get none).",
               f"- Within-fly permutation p: the state label is shuffled among the trials of each fly of one trial type "
               f"(pretest or testing), so a pretest-vs-testing difference cannot create an association; only fly × "
               f"trial-type groups seen in both states count; {stats['n_perm']} permutations, seed {stats['seed']}.",
+              "- Limitation of the within-fly test: it shuffles the state among a fly's trials of one trial type and "
+              "ignores which odor a trial had and where it sat in the session. Odor order is fixed per protocol, so "
+              "the test cannot separate the state from the odor or from the trial's position: an association it finds "
+              "may come from either.",
               "- The difference shown for each baseline-state comparison is the Mantel–Haenszel-weighted risk difference "
               "over those same groups, Σ w (p1 − p0) / Σ w with w = n1·n0 / (n1 + n0), where p1 / p0 are the response "
               "rates in the state / not in it: a pretest-vs-testing shift cannot inflate it. The bars are pooled rates "
@@ -883,8 +959,12 @@ def scatter_bullets(s: Mapping, shuffled: str = "pitch") -> List[str]:
     """The answer, rho / p and the stratified permutation p of one per-fly scatter (*shuffled* names what was shuffled)."""
     return [f"- Answer: **{s['verdict']}**",
             f"- {n_flies_label(s['n_flies'])}; Spearman {rho_text(s['rho'], 3)}, {p_text(s['p'], 4)} (uncorrected)",
-            f"- Stratified permutation {p_text(s['p_perm'], 4)} (uncorrected): {shuffled} shuffled within dataset × rig "
-            f"strata, {count_noun(s['n_strata'], 'stratum', 'strata')} ({s['n_strata_shuffled']} with at least 2 flies)"]
+            f"- Stratified permutation {p_text(s['p_perm'], 4)} (uncorrected), which decides the answer: {shuffled} shuffled "
+            f"within dataset × batch strata, {count_noun(s['n_strata'], 'stratum', 'strata')} "
+            f"({s['n_strata_shuffled']} with at least 2 flies)",
+            f"- Secondary: the same permutation within dataset × rig strata (coarser: the flies of a rig differ in "
+            f"batch) {p_text(s['p_perm_rig'], 4)} (uncorrected), {count_noun(s['n_strata_rig'], 'stratum', 'strata')} "
+            f"({s['n_strata_rig_shuffled']} with at least 2 flies)"]
 
 
 def placeholder_line(stats: Mapping, name: str) -> List[str]:
@@ -958,8 +1038,12 @@ def _mounting_section(stats: Mapping, missing: Sequence[str] = ()) -> str:
 
 def report_sections(fly_trial: pd.DataFrame, fly: pd.DataFrame, exclusions: Mapping, stats: Mapping,
                     *, figures_missing: Sequence[str] = ()) -> List[str]:
-    """The report as a list of markdown sections: header, exclusions and (with data) the mounting section."""
-    sections = [_header(fly_trial, stats), _exclusions_section(exclusions)]
+    """The report as a list of markdown sections: header, run information (when *exclusions* carries ``run_info``),
+    exclusions and (with data) the mounting section."""
+    sections = [_header(fly_trial, stats)]
+    if isinstance(exclusions.get("run_info"), Mapping):
+        sections.append(_run_information_section(exclusions["run_info"]))
+    sections.append(_exclusions_section(exclusions))
     if len(fly_trial):
         sections.append(_mounting_section(stats, figures_missing))
     return sections
@@ -967,7 +1051,8 @@ def report_sections(fly_trial: pd.DataFrame, fly: pd.DataFrame, exclusions: Mapp
 
 def write_report(fly_trial: pd.DataFrame, fly: pd.DataFrame, exclusions: Mapping, stats: Mapping, out_dir,
                  *, figures: Optional[Mapping[str, Path]] = None, extra_sections: Sequence[str] = ()) -> Path:
-    """Write ``<out_dir>/report.md``: every exclusions key, rho / p of every per-fly scatter, every permutation p.
+    """Write ``<out_dir>/report.md``: the run information (time, settings, retracted reference per rig, WARNINGs), every
+    exclusions key, rho / p of every per-fly scatter, every permutation p.
 
     *figures* is what ``render_figures`` returned: a figure that is not in it (it failed to build) is named in the mounting
     section, so the report never points at a picture that is not there. Without *figures* the report claims nothing

@@ -10,6 +10,9 @@ Rules pinned here, on a synthetic production + geometry + secured-mirror tree un
   production's ``_trial_meta.json`` names (a restarted trial can have two videos under one name): a different session is
   dropped and counted, a trial with nothing to compare is kept and counted, a track that stopped short of its video is
   dropped and counted, and the length of production's table is never compared;
+* what produced the tables -- ``exclusions.json`` carries a ``run_info``: when (UTC), every mounting setting, and per rig
+  the retracted reference used, how many identity-consistent flies it came from, whether the config set it, and a warning
+  when more than half of those flies never rest below the reference plus ``held_margin_eu``;
 * units and windows -- eye units are pixels over the geometry ``eye_scale_px``; the stimulus window comes from
   the geometry meta, so nothing is ever written next to production;
 * gates -- an unknown rest, rig reference, pre-window or poorly tracked tip gives NaN, never a guess;
@@ -25,10 +28,12 @@ Rules pinned here, on a synthetic production + geometry + secured-mirror tree un
 """
 from __future__ import annotations
 
+import dataclasses
 import json
 import math
+import re
 import sys
-from datetime import date
+from datetime import date, datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -612,6 +617,127 @@ def test_each_rig_has_its_own_retracted_reference(tmp_path):
     assert dict(ft.groupby("rig")["retracted_ref_eu"].first()) == pytest.approx({"Flybehavior2": 0.5, "Flybehavior3": 2.0})
     assert row(ft[ft["rig"] == "Flybehavior2"], 2, "testing", 1)["held_out"] == 1       # 1.25 eu against 0.5 + 0.25
     assert ft.loc[ft["rig"] == "Flybehavior3", "held_out"].eq(0).all()
+
+
+# ---- what produced the tables: run_info --------------------------------------------------------------------
+
+def settings_dict(mcfg) -> dict:
+    return {k: v.isoformat() if isinstance(v, date) else v for k, v in dataclasses.asdict(mcfg).items()}
+
+
+def test_the_exclusions_record_the_utc_time_and_every_mounting_setting_used(tmp_path):
+    custom = M.parse_mounting_block({"held_margin_eu": 0.4, "n_permutations": 77, "retracted_ref_eu": 0.9,
+                                     "csv_out_dir": "/x/csv"}, default_batch_date_from=CUTOFF)
+    _, exc, _ = tables(variant(tmp_path), mcfg=custom)
+    info = exc["run_info"]
+    assert info["settings"] == settings_dict(custom)
+    assert set(info["settings"]) == {f.name for f in dataclasses.fields(M.MountingSettings)}
+    assert info["settings"]["batch_date_from"] == "2026-10-06" and info["settings"]["held_margin_eu"] == 0.4
+    stamp = datetime.strptime(info["generated_utc"], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+    assert abs((datetime.now(timezone.utc) - stamp).total_seconds()) < 120
+    assert json.loads(json.dumps(info)) == info, "plain JSON: the CLI writes it to exclusions.json as it is"
+
+
+def test_the_generation_time_is_taken_in_utc(tmp_path, monkeypatch):
+    monkeypatch.setattr(MP, "_utc_now", lambda: datetime(2026, 10, 14, 9, 30, 5, tzinfo=timezone.utc))
+    assert tables(variant(tmp_path))[1]["run_info"]["generated_utc"] == "2026-10-14T09:30:05Z"
+
+
+def test_the_run_info_is_there_even_when_nothing_is_in_scope(tmp_path):
+    late = M.parse_mounting_block({"batch_date_from": date(2030, 1, 1)})
+    _, exc, _ = tables(variant(tmp_path), mcfg=late)
+    assert exc["n_fly_trials"] == 0 and exc["run_info"]["settings"] == settings_dict(late)
+    assert exc["run_info"]["retracted_ref"] == {} and exc["run_info"]["warnings"] == []
+
+
+def test_each_rig_records_its_reference_the_flies_it_came_from_and_that_it_was_derived(tmp_path):
+    def held(r):
+        r["dist"] = np.full(N, 96.0)                            # rest 2.0 eu in every trial of this rig
+    tree = Tree(tmp_path)
+    tree.write_batch(NEW, "20261007", host="Flybehavior2")
+    tree.write_batch("october_08_batch_1_rig_3", "20261008", host="Flybehavior3", all_edit=held)
+    _, exc, _ = tables(tree)
+    ref = exc["run_info"]["retracted_ref"]
+    assert set(ref) == {"Flybehavior2", "Flybehavior3"}
+    assert ref["Flybehavior2"] == {"retracted_ref_eu": pytest.approx(0.5), "n_flies": 2, "from_config": False,
+                                   "n_flies_at_held_level": 0, "warning": False}
+    assert ref["Flybehavior3"]["retracted_ref_eu"] == pytest.approx(2.0) and ref["Flybehavior3"]["n_flies"] == 2
+    assert exc["run_info"]["warnings"] == []
+
+
+def test_a_configured_reference_is_recorded_as_such(tmp_path):
+    mc = M.parse_mounting_block({"retracted_ref_eu": 0.9}, default_batch_date_from=CUTOFF)
+    _, exc, _ = tables(variant(tmp_path), mcfg=mc)
+    assert exc["run_info"]["retracted_ref"][HOST] == {
+        "retracted_ref_eu": 0.9, "n_flies": 2, "from_config": True, "n_flies_at_held_level": 0, "warning": False}
+
+
+def test_a_drifting_fly_is_not_counted_among_the_flies_a_reference_came_from(tmp_path):
+    tree = variant(tmp_path, all_edit=hold_fly_2, edits={(2, "testing", 2): drifting})
+    _, exc, _ = tables(tree)
+    ref = exc["run_info"]["retracted_ref"][HOST]
+    assert ref["n_flies"] == 1 and ref["retracted_ref_eu"] == pytest.approx(0.5)
+
+
+def test_a_rig_whose_flies_all_drift_has_no_reference_to_record(tmp_path):
+    tree = variant(tmp_path, edits={(1, "testing", 2): drifting, (2, "testing", 2): drifting})
+    _, exc, _ = tables(tree)
+    ref = exc["run_info"]["retracted_ref"][HOST]
+    assert ref["retracted_ref_eu"] is None and ref["n_flies"] == 0 and ref["warning"] is False
+    assert json.loads(json.dumps(exc["run_info"])) == exc["run_info"], "no NaN in the JSON"
+
+
+def reference_frame(mins_by_rig):
+    """One row per fly with its lowest rest, plus a higher-resting trial of the same fly (the minimum is what counts)."""
+    rows = []
+    for rig, mins in mins_by_rig.items():
+        for i, low in enumerate(mins):
+            rows += [{"rig": rig, "fly_id": f"{rig}/fly{i}", "rest_eu": low + gap, "identity_consistent": True}
+                     for gap in (0.0, 0.4)]
+    return pd.DataFrame(rows)
+
+
+@pytest.mark.parametrize("mins, flagged", [([0.6, 0.7, 0.4], True), ([0.6, 0.7, 0.4, 0.3], False), ([0.6, 0.4, 0.3], False),
+                                           ([0.55, 0.55, 0.55], True), ([0.54, 0.54, 0.54], False)])
+def test_more_than_half_the_flies_resting_at_or_above_the_reference_plus_the_margin_is_a_warning(mins, flagged):
+    mc = M.parse_mounting_block({"retracted_ref_eu": 0.3, "held_margin_eu": 0.25})          # the cut-off: 0.55 eu
+    info = MP.reference_info(reference_frame({"A": mins}), mc)
+    assert info["retracted_ref"]["A"]["warning"] is flagged
+    assert info["retracted_ref"]["A"]["n_flies_at_held_level"] == sum(m >= 0.55 for m in mins)
+    assert len(info["warnings"]) == int(flagged)
+
+
+def test_the_warning_names_the_rig_the_flies_and_the_cut_off_and_what_it_means():
+    mc = M.parse_mounting_block({"retracted_ref_eu": 0.3, "held_margin_eu": 0.25})
+    (text,) = MP.reference_info(reference_frame({"Flybehavior3": [0.6, 0.7, 0.4]}), mc)["warnings"]
+    assert text.startswith("Flybehavior3: 2 of 3 identity-consistent flies") and "0.30 + 0.25 = 0.55 eu" in text
+    assert "held-out level" in text and "labelled retracted" in text
+
+
+def test_the_warning_counts_only_identity_consistent_flies_with_a_known_rest():
+    mc = M.parse_mounting_block({"retracted_ref_eu": 0.3, "held_margin_eu": 0.25})
+    frame = reference_frame({"A": [0.6, 0.4, 0.3]})                                         # 1 of 3: fine
+    drifter = pd.DataFrame([{"rig": "A", "fly_id": f"A/drift{i}", "rest_eu": 2.0, "identity_consistent": False}
+                            for i in range(5)])                                             # five held-out drifters
+    blind = pd.DataFrame([{"rig": "A", "fly_id": "A/blind", "rest_eu": np.nan, "identity_consistent": True}])
+    info = MP.reference_info(pd.concat([frame, drifter, blind], ignore_index=True), mc)
+    assert info["retracted_ref"]["A"]["n_flies"] == 3 and info["retracted_ref"]["A"]["warning"] is False
+
+
+def test_a_derived_reference_is_the_median_of_the_flies_lowest_rests_per_rig():
+    mc = M.parse_mounting_block({})
+    info = MP.reference_info(reference_frame({"A": [0.5, 0.7, 0.9], "B": [1.0, 2.0]}), mc)["retracted_ref"]
+    assert info["A"]["retracted_ref_eu"] == pytest.approx(0.7) and info["A"]["from_config"] is False
+    assert info["B"]["retracted_ref_eu"] == pytest.approx(1.5) and info["B"]["n_flies"] == 2
+
+
+def test_main_writes_the_run_info_into_exclusions_json(cli):
+    assert run_main(cli, "--predictions-csv", str(cli.preds)) == 0
+    exc = json.loads((cli.tree.root / "csv_out" / "exclusions.json").read_text(encoding="utf-8"))
+    info = exc["run_info"]
+    assert re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ", info["generated_utc"])
+    assert info["settings"]["held_margin_eu"] == 0.25 and info["settings"]["csv_out_dir"] == str(cli.tree.root / "csvs")
+    assert info["retracted_ref"][HOST]["n_flies"] == 2
 
 
 def test_held_forward_and_held_down_follow_the_rest_angle(tmp_path):

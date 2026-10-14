@@ -6,8 +6,10 @@ Rules pinned here, on synthetic fly-trial / fly tables (the fly table is always 
 * the six PNGs of the Design are written at 300 dpi, and every figure carries an ``n=`` label (``n=… flies`` for per-fly
   plots, ``n=… trials / … flies`` for the pooled-trial bars);
 * the fly is the unit of inference: the per-fly scatters use the FLY table, the rig-centred mounting angle (the tip pitch
-  is rig-centred too: camera roll shifts both) and a permutation p stratified by dataset x rig; the coupling strip is
-  descriptive;
+  is rig-centred too: camera roll shifts both) and a permutation p stratified by dataset x BATCH (flies of one batch share
+  the mounting day, the glue session and the starvation, so only they are interchangeable) that alone decides the
+  verdict, with the dataset x rig p printed beside it as a secondary number; a test in which no stratum holds two flies
+  has nothing to shuffle and is "Not enough data to tell"; the coupling strip is descriptive;
 * displayed event rates pool trials (events over minutes of the SAME trials, odor and light windows apart, never a mean of
   per-trial rates); the stimulus comparison is a placebo design: the last L s before the stimulus against the first L s
   of it, both scored against ONE resting bend, the median of the early baseline windows of the fly's OTHER trials (a
@@ -86,8 +88,8 @@ def fly_table(ft) -> pd.DataFrame:
     return MP.build_fly_table(ft, MCFG)
 
 
-def row(fly_id, rig="R", dataset="D", **cols):
-    batch, number = "b1", int(fly_id.split("fly")[-1])
+def row(fly_id, rig="R", dataset="D", batch="b1", **cols):
+    number = int(fly_id.split("fly")[-1])
     return {"dataset": dataset, "batch": batch, "fly_number": number, "fly_id": f"{dataset}/{batch}/{fly_id}", "rig": rig,
             "trial_type": "testing", "stim_kind": "odor", "identity_consistent": True, "trial_body_pitch_deg": 0.0, **cols}
 
@@ -110,7 +112,7 @@ def windows(fly, placebo=0, during=0, *, pb=0.25, straighten=(0, 0), kind="odor"
 
 
 def abd_cohort(seed=1, per_cell=8, *, bend=0.0, tip=0.0, activity=0.0, restless=0.0, per_link=None, boost=0.0,
-               flaws=True) -> pd.DataFrame:
+               flaws=True, batches=1) -> pd.DataFrame:
     """Flies with unbalanced trial counts and the abdomen columns filled in.
 
     ``bend`` / ``tip`` / ``activity`` make the resting bend, the (rig-shifted) tip pitch and the bend SD / tip moving
@@ -122,13 +124,15 @@ def abd_cohort(seed=1, per_cell=8, *, bend=0.0, tip=0.0, activity=0.0, restless=
 
     The placebo-design columns (the last L s before the stimulus, the first L s of it, L = the shorter of the stimulus and
     half the pre-stimulus window) are drawn from a stream of their own, so every other column is the same for a seed
-    whatever they hold.
+    whatever they hold. Each (dataset, rig) cell is one batch, or ``batches`` of them (flies alternate), so the batch strata
+    can differ from the rig strata.
     """
     rng = np.random.default_rng(seed)
     pb_rng = np.random.default_rng([seed, PLACEBO_STREAM])
     rows = []
     for cell, (dataset, rig) in enumerate(CELLS):
         for k in range(per_cell):
+            batch = f"batch_{cell}" if batches == 1 else f"batch_{cell}_{k % batches}"
             dev = rng.normal(0.0, 4.0)
             z = dev / 4.0
             state = str(rng.choice(["retracted", "held_down", "held_back"], p=[0.5, 0.3, 0.2]))
@@ -151,8 +155,8 @@ def abd_cohort(seed=1, per_cell=8, *, bend=0.0, tip=0.0, activity=0.0, restless=
                 placebo_ok = base_ok and ((not flaws) or pb_rng.random() > 0.06)
                 during_ok = base_ok and ((not flaws) or pb_rng.random() > 0.06)
                 rows.append({
-                    "dataset": dataset, "batch": f"batch_{cell}", "fly_number": k + 1,
-                    "fly_id": f"{dataset}/batch_{cell}/fly{k + 1}", "rig": rig, "trial": f"t{t}",
+                    "dataset": dataset, "batch": batch, "fly_number": k + 1,
+                    "fly_id": f"{dataset}/{batch}/fly{k + 1}", "rig": rig, "trial": f"t{t}",
                     "trial_type": "pretest" if t < 2 else "training" if t < 4 else "testing", "trial_index": t,
                     "stim_kind": kind, "identity_consistent": True, "pre_window_known": True, "pre_min": pre_min,
                     "stim_min": stim_min, "trial_body_pitch_deg": RIG_SHIFT[rig] + dev + rng.normal(0.0, 0.5),
@@ -255,6 +259,12 @@ def bar_heights(ax) -> list:
 
 
 def strata_of(fly) -> np.ndarray:
+    """The strata the verdicts shuffle within: dataset x batch."""
+    return (fly["dataset"] + " | " + fly["batch"]).to_numpy()
+
+
+def rig_strata_of(fly) -> np.ndarray:
+    """The coarser dataset x rig strata, whose p is printed beside the verdict's."""
     return (fly["dataset"] + " | " + fly["rig"]).to_numpy()
 
 
@@ -292,13 +302,15 @@ def test_the_rest_bend_answer_for_one_rig_names_it():
     assert stats["rest_bend"]["answer"] == "One rig: the median resting bend is +4.0° (Flybehavior2)"
 
 
-def test_the_pitch_scatters_use_the_rig_centred_pitch_of_the_fly_table_and_a_dataset_by_rig_permutation(data):
+def test_the_pitch_scatters_use_the_rig_centred_pitch_of_the_fly_table_and_a_dataset_by_batch_permutation(data):
     fly, s = data.fly, data.stats["bend_vs_pitch"]
     rho, p = M.spearman(fly["mount_pitch_centred_deg"], fly["abd_rest_bend_deg"])
     raw_rho, _ = M.spearman(fly["mount_pitch_deg"], fly["abd_rest_bend_deg"])
     assert s["rho"] == pytest.approx(rho) and s["p"] == pytest.approx(p)
     assert s["p_perm"] == M.stratified_permutation_p(fly["mount_pitch_centred_deg"], fly["abd_rest_bend_deg"],
                                                      strata_of(fly), n=N_PERM, seed=0)
+    assert s["p_perm_rig"] == M.stratified_permutation_p(fly["mount_pitch_centred_deg"], fly["abd_rest_bend_deg"],
+                                                         rig_strata_of(fly), n=N_PERM, seed=0)
     assert s["n_flies"] == int(fly[["mount_pitch_centred_deg", "abd_rest_bend_deg"]].notna().all(axis=1).sum())
     assert s["n_strata"] == 4 and s["n_strata_shuffled"] == 4
     assert abs(rho - raw_rho) > 0.01                                              # this cohort's rig offsets tell them apart
@@ -328,6 +340,46 @@ def confound_flies():
     return trial_table(rows)
 
 
+def test_every_per_fly_scatter_is_stratified_by_dataset_and_batch_with_the_rig_p_beside_it():
+    """Figures 2, 4 and 6: the five per-fly scatters. Two batches in each dataset x rig cell make the two strata differ."""
+    ft = abd_cohort(seed=7, bend=0.9, tip=0.8, activity=1.0, restless=0.7, boost=3.0, batches=2)
+    fly = fly_table(ft)
+    stats = AM.compute_abdomen_stats(ft, fly, n_perm=N_PERM, seed=0)
+    tip = fly["tip_pitch_rest_deg"] - fly["tip_pitch_rest_deg"].groupby(fly["rig"]).transform("median")
+    pitch = fly["mount_pitch_centred_deg"]
+    cases = {"bend_vs_pitch": (stats["bend_vs_pitch"], pitch, fly["abd_rest_bend_deg"]),
+             "tip_vs_pitch": (stats["tip_vs_pitch"], pitch, tip),
+             "restless": (stats["restless"], fly["abd_curl_rate_pre_per_min"], fly["spont_per_rate_per_min"]),
+             "bend_sd": (stats["activity"]["bend_sd"], pitch, fly["abd_bend_sd_pre_deg"]),
+             "tip_moving": (stats["activity"]["tip_moving"], pitch, fly["tip_moving_frac_pre"])}
+    for name, (s, x, y) in cases.items():
+        assert s["p_perm"] == M.stratified_permutation_p(x, y, strata_of(fly), n=N_PERM, seed=0), name
+        assert s["p_perm_rig"] == M.stratified_permutation_p(x, y, rig_strata_of(fly), n=N_PERM, seed=0), name
+        assert (s["n_strata"], s["n_strata_shuffled"]) == (8, 8) and (s["n_strata_rig"], s["n_strata_rig_shuffled"]) == (4, 4), name
+
+
+def batch_confound_flies():
+    """Twelve flies of one dataset and rig in two batches: pitch and resting bend both rise from B1 to B2, but inside each
+    batch the two are unrelated, so only a test that shuffles within the batch sees there is nothing."""
+    rows = []
+    for batch, offset, pitches, bends in (("B1", 0, [-3.0, -2.6, -2.2, -1.8, -1.4, -1.0], [3.0, 6.0, 1.0, 5.0, 2.0, 4.0]),
+                                          ("B2", 6, [1.0, 1.4, 1.8, 2.2, 2.6, 3.0], [12.0, 15.0, 13.0, 16.0, 11.0, 14.0])):
+        for k, (pitch, bend) in enumerate(zip(pitches, bends)):
+            for t in range(3):
+                rows.append(row(f"fly{offset + k + 1}", batch=batch, trial_body_pitch_deg=pitch, trial_index=t,
+                                fly_abd_rest_bend_deg=bend, abd_quality_ok=True, abd_rest_bend_deg=bend))
+    return trial_table(rows)
+
+
+def test_a_batch_effect_on_both_pitch_and_resting_bend_does_not_make_the_answer_yes():
+    ft = batch_confound_flies()
+    fly = fly_table(ft)
+    s = AM.compute_abdomen_stats(ft, fly, n_perm=2000, seed=0)["bend_vs_pitch"]
+    assert s["p_perm_rig"] < 0.05, "shuffled over the whole rig, the batch shift alone reads as a link"
+    assert s["p_perm"] > 0.3 and s["verdict"] == "No clear link", "shuffled inside each batch there is nothing"
+    assert (s["n_strata"], s["n_strata_rig"]) == (2, 1)
+
+
 def test_the_answer_follows_the_stratified_p_not_the_pooled_spearman_p():
     ft = confound_flies()
     fly = fly_table(ft)
@@ -336,7 +388,7 @@ def test_the_answer_follows_the_stratified_p_not_the_pooled_spearman_p():
     assert s["p_perm"] > 0.3 and s["verdict"] == "No clear link" and s["n_strata"] == 2
 
 
-def test_with_no_dataset_by_rig_holding_two_flies_there_is_nothing_to_shuffle_and_the_answer_is_not_enough_data():
+def test_with_no_dataset_by_batch_holding_two_flies_there_is_nothing_to_shuffle_and_the_answer_is_not_enough_data():
     rows = []
     for k in range(4):                                  # one rig (so the pitch varies after centring), one fly per dataset
         for t in range(2):
@@ -348,6 +400,7 @@ def test_with_no_dataset_by_rig_holding_two_flies_there_is_nothing_to_shuffle_an
     assert s["n_flies"] == 4 and s["n_strata"] == 4 and s["n_strata_shuffled"] == 0
     assert s["p_perm"] == 1.0 and s["rho"] == pytest.approx(1.0)                  # the permutation had nothing to move ...
     assert s["verdict"].startswith("Not enough data to tell")                    # ... so it must not say "No clear link"
+    assert "dataset × batch" in s["verdict"]
     two = AM.compute_abdomen_stats(ft[ft["fly_id"].str.contains("D0|D1")], fly[fly["dataset"].isin(["D0", "D1"])],
                                    n_perm=N_PERM)["bend_vs_pitch"]
     assert two["n_flies"] == 2 and two["verdict"] == "Not enough data to tell"      # and two flies are never enough, plainly
@@ -1318,9 +1371,13 @@ def test_the_section_gives_every_permutation_p_and_what_was_shuffled(section, da
     for event in ("curl", "straighten"):
         for cell in s["events"][event].values():
             assert FIG.p_text(cell["p_perm"], digits=4) in section
-    assert re.search(rf"Stratified permutation p: .*dataset × rig.*{N_PERM} permutations, seed 0", section)
-    assert "curl rate shuffled within dataset × rig strata" in section                 # what each scatter shuffled
-    assert section.count("mounting angle shuffled within dataset × rig strata") == 4
+    assert re.search(rf"Stratified permutation p: .*dataset × batch.*{N_PERM} permutations, seed 0", section)
+    assert "curl rate shuffled within dataset × batch strata" in section               # what each scatter shuffled
+    assert section.count("mounting angle shuffled within dataset × batch strata") == 4
+    for s_ in (s["bend_vs_pitch"], s["tip_vs_pitch"], s["restless"], s["activity"]["bend_sd"], s["activity"]["tip_moving"]):
+        assert FIG.p_text(s_["p_perm_rig"], digits=4) in section                       # the secondary dataset x rig p
+    assert section.count("Secondary: the same permutation within dataset × rig strata") == 5
+    assert "Flies of one batch share the mounting day, the glue session and the starvation" in section
     assert re.search(rf"Window-swap permutation p: .*labels of a trial's two windows.*{N_PERM} permutations, seed 0",
                      section)
     assert section.count("uncorrected") >= 12

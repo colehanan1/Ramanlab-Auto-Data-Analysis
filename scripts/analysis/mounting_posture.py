@@ -18,7 +18,9 @@ number. Writes to ``--csv-out-dir`` (default ``mounting.csv_out_dir``):
   measures are medians over the fly's pooled frames (they ride on every row of the fly's trial table as ``fly_*``
   columns, because only the frames can give them);
 * ``exclusions.json``       -- what was left out and why (including ``pending_trials``: videos the abdomen stage has
-  not tracked yet).
+  not tracked yet), and under ``run_info`` what produced the tables: the time (UTC), every mounting setting used, and per
+  rig the retracted reference used, how many flies it came from, whether the config set it, and a warning when most of
+  those flies never rest below it.
 
 Then, into ``--out-dir`` (default ``mounting.out_dir``), the six ``Mounting-Posture`` figures and ``report.md``
 (``mounting_posture_figures``): exclusions, rho / p of every per-fly scatter, every permutation p, all labelled uncorrected.
@@ -41,6 +43,7 @@ import dataclasses
 import json
 import sys
 from collections import defaultdict
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -446,14 +449,67 @@ def _placebo_columns(df: pd.DataFrame, traces: list, mcfg) -> None:
         df[name] = values
 
 
+def _fly_lowest_rest(df: pd.DataFrame) -> pd.Series:
+    """Each identity-consistent fly's smallest trial ``rest_eu`` (NaN where it has none), indexed by (rig, fly_id)."""
+    return df[df["identity_consistent"]].groupby(["rig", "fly_id"], sort=False)["rest_eu"].min()
+
+
 def _rig_reference(df: pd.DataFrame, mcfg) -> pd.Series:
     """The retracted reference per row: the configured value, else per rig the median over its identity-consistent flies
     of each fly's smallest trial rest (NaN for a rig without any)."""
     if mcfg.retracted_ref_eu is not None:
         return pd.Series(float(mcfg.retracted_ref_eu), index=df.index)
-    fly_min = df[df["identity_consistent"]].groupby(["rig", "fly_id"], sort=False)["rest_eu"].min()
+    fly_min = _fly_lowest_rest(df)
     reference = {rig: M.retracted_reference(g.to_numpy()) for rig, g in fly_min.groupby(level="rig", sort=False)}
     return df["rig"].map(reference).astype(float)
+
+
+def reference_info(df: pd.DataFrame, mcfg) -> dict:
+    """The retracted reference of every rig as the held-out call used it, and a warning where it looks wrong.
+
+    ``{"retracted_ref": {rig: {...}}, "warnings": [text, ...]}``; per rig: ``retracted_ref_eu`` (None without any),
+    ``n_flies`` (identity-consistent flies with a known rest: the ones a derived reference is the median of), ``from_config``
+    (``mounting.retracted_ref_eu`` was set), ``n_flies_at_held_level`` (flies whose smallest trial rest is at or above the
+    reference plus ``held_margin_eu``) and ``warning``. The warning is set when MORE than half of the rig's flies are at that
+    level even in their most retracted trial: the reference may then sit at the held-out level, and held-out flies would be
+    labelled retracted. (A reference derived as the median cannot trip it with a positive margin; a configured one can.)
+    """
+    rigs, warnings = {}, []
+    if len(df):
+        lowest = _fly_lowest_rest(df)
+        for rig in sorted(df["rig"].dropna().unique(), key=str):
+            mins = lowest.xs(rig, level="rig").to_numpy(float) if rig in lowest.index.get_level_values("rig") else np.empty(0)
+            mins = mins[np.isfinite(mins)]
+            from_config = mcfg.retracted_ref_eu is not None
+            ref = float(mcfg.retracted_ref_eu) if from_config else M.retracted_reference(mins)
+            cutoff = ref + mcfg.held_margin_eu
+            at_level = int(np.count_nonzero(mins >= cutoff)) if np.isfinite(cutoff) else 0
+            warn = bool(mins.size and at_level > mins.size / 2)
+            rigs[str(rig)] = {"retracted_ref_eu": ref if np.isfinite(ref) else None, "n_flies": int(mins.size),
+                              "from_config": from_config, "n_flies_at_held_level": at_level, "warning": warn}
+            if warn:
+                warnings.append(
+                    f"{rig}: {at_level} of {mins.size} identity-consistent flies have their lowest trial rest at or above "
+                    f"the retracted reference plus held_margin_eu ({ref:.2f} + {mcfg.held_margin_eu:g} = {cutoff:.2f} eu); "
+                    "the reference may sit at the held-out level, and held-out flies would be labelled retracted")
+    return {"retracted_ref": rigs, "warnings": warnings}
+
+
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def settings_record(mcfg) -> dict:
+    """Every ``MountingSettings`` value as plain JSON data (a date as its ISO string)."""
+    values = {f.name: getattr(mcfg, f.name) for f in dataclasses.fields(mcfg)}
+    return {name: value.isoformat() if isinstance(value, date) else value for name, value in values.items()}
+
+
+def run_info(df: pd.DataFrame, mcfg) -> dict:
+    """What produced these tables, for ``exclusions.json`` and the head of ``report.md``: the time (UTC), every mounting
+    setting used, and the retracted reference of each rig (:func:`reference_info`)."""
+    return {"generated_utc": _utc_now().astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "settings": settings_record(mcfg), **reference_info(df, mcfg)}
 
 
 def _classify_held(df: pd.DataFrame, pre_dist: list, mcfg) -> None:
@@ -563,12 +619,15 @@ def build_fly_trial_table(settings, gcfg, mcfg, predictions_csv) -> tuple:
                     chunks[row["fly_id"]][name].append(frames)
     exc["flagged_flies"], exc["n_fly_trials"] = len(flagged_seen), len(rows)
     if not rows:
-        return pd.DataFrame(columns=FLY_TRIAL_COLUMNS), exc
+        empty = pd.DataFrame(columns=FLY_TRIAL_COLUMNS)
+        exc["run_info"] = run_info(empty, mcfg)
+        return empty, exc
     df = pd.DataFrame(rows)
     _mark_identity(df, mcfg, exc)
     _placebo_columns(df, traces, mcfg)
     traces.clear()
     df["retracted_ref_eu"] = _rig_reference(df, mcfg)
+    exc["run_info"] = run_info(df, mcfg)
     _classify_held(df, pre_dist, mcfg)
     _attach_scores(df, predictions_csv, mcfg, exc)
     per_fly = {fid: _pooled_fly_values(c, mcfg.tip_move_eu_s) for fid, c in chunks.items()}

@@ -14,8 +14,11 @@ the data (``Yes -- flies tilted more head-up rest more curled`` / ``No clear lin
 
 The conventions are those of ``mounting_posture_figures`` (whose primitives this module imports). The fly is the unit of
 inference: the per-fly scatters use the fly table, the rig-centred mounting angle (the tip pitch is rig-centred too:
-camera roll shifts both) and a permutation p stratified by dataset x rig. Event rates pool TRIALS (events over minutes of
-the same trials, never a mean of per-trial rates).
+camera roll shifts both) and a permutation p stratified by dataset x BATCH (flies of one batch share the mounting day, the
+glue session and the starvation, so only they are interchangeable) that alone decides the verdict, the dataset x rig p
+being printed beside it as a secondary number; with no batch holding two flies there is nothing to shuffle and the answer
+is "Not enough data to tell". Event rates pool TRIALS (events over minutes of the same trials, never a mean of per-trial
+rates).
 
 Figure 3 is a placebo design with a leave-one-trial-out baseline. For each odor or light trial L is the shorter of the
 stimulus and half the pre-stimulus window. The trial's resting bend is the median bend over the early baseline windows
@@ -121,11 +124,9 @@ def _centred_tip(fly: pd.DataFrame) -> np.ndarray:
 
 def _scatter(fly: pd.DataFrame, column: str, *, x: str = "mount_pitch_centred_deg", n_perm: int, seed: int,
              up: str, down: str) -> dict:
-    """``FIG.scatter_stats``, except that no dataset x rig with two flies (nothing was shuffled) is not "No clear link"."""
-    s = FIG.scatter_stats(fly, column, x=x, n_perm=n_perm, seed=seed, up=up, down=down)
-    if s["n_flies"] >= FIG.MIN_FLIES and s["n_strata_shuffled"] == 0:
-        s["verdict"] = "Not enough data to tell (no dataset × rig has two flies to shuffle)"
-    return s
+    """``FIG.scatter_stats`` (permutation p stratified by dataset x batch, the dataset x rig p beside it; no batch with two
+    flies to shuffle is "Not enough data to tell", never "No clear link")."""
+    return FIG.scatter_stats(fly, column, x=x, n_perm=n_perm, seed=seed, up=up, down=down)
 
 
 # ---------------------------------------------------------------------------
@@ -701,8 +702,11 @@ def abdomen_report_section(fly_trial: pd.DataFrame, fly: pd.DataFrame, stats: Ma
           "in at least `abd_min_tracked_frac` of its frames); flies whose identity is not consistent are left out.",
           "- Mount pitch is rig-centred (fly value minus the median of its rig) because camera roll differs per rig; the "
           "tip pitch is rig-centred the same way, since the roll shifts it too.",
-          f"- Stratified permutation p: the x variable is shuffled among flies of the same dataset × rig, two-sided on |ρ|, "
-          f"{n_perm} permutations, seed {seed}.",
+          f"- Stratified permutation p: the x variable is shuffled among flies of the same dataset × batch, two-sided on "
+          f"|ρ|, {n_perm} permutations, seed {seed}. This p decides every \"Yes\" in a figure title. Flies of one batch "
+          f"share the mounting day, the glue session and the starvation, so only flies of the same batch are "
+          f"interchangeable (a batch is recorded on one rig); the same permutation within dataset × rig is printed "
+          f"beside it as a secondary number.",
           f"- Window-swap permutation p: the labels of a trial's two windows (just before / start of the stimulus) are "
           f"swapped with probability 1/2, independently in each trial, and the pooled rate difference (start minus just "
           f"before) is recomputed; two-sided, {n_perm} permutations, seed {seed}: a Monte-Carlo permutation estimate of the "
