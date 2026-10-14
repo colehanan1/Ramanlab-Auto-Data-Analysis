@@ -234,7 +234,8 @@ def test_finish_complete_and_failed(tmp_path):
     assert snap["state"] == "complete" and snap["progress"] == 1.0
     assert snap["expected_end_at"] == 1200.0
     run.finish("failed", error="boom")
-    assert phase.snapshot()["run"]["error"] == "boom"
+    snap = phase.snapshot()["run"]
+    assert snap["state"] == "failed" and snap["error"] == "boom"
 
 
 def test_due_messages_use_the_tracker_eta(tmp_path):
@@ -313,3 +314,46 @@ def test_handoff_unreachable_still_tries_abort():
     hub = FakeHub([], fail_complete=True)
     assert _handoff(hub) == "unreachable"
     assert hub.posts[-1][0].endswith("/abort")
+
+
+def test_titles_are_ascii_even_with_non_ascii_prefix():
+    t = 1000.0
+    for title, _ in (rs.start_message("Pi2 Fly 3 \u00b5L-ACV", t, t + 60),
+                     rs.reminder_message("Pi2 Fly 3 \u00b5L-ACV", 5400, t)):
+        assert title.isascii() and "Pi2 Fly 3" in title
+
+
+# ── best-effort guarantee ────────────────────────────────────────────────────
+
+class _BrokenPhase:
+    def set_run(self, **fields):
+        if fields.get("state") == "idle":
+            return  # let __init__ publish
+        raise RuntimeError("boom")
+
+
+def _broken_tracker(tmp_path):
+    return rs.RunTracker(_BrokenPhase(), rs.RunPlan(CYCLES), host="h",
+                         batch_dir="b", output_dir=tmp_path, push_to="",
+                         push_mode="hub", prefix="p", clock=Clock())
+
+
+def test_best_effort_methods_never_raise_and_warn_once(tmp_path, capsys):
+    run = _broken_tracker(tmp_path)
+    kw = dict(phase_tag="t", label="", odor="", video="a", frames_csv="b",
+              started_at=0, ended_at=0, closed=True)
+    for _ in range(2):
+        run.mark(1, 0, 0)
+        run.trial_closed(**kw)
+        run.finish("complete")
+    err = capsys.readouterr().err
+    for name in ("mark", "trial_closed", "finish"):
+        assert err.count(f"[RUN] {name} failed: RuntimeError('boom')") == 1
+
+
+def test_unknown_mark_position_warns_once(tmp_path, capsys):
+    _, run = _tracker(tmp_path, Clock())
+    run.mark(99, 0, 0)
+    run.mark(99, 0, 0)
+    err = capsys.readouterr().err
+    assert err.count("[RUN] mark: unknown step position (99, 0, 0)") == 1
