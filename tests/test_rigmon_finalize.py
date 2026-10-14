@@ -150,3 +150,81 @@ def test_malformed_manifest_item_fails_not_sticks(tmp_path):
     assert fin.run(LOCAL, "b", str(pi), push_to, bad) == "failed"
     assert store.get_session("fake", "b")["state"] == "failed"
     assert alerts == ["Fake finalize failed"]
+
+
+def test_abort_during_pull_wins_and_nothing_moves(tmp_path):
+    cfg, pi, manifest, store, tt, fin, push_to, _ = _setup(tmp_path)
+    real_pull, fired = tt.pull, []
+
+    def pull(*a, **k):
+        if not fired:
+            fired.append(1)
+            fin.abort("fake", "b")
+        return real_pull(*a, **k)
+    tt.pull = pull
+    assert fin.run(LOCAL, "b", str(pi), push_to, manifest) == "aborted"
+    assert not (tmp_path / "Data" / "flys_New").exists()
+    assert tt.staging_dir("fake", "b").exists()
+    assert store.get_session("fake", "b")["state"] == "aborted"
+
+
+def test_abort_during_remux_wins(tmp_path):
+    cfg, pi, manifest, store, tt, fin, push_to, _ = _setup(tmp_path)
+    real, fired = tt.remux, []
+
+    def remux(h):
+        if not fired:
+            fired.append(1)
+            fin.abort("fake", "b")
+        return real(h)
+    tt.remux = remux
+    assert fin.run(LOCAL, "b", str(pi), push_to, manifest) == "aborted"
+    assert not (tmp_path / "Data" / "flys_New").exists()
+    assert store.get_session("fake", "b")["state"] == "aborted"
+
+
+def test_error_after_abort_does_not_overwrite_aborted(tmp_path):
+    cfg, pi, manifest, store, tt, fin, push_to, alerts = _setup(tmp_path)
+
+    def pull(*a, **k):
+        fin.abort("fake", "b")
+        raise RuntimeError("boom")
+    tt.pull = pull
+    fin.run(LOCAL, "b", str(pi), push_to, manifest)
+    assert store.get_session("fake", "b")["state"] == "aborted"
+
+
+def test_landing_marks_leftover_trials_done(tmp_path):
+    cfg, pi, manifest, store, tt, fin, push_to, _ = _setup(tmp_path)
+    for i, st in ((1, "waiting"), (2, "failed"), (3, "queued")):
+        store.upsert_trial("fake", "b", {"index": i, "video": f"t{i}.h264"})
+        store.set_trial_state("fake", "b", i, st, error="x")
+    store.upsert_trial("other", "b", {"index": 1, "video": "t1.h264"})
+    assert fin.run(LOCAL, "b", str(pi), push_to, manifest) == "landed"
+    rows = {r["idx"]: r for r in store.trials() if r["rig"] == "fake"}
+    assert {i: r["state"] for i, r in rows.items()} == {1: "done", 2: "done", 3: "done"}
+    assert rows[1]["mp4"] == "t1.mp4" and rows[2]["mp4"] == "t2.mp4" and rows[3]["mp4"] == ""
+    assert rows[1]["error"] == ""
+    other = [r for r in store.trials() if r["rig"] == "other"][0]
+    assert other["state"] == "queued"
+
+
+def test_only_manifest_h264_are_remuxed(tmp_path):
+    cfg, pi, manifest, store, tt, fin, push_to, _ = _setup(tmp_path)
+    stage = tt.staging_dir("fake", "b")
+    stage.mkdir(parents=True)
+    (stage / "stray.h264").write_bytes(b"s")
+    (stage / "stray.csv").write_bytes(b"s")
+    assert fin.run(LOCAL, "b", str(pi), push_to, manifest) == "failed"
+    assert not any("stray" in str(c) for c in tt.runner.calls)
+    assert not (tmp_path / "Data" / "flys_New").exists()
+
+
+def test_non_manifest_straggler_blocks_landing(tmp_path):
+    cfg, pi, manifest, store, tt, fin, push_to, _ = _setup(tmp_path)
+    stage = tt.staging_dir("fake", "b")
+    stage.mkdir(parents=True)
+    (stage / "leftover.txt").write_bytes(b"s")
+    assert fin.run(LOCAL, "b", str(pi), push_to, manifest) == "failed"
+    assert "leftover.txt" in store.get_session("fake", "b")["error"]
+    assert not (tmp_path / "Data" / "flys_New").exists()

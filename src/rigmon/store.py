@@ -88,6 +88,33 @@ class Store:
             " error=excluded.error, updated_at=excluded.updated_at",
             (rig, batch_dir, state, dest, error, self._clock()))
 
+    def set_session_unless(self, rig, batch_dir, state, *, not_in=("aborted", "landed"),
+                           dest="", error="") -> bool:
+        """Compare-and-set: write `state` unless the session is already in one
+        of `not_in`. One statement under the store lock, so an abort that lands
+        between a caller's check and its write can never be overwritten."""
+        marks = ",".join("?" * len(not_in))
+        n = self._exec(
+            "INSERT INTO sessions (rig, batch_dir, state, dest, error, updated_at)"
+            " VALUES (?,?,?,?,?,?) ON CONFLICT(rig, batch_dir) DO UPDATE SET"
+            " state=excluded.state, dest=COALESCE(NULLIF(excluded.dest, ''), sessions.dest),"
+            " error=excluded.error, updated_at=excluded.updated_at"
+            f" WHERE sessions.state NOT IN ({marks})",
+            (rig, batch_dir, state, dest, error, self._clock(), *not_in))
+        return n > 0
+
+    def finish_batch_trials(self, rig, batch_dir, existing: set) -> int:
+        """The session landed: every non-done trial of the batch is now in
+        flys_New, so close them out. `existing` = file names present in dest."""
+        n = 0
+        for r in self._all("SELECT idx, video FROM trials WHERE rig=? AND batch_dir=?"
+                           " AND state!='done'", (rig, batch_dir)):
+            mp4 = Path(r["video"] or "").with_suffix(".mp4").name
+            self.set_trial_state(rig, batch_dir, r["idx"], "done",
+                                 mp4=mp4 if r["video"] and mp4 in existing else "")
+            n += 1
+        return n
+
     def get_session(self, rig, batch_dir) -> dict | None:
         rows = self._all("SELECT * FROM sessions WHERE rig=? AND batch_dir=?", (rig, batch_dir))
         return rows[0] if rows else None

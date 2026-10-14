@@ -55,6 +55,15 @@ def outstanding(manifest: list[dict], staging: Path) -> list[str]:
     return out
 
 
+def unlisted(manifest: list[dict], staging: Path) -> list[str]:
+    """Staging files that are neither in the manifest nor the .mp4 of a
+    manifest .h264."""
+    allowed = {item["path"] for item in manifest}
+    allowed |= {str(PurePosixPath(p).with_suffix(".mp4")) for p in allowed if p.endswith(".h264")}
+    return sorted(f.relative_to(staging).as_posix() for f in staging.rglob("*")
+                  if f.is_file() and f.relative_to(staging).as_posix() not in allowed)
+
+
 class Finalizer:
     def __init__(self, cfg, store, transfer,
                  disk_free=lambda p: shutil.disk_usage(p).free,
@@ -79,7 +88,9 @@ class Finalizer:
             return self._run(rig, batch_dir, output_dir, push_to, manifest)
         except Exception as e:
             log.warning("finalize %s/%s failed: %s", rig.name, batch_dir, e)
-            self.store.set_session(rig.name, batch_dir, "failed", error=str(e))
+            self.store.set_session_unless(rig.name, batch_dir, "failed", error=str(e))
+            if self._state(rig.name, batch_dir) == "aborted":
+                return "aborted"
             self.alert(f"{rig.label} finalize failed", f"{batch_dir}: {e}")
             return "failed"
 
@@ -96,12 +107,21 @@ class Finalizer:
         staging = self.transfer.staging_dir(rig.name, batch_dir)
         staging.mkdir(parents=True, exist_ok=True)
 
-        self.store.set_session(rig.name, batch_dir, "pulling")
+        if not self.store.set_session_unless(rig.name, batch_dir, "pulling"):
+            return self._state(rig.name, batch_dir)
         for rel in outstanding(manifest, staging):
             self.transfer.pull(rig, output_dir, rel, staging)
-        self.store.set_session(rig.name, batch_dir, "remuxing")
+        if not self.store.set_session_unless(rig.name, batch_dir, "remuxing"):
+            return self._state(rig.name, batch_dir)
+        listed = {item["path"] for item in manifest}
         for h264 in sorted(staging.rglob("*.h264")):
-            self.transfer.remux(h264)
+            if h264.relative_to(staging).as_posix() in listed:
+                self.transfer.remux(h264)
+        if self._state(rig.name, batch_dir) == "aborted":
+            return "aborted"
+        strays = unlisted(manifest, staging)
+        if strays:
+            raise FinalizeError(f"{len(strays)} file(s) in staging not in the Pi manifest: {strays[:5]}")
 
         problems = outstanding(manifest, staging)
         if problems:
@@ -120,4 +140,6 @@ class Finalizer:
             dest.parent.mkdir(parents=True, exist_ok=True)
             os.rename(staging, dest)  # same filesystem → atomic; EXDEV → OSError → failed
             self.store.set_session(rig.name, batch_dir, "landed", dest=str(dest))
+            self.store.finish_batch_trials(rig.name, batch_dir,
+                                           {p.name for p in dest.iterdir()})
             return "landed"
