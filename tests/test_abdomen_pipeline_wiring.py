@@ -15,9 +15,12 @@ builds the mounting command, so a broken analysis module cannot stop a plain nig
 others follow it, it gets the budget less a tail of ``min(30 min, a tenth of the budget)``, so a timed-out track still
 leaves time for normalize, the stats and the mounting analysis to read what it tracked. A killed driver must not orphan
 the stage: SIGTERM / SIGHUP make the driver raise (so the group of the running command is killed and the lock freed) and
-every command is spawned to die with its parent (``PR_SET_PDEATHSIG``), which also covers SIGKILL. Pinned here: the pure
-command builders, ``main()``'s source order and lock behaviour, the stage with a fake Popen and with real processes, the
-flags and the ntfy. (The PER call trace itself is pinned in test_layered_parity.py.)
+every command is spawned to die with its parent (``PR_SET_PDEATHSIG``), which also covers SIGKILL. The commands that read
+``model_predictions.csv`` (the stats and the mounting analysis) are skipped, and the summary says so, whenever a PER run
+holds the PER lock when they would start; the stats are handed the base config's predictions file, and no mounting
+directory may lie inside production, the secured storage or the hand-run figures. Pinned here: the pure command builders,
+``main()``'s source order and lock behaviour, the stage with a fake Popen and with real processes, the flags and the ntfy.
+(The PER call trace itself is pinned in test_layered_parity.py.)
 """
 from __future__ import annotations
 
@@ -45,7 +48,7 @@ import yaml
 from fbpipe import geometry_pipeline
 from fbpipe.config import ReactionPredictionSettings, Settings
 from fbpipe.config_layers import ConfigLayers, LayeredConfigError
-from fbpipe.utils.run_locks import abdomen_lock, per_run_active
+from fbpipe.utils.run_locks import abdomen_lock, acquire_per_run_lock, per_run_active, per_run_lock, release_run_lock
 from scripts.pipeline import run_workflows as rw
 from test_eye_drift_qc_summary import _run_main_guard
 
@@ -58,13 +61,14 @@ MOUNTING_SCRIPT = str(rw.REPO_ROOT / "scripts" / "analysis" / "mounting_posture.
 GEOMETRY = [PY, "-m", "fbpipe.geometry_pipeline", "--config", str(OVERLAY)]
 TRACK = GEOMETRY + ["--workers", "3", "track"]
 NORMALIZE = GEOMETRY + ["normalize", "wide", "figures"]
-STATS_CMD = [PY, STATS, "--config", str(OVERLAY)]
 
 # Strings only: the builder is pure and every Popen here is a fake, so none of these paths is ever touched.
 NEW_OPTO = "/home/ramanlab/Documents/cole/Results/New-Opto-Fly-Figures"
 HAND_RUN = "/home/ramanlab/Documents/cole/Results/Figures"
 PREDICTIONS = "/home/ramanlab/Documents/cole/Data/CSVs-New-Opto-Flys/model_predictions.csv"
 MOUNTING_TABLES = "/home/ramanlab/Documents/cole/Data/CSVs-New-Opto-Flys/Mounting-Posture"
+STATS_CMD = [PY, STATS, "--config", str(OVERLAY), "--predictions", PREDICTIONS]     # the base config's predictions CSV
+STATS_NO_PREDICTIONS = [PY, STATS, "--config", str(OVERLAY)]                        # a base config without one
 MOUNTING = {
     "enabled": True,
     "out_dir": f"{NEW_OPTO}/Mounting-Posture",
@@ -266,6 +270,40 @@ def test_a_directory_the_pipeline_must_not_write_to_is_refused_with_one_warning_
     assert len(_warnings(caplog)) == 1 and f"mounting.{key}" in _warnings(caplog)[0]
 
 
+FLYS_NEW = "/home/ramanlab/Documents/cole/Data/flys_New"
+
+
+@pytest.mark.parametrize("value", [
+    FLYS_NEW, FLYS_NEW + "/", f"{FLYS_NEW}/IAA-X", f"{FLYS_NEW}/IAA-X/october_07_batch_2/tables",
+    f"/somewhere/else/flys_New/tables", "/securedstorage", "/securedstorage/DATAsec/cole/Data-secured-New/tables",
+    f"/tmp/elsewhere/../../securedstorage/x", f"{FLYS_NEW}/../flys_New/IAA-X",
+], ids=["flys_New", "flys_New with a slash", "a dataset folder", "a batch folder", "a flys_New elsewhere",
+        "the secured mount", "inside the secured mount", "walks into the secured mount", "walks back into flys_New"])
+def test_the_tables_may_not_go_inside_production_or_the_secured_storage_either(value, caplog):
+    with caplog.at_level(logging.INFO):
+        assert _mounting(_with(csv_out_dir=value)) is None
+    (warning,) = _warnings(caplog)
+    assert "mounting.csv_out_dir" in warning and ("flys_New" in warning or "/securedstorage" in warning)
+
+
+@pytest.mark.parametrize("value", [
+    f"{FLYS_NEW}2/tables", f"{FLYS_NEW}_copy/tables", "/securedstorage2/tables", MOUNTING_TABLES, "tables/mounting",
+], ids=["flys_New2", "flys_New_copy", "securedstorage2", "the tables root", "relative"])
+def test_a_directory_that_only_looks_like_production_is_not_refused(value):
+    cmd = _mounting(_with(csv_out_dir=value))
+    assert cmd is not None and cmd[cmd.index("--csv-out-dir") + 1] == value
+
+
+def test_the_production_roots_of_the_base_settings_are_read_only_to_the_tables_too(caplog):
+    settings = Settings(model_path="m.pt", main_directories=["/mnt/prod/Data/flys_Old/IAA-X", "/mnt/prod/Data/flys_Old/Hex-Y"],
+                        reaction_prediction=ReactionPredictionSettings(output_csv=PREDICTIONS))
+    with caplog.at_level(logging.INFO):
+        assert _mounting(_with(csv_out_dir="/mnt/prod/Data/flys_Old/IAA-X/tables"), settings=settings) is None
+    (warning,) = _warnings(caplog)
+    assert "mounting.csv_out_dir" in warning and "/mnt/prod/Data/flys_Old/IAA-X" in warning
+    assert _mounting(_with(csv_out_dir="/mnt/prod/Data/flys_Old/IAA-X2/tables"), settings=settings) is not None
+
+
 def test_every_refused_directory_is_warned_about_not_just_the_first(caplog):
     with caplog.at_level(logging.INFO):
         assert _mounting(_with(out_dir="/tmp/a", abdomen_out_dir="/tmp/b", csv_out_dir=f"{HAND_RUN}/c")) is None
@@ -328,8 +366,34 @@ def test_a_refused_mounting_block_leaves_the_abdomen_commands_alone(caplog):
 
 def test_an_empty_predictions_path_drops_only_the_mounting_command(caplog):
     with caplog.at_level(logging.INFO):
-        assert _cmds(BOTH, settings=_base_settings("")) == [TRACK, NORMALIZE, STATS_CMD]
+        assert _cmds(BOTH, settings=_base_settings("")) == [TRACK, NORMALIZE, STATS_NO_PREDICTIONS]
     assert len(_warnings(caplog)) == 1
+
+
+def test_the_stats_command_reads_the_predictions_csv_of_the_base_settings_not_the_scripts_hard_coded_default():
+    settings = _base_settings(output_csv="/pred/model_predictions.csv", data_csv="/wide/all_rows.csv")
+    stats = _cmds(settings=settings)[2]
+    assert stats == [PY, STATS, "--config", str(OVERLAY), "--predictions", "/pred/model_predictions.csv"]
+    assert "/wide/all_rows.csv" not in stats
+
+
+def test_the_stats_command_parses_with_the_scripts_own_parser(monkeypatch):
+    from scripts.analysis import abdomen_geometry_stats
+
+    class Parsed(Exception):
+        pass
+
+    real, seen = argparse.ArgumentParser.parse_args, []
+
+    def parse_then_stop(self, args=None, namespace=None):
+        seen.append(real(self, args, namespace))
+        raise Parsed
+
+    monkeypatch.setattr(argparse.ArgumentParser, "parse_args", parse_then_stop)
+    with pytest.raises(Parsed):
+        abdomen_geometry_stats.main(_cmds(settings=_base_settings(output_csv="/pred/p.csv"))[2][2:])
+    (parsed,) = seen
+    assert (parsed.config, parsed.predictions) == (str(OVERLAY), "/pred/p.csv")
 
 
 # ---- the stage: fakes --------------------------------------------------------------------------------------
@@ -811,6 +875,61 @@ def test_a_driver_sent_sigterm_or_sighup_takes_its_stage_command_and_that_comman
                     pass
 
 
+# ---- the stage: no reading of a predictions file that PER is rewriting ------------------------------------------
+
+def test_a_running_per_run_holds_back_the_commands_that_read_the_predictions_and_only_those(tmp_path, procs, caplog):
+    with per_run_lock(tmp_path / "cache"), caplog.at_level(logging.INFO):
+        result = _run(tmp_path, _layers(tmp_path, mounting=MOUNTING))
+    assert procs.calls == [_expected(tmp_path)[0], _expected(tmp_path)[1]], "track and normalize read no predictions"
+    assert [c["ran"] for c in result["commands"]] == [True, True, False, False]
+    assert [c["skipped"] for c in result["commands"]] == ["", "", "PER run active", "PER run active"]
+    warnings = _warnings(caplog)
+    assert "[abdomen] PER run active — skipping abdomen_geometry_stats: model_predictions.csv may be mid-write" in warnings
+    assert "[abdomen] PER run active — skipping mounting_posture: model_predictions.csv may be mid-write" in warnings
+    assert result["summary"] == ("ABDOMEN: track rc=0; normalize+wide+figures rc=0; "
+                                 "abdomen_geometry_stats skipped (PER run active); mounting_posture skipped (PER run active)")
+    assert rw.LAST_ABDOMEN_SUMMARY == result["summary"]
+
+
+def test_without_a_per_run_the_commands_that_read_the_predictions_run(tmp_path, procs):
+    result = _run(tmp_path, _layers(tmp_path, mounting=MOUNTING))
+    assert len(procs.calls) == 4 and all(c["skipped"] == "" for c in result["commands"])
+
+
+def test_the_per_run_is_asked_before_each_of_those_commands_not_once_at_the_start(tmp_path, monkeypatch):
+    """A track of hours can outlast the start of a PER run: the lock is looked at when the stats are about to start."""
+    held = []
+
+    class Probe(_Procs):
+        def _popen(self, cmd, **kwargs):
+            if len(self.calls) == 1:                       # the second command (normalize) starts: PER begins now
+                held.append(acquire_per_run_lock(tmp_path / "cache"))
+            return super()._popen(cmd, **kwargs)
+
+    procs = Probe(monkeypatch)
+    try:
+        result = _run(tmp_path, _layers(tmp_path, mounting=MOUNTING))
+    finally:
+        for handle in held:
+            release_run_lock(handle)
+    assert len(procs.calls) == 2 and [c["skipped"] for c in result["commands"]] == ["", "", "PER run active", "PER run active"]
+
+
+def test_a_stage_with_only_the_mounting_command_is_held_back_too(tmp_path, procs):
+    with per_run_lock(tmp_path / "cache"):
+        result = _run(tmp_path, _layers(tmp_path, False, mounting=MOUNTING))
+    assert procs.calls == [] and result["ran"] is False
+    assert result["summary"] == "ABDOMEN: mounting_posture skipped (PER run active)"
+
+
+def test_a_per_lock_that_is_gone_again_lets_the_next_run_read_the_predictions(tmp_path, procs):
+    with per_run_lock(tmp_path / "cache"):
+        assert _run(tmp_path, _layers(tmp_path, mounting=MOUNTING))["commands"][3]["skipped"] == "PER run active"
+    procs.calls.clear()
+    assert _run(tmp_path, _layers(tmp_path, mounting=MOUNTING))["commands"][3]["skipped"] == ""
+    assert len(procs.calls) == 4
+
+
 def test_the_summary_is_one_line(tmp_path, procs):
     result = _run(tmp_path)
     assert result["summary"] == "ABDOMEN: track rc=0; normalize+wide+figures rc=0; abdomen_geometry_stats rc=0"
@@ -1059,7 +1178,8 @@ def test_real_processes_get_exactly_the_planned_command_lines_and_a_failure_does
     overlay = tmp_path / "config_new_abdomen.yaml"
     assert (tmp_path / "argv.log").read_text().splitlines() == [
         f"-m fbpipe.geometry_pipeline --config {overlay} normalize wide figures",
-        f"{rw.REPO_ROOT / 'scripts' / 'analysis' / 'abdomen_geometry_stats.py'} --config {overlay}",
+        f"{rw.REPO_ROOT / 'scripts' / 'analysis' / 'abdomen_geometry_stats.py'} --config {overlay} "
+        f"--predictions {PREDICTIONS}",
     ]
     assert [c["returncode"] for c in result["commands"]] == [3, 3]
 
@@ -1253,9 +1373,9 @@ def test_abdomen_only_runs_the_real_stage_on_the_overlay_with_a_fake_popen(tmp_p
     _, overlay = _configs(tmp_path, {"extends": "config_new.yaml",
                                      "abdomen": {"enabled": True, "yolo": {"num_workers": 2}}})
     assert rw.main(["--config", str(overlay), "--abdomen-only", "--abdomen-video"]) is None
-    assert procs.calls == rw._abdomen_commands({"abdomen": {"enabled": True}}, _base_settings(),
+    assert procs.calls == rw._abdomen_commands({"abdomen": {"enabled": True}}, _base_settings(""),
                                                python_exec=sys.executable, overlay_path=overlay, figures_only=False,
-                                               annotated_video=True, n_workers=2)
+                                               annotated_video=True, n_workers=2)     # this base has no predictions CSV
     assert rw.LAST_ABDOMEN_SUMMARY.startswith("ABDOMEN: track rc=0") and rw.LAST_RUN_ABDOMEN_ONLY is True
 
 

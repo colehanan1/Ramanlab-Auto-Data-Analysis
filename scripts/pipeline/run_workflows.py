@@ -61,7 +61,7 @@ from fbpipe.steps import predict_reactions
 from fbpipe.utils.data_secured_sync import sync_data_secured
 from fbpipe.utils.process_guard import die_with_parent_preexec
 from fbpipe.utils.run_lock import RunLockTimeout, run_lock
-from fbpipe.utils.run_locks import abdomen_lock, acquire_per_run_lock, release_run_lock
+from fbpipe.utils.run_locks import abdomen_lock, acquire_per_run_lock, per_run_active, release_run_lock
 from fbpipe.utils.smb_copy import copy_to_smb
 
 from scripts.analysis.envelope_visuals import (
@@ -5228,6 +5228,14 @@ ABDOMEN_TAIL_FRACTION = 0.1          # ... and the fraction of the whole budget 
 #: sibling ``Results/Figures`` are never a pipeline step's to write.
 MOUNTING_FIGURES_ROOT = "/home/ramanlab/Documents/cole/Results/New-Opto-Fly-Figures/"
 
+#: The trees that are only ever READ, whatever a ``mounting:`` directory says: a directory named ``flys_New`` (the
+#: production tree; the base config's ``dataset_bases.data``) and the secured storage mount.
+PRODUCTION_DIR_NAME = "flys_New"
+SECURED_STORAGE = "/securedstorage"
+
+#: The stage commands that read ``model_predictions.csv``, which a PER run rewrites (see ``_run_abdomen_commands``).
+_READS_PREDICTIONS = frozenset({"abdomen_geometry_stats", "mounting_posture"})
+
 _GEOMETRY_STEPS = ("track", "normalize", "wide", "figures")
 
 
@@ -5236,18 +5244,31 @@ def _block_enabled(block: Any) -> bool:
     return isinstance(block, Mapping) and bool(block.get("enabled", True))
 
 
-def _refused_mounting_dir(key: str, path: str, *, figures: bool) -> str:
+def _refused_mounting_dir(key: str, path: str, *, figures: bool, read_only: Sequence[str] = ()) -> str:
     """Why the mounting command may not write to *path* (``mounting.<key>``, already normalised), or ``""`` if it may.
 
     Nothing inside ``Results/Figures`` is ever a pipeline step's to write, the tables included. The two figure
-    directories (*figures*) must also lie below ``MOUNTING_FIGURES_ROOT``.
+    directories (*figures*) must also lie below ``MOUNTING_FIGURES_ROOT``. No directory may be, or lie inside, a tree
+    the pipeline only reads: a folder named ``flys_New``, the secured storage mount, or one of the *read_only* roots
+    (the base config's dataset directories). Compared by path component, so ``flys_New2`` is not "inside" ``flys_New``.
     """
     parts = Path(path).parts
     if any(pair == ("Results", "Figures") for pair in zip(parts, parts[1:])):
         return f"mounting.{key} = {path!r} is inside Results/Figures, which only hand-run figure sets may use"
     if figures and not path.startswith(MOUNTING_FIGURES_ROOT):
         return f"mounting.{key} = {path!r} is not below {MOUNTING_FIGURES_ROOT}"
+    if PRODUCTION_DIR_NAME in parts:
+        return f"mounting.{key} = {path!r} is inside {PRODUCTION_DIR_NAME}, which the pipeline only reads"
+    for root in (SECURED_STORAGE, *map(str, read_only)):
+        root_parts = Path(os.path.normpath(root)).parts
+        if root_parts and parts[:len(root_parts)] == root_parts:
+            return f"mounting.{key} = {path!r} is inside {root}, which the pipeline only reads"
     return ""
+
+
+def _predictions_csv(settings: Any) -> str:
+    """The base config's ``reaction_prediction.output_csv`` ("" when it has none)."""
+    return str(getattr(getattr(settings, "reaction_prediction", None), "output_csv", "") or "").strip()
 
 
 def _mounting_command(
@@ -5285,8 +5306,8 @@ def _mounting_command(
         LOGGER.warning("[mounting] not run: the mounting block is invalid or its module cannot be loaded (%s: %s)",
                        type(exc).__name__, exc, exc_info=True)
         return None
-    predictions = str(getattr(getattr(settings, "reaction_prediction", None), "output_csv", "") or "")
-    if not predictions.strip():
+    predictions = _predictions_csv(settings)
+    if not predictions:
         LOGGER.warning("[mounting] not run: reaction_prediction.output_csv is empty in the base config")
         return None
     configured = {
@@ -5297,8 +5318,10 @@ def _mounting_command(
         LOGGER.warning("[mounting] not run: %s not set", ", ".join(missing))
         return None
     dirs = {key: os.path.normpath(value) for key, value in configured.items()}
+    production = [str(d) for d in getattr(settings, "main_directories", None) or ()]
     refusals = [
-        _refused_mounting_dir(key, value, figures=key in ("out_dir", "abdomen_out_dir")) for key, value in dirs.items()
+        _refused_mounting_dir(key, value, figures=key in ("out_dir", "abdomen_out_dir"), read_only=production)
+        for key, value in dirs.items()
     ]
     if any(refusals):
         for reason in filter(None, refusals):
@@ -5331,7 +5354,9 @@ def _abdomen_commands(
     the OVERLAY as ``--config`` -- the geometry loader takes the ``abdomen:`` block from it and the production
     settings from its base. The three geometry commands need an enabled ``abdomen:`` block. ``--annotated-video``
     (the one-time backfill) goes to ``track`` alone, the only step that writes videos; ``figures_only`` drops
-    ``track``, since restyling figures must not load the model. The mounting command (:func:`_mounting_command`,
+    ``track``, since restyling figures must not load the model. The stats command is handed the base config's
+    predictions CSV (``--predictions``) instead of the script's hard-coded one. The mounting command
+    (:func:`_mounting_command`,
     which reads the BASE *settings*) comes last whenever it can be built: it only reads what the others wrote, so it
     needs no enabled ``abdomen:`` block and ``figures_only`` does not drop it.
     """
@@ -5347,9 +5372,11 @@ def _abdomen_commands(
                 track.append("--annotated-video")
             commands.append(track + ["track"])
         commands.append(geometry + ["normalize", "wide", "figures"])
-        commands.append(
-            [py, str(REPO_ROOT / "scripts" / "analysis" / "abdomen_geometry_stats.py"), "--config", config]
-        )
+        stats = [py, str(REPO_ROOT / "scripts" / "analysis" / "abdomen_geometry_stats.py"), "--config", config]
+        predictions = _predictions_csv(settings)
+        if predictions:                      # the base config's file, not the script's hard-coded default
+            stats += ["--predictions", predictions]
+        commands.append(stats)
     mounting = _mounting_command(overlay, settings, python_exec=py, overlay_path=overlay_path)
     if mounting is not None:
         commands.append(mounting)
@@ -5392,6 +5419,8 @@ def _abdomen_summary(result: Mapping[str, Any]) -> str:
         label = command["label"]
         if command["timed_out"]:
             parts.append(f"{label} TIMED OUT (killed)")
+        elif command.get("skipped"):
+            parts.append(f"{label} skipped ({command['skipped']})")
         elif not command["ran"]:
             parts.append(f"{label} not run")
         else:
@@ -5545,7 +5574,7 @@ def _run_abdomen_commands(
         with _stage_signals_raise():
             for i, cmd in enumerate(commands):
                 label = _abdomen_command_label(cmd)
-                entry = {"label": label, "returncode": None, "timed_out": False, "ran": False}
+                entry = {"label": label, "returncode": None, "timed_out": False, "ran": False, "skipped": ""}
                 result["commands"].append(entry)
                 remaining = deadline - time.monotonic()
                 keeps_tail = label == "track" and i < len(commands) - 1
@@ -5553,6 +5582,15 @@ def _run_abdomen_commands(
                 if allowed <= 0:
                     LOGGER.warning(
                         "[abdomen] %s not run: the %.1f h budget (abdomen.max_hours) is used up", label, max_hours
+                    )
+                    continue
+                if label in _READS_PREDICTIONS and per_run_active(settings.cache_dir):
+                    # Asked now, not once at the start: a track of hours can outlast the start of a PER run, and PER
+                    # rewrites the predictions CSV while it runs, so a read could see half a file.
+                    entry["skipped"] = "PER run active"
+                    LOGGER.warning(
+                        "[abdomen] PER run active — skipping %s: %s may be mid-write", label,
+                        Path(_predictions_csv(settings)).name or "model_predictions.csv"
                     )
                     continue
                 LOGGER.info("[abdomen] %s → %s", label, " ".join(cmd))
@@ -5588,13 +5626,15 @@ def _run_abdomen_stages(
     allowance is the budget less a tail of ``min(ABDOMEN_TAIL_MAX_S, ABDOMEN_TAIL_FRACTION x budget)``: a track that is
     killed still leaves normalize, the stats and the mounting analysis time to read what it tracked, and they share what
     is left. A non-zero exit is a warning and the next command still runs (a failed track must not stop the figures of
-    what was tracked). A SIGTERM or SIGHUP of the driver kills the running command's group and frees the lock
+    what was tracked); but the stats and the mounting analysis, which read ``model_predictions.csv``, are skipped (with
+    a warning and in the summary) whenever a PER run holds the PER lock when they would start, since PER rewrites that
+    file. A SIGTERM or SIGHUP of the driver kills the running command's group and frees the lock
     (:func:`_stage_signals_raise`), and every command dies with the driver even on a SIGKILL. The stage is skipped, with
     a log line, when there is nothing to run, for ``--folder`` runs, and while another abdomen run holds ``abdomen.lock``.
 
     Never raises on anything that goes wrong in the stage or its configuration: a PER run that has finished
     must not be failed by it. Returns ``{"ran", "skipped_reason", "error", "timed_out", "commands", "summary"}``
-    (``commands`` one ``{"label", "returncode", "timed_out", "ran"}`` per command) and leaves ``summary`` in
+    (``commands`` one ``{"label", "returncode", "timed_out", "ran", "skipped"}`` per command) and leaves ``summary`` in
     ``LAST_ABDOMEN_SUMMARY`` for the ntfy.
     """
     global LAST_ABDOMEN_SUMMARY

@@ -895,8 +895,8 @@ def _exclusions_section(exclusions: Mapping) -> str:
              "What was left out of the tables and why. Counts are fly-trials unless said otherwise.", "",
              "| What | Count | Meaning |", "|---|---|---|"]
     for key, value in exclusions.items():
-        if key == "run_info":
-            continue                                  # not a counter: it has a section of its own
+        if key in ("run_info", "scoring"):
+            continue                                  # not counters: a section of their own / a table below
         label, note = EXCLUSION_LABELS.get(key, (key.replace("_", " ").capitalize(), "not described by this report"))
         if key == "pending_trials" and value is None:
             note = "could not be counted (the error is in the row below)"
@@ -906,6 +906,15 @@ def _exclusions_section(exclusions: Mapping) -> str:
         lines += ["", f"Flies with identity drift (`identity_drift`), {len(drift)}:", ""]
         lines += [f"- `{d.get('fly_id', '?')}`: anchors spread {d.get('spread_px', '?')} px over "
                   f"{d.get('n_trials', '?')} trial(s)" for d in drift]
+    scoring = exclusions.get("scoring")
+    if isinstance(scoring, Mapping) and scoring:
+        lines += ["", "Scoring (`scoring`): the fly-trials of the table that could carry a score (pretest and testing; "
+                      "training trials get none) and how many do. The pooled bars count the identity-consistent flies' "
+                      "scored fly-trials only.", "",
+                  "| Trial type | Scoreable fly-trials | Scored fly-trials | Scored, identity-consistent flies |",
+                  "|---|---|---|---|"]
+        lines += [f"| {kind} | {c.get('scoreable', 0)} | {c.get('scored', 0)} | {c.get('scored_identity_consistent', 0)} |"
+                  for kind, c in scoring.items()]
     return "\n".join(lines)
 
 

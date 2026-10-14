@@ -24,7 +24,11 @@ Rules pinned here, on a synthetic production + geometry + secured-mirror tree un
   They are NaN without that baseline or a tracked window, and every older column is unchanged;
 * the command line -- the Mounting-Posture figures and ``report.md`` go to ``--out-dir``, the Abdomen-Movement figures
   to ``--abdomen-out-dir`` (their "Abdomen movement" section stays in ``report.md``), the pictures of an earlier run are
-  removed, and a failure in one part never costs the others.
+  removed, and a failure in one part never costs the others; no output directory may be, or lie inside, production
+  (flys_New), the secured mirror, ``/securedstorage`` or the hand-run ``Results/Figures`` (exit 2, before anything is
+  read or written), and ``exclusions.json`` / ``report.md`` count the scoreable and the scored fly-trials per trial
+  type;
+* the settings -- ``abd_min_tracked_frac`` must be above 0 and at most 1.
 """
 from __future__ import annotations
 
@@ -336,12 +340,20 @@ def test_the_batch_cutoff_defaults_to_the_abdomen_blocks_and_an_explicit_one_win
                                  {"held_frac_min": 1.5}, {"held_margin_eu": -0.1}, {"event_min_s": 0.0},
                                  {"curl_min_s": -1}, {"curl_rise_deg": 0}, {"n_permutations": 0},
                                  {"n_permutations": 10.5}, {"speed_smooth_frames": 0}, {"speed_smooth_frames": True},
-                                 {"abd_min_tracked_frac": 1.2}, {"eye_match_px": -1}, {"identity_tol_px": "wide"},
+                                 {"abd_min_tracked_frac": 1.2}, {"abd_min_tracked_frac": 0},
+                                 {"abd_min_tracked_frac": 0.0}, {"abd_min_tracked_frac": -0.1},
+                                 {"eye_match_px": -1}, {"identity_tol_px": "wide"},
                                  {"held_back_deg": 20.0}, {"event_rise_eu": float("nan")}, {"retracted_ref_eu": "x"},
                                  {"enabled": "yes"}, {"csv_out_dir": 5}])
 def test_out_of_range_or_mistyped_values_are_refused(bad):
     with pytest.raises(ValueError):
         M.parse_mounting_block(bad)
+
+
+@pytest.mark.parametrize("frac", [1.0, 0.5, 0.01, 1])
+def test_a_tracked_fraction_above_zero_and_up_to_one_is_accepted(frac):
+    """A gate of 0 would call a window with no tracked frame usable, and its median would be NaN."""
+    assert M.parse_mounting_block({"abd_min_tracked_frac": frac}).abd_min_tracked_frac == frac
 
 
 def test_a_configured_retracted_reference_and_paths_are_kept():
@@ -729,6 +741,53 @@ def test_a_derived_reference_is_the_median_of_the_flies_lowest_rests_per_rig():
     info = MP.reference_info(reference_frame({"A": [0.5, 0.7, 0.9], "B": [1.0, 2.0]}), mc)["retracted_ref"]
     assert info["A"]["retracted_ref_eu"] == pytest.approx(0.7) and info["A"]["from_config"] is False
     assert info["B"]["retracted_ref_eu"] == pytest.approx(1.5) and info["B"]["n_flies"] == 2
+
+
+# ---- how many fly-trials could carry a score, and how many do ------------------------------------------------
+
+def test_the_exclusions_count_the_scoreable_and_the_scored_fly_trials_per_trial_type(base):
+    scoring = base.exc["scoring"]
+    # pretest_1 and testing_1/_2 of two flies; the predictions score both pretests, three of the four testing trials
+    assert scoring == {"pretest": {"scoreable": 2, "scored": 2, "scored_identity_consistent": 2},
+                       "testing": {"scoreable": 4, "scored": 3, "scored_identity_consistent": 3}}
+    assert base.ft["score"].notna().sum() == 5
+
+
+def test_a_training_trial_is_never_scoreable(tmp_path):
+    def training(m):
+        m["trial"]["trial_type"], m["trial"]["trial_index"] = "training", 1
+    ft, exc, _ = tables(variant(tmp_path, meta_edits={("testing", 2): training}),
+                        predictions=write_predictions(tmp_path / "p.csv"))
+    assert (ft["trial_type"] == "training").sum() == 2
+    assert exc["scoring"]["testing"]["scoreable"] == 2 and exc["scoring"]["pretest"]["scoreable"] == 2
+    assert set(exc["scoring"]) == {"pretest", "testing"}
+
+
+def test_without_a_predictions_file_nothing_is_scored_but_the_scoreable_trials_are_still_counted(tmp_path):
+    _, exc, _ = tables(variant(tmp_path))
+    assert exc["scoring"] == {"pretest": {"scoreable": 2, "scored": 0, "scored_identity_consistent": 0},
+                              "testing": {"scoreable": 4, "scored": 0, "scored_identity_consistent": 0}}
+
+
+def test_the_scored_count_of_identity_consistent_flies_leaves_out_a_drifting_fly(tmp_path):
+    tree = variant(tmp_path, edits={(1, "testing", 2): drifting})
+    _, exc, _ = tables(tree, predictions=write_predictions(tmp_path / "p.csv"))
+    assert exc["scoring"]["testing"]["scored"] == 3 and exc["scoring"]["testing"]["scored_identity_consistent"] == 2
+    assert exc["scoring"]["pretest"] == {"scoreable": 2, "scored": 2, "scored_identity_consistent": 1}
+
+
+def test_nothing_in_scope_gives_zero_counts(tmp_path):
+    _, exc, _ = tables(variant(tmp_path), mcfg=M.parse_mounting_block({"batch_date_from": date(2030, 1, 1)}))
+    zero = {"scoreable": 0, "scored": 0, "scored_identity_consistent": 0}
+    assert exc["scoring"] == {"pretest": zero, "testing": zero}
+
+
+def test_main_writes_the_scoring_counts_into_exclusions_json(cli):
+    assert run_main(cli, "--predictions-csv", str(cli.preds)) == 0
+    exc = json.loads((cli.tree.root / "csv_out" / "exclusions.json").read_text(encoding="utf-8"))
+    assert exc["scoring"]["testing"] == {"scoreable": 4, "scored": 3, "scored_identity_consistent": 3}
+    report = (cli.tree.root / "figs_out" / "report.md").read_text(encoding="utf-8")
+    assert "| testing | 4 | 3 | 3 |" in report and "| pretest | 2 | 2 | 2 |" in report
 
 
 def test_main_writes_the_run_info_into_exclusions_json(cli):
@@ -1351,10 +1410,12 @@ def test_csv_geometry_tables_read_the_same_as_parquet_ones(tmp_path):
     pd.testing.assert_frame_equal(first, second)
 
 
-def test_a_window_with_no_tracked_bend_has_no_resting_bend_even_when_the_gate_is_open(tmp_path):
+def test_a_window_with_no_tracked_bend_has_no_resting_bend_even_if_the_gate_were_zero(tmp_path):
+    """The parser refuses a gate of 0 (``0 < abd_min_tracked_frac <= 1``); a settings object built by hand with one must
+    still not turn an empty window into a resting bend of NaN that counts as usable."""
     def blind(r):
         r["tip_ok"] = np.zeros(N, bool)
-    mc = M.parse_mounting_block({"abd_min_tracked_frac": 0.0}, default_batch_date_from=CUTOFF)
+    mc = dataclasses.replace(M.parse_mounting_block({}, default_batch_date_from=CUTOFF), abd_min_tracked_frac=0.0)
     t = row(tables(variant(tmp_path, edits={(2, "pretest", 1): blind}), mcfg=mc)[0], 2, "pretest", 1)
     assert t["abd_tracked_frac_pre"] == 0 and not t["abd_quality_ok"] and math.isnan(t["abd_rest_bend_deg"])
     assert math.isnan(t["abd_curl_events_pre"])               # not 0: with no resting bend nothing can be a curl
@@ -1978,6 +2039,61 @@ def test_main_changes_nothing_under_production_the_mirror_or_the_geometry_tree(c
     assert snapshot(*watched) == before
     assert list(t.root.rglob("_trial_meta.json")) == []
     assert (t.root / "csv_out" / "fly_trial_posture.csv").is_file()          # the outputs went elsewhere
+
+
+# ---- the output directories can never be production, the secured storage or the hand-run figures --------------
+
+def refused_places(tree) -> dict:
+    return {"flys_New itself": tree.prod, "a dataset folder of flys_New": tree.prod / DATASET / "tables",
+            "a batch folder of flys_New": tree.prod / DATASET / NEW / "mounting",
+            "the secured mirror of the config": tree.mirror / "mounting",
+            "the literal /securedstorage mount": Path("/securedstorage/DATAsec/cole/mounting"),
+            "the hand-run Results/Figures": tree.root / "Results" / "Figures" / "Mounting-Posture"}
+
+
+@pytest.mark.parametrize("flag", ["--out-dir", "--abdomen-out-dir", "--csv-out-dir"])
+@pytest.mark.parametrize("where", list(refused_places(SimpleNamespace(
+    prod=Path("p"), mirror=Path("m"), root=Path("r")))), ids=str)
+def test_main_refuses_an_output_directory_that_production_the_secured_storage_or_the_hand_run_figures_own(
+        cli, capsys, flag, where):
+    target = refused_places(cli.tree)[where]
+    before = snapshot(cli.tree.prod, cli.tree.mirror, cli.tree.out)
+    with pytest.raises(SystemExit) as stop:
+        MP.main(["--config", str(cli.overlay), "--predictions-csv", str(cli.preds), flag, str(target)])
+    assert stop.value.code == 2
+    err = capsys.readouterr().err
+    assert flag in err and str(target) in err, "the message names the directory that was refused"
+    assert "only reads" in err or "Results/Figures" in err
+    assert snapshot(cli.tree.prod, cli.tree.mirror, cli.tree.out) == before, "nothing was written"
+    assert not (cli.tree.root / "csvs").exists() and not (cli.tree.root / "mfigs").exists(), "refused before any output"
+
+
+@pytest.mark.parametrize("key", ["csv_out_dir", "out_dir", "abdomen_out_dir"])
+def test_main_refuses_a_configured_output_directory_inside_production_too(tmp_path, monkeypatch, capsys, key):
+    monkeypatch.delenv("FLAGGED_FLIES_CSV", raising=False)
+    monkeypatch.delenv("REACTION_OUTPUT_CSV", raising=False)
+    tree = variant(tmp_path)
+    overlay = write_configs(tree, write_predictions(tree.root / "p.csv"), **{key: str(tree.prod / DATASET / "tables")})
+    with pytest.raises(SystemExit) as stop:
+        MP.main(["--config", str(overlay)])
+    assert stop.value.code == 2 and f"mounting.{key}" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("name", ["flys_New2", "flys_New_copy", "Results-Figures", "securedstorage2"])
+def test_main_accepts_directories_that_only_look_like_the_protected_ones(cli, name):
+    figs = cli.tree.root / name / "figs"
+    assert run_main(cli, "--predictions-csv", str(cli.preds), "--out-dir", str(figs),
+                    "--abdomen-out-dir", str(cli.tree.root / name / "abd"), "--csv-out-dir",
+                    str(cli.tree.root / name / "csv")) == 0
+    assert (figs / "report.md").is_file()
+
+
+def test_main_accepts_the_pipelines_own_figure_root_next_to_the_hand_run_one(cli):
+    root = cli.tree.root / "Results"
+    new_opto = root / "New-Opto-Fly-Figures"
+    assert run_main(cli, "--predictions-csv", str(cli.preds), "--out-dir", str(new_opto / "Mounting-Posture"),
+                    "--abdomen-out-dir", str(new_opto / "Abdomen-Movement")) == 0
+    assert (root / "New-Opto-Fly-Figures" / "Mounting-Posture" / "report.md").is_file()
 
 
 # ---------------------------------------------------------------------------

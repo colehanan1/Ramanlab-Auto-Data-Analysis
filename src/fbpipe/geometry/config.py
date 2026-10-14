@@ -241,17 +241,25 @@ def parse_abdomen_block(block: Mapping[str, Any], base: Settings) -> Tuple[Setti
     return settings, gcfg
 
 
-def assert_out_tree_safe(out_base: Path, forbidden: Sequence[Path]) -> None:
+def read_only_roots(base_path: Path) -> list:
+    """The trees the abdomen pipeline and the analyses built on its outputs only READ: ``dataset_bases.data`` (the
+    production tree, flys_New) and ``dataset_bases.secured`` of the base config, and the literal secured mount."""
+    bases = (yaml.safe_load(Path(base_path).read_text(encoding="utf-8")) or {}).get("dataset_bases") or {}
+    return [Path(str(p)) for p in (bases.get("data"), bases.get("secured"), SECURED_MOUNT) if p]
+
+
+def assert_out_tree_safe(out_base: Path, forbidden: Sequence[Path], *, what: str = "[geometry] abdomen.out_base",
+                         who: str = "the abdomen pipeline",
+                         advice: str = "Give the abdomen outputs their own tree (e.g. .../Data/flys_Abdomen).") -> None:
     """Refuse an output tree that equals, or lies inside, a read-only root (the production batches,
     the secured mirror). Compared after resolving symlinks and ``..``, component by component, so
-    ``flys_New2`` is not "inside" ``flys_New``."""
+    ``flys_New2`` is not "inside" ``flys_New``. *what*, *who* and *advice* only word the error, for a caller whose
+    output is not the abdomen tree (the mounting analysis names its flag)."""
     out = Path(out_base).expanduser().resolve()
     for root in forbidden:
         resolved = Path(root).expanduser().resolve()
         if out.is_relative_to(resolved):
-            raise ValueError(
-                f"[geometry] abdomen.out_base {out} is, or lies inside, {resolved}, which the abdomen pipeline only "
-                "reads. Give the abdomen outputs their own tree (e.g. .../Data/flys_Abdomen).")
+            raise ValueError(f"{what} {out} is, or lies inside, {resolved}, which {who} only reads. {advice}")
 
 
 def _load_integrated(layers: ConfigLayers) -> Tuple[Settings, GeometrySettings]:
@@ -270,8 +278,7 @@ def _load_integrated(layers: ConfigLayers) -> Tuple[Settings, GeometrySettings]:
     if not gcfg.out_base:
         raise ValueError("[geometry] abdomen.out_base is required: without it the outputs would land beside "
                          "the production batches")
-    assert_out_tree_safe(Path(gcfg.out_base),
-                         [Path(str(p)) for p in (data_base, bases.get("secured"), SECURED_MOUNT) if p])
+    assert_out_tree_safe(Path(gcfg.out_base), read_only_roots(layers.base_path))
     if not get_main_directories(settings):
         raise RuntimeError(
             "[geometry] no main_directories resolved: none of the base config's `datasets` exists under "

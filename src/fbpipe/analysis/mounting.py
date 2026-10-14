@@ -688,7 +688,7 @@ class MountingSettings:
     curl_min_s: float = 0.3
     tip_move_eu_s: float = 0.5
     speed_smooth_frames: int = 5
-    abd_min_tracked_frac: float = 0.5
+    abd_min_tracked_frac: float = 0.5               # a window is usable when tracked in at least this fraction (0 < f <= 1)
 
 
 def _number(block: Mapping, key: str, *, lo=None, hi=None, lo_open=False, hi_open=False, integer=False):
@@ -763,4 +763,4 @@ def parse_mounting_block(block: Mapping, *, default_batch_date_from: Optional[da
         binary_threshold=num("binary_threshold"), n_permutations=num("n_permutations", lo=1, integer=True),
         curl_rise_deg=num("curl_rise_deg", lo=0.0, lo_open=True), curl_min_s=num("curl_min_s", lo=0.0, lo_open=True),
         tip_move_eu_s=num("tip_move_eu_s", lo=0.0), speed_smooth_frames=num("speed_smooth_frames", lo=1, integer=True),
-        abd_min_tracked_frac=num("abd_min_tracked_frac", lo=0.0, hi=1.0))
+        abd_min_tracked_frac=num("abd_min_tracked_frac", lo=0.0, hi=1.0, lo_open=True))

@@ -1094,6 +1094,24 @@ def test_a_report_without_a_reference_warning_has_no_warning_line(data, tmp_path
     assert "WARNING" not in text and "## Run information" in text
 
 
+SCORING = {"pretest": {"scoreable": 120, "scored": 118, "scored_identity_consistent": 104},
+           "testing": {"scoreable": 240, "scored": 231, "scored_identity_consistent": 205}}
+
+
+def test_the_report_gives_the_scoreable_and_the_scored_fly_trials_per_trial_type(data, tmp_path):
+    text = F.write_report(data.ft, data.fly, {**EXCLUSIONS, "scoring": SCORING}, data.stats, tmp_path).read_text(
+        encoding="utf-8")
+    exclusions = text.split("## Exclusions")[1].split("\n## ")[0]
+    assert "| Trial type | Scoreable fly-trials | Scored fly-trials | Scored, identity-consistent flies |" in exclusions
+    assert "| pretest | 120 | 118 | 104 |" in exclusions and "| testing | 240 | 231 | 205 |" in exclusions
+    assert "training trials get none" in exclusions
+    assert "(`scoring`) |" not in text, "a table of its own, not a counter row"
+
+
+def test_a_report_without_scoring_counts_has_no_scoring_table(report):
+    assert "Scoreable fly-trials" not in report
+
+
 def test_the_run_info_is_not_one_of_the_exclusion_counters(run_report):
     exclusions = run_report.split("## Exclusions")[1].split("\n## ")[0]
     assert "run_info" not in exclusions and "(`run_info`) |" not in run_report

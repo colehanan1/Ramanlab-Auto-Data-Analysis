@@ -18,7 +18,8 @@ number. Writes to ``--csv-out-dir`` (default ``mounting.csv_out_dir``):
   measures are medians over the fly's pooled frames (they ride on every row of the fly's trial table as ``fly_*``
   columns, because only the frames can give them);
 * ``exclusions.json``       -- what was left out and why (including ``pending_trials``: videos the abdomen stage has
-  not tracked yet), and under ``run_info`` what produced the tables: the time (UTC), every mounting setting used, and per
+  not tracked yet), under ``scoring`` how many pretest / testing fly-trials could carry a score and how many do, and
+  under ``run_info`` what produced the tables: the time (UTC), every mounting setting used, and per
   rig the retracted reference used, how many flies it came from, whether the config set it, and a warning when most of
   those flies never rest below it.
 
@@ -27,7 +28,9 @@ Then, into ``--out-dir`` (default ``mounting.out_dir``), the six ``Mounting-Post
 Into ``--abdomen-out-dir`` (default ``mounting.abdomen_out_dir``) go the six ``Abdomen-Movement`` figures
 (``abdomen_movement_figures``); their "Abdomen movement" section is part of the same ``report.md``.
 
-Read-only on production, the secured mirror and the geometry tree. The definitions live in
+Read-only on production, the secured mirror and the geometry tree: an output directory (flag or config) that is, or lies
+inside, the base config's ``dataset_bases.data`` (flys_New), its secured mirror, ``/securedstorage`` or the hand-run
+``Results/Figures`` is refused (exit 2) before anything is read or written. The definitions live in
 ``fbpipe.analysis.mounting``; the stimulus windows come from the geometry meta, never from
 ``load_trial_metadata`` (which writes a ``_trial_meta.json`` beside production on a cache miss).
 
@@ -59,7 +62,7 @@ from fbpipe.analysis import mounting as M  # noqa: E402
 from fbpipe.config import canon_fly_number, load_flagged_fly_exclusions, resolve_config_path  # noqa: E402
 from fbpipe.config_layers import resolve_layers  # noqa: E402
 from fbpipe.geometry import columns as C  # noqa: E402
-from fbpipe.geometry.config import load_geometry_config  # noqa: E402
+from fbpipe.geometry.config import assert_out_tree_safe, load_geometry_config, read_only_roots  # noqa: E402
 from fbpipe.geometry.steps import geometry_dir, iter_batch_jobs, pending_trials  # noqa: E402
 from fbpipe.utils.rig_anchor import rig_token  # noqa: E402
 from fbpipe.utils.rig_gates import read_batch_host  # noqa: E402
@@ -110,6 +113,7 @@ COUNTS = ("n_batches", "n_trials", "n_fly_trials", "eye_mismatch", "non_square_f
           "no_production_table", "unreadable_geometry", "flagged_flies", "flagged_fly_trials", "truncated_video",
           "session_mismatch", "session_unverified")
 PRODUCTION_META = "_trial_meta.json"      # production's per-trial metadata cache: only ever READ, and as plain JSON
+SCOREABLE_TYPES = ("pretest", "testing")  # the trial types the model scores (training trials get no score)
 TRUNCATED_BELOW = 0.99                    # a trial whose tracking stopped before this fraction of its video is dropped
 
 
@@ -552,6 +556,21 @@ def _attach_scores(df: pd.DataFrame, predictions_csv, mcfg, exc: dict) -> None:
     df["responded"] = np.where(np.isfinite(df["score"]), (df["score"] >= mcfg.binary_threshold).astype(float), np.nan)
 
 
+def scoring_counts(df: pd.DataFrame) -> dict:
+    """How many fly-trials of the table could carry a score and how many do, per trial type: ``{trial type: {"scoreable":
+    pretest / testing fly-trials in scope (training trials get none), "scored": those with a score,
+    "scored_identity_consistent": those of identity-consistent flies}}``. The last is what the pooled bars of the report
+    can count; the first two cover every row of the table."""
+    out = {}
+    for kind in SCOREABLE_TYPES:
+        rows = df[df["trial_type"] == kind] if len(df) else df
+        scored = rows[rows["score"].notna()] if len(rows) else rows
+        consistent = scored[scored["identity_consistent"].astype(bool)] if len(scored) else scored
+        out[kind] = {"scoreable": int(len(rows)), "scored": int(len(scored)),
+                     "scored_identity_consistent": int(len(consistent))}
+    return out
+
+
 def _pooled_fly_values(chunks: dict, moving_eu_s: float) -> dict:
     cat = {k: np.concatenate(v) for k, v in chunks.items() if v}
     out = {"abd_rest_bend_deg": _median(cat.get("abd_rest_bend_deg", [])),
@@ -621,6 +640,7 @@ def build_fly_trial_table(settings, gcfg, mcfg, predictions_csv) -> tuple:
     if not rows:
         empty = pd.DataFrame(columns=FLY_TRIAL_COLUMNS)
         exc["run_info"] = run_info(empty, mcfg)
+        exc["scoring"] = scoring_counts(empty)
         return empty, exc
     df = pd.DataFrame(rows)
     _mark_identity(df, mcfg, exc)
@@ -630,6 +650,7 @@ def build_fly_trial_table(settings, gcfg, mcfg, predictions_csv) -> tuple:
     exc["run_info"] = run_info(df, mcfg)
     _classify_held(df, pre_dist, mcfg)
     _attach_scores(df, predictions_csv, mcfg, exc)
+    exc["scoring"] = scoring_counts(df)
     per_fly = {fid: _pooled_fly_values(c, mcfg.tip_move_eu_s) for fid, c in chunks.items()}
     for name in POOLED:
         df[f"fly_{name}"] = df["fly_id"].map({fid: v[name] for fid, v in per_fly.items()})
@@ -687,6 +708,29 @@ def build_fly_table(fly_trial: pd.DataFrame, mcfg) -> pd.DataFrame:
 # Command line
 # ---------------------------------------------------------------------------
 
+def _refused_out_dirs(base_path, requested: dict) -> list:
+    """Why each of the output directories in *requested* (``{"--out-dir": (path, "mounting.out_dir"), ...}``; a path that
+    is empty is not an output) may not be written: it is, or lies inside, the base config's production tree
+    (``dataset_bases.data``, flys_New), its secured mirror or ``/securedstorage`` (``assert_out_tree_safe``), or it lies
+    inside the hand-run ``Results/Figures``. Messages name the flag, or the config key it came from."""
+    roots, reasons = read_only_roots(base_path), []
+    for flag, (path, source) in requested.items():
+        if not path:
+            continue
+        name = f"{flag} ({source})" if source else flag
+        try:
+            assert_out_tree_safe(Path(path), roots, what=f"[mounting] {name}", who="the mounting analysis",
+                                 advice="Give its outputs a directory of their own: figures under "
+                                        "Results/New-Opto-Fly-Figures, tables under Data/CSVs-New-Opto-Flys.")
+        except ValueError as err:
+            reasons.append(str(err))
+            continue
+        parts = Path(path).expanduser().resolve().parts
+        if any(pair == ("Results", "Figures") for pair in zip(parts, parts[1:])):
+            reasons.append(f"[mounting] {name} {path} is inside Results/Figures, which only hand-run figure sets may use")
+    return reasons
+
+
 def _count_pending(settings, scope) -> dict:
     """``{"pending_trials": n}``: trial videos of the in-scope batches the abdomen stage would still track. A walk that
     fails is recorded (``pending_trials`` None + ``pending_trials_error``) and never stops the tables, figures or report."""
@@ -718,6 +762,13 @@ def main(argv=None) -> int:
     csv_dir = a.csv_out_dir or mcfg.csv_out_dir
     if not csv_dir:
         p.error("no output directory: pass --csv-out-dir or set mounting.csv_out_dir")
+    fig_dir, abdomen_dir = a.out_dir or mcfg.out_dir, a.abdomen_out_dir or mcfg.abdomen_out_dir
+    refused = _refused_out_dirs(resolve_layers(path).base_path, {
+        "--csv-out-dir": (csv_dir, "" if a.csv_out_dir else "mounting.csv_out_dir"),
+        "--out-dir": (fig_dir, "" if a.out_dir else "mounting.out_dir"),
+        "--abdomen-out-dir": (abdomen_dir, "" if a.abdomen_out_dir else "mounting.abdomen_out_dir")})
+    if refused:
+        p.error("; ".join(refused))                  # exit 2, before anything is read or written
     predictions = a.predictions_csv or settings.reaction_prediction.output_csv
     fly_trial, exclusions = build_fly_trial_table(settings, gcfg, mcfg, predictions)
     fly = build_fly_table(fly_trial, mcfg)
@@ -727,7 +778,6 @@ def main(argv=None) -> int:
     fly_trial.to_csv(out / "fly_trial_posture.csv", index=False)
     fly.to_csv(out / "fly_posture.csv", index=False)
     (out / "exclusions.json").write_text(json.dumps(exclusions, indent=2, default=str), encoding="utf-8")
-    fig_dir, abdomen_dir = a.out_dir or mcfg.out_dir, a.abdomen_out_dir or mcfg.abdomen_out_dir
     if exclusions["predictions_missing"]:
         print(f"[MOUNTING] WARNING: no predictions file at {predictions!r}; the scores are left empty")
     print(f"[MOUNTING] {len(fly_trial)} fly-trial(s), {len(fly)} fly/flies -> {out}; excluded: "
