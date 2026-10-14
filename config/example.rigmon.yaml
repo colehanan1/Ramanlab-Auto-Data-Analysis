@@ -1,0 +1,12 @@
+# Copy to config/rigmon.yaml (gitignored) and set ntfy_topic there.
+rigs:
+  - {name: behaviorlocust, label: "Pi 1", ip: 100.121.64.36}
+  - {name: flybehavior2,   label: "Pi 2", ip: 100.93.23.70}
+  - {name: flybehavior3,   label: "Pi 3", ip: 100.97.155.65}
+staging_root: /home/ramanlab/Documents/cole/Data/rigmon_staging
+data_root: /home/ramanlab/Documents/cole/Data
+db_path: /home/ramanlab/Documents/cole/Data/rigmon_staging/rigmon.sqlite
+bind: [127.0.0.1, 100.94.160.60]   # localhost + tailnet only, never 0.0.0.0
+port: 8765
+transfer_enabled: true
+ntfy_topic: null                    # private topic for hub alerts — set in rigmon.yaml only

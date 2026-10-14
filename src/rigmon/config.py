@@ -1,0 +1,85 @@
+"""Load config/rigmon.yaml (gitignored) into frozen dataclasses."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from pathlib import Path
+
+import yaml
+
+REPO = Path(__file__).resolve().parents[2]
+DEFAULT_REMUX_ARGS = ("--crf", "22", "--preset", "slow", "--faststart",
+                      "--scale", "1.0", "--fps-cap", "50.0")
+
+
+@dataclass(frozen=True)
+class RigConfig:
+    name: str              # the Pi's hostname (what it sends as run.host)
+    label: str             # "Pi 1"
+    ip: str                # tailnet IP; "local" = test rig on this machine
+    port: int = 8008
+    ssh_user: str = "ramanlab"
+
+    @property
+    def host(self) -> str:
+        return "127.0.0.1" if self.ip == "local" else self.ip
+
+    @property
+    def status_url(self) -> str:
+        return f"http://{self.host}:{self.port}/status.json"
+
+    @property
+    def live_url(self) -> str:
+        return f"http://{self.host}:{self.port}/"
+
+
+@dataclass(frozen=True)
+class HubConfig:
+    rigs: tuple[RigConfig, ...]
+    staging_root: Path
+    data_root: Path
+    db_path: Path
+    ssh_key: Path = Path.home() / ".ssh" / "pi_backup"
+    bind: tuple[str, ...] = ("127.0.0.1",)
+    port: int = 8765
+    poll_interval_s: float = 1.0
+    offline_after_s: float = 60.0
+    transfer_enabled: bool = True
+    min_free_gb: float = 20.0
+    remux_python: str = "/usr/bin/python3"
+    remux_script: Path = REPO / "scripts" / "tools" / "remux_from_csv.py"
+    remux_args: tuple[str, ...] = DEFAULT_REMUX_ARGS
+    remux_path_env: str = "/usr/bin:/bin"
+    ntfy_topic: str | None = None
+
+    def rig(self, name: str) -> RigConfig:
+        for r in self.rigs:
+            if r.name == name:
+                return r
+        raise KeyError(name)
+
+
+_PATH_KEYS = ("staging_root", "data_root", "db_path", "ssh_key", "remux_script")
+_TUPLE_KEYS = ("bind", "remux_args")
+
+
+def load_config(path) -> HubConfig:
+    raw = yaml.safe_load(Path(path).read_text()) or {}
+    rigs = tuple(RigConfig(**r) for r in raw.pop("rigs", None) or [])
+    if not rigs:
+        raise ValueError("rigmon config needs at least one rig")
+    names = [r.name for r in rigs]
+    if len(set(names)) != len(names):
+        raise ValueError(f"duplicate rig names in {names}")
+    kw = {}
+    for key in _PATH_KEYS:
+        if key in raw:
+            kw[key] = Path(str(raw.pop(key))).expanduser()
+    for key in _TUPLE_KEYS:
+        if key in raw:
+            kw[key] = tuple(str(v) for v in raw.pop(key))
+    kw.update(raw)  # scalars; an unknown key is a TypeError from the dataclass
+    cfg = HubConfig(rigs=rigs, **kw)
+    if "flys_New" in cfg.staging_root.parts:
+        raise ValueError("staging_root must be outside flys_New (the nightly pipeline reads it)")
+    return cfg

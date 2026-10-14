@@ -18,6 +18,10 @@ tqdm>=4.66
 PyYAML>=6.0.1
 python-dotenv>=1.0.1
 
+# Rig monitor hub (src/rigmon)
+fastapi>=0.115
+uvicorn>=0.30
+
 # CV / DL
 opencv-python>=4.9
 ultralytics>=8.3.0,<9
