@@ -29,7 +29,7 @@ import re
 from dataclasses import dataclass, fields
 from datetime import date, datetime
 from pathlib import Path
-from typing import Mapping, Optional
+from typing import Mapping, NamedTuple, Optional
 
 import numpy as np
 import pandas as pd
@@ -250,65 +250,157 @@ def curl_events(bend_deg, rest_deg: float, *, rise_deg: float, min_frames: int,
 
 # The columns of the placebo design, in one place: the table builder and its tests take them from here.
 PLACEBO_COLUMNS = ("pb_window_min", "abd_tracked_frac_base", "abd_tracked_frac_placebo", "abd_tracked_frac_during",
-                   "abd_rest_bend_base_deg", "abd_curl_events_placebo", "abd_straighten_events_placebo",
+                   "abd_base_ok", "abd_rest_bend_loo_deg", "abd_curl_events_placebo", "abd_straighten_events_placebo",
                    "abd_curl_events_during", "abd_straighten_events_during")
 
 
-def placebo_events(bend_deg, *, onset: Optional[int], offset: Optional[int], fps: float, rise_deg: float, min_s: float,
-                   min_tracked_frac: float) -> dict[str, float]:
-    """Curl / straightening events in an equal-length placebo window and in the stimulus window, both scored against a
-    resting bend taken from EARLIER in the trial (the columns :data:`PLACEBO_COLUMNS`).
+class PlaceboTrial(NamedTuple):
+    """One trial of a fly for :func:`placebo_fly`: the bend trace (degrees, NaN = not tracked), the stimulus frames
+    (None = unknown) and the frame rate."""
+    bend: np.ndarray
+    onset: Optional[int]
+    offset: Optional[int]
+    fps: float
 
-    With ``L = min(stimulus length, floor(pre-stimulus length / 2))`` frames the trial is cut into the baseline
-    ``[0, onset - L)``, the placebo ``[onset - L, onset)`` and the during window ``[onset, onset + L)``; the windows come
+
+def _placebo_windows(n_frames: int, onset: Optional[int], offset: Optional[int]) -> Optional[dict[str, slice]]:
+    """The three windows of the placebo design of one trial, or None when there is no room for them.
+
+    With ``L = min(stimulus length, floor(pre-stimulus length / 2))`` frames the trial is cut into the early baseline
+    ``[0, onset - L)``, the placebo ``[onset - L, onset)`` and the during window ``[onset, onset + L)``. The windows come
     from :func:`window_slice`, so the stimulus runs to the last frame when its end is unknown and only frames that exist
-    count. The resting bend is the median of the finite bend over the baseline; curls (``bend > rest + rise_deg``) and
-    straightenings (``bend < rest - rise_deg``) lasting at least ``round(min_s * fps)`` frames are counted in the placebo
-    window and in the during window against that SAME resting bend, so the two windows are equally long, scored the same
-    way, and exchangeable when the stimulus does nothing. (Scoring the pre-stimulus window against its own median, as the
-    per-fly columns do, makes it look quieter than any window the baseline was not fitted to, and a stimulus that changes
-    nothing then reads as "more events".) The baseline is never shorter than L (L is at most half the pre-stimulus
-    window) and needs a tracked fraction of at least *min_tracked_frac* (and at least one finite frame), else there is no
-    resting bend and every count is NaN; the placebo and the during window each need the same of their own frames, else
-    their counts are NaN. ``pb_window_min`` is L in minutes, the tracked fractions are those of the three windows, and
-    everything is NaN when there is no stimulus, when the pre-stimulus window has fewer than two frames (no room for a
-    baseline and a placebo window) or when the stimulus has no frame.
-
-    **Limitation: the design assumes a stable resting posture over the trial.** It removes the bias of scoring a window
-    against a baseline fitted to itself, but the during window is LATER in the trial than the placebo window, so a bend
-    that wanders steadily away from the baseline (a posture that drifts) still makes the two windows differ when the
-    stimulus does nothing. Simulated (40 trials of a stationary AR(1) bend, time constant 3 s, 40 fps, 15 s windows, the
-    window-swap test, 1000 replicates) the false-positive rate at alpha 0.05 is 0.02 for an SD of 4 degrees and 0.04 for
-    6 degrees, and with a random-walk drift added to the SD-4 bend it is 0.02-0.03, 0.06 and 0.15 for 0.3, 0.5 and 1.0
-    degrees per square-root second (``tests/test_mounting_metrics.py`` pins the stationary and the 0.3 cases).
+    count; the baseline is never shorter than L.
     """
-    bend = _f64(bend_deg)
-    out = dict.fromkeys(PLACEBO_COLUMNS, float("nan"))
-    if not (math.isfinite(fps) and fps > 0):
-        return out
-    pre, stim = (slice(*w.indices(bend.size)[:2]) for w in window_slice(bend.size, onset, offset))
+    pre, stim = (slice(*w.indices(n_frames)[:2]) for w in window_slice(n_frames, onset, offset))
     start = pre.stop
     frames = min(max(0, stim.stop - stim.start), max(0, pre.stop - pre.start) // 2)
     if frames < 1:
+        return None
+    return {"base": slice(0, start - frames), "placebo": slice(start - frames, start),
+            "during": slice(start, start + frames)}
+
+
+def _finite_values(values) -> np.ndarray:
+    v = _f64(values)
+    return v[np.isfinite(v)]
+
+
+def _lendable(base: np.ndarray, min_tracked_frac: float) -> Optional[np.ndarray]:
+    """The finite frames of an early baseline window when it is tracked in at least *min_tracked_frac* of its frames (and
+    in at least one), else None."""
+    finite = base[np.isfinite(base)]
+    return finite if finite.size and finite.size / base.size >= min_tracked_frac else None
+
+
+def baseline_values(bend_deg, *, onset: Optional[int], offset: Optional[int],
+                    min_tracked_frac: float) -> Optional[np.ndarray]:
+    """The finite bend over the EARLY baseline window ``[0, onset - L)`` of one trial (see :func:`placebo_events`), which
+    the trial lends to the other trials of its fly; None when it cannot lend one: no stimulus or no room for the windows,
+    the window tracked in less than *min_tracked_frac* of its frames, or not in a single frame. The placebo and the during
+    frames are never part of it."""
+    bend = _f64(bend_deg)
+    windows = _placebo_windows(bend.size, onset, offset)
+    return None if windows is None else _lendable(bend[windows["base"]], min_tracked_frac)
+
+
+def leave_one_out_rest(baselines, *, min_trials: int = 2) -> list[float]:
+    """The resting bend of every trial of ONE fly: the median of the frames of the OTHER trials' early baselines, pooled.
+
+    *baselines* has one entry per trial: its :func:`baseline_values`, or None for a trial that cannot lend one. A trial's
+    own baseline is never part of its own resting bend, and a trial that lends nothing still gets one from the others.
+    Frames are pooled (the median of all of them, not of the trials' medians) and only finite frames count. The result is
+    NaN for a trial that has fewer than *min_trials* (at least one) other trials with a baseline, in the order of
+    *baselines*.
+    """
+    pools = [None if b is None else _finite_values(b) for b in baselines]
+    lenders = [i for i, v in enumerate(pools) if v is not None and v.size]
+    need = max(1, int(min_trials))
+    out = []
+    for i in range(len(pools)):
+        others = [pools[j] for j in lenders if j != i]
+        out.append(float(np.median(np.concatenate(others))) if len(others) >= need else float("nan"))
+    return out
+
+
+def placebo_events(bend_deg, *, onset: Optional[int], offset: Optional[int], fps: float, rise_deg: float, min_s: float,
+                   min_tracked_frac: float, rest_deg: float) -> dict[str, float]:
+    """Curl / straightening events in an equal-length placebo window and in the stimulus window of one trial, both scored
+    against the SAME resting bend *rest_deg* (the columns :data:`PLACEBO_COLUMNS`).
+
+    With ``L = min(stimulus length, floor(pre-stimulus length / 2))`` frames the trial is cut into the early baseline
+    ``[0, onset - L)``, the placebo ``[onset - L, onset)`` and the during window ``[onset, onset + L)``
+    (:func:`_placebo_windows`). Curls (``bend > rest_deg + rise_deg``) and straightenings (``bend < rest_deg - rise_deg``)
+    lasting at least ``round(min_s * fps)`` frames are counted in the placebo and in the during window; a run is clipped
+    to its window and a missing frame breaks it. A window is scored only when it is tracked in at least *min_tracked_frac*
+    of its own frames (and in at least one), else its counts are NaN; without a finite *rest_deg* every count is NaN.
+
+    *rest_deg* must not depend on the two windows, and in particular not on frames next to them. Taken from the same
+    trial's early baseline it is a local level of the wandering bend: the placebo window is still near it and the
+    start of the stimulus is farther away, so with NO stimulus effect the placebo has fewer events (a during / placebo
+    ratio of about 1.1 at a bend time constant of 3 s, 1.3 at 5 s and 1.8 at 10 s) and, pooled over a few hundred trials,
+    the difference reads as significant. :func:`leave_one_out_rest` takes it from the fly's OTHER trials instead, and
+    :func:`placebo_fly` does both passes. The test of the two counts
+    (``paired_window_permutation(scheme="swap")``) then assumes WITHIN-TRIAL STATIONARITY: with no stimulus effect the two
+    windows are interchangeable. A bend that drifts steadily inside the trial breaks that (the start of the stimulus is
+    later, and further from the baseline, than the placebo window); see :func:`placebo_fly` for how large the effect is.
+
+    ``pb_window_min`` is L in minutes; ``abd_tracked_frac_base`` / ``_placebo`` / ``_during`` are the tracked fractions of
+    the three windows; ``abd_base_ok`` says whether this trial's own early baseline can be lent to the other trials
+    (:func:`baseline_values`; False without room for the windows); ``abd_rest_bend_loo_deg`` is *rest_deg* (NaN when it is
+    not finite). Everything is NaN, and ``abd_base_ok`` False, when there is no stimulus, when the pre-stimulus window
+    has fewer than two frames (no room for a baseline and a placebo window), when the stimulus has no frame or when
+    *fps* is not a positive number.
+    """
+    bend = _f64(bend_deg)
+    out = dict.fromkeys(PLACEBO_COLUMNS, float("nan"))
+    out["abd_base_ok"] = False
+    if not (math.isfinite(fps) and fps > 0):
         return out
-    windows = {"base": slice(0, start - frames), "placebo": slice(start - frames, start),
-               "during": slice(start, start + frames)}
-    out["pb_window_min"] = frames / fps / 60.0
+    windows = _placebo_windows(bend.size, onset, offset)
+    if windows is None:
+        return out
+    out["pb_window_min"] = (windows["placebo"].stop - windows["placebo"].start) / fps / 60.0
     tracked = {}
     for name, window in windows.items():
         tracked[name] = float(np.isfinite(bend[window]).mean())
         out[f"abd_tracked_frac_{name}"] = tracked[name]
-    base = bend[windows["base"]]
-    if tracked["base"] < min_tracked_frac or not np.isfinite(base).any():
+    out["abd_base_ok"] = _lendable(bend[windows["base"]], min_tracked_frac) is not None
+    if not math.isfinite(rest_deg):
         return out
-    rest = float(np.median(base[np.isfinite(base)]))
-    out["abd_rest_bend_base_deg"] = rest
+    out["abd_rest_bend_loo_deg"] = float(rest_deg)
     for name in ("placebo", "during"):
         if tracked[name] >= min_tracked_frac and tracked[name] > 0:
-            curls, straightens = curl_events(bend, rest, rise_deg=rise_deg, min_frames=max(1, round(min_s * fps)),
+            curls, straightens = curl_events(bend, rest_deg, rise_deg=rise_deg, min_frames=max(1, round(min_s * fps)),
                                              start=windows[name].start, end=windows[name].stop)
             out[f"abd_curl_events_{name}"], out[f"abd_straighten_events_{name}"] = float(curls), float(straightens)
     return out
+
+
+def placebo_fly(trials, *, rise_deg: float, min_s: float, min_tracked_frac: float,
+                min_trials: int = 2) -> list[dict[str, float]]:
+    """The placebo columns of every trial of ONE fly, in two passes: every trial lends its early baseline
+    (:func:`baseline_values`), then each trial is scored (:func:`placebo_events`) against the pooled baselines of the
+    OTHER trials (:func:`leave_one_out_rest`; at least *min_trials* of them, else its counts are NaN).
+
+    *trials* is a sequence of :class:`PlaceboTrial` (the trials of one fly: the caller has already left out a fly whose
+    identity is not consistent) and the result has one row of :data:`PLACEBO_COLUMNS` per trial, in order. A trial with
+    no known stimulus, or without a usable frame rate, lends nothing and is not scored. A fly therefore needs at least
+    ``min_trials + 1`` trials, ``min_trials`` of them with a usable baseline, before any of them is scored.
+
+    Calibration (``tests/test_mounting_metrics.py``; AR(1) bend traces with a resting level per fly, no stimulus effect,
+    10 trials per fly, L = 15 s, 10 fps, the swap test at alpha 0.05, 1000 replicates): the false-positive rate is 0.003 to
+    0.05 from 40 to 400 pooled trials at bend time constants of 3, 5 and 10 s (a baseline taken from the same trial next to
+    the placebo window gives up to 0.64 at 400 trials and 10 s). The design assumes a stable resting posture inside a trial:
+    a bend that drifts steadily inside the trial (a random walk) separates the two windows, more so the more trials are
+    pooled; with 100, 200 and 400 trials the rate is 0.05, 0.07 and 0.11 at a drift of 0.3 degrees per square-root second,
+    0.12, 0.21 and 0.39 at 0.5, and 0.18, 0.35 and 0.64 at 1.0.
+    """
+    ready = [math.isfinite(t.fps) and t.fps > 0 for t in trials]
+    baselines = [baseline_values(t.bend, onset=t.onset, offset=t.offset, min_tracked_frac=min_tracked_frac) if ok else None
+                 for t, ok in zip(trials, ready)]
+    rests = leave_one_out_rest(baselines, min_trials=min_trials)
+    return [placebo_events(t.bend, onset=t.onset, offset=t.offset, fps=t.fps, rise_deg=rise_deg, min_s=min_s,
+                           min_tracked_frac=min_tracked_frac, rest_deg=rest) for t, rest in zip(trials, rests)]
 
 
 # ---------------------------------------------------------------------------
@@ -486,19 +578,21 @@ def paired_window_permutation(df: pd.DataFrame, *, events_pre: str, min_pre: str
 
     * ``"split"`` (the default): the trial's events (whole numbers) are re-assigned to its windows at random, each to the
       stimulus window with probability ``min_stim / (min_pre + min_stim)``, the minutes staying with their windows. That
-      is exact for any window lengths **only if the events of a trial are independent and come at a constant rate** when
-      the stimulus changes nothing. Real events (curls of a restless fly, a drifting bend) come in bursts, so two windows
-      of one trial resemble each other more than chance counts allow; the p then holds its level only as far as that
-      assumption does, and it says nothing about whether the two windows were scored in the same way.
+      is a valid test for any window lengths **only if the events of a trial are independent and come at a constant
+      rate** when the stimulus changes nothing. Real events (curls of a restless fly, a drifting bend) come in bursts, so
+      two windows of one trial resemble each other more than chance counts allow; the p then holds its level only as far
+      as that assumption does, and it says nothing about whether the two windows were scored in the same way.
     * ``"swap"``: the trial's two windows, events AND minutes, are exchanged with probability 1/2. **Valid only when the
-      two windows of every trial have the same length** (unequal windows are not exchangeable: the short one is far
+      two windows of every trial have the same length** (unequal windows are not interchangeable: the short one is far
       noisier than the long one, a swap does not preserve that, and about one stimulus in five that changes nothing
       reads p < 0.05 for 30 s against 4 s), so a trial whose two windows differ in length by more than 1 % is a
-      ``ValueError``. The swap is exact when the two windows of a trial are exchangeable under "the stimulus changes
-      nothing", which the caller must arrange (see :func:`placebo_events`).
+      ``ValueError``. Even then it needs the two windows of a trial to be interchangeable when the stimulus changes
+      nothing (the bend stationary within the trial, and no dependence of the scoring on frames next to one of the
+      windows), which the caller must arrange: see :func:`placebo_fly`.
 
-    In both schemes the random draw is made per TRIAL: trials are treated as independent, so a fly with many trials
-    weighs more, and the correlation between the trials of one fly is not modelled.
+    In both schemes the p is a Monte-Carlo permutation estimate (``n`` random draws, never an enumeration of all of them),
+    and the draw is made per TRIAL: trials are treated as independent, so a fly with many trials weighs more, and the
+    correlation between the trials of one fly is not modelled.
     """
     if n < 1:
         raise ValueError("n must be at least 1")

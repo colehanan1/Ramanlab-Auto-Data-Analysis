@@ -10,10 +10,11 @@ Rules pinned here, on synthetic fly-trial / fly tables (the fly table is always 
   descriptive;
 * displayed event rates pool trials (events over minutes of the SAME trials, odor and light windows apart, never a mean of
   per-trial rates); the stimulus comparison is a placebo design: the last L s before the stimulus against the first L s
-  of it, both scored against the fly's resting bend from the EARLIER part of the pre-stimulus window (a pre window scored
-  against a baseline fitted to itself looks "significant" in 13 to 39 % of simulated runs when the stimulus does nothing),
-  and its p is the exact window-label swap permutation (the two windows of a trial are as long as each other, so
-  exchanging them is a fair shuffle; the randomisation is by trial, not by fly);
+  of it, both scored against ONE resting bend, the median of the early baseline windows of the fly's OTHER trials (a
+  baseline fitted to the pre-stimulus window itself, or taken from the same trial next to the placebo window, makes the
+  placebo quieter than the start of the stimulus and reads as "significant" when a few hundred trials are pooled), and its
+  p is the Monte-Carlo window-label swap permutation (the two windows of a trial are as long as each other; it assumes the
+  bend is stationary within a trial; the randomisation is by trial, not by fly);
 * only quality-ok windows of identity-consistent flies enter a number, and the windows the ``abd_min_tracked_frac`` gate
   dropped are counted in the report;
 * a comparison with fewer than 3 flies to compare is "Not enough data to tell", every p is "uncorrected", and no text says
@@ -94,14 +95,15 @@ def row(fly_id, rig="R", dataset="D", **cols):
 def windows(fly, placebo=0, during=0, *, pb=0.25, straighten=(0, 0), kind="odor", base=True, placebo_ok=True,
             during_ok=True, **cols):
     """One trial of a hand-built table: curl events (and straightenings) in the placebo window and in the during window of
-    ``pb`` minutes each, against a baseline that is usable (``base``) or not; a window that is not usable has NaN counts.
-    Any column can be overridden by keyword (a keyword wins over what the flags above set)."""
+    ``pb`` minutes each, against a resting bend from the fly's other trials that is there (``base``) or not; a window that is
+    not usable has NaN counts, and so is every count without a resting bend. Any column can be overridden by keyword (a
+    keyword wins over what the flags above set)."""
     in_placebo, in_during = base and placebo_ok, base and during_ok
     nan = np.nan
     return row(fly, **{
         "stim_kind": kind, "pb_window_min": pb, "abd_quality_ok": True, "abd_tracked_frac_base": 0.9 if base else 0.2,
         "abd_tracked_frac_placebo": 0.9 if placebo_ok else 0.2, "abd_tracked_frac_during": 0.9 if during_ok else 0.2,
-        "abd_rest_bend_base_deg": 3.0 if base else nan,
+        "abd_base_ok": base, "abd_rest_bend_loo_deg": 3.0 if base else nan,
         "abd_curl_events_placebo": placebo if in_placebo else nan, "abd_curl_events_during": during if in_during else nan,
         "abd_straighten_events_placebo": straighten[0] if in_placebo else nan,
         "abd_straighten_events_during": straighten[1] if in_during else nan, **cols})
@@ -115,7 +117,8 @@ def abd_cohort(seed=1, per_cell=8, *, bend=0.0, tip=0.0, activity=0.0, restless=
     fraction rise with how head-up the fly is mounted relative to its rig, ``restless`` makes the spontaneous curl rate
     rise with it (and the PER rate too, unless ``per_link`` gives the PER rate its own slope), ``boost`` multiplies the curl
     rate during the stimulus (0 = no effect); ``flaws`` switches on the poorly tracked windows (10 % of pre-windows, 8 % of
-    the remaining stimulus windows; 8 % of baselines, 6 % of the placebo and of the during windows).
+    the remaining stimulus windows; 8 % of the trials have no resting bend, 6 % of the placebo and of the during windows
+    are poorly tracked).
 
     The placebo-design columns (the last L s before the stimulus, the first L s of it, L = the shorter of the stimulus and
     half the pre-stimulus window) are drawn from a stream of their own, so every other column is the same for a seed
@@ -169,7 +172,8 @@ def abd_cohort(seed=1, per_cell=8, *, bend=0.0, tip=0.0, activity=0.0, restless=
                     "abd_tracked_frac_base": 0.95 if base_ok else 0.2,
                     "abd_tracked_frac_placebo": 0.9 if placebo_ok else 0.1,
                     "abd_tracked_frac_during": 0.9 if during_ok else 0.1,
-                    "abd_rest_bend_base_deg": rest_bend + pb_rng.normal(0.0, 0.5) if base_ok else nan,
+                    "abd_base_ok": base_ok,
+                    "abd_rest_bend_loo_deg": rest_bend + pb_rng.normal(0.0, 0.5) if base_ok else nan,
                     "abd_curl_events_placebo": float(pb_rng.poisson(curl_rate * length)) if placebo_ok else nan,
                     "abd_curl_events_during": float(pb_rng.poisson(curl_rate * (1 + boost) * length)) if during_ok else nan,
                     "abd_straighten_events_placebo": float(pb_rng.poisson(0.5 * curl_rate * length)) if placebo_ok else nan,
@@ -400,36 +404,39 @@ def test_a_stimulus_that_changes_nothing_is_not_called_significant(null_data):
             assert events[event][kind]["verdict"] == "No clear difference", (event, kind, events[event][kind]["p_perm"])
 
 
-def _simulated_trials(rng, *, flies=6, trials=8, evoked=0.0):
-    """The placebo columns of simulated odor trials (40 fps): an AR(1) bend, time constant 3 s, SD 4 degrees, with the
-    stimulus 30 s in and running to the end of the 45 s trace, so L = 15 s; ``evoked`` = mean number of 0.5 s,
-    15 degree curls added to the first 15 s of the stimulus."""
-    a = math.exp(-1.0 / (3.0 * 40.0))
+def _simulated_trials(rng, *, flies=6, trials=8, evoked=0.0, tau_s=3.0):
+    """The placebo columns of simulated odor trials, as the table builder writes them (10 fps): every fly has a resting level
+    of its own and an AR(1) bend (SD 4 degrees) in every trial, the stimulus starts 30 s in and runs to the end of the 45 s
+    trace, so L = 15 s; ``evoked`` = mean number of 0.5 s, 15 degree curls added to the first 15 s of the stimulus."""
+    a = math.exp(-1.0 / (tau_s * 10.0))
     rows = []
     for fly in range(flies):
+        level, traces = rng.normal(0.0, 3.0), []
         for _ in range(trials):
-            bend, _ = signal.lfilter([1.0], [1.0, -a], rng.normal(0.0, 4.0 * math.sqrt(1.0 - a * a), 1800),
+            bend, _ = signal.lfilter([1.0], [1.0, -a], rng.normal(0.0, 4.0 * math.sqrt(1.0 - a * a), 450),
                                      zi=[a * rng.normal(0.0, 4.0)])
-            bend = bend + 6.0
-            for start in rng.integers(1200, 1780, rng.poisson(evoked)):
-                bend[start:start + 20] += 15.0
-            rows.append({**M.placebo_events(bend, onset=1200, offset=None, fps=40.0, rise_deg=10.0, min_s=0.3,
-                                            min_tracked_frac=0.5), "fly_id": f"D/b/fly{fly}", "stim_kind": "odor"})
+            bend = bend + 6.0 + level
+            for start in rng.integers(300, 430, rng.poisson(evoked)):
+                bend[start:start + 5] += 15.0
+            traces.append(M.PlaceboTrial(bend, 300, None, 10.0))
+        for columns in M.placebo_fly(traces, rise_deg=10.0, min_s=0.3, min_tracked_frac=0.5):
+            rows.append({**columns, "fly_id": f"D/b/fly{fly}", "stim_kind": "odor"})
     return pd.DataFrame(rows)
 
 
-def test_simulated_traces_on_which_the_stimulus_does_nothing_are_not_answered_yes():
-    """From the bend trace to the answer in the figure: the real event counter, the placebo columns and the window-swap
-    p of ``_event_stats``. 100 replicates of 6 flies x 8 trials; the old whole-window design said "Yes" here in a
-    quarter of them."""
+@pytest.mark.parametrize("tau_s", [3.0, 10.0])
+def test_simulated_traces_on_which_the_stimulus_does_nothing_are_not_answered_yes(tau_s):
+    """From the bend trace to the answer in the figure: the real event counter, the leave-one-out placebo columns and the
+    window-swap p of ``_event_stats``. 60 replicates of 6 flies x 8 trials; the whole-window design said "Yes" here in a
+    quarter of them and the adjacent baseline, with more trials, in a third (``tests/test_mounting_metrics.py``)."""
     yes = {"curl": 0, "straighten": 0}
-    for rep in range(100):
-        events = AM._event_stats(_simulated_trials(np.random.default_rng(9000 + rep)), n_perm=199, seed=rep)
+    for rep in range(60):
+        events = AM._event_stats(_simulated_trials(np.random.default_rng(9000 + rep), tau_s=tau_s), n_perm=199, seed=rep)
         for event in yes:
             cell = events[event]["odor"]
             assert cell["n_flies"] == 6 and cell["window_s"]["median"] == pytest.approx(15.0)
             yes[event] += cell["verdict"].startswith("Yes")
-    assert max(yes.values()) <= 10, yes
+    assert max(yes.values()) <= 6, yes
 
 
 def test_simulated_traces_with_curls_added_to_the_stimulus_are_answered_yes_for_curls_only():
@@ -672,14 +679,15 @@ def test_the_dropped_windows_are_counted_for_the_pre_stimulus_window_and_the_thr
         windows("fly2", 1, 1, trial_index=2, abd_tracked_frac_pre=0.8, **no_stimulus),
         windows("fly3", 1, 1, trial_index=0, base=False, abd_quality_ok=False,                 # no window of any kind
                 **{**no_stimulus, "abd_tracked_frac_pre": nan, "abd_tracked_frac_base": nan}),
-        windows("fly2", 1, 1, trial_index=3, abd_rest_bend_base_deg=nan),         # counts, but no resting bend to score by
+        windows("fly2", 1, 1, trial_index=3, abd_rest_bend_loo_deg=nan),          # counts, but no resting bend to score by
+        windows("fly2", 1, 1, trial_index=4, abd_tracked_frac_pre=0.3, abd_quality_ok=False),   # a poor pre window only
         windows("fly9", 1, 1, trial_index=0, base=False, identity_consistent=False, abd_tracked_frac_pre=0.0,
                 abd_quality_ok=False)])
     w = AM.compute_abdomen_stats(ft, fly_table(ft), n_perm=N_PERM, min_tracked_frac=0.5)["windows"]
-    assert w["pre"] == {"with_window": 7, "usable": 5, "dropped": 2}
-    assert w["base"] == {"with_window": 8, "usable": 5, "dropped": 3}
+    assert w["pre"] == {"with_window": 8, "usable": 5, "dropped": 3}
+    assert w["base"] == {"with_window": 9, "usable": 7, "dropped": 2}       # whether a trial can LEND its baseline
     for name in ("placebo", "during"):                  # usable + dropped + blank = the windows that exist
-        assert w[name] == {"with_window": 7, "usable": 3, "dropped": 1, "blank_by_base": 3}, name
+        assert w[name] == {"with_window": 8, "usable": 4, "dropped": 1, "blank_by_base": 3}, name
 
 
 def test_the_gate_value_is_recorded_when_it_is_given(data):
@@ -788,17 +796,33 @@ def test_the_stimulus_effect_is_answered_per_event_and_window(figures, data, nul
 def test_the_event_figure_says_in_plain_words_what_is_compared(figures):
     text = all_text(figures["abdomen_curl_events_by_window"])
     assert ("Each pair compares the last L s before the stimulus with the first L s of it "
-            "(L = 4 s for the odor, 15 s for the light), both against the fly's resting bend from earlier in the trial"
+            "(L = 4 s for the odor, 15 s for the light), both against the fly's resting bend from its other trials"
             in text)
     assert "during minus just before" in text and "uncorrected" in text
     assert "swaps the two window labels at random within each trial" in text
     assert "trial-level: trials, not flies, are shuffled" in text
+    assert "it assumes the bend is stationary within a trial" in text
 
 
 def test_no_text_claims_the_windows_are_compared_fairly(figures, section):
     sources = [Path(AM.__file__), Path(M.__file__)]
     for text in [section, *(all_text(f) for f in figures.values()), *(s.read_text(encoding="utf-8") for s in sources)]:
         assert "compared fairly" not in text
+
+
+def test_no_text_says_the_windows_differ_only_by_chance_or_that_the_p_is_exact(figures, section):
+    """The two windows are interchangeable only under an assumption (within-trial stationarity), and the p is a
+    Monte-Carlo estimate: neither is a claim the report or a docstring may make without it."""
+    sources = [Path(AM.__file__), Path(M.__file__), Path(MP.__file__)]
+    for text in [section, *(all_text(f) for f in figures.values()), *(s.read_text(encoding="utf-8") for s in sources)]:
+        flat = squash(text)
+        assert "differ only by chance" not in flat and "exact window-label" not in flat
+        assert "exchangeable when the stimulus does nothing" not in flat and "exact permutation" not in flat
+
+
+def test_the_section_says_the_p_is_a_monte_carlo_estimate(section):
+    assert re.search(rf"Window-swap permutation p: .*{N_PERM} permutations, seed 0: a Monte-Carlo permutation estimate",
+                     section)
 
 
 def test_the_window_length_is_reported_for_each_stimulus(data, section):
@@ -1150,7 +1174,7 @@ def test_the_event_figure_is_a_placeholder_when_no_odor_or_light_trial_has_both_
     fig = AM.build_abdomen_figures(ft, fly, stats)["abdomen_curl_events_by_window"]
     text = all_text(fig)
     assert fig.axes == [] and "Not enough data" in text and "n=0 trials / 0 flies" in text
-    assert "usable baseline, just-before window and start-of-stimulus window" in text      # what the figure needs
+    assert "resting bend from its fly's other trials, a just-before window and a start-of-stimulus window" in text
 
 
 def test_a_two_panel_figure_with_one_empty_panel_keeps_both_panels():
@@ -1316,18 +1340,26 @@ def test_the_section_counts_the_windows_the_tracked_fraction_gate_dropped(sectio
 
 def test_the_section_describes_the_placebo_design_in_plain_words(section):
     assert "L is the shorter of the stimulus and half the pre-stimulus window" in section
-    assert "median bend over the pre-stimulus window before its last L s" in section
+    assert "median bend over the early baseline windows" in section
+    assert "of the fly's OTHER trials, pooled over frames" in section
+    assert "the trial itself and every trial's just-before and start-of-stimulus frames are left out" in section
     assert "in the last L s before the stimulus" in section and "in the first L s of the stimulus" in section
-    assert "fitted to neither window being compared" in section
-    assert "if the stimulus does nothing they differ only by chance" in section
-    assert "Event-split" not in section
+    assert "differ only by chance" not in section and "Event-split" not in section
+
+
+def test_the_section_states_the_stationarity_assumption_and_the_trials_a_fly_needs(section):
+    assert ("Assumption (within-trial stationarity): with no stimulus effect the two windows of a trial are "
+            "interchangeable") in section
+    assert "A fly needs at least 3 trials with a known stimulus onset" in section
+    assert "at least 2 of the fly's other trials have a usable baseline window" in section
+    assert "flies whose identity is not consistent are left out" in section
 
 
 def test_the_section_says_the_window_swap_is_trial_level_and_names_its_limitation(section):
     assert "Window-swap permutation p" in section and "trial-level" in section
     assert "trials, not flies, are shuffled" in section and "treats trials as independent" in section
-    assert "Limitation: the stimulus comparison assumes the fly's resting posture is steady over the trial" in section
-    assert "drifts" in section
+    assert "Limitation: a bend that drifts steadily inside the trial breaks the assumption above" in section
+    assert "the more trials are pooled the more a small drift shows as a difference" in section
 
 
 def test_the_events_table_names_its_two_windows_and_the_test(section):
@@ -1386,7 +1418,8 @@ def test_the_section_counts_a_single_blank_window_in_the_singular():
                               abd_tracked_frac_during=np.nan)])
     fly = fly_table(ft)
     text = AM.abdomen_report_section(ft, fly, AM.compute_abdomen_stats(ft, fly, n_perm=N_PERM))
-    assert "1 more window was blank because" in text and "windows were blank" not in text
+    assert "1 more window was blank because the fly had fewer than 2 other trials with a usable baseline window" in text
+    assert "windows were blank" not in text
     more = trial_table([windows("fly1", 1, 1, trial_index=t, base=False) for t in range(2)]
                        + [windows("fly1", 1, 1, trial_index=9)])
     text = AM.abdomen_report_section(more, fly_table(more), AM.compute_abdomen_stats(more, fly_table(more), n_perm=N_PERM))

@@ -10,9 +10,9 @@ number. Writes to ``--csv-out-dir`` (default ``mounting.csv_out_dir``):
 
 * ``fly_trial_posture.csv`` -- one row per fly-trial, every trial type: mounting pitch, proboscis rest, held-out
   state, spontaneous PER and pull-ins in eye units (pixels / ``eye_scale_px``), abdomen-movement metrics (the last
-  nine columns, ``pb_window_min`` ... ``abd_straighten_events_during``, are the placebo design of the stimulus
-  comparison: events in the last L s before the stimulus and in the first L s of it, both against a resting bend
-  from the earlier part of the pre-stimulus window), the score;
+  ten columns, ``pb_window_min`` ... ``abd_straighten_events_during``, are the placebo design of the stimulus
+  comparison: events in the last L s before the stimulus and in the first L s of it, both against the resting bend
+  ``abd_rest_bend_loo_deg``, the median of the early baseline windows of the fly's OTHER trials), the score;
 * ``fly_posture.csv``       -- one row per identity-consistent fly. Event rates divide pooled events by pooled
   window-minutes and proportions pool trials, so nothing is a mean of per-trial rates; the continuous abdomen
   measures are medians over the fly's pooled frames (they ride on every row of the fly's trial table as ``fly_*``
@@ -69,7 +69,8 @@ ABDOMEN = ["abd_tracked_frac_pre", "abd_tracked_frac_stim", "abd_quality_ok", "a
            "abd_straighten_events_pre", "abd_straighten_events_stim", "abd_curl_delta_deg", "tip_pitch_rest_deg",
            "tip_speed_med_pre_eu_s", "tip_speed_p95_pre_eu_s", "tip_moving_frac_pre", "tip_speed_med_stim_eu_s",
            "tip_speed_p95_stim_eu_s", "tip_moving_frac_stim", "per_abdomen_coupling_rho"]
-# The placebo design (``fbpipe.analysis.mounting.placebo_events``): baseline / placebo / during windows cut from the onset.
+# The placebo design (``fbpipe.analysis.mounting.placebo_fly``): baseline / placebo / during windows cut from the onset,
+# scored against the resting bend of the fly's other trials.
 PLACEBO = list(M.PLACEBO_COLUMNS)
 FLY_TRIAL_COLUMNS = [
     "dataset", "batch", "fly_number", "fly_id", "rig", "trial", "trial_type", "trial_index", "odor", "label", "stim_kind",
@@ -236,14 +237,10 @@ def _abdomen(g: dict, dist: np.ndarray, scale: float, win: Window, mcfg) -> tupl
     """Abdomen-movement columns of one trial, and the finite frames the fly-level pools take.
 
     A window whose bend is tracked in fewer than ``abd_min_tracked_frac`` of its frames is unusable, and so is every
-    window when the resting bend (the pre-window median) is: those columns stay NaN, never zero. The placebo columns
-    (equal-length windows against a baseline from earlier in the trial) are judged on their own windows and do not depend
-    on the pre-window gate.
+    window when the resting bend (the pre-window median) is: those columns stay NaN, never zero. (The placebo columns need
+    the fly's other trials and are filled in a second pass, ``_placebo_columns``.)
     """
-    bend, pooled, ok = g["bend"], {}, {}
-    out = {**dict.fromkeys(ABDOMEN, np.nan),
-           **M.placebo_events(bend, onset=win.onset, offset=win.offset, fps=win.fps, rise_deg=mcfg.curl_rise_deg,
-                              min_s=mcfg.curl_min_s, min_tracked_frac=mcfg.abd_min_tracked_frac)}
+    bend, out, pooled, ok = g["bend"], dict.fromkeys(ABDOMEN, np.nan), {}, {}
     for name, sl in (("pre", win.pre), ("stim", win.stim)):
         out[f"abd_tracked_frac_{name}"] = float(np.isfinite(bend[sl]).mean()) if bend[sl].size else np.nan
         ok[name] = bool(bend[sl].size) and out[f"abd_tracked_frac_{name}"] >= mcfg.abd_min_tracked_frac
@@ -281,7 +278,8 @@ def _first_finite_pair(x: np.ndarray, y: np.ndarray) -> tuple:
 
 
 def _fly_trial(job, rig: str, trial: str, meta: dict, slot: int, path: Path, gcfg, mcfg, exc: dict) -> Optional[tuple]:
-    """One geometry slot of one trial joined to its production track: ``(row, pre-stimulus distance, pooled frames)``.
+    """One geometry slot of one trial joined to its production track: ``(row, pre-stimulus distance, pooled frames,
+    placebo trace)``.
 
     None when the slot drops out (counted in ``exc``): unreadable geometry, no production table, or a geometry eye
     further than ``eye_match_px`` from the production anchor. Only a 1080-square frame (``sx == sy == 1``) has eye
@@ -329,7 +327,9 @@ def _fly_trial(job, rig: str, trial: str, meta: dict, slot: int, path: Path, gcf
            "pre_window_known": win.known, "pre_min": win.minutes(win.pre), "stim_min": win.minutes(win.stim),
            "trial_body_pitch_deg": _median(M.body_pitch_deg(g["eye_x"], g["eye_y"], g["abd_x"], g["abd_y"])[win.pre]),
            **state, **abdomen}
-    return row, pre_dist, pooled
+    trace = (M.PlaceboTrial(g["bend"].copy(), win.onset, win.offset, win.fps) if win.known
+             else M.PlaceboTrial(np.empty(0), None, None, win.fps))       # a copy: the table is not kept alive for it
+    return row, pre_dist, pooled, trace
 
 
 # ---------------------------------------------------------------------------
@@ -344,6 +344,27 @@ def _mark_identity(df: pd.DataFrame, mcfg, exc: dict) -> None:
         {"fly_id": fid, "dataset": g["dataset"].iloc[0], "batch": g["batch"].iloc[0],
          "fly_number": int(g["fly_number"].iloc[0]), "spread_px": round(spread[fid], 1), "n_trials": len(g)}
         for fid, g in df.groupby("fly_id", sort=False) if spread[fid] > mcfg.identity_tol_px]
+
+
+def _placebo_columns(df: pd.DataFrame, traces: list, mcfg) -> None:
+    """The ten placebo columns (``fbpipe.analysis.mounting.PLACEBO_COLUMNS``) in two passes per fly: every trial lends the
+    early baseline of its pre-stimulus window, then each trial is scored against the pooled baselines of the OTHER trials
+    of the same fly (``placebo_fly``: at least two of them, each tracked in ``abd_min_tracked_frac`` of its frames; never
+    the trial itself, never a placebo or a during frame). A fly whose identity is not consistent pools nothing: all ten
+    columns stay NaN (``abd_base_ok`` False)."""
+    columns = {name: np.full(len(df), np.nan) for name in M.PLACEBO_COLUMNS}
+    columns["abd_base_ok"] = np.zeros(len(df), dtype=bool)
+    consistent = df["identity_consistent"].to_numpy(dtype=bool)
+    for rows in df.groupby("fly_id", sort=False).indices.values():
+        if not consistent[rows[0]]:
+            continue
+        scored = M.placebo_fly([traces[i] for i in rows], rise_deg=mcfg.curl_rise_deg, min_s=mcfg.curl_min_s,
+                               min_tracked_frac=mcfg.abd_min_tracked_frac)
+        for i, out in zip(rows, scored):
+            for name in M.PLACEBO_COLUMNS:
+                columns[name][i] = out[name]
+    for name, values in columns.items():
+        df[name] = values
 
 
 def _rig_reference(df: pd.DataFrame, mcfg) -> pd.Series:
@@ -442,7 +463,7 @@ def build_fly_trial_table(settings, gcfg, mcfg, predictions_csv) -> tuple:
            "prediction_key_conflicts": 0}
     flagged = load_flagged_fly_exclusions(settings.flagged_flies_csv) if settings.flagged_flies_csv else set()
     scope = _scope(gcfg, mcfg)
-    rows, pre_dist, chunks, flagged_seen = [], [], defaultdict(lambda: defaultdict(list)), set()
+    rows, pre_dist, traces, chunks, flagged_seen = [], [], [], defaultdict(lambda: defaultdict(list)), set()
     for job in iter_batch_jobs(settings, scope, live_only=True):
         exc["n_batches"] += 1
         rig = read_batch_host(job.prod_dir) or rig_token(job.name) or "unknown"
@@ -454,9 +475,10 @@ def build_fly_trial_table(settings, gcfg, mcfg, predictions_csv) -> tuple:
             elif gcfg.slot_seeds == "production" and meta.get("slot_source") != "production":
                 exc["warmup_slots"] += 1                                  # numbered by warm-up order: not production's fly N
             elif (joined := _fly_trial(job, rig, trial, meta, slot, path, gcfg, mcfg, exc)) is not None:
-                row, pre, pooled = joined
+                row, pre, pooled, trace = joined
                 rows.append(row)
                 pre_dist.append(pre)
+                traces.append(trace)
                 for name, frames in pooled.items():
                     chunks[row["fly_id"]][name].append(frames)
     exc["flagged_flies"], exc["n_fly_trials"] = len(flagged_seen), len(rows)
@@ -464,6 +486,8 @@ def build_fly_trial_table(settings, gcfg, mcfg, predictions_csv) -> tuple:
         return pd.DataFrame(columns=FLY_TRIAL_COLUMNS), exc
     df = pd.DataFrame(rows)
     _mark_identity(df, mcfg, exc)
+    _placebo_columns(df, traces, mcfg)
+    traces.clear()
     df["retracted_ref_eu"] = _rig_reference(df, mcfg)
     _classify_held(df, pre_dist, mcfg)
     _attach_scores(df, predictions_csv, mcfg, exc)

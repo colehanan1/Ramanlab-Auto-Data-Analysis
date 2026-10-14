@@ -17,15 +17,19 @@ inference: the per-fly scatters use the fly table, the rig-centred mounting angl
 camera roll shifts both) and a permutation p stratified by dataset x rig. Event rates pool TRIALS (events over minutes of
 the same trials, never a mean of per-trial rates).
 
-Figure 3 is a placebo design. For each odor or light trial L is the shorter of the stimulus and half the pre-stimulus
-window; the fly's resting bend is the median bend over the pre-stimulus window BEFORE its last L s, and curls and
-straightenings are counted against that one resting bend in the last L s before the stimulus and in the first L s of it
-(``fbpipe.analysis.mounting.placebo_events``, columns written by ``mounting_posture.py``). The two windows are as long as
-each other and scored the same way, so if the stimulus does nothing they differ only by chance, and the p is the exact
-window-label swap permutation of ``paired_window_permutation(scheme="swap")``. Scoring the whole pre-stimulus window
-against its own median instead made a stimulus that changes nothing look significant in 13 to 39 % of simulated runs at
-alpha 0.05. The randomisation is by trial (trials, not flies, are shuffled) and the design assumes a stable resting
-posture over the trial: a drifting bend still separates the two windows.
+Figure 3 is a placebo design with a leave-one-trial-out baseline. For each odor or light trial L is the shorter of the
+stimulus and half the pre-stimulus window. The trial's resting bend is the median bend over the early baseline windows
+(the part of the pre-stimulus window before its last L s) of the fly's OTHER trials, pooled over frames, so it depends
+neither on the trial's own two windows nor on the frames next to them; curls and straightenings are counted against that
+one resting bend in the last L s before the stimulus and in the first L s of it (``fbpipe.analysis.mounting.placebo_fly``,
+columns written by ``mounting_posture.py``). The p is the Monte-Carlo window-label swap permutation of
+``paired_window_permutation(scheme="swap")``. The design assumes WITHIN-TRIAL STATIONARITY: with no stimulus effect the
+two windows are interchangeable. A baseline taken from the whole pre-stimulus window (the first design) or from the early
+part of the same trial (the second) made a stimulus that changes nothing look significant (13 to 40 % of simulated runs at
+40 pooled trials for the first, up to 64 % at 400 trials for the second); a bend that drifts steadily inside the trials
+still does, and more so the more trials are pooled. The randomisation is by trial (trials, not flies, are shuffled). A fly
+needs at least 3 trials with a known stimulus onset (a trial is scored only when at least 2 of the fly's other trials have
+a usable baseline window); a fly whose identity is not consistent does not enter.
 
 Only quality-ok windows of identity-consistent flies enter a number. Every p is uncorrected, and says so; a comparison
 with fewer than three flies is "Not enough data to tell". Figure 5 is descriptive.
@@ -135,18 +139,20 @@ def _count(mask: np.ndarray) -> int:
 def _window_counts(trials: pd.DataFrame) -> dict:
     """How many windows of each kind exist, are usable and were dropped (from the quality flag and the NaN gates).
 
-    ``pre`` is the whole pre-stimulus window (the per-fly figures), ``base`` the part of it before the last L s (the
-    resting bend of the stimulus comparison), ``placebo`` the last L s before the stimulus and ``during`` the first L s of
-    it. A ``placebo`` / ``during`` window that exists is usable (scored), dropped (its own tracking was too poor) or blank
-    (``blank_by_base``: there was no usable baseline to score it against).
+    ``pre`` is the whole pre-stimulus window (the per-fly figures), ``base`` the part of it before the last L s (the trial
+    lends it to the other trials of its fly when it is tracked well enough: usable, else dropped), ``placebo`` the last
+    L s before the stimulus and ``during`` the first L s of it. A ``placebo`` / ``during`` window that exists is usable
+    (scored), dropped (its own tracking was too poor) or blank (``blank_by_base``: the fly had no resting bend for the
+    trial, fewer than two other trials with a usable baseline).
     """
     has = {name: np.isfinite(FIG.float_column(trials, f"abd_tracked_frac_{name}"))
            for name in ("pre", "base", "placebo", "during")}
-    ok, rest = _flag(trials, "abd_quality_ok"), np.isfinite(FIG.float_column(trials, "abd_rest_bend_base_deg"))
+    ok, lends = _flag(trials, "abd_quality_ok"), _flag(trials, "abd_base_ok")
+    rest = np.isfinite(FIG.float_column(trials, "abd_rest_bend_loo_deg"))
     out = {"pre": {"with_window": _count(has["pre"]), "usable": _count(has["pre"] & ok),
                    "dropped": _count(has["pre"] & ~ok)},
-           "base": {"with_window": _count(has["base"]), "usable": _count(has["base"] & rest),
-                    "dropped": _count(has["base"] & ~rest)}}
+           "base": {"with_window": _count(has["base"]), "usable": _count(has["base"] & lends),
+                    "dropped": _count(has["base"] & ~lends)}}
     for name in WINDOWS:
         scored = np.isfinite(FIG.float_column(trials, f"abd_curl_events_{name}"))
         out[name] = {"with_window": _count(has[name]), "usable": _count(has[name] & rest & scored),
@@ -284,7 +290,8 @@ def _placeholders(stats: dict) -> None:
                                      f"{' and '.join(str(n) for n in panels)})", "n": FIG.n_flies_label(max(panels))}
     if not any(c["n_trials"] for event in EVENTS for c in stats["events"][event].values()):
         holes["abdomen_curl_events_by_window"] = {
-            "reason": "no odor or light trial has a usable baseline, just-before window and start-of-stimulus window",
+            "reason": "no odor or light trial has a resting bend from its fly's other trials, a just-before window and "
+                      "a start-of-stimulus window",
             "n": FIG.n_label(0, 0)}
     if stats["restless"]["n_flies"] < enough:
         holes["abdomen_vs_spontaneous_per"] = {
@@ -480,9 +487,10 @@ def _fig_events(trials, fly, stats):
         fig, TITLES["abdomen_curl_events_by_window"], answer,
         "A curl is a sustained rise of the bend above the fly's resting bend, a straightening a sustained fall below it. "
         f"Each pair compares the last L s before the stimulus with the first L s of it (L = {lengths}), both against the "
-        "fly's resting bend from earlier in the trial. Bars pool trials (events over minutes of the same trials). Above "
-        "each pair: during minus just before, and the p-value of a test that swaps the two window labels at random within "
-        "each trial (trial-level: trials, not flies, are shuffled), uncorrected")
+        "fly's resting bend from its other trials. Bars pool trials (events over minutes of the same trials). Above each "
+        "pair: during minus just before, and the p-value of a test that swaps the two window labels at random within each "
+        "trial (trial-level: trials, not flies, are shuffled; it assumes the bend is stationary within a trial), "
+        "uncorrected")
     rates = [ev[e][k][w]["rate"] for e in EVENTS for k in kinds for w in WINDOWS]
     ceiling = max(1.0, 1.4 * max([r for r in rates if np.isfinite(r)] + [0.0]))
     corner = left
@@ -570,7 +578,8 @@ def _gate_text(gate: Optional[float]) -> str:
 
 def _blank_clause(n: int) -> str:
     """``; 2 more windows were blank because ...`` (nothing when none was), in the right number."""
-    return f"; {n} more {'window was' if n == 1 else 'windows were'} blank because their baseline was dropped" if n else ""
+    return (f"; {n} more {'window was' if n == 1 else 'windows were'} blank because the fly had fewer than 2 other trials "
+            "with a usable baseline window") if n else ""
 
 
 def _windows_lines(stats: Mapping) -> List[str]:
@@ -578,9 +587,9 @@ def _windows_lines(stats: Mapping) -> List[str]:
     pre, base = w["pre"], w["base"]
     lines = [f"- Pre-stimulus windows: {pre['dropped']} of {pre['with_window']} pre-stimulus windows dropped ({gate}, "
              f"`abd_min_tracked_frac`); {pre['usable']} usable",
-             f"- Baseline windows (the part of the pre-stimulus window before its last L s, which sets the resting bend "
-             f"of the stimulus comparison): {base['dropped']} of {base['with_window']} baseline windows dropped ({gate}); "
-             f"{base['usable']} usable"]
+             f"- Baseline windows (the part of the pre-stimulus window before its last L s, which a trial lends to the "
+             f"resting bend of the other trials of its fly): {base['dropped']} of {base['with_window']} baseline windows "
+             f"dropped ({gate}); {base['usable']} usable"]
     for name, label, what in (("placebo", "Just-before windows (the last L s before the stimulus)", "just-before"),
                               ("during", "Start-of-stimulus windows (the first L s of the stimulus)",
                                "start-of-stimulus")):
@@ -673,7 +682,7 @@ def abdomen_report_section(fly_trial: pd.DataFrame, fly: pd.DataFrame, stats: Ma
           "proboscis (ventral). Tip pitch is the direction of the tip from the abdomen centre against the image horizontal "
           "(positive = the tip points down). Only windows judged usable of identity-consistent flies enter a number: "
           "`abd_quality_ok` for the pre-stimulus window, the same tracked-fraction gate for each window of the stimulus "
-          "comparison.", "",
+          "comparison and for every baseline that is lent to the other trials of its fly.", "",
           "How to read the statistics:", "",
           "- The fly is the unit of inference. Per-fly figures use the fly table; pooled rates use the trials of "
           "identity-consistent flies and divide pooled events by pooled minutes (never a mean of per-trial rates).",
@@ -681,23 +690,28 @@ def abdomen_report_section(fly_trial: pd.DataFrame, fly: pd.DataFrame, stats: Ma
           "it; thresholds `curl_rise_deg` and `curl_min_s` of the `mounting:` block. In the per-fly figures the resting "
           "bend is the fly's median bend before the stimulus; the stimulus comparison uses the one described next.",
           "- Stimulus comparison (placebo design): L is the shorter of the stimulus and half the pre-stimulus window "
-          "(its value is given under the events table). The resting bend of this comparison is the fly's median bend over "
-          "the pre-stimulus window before its last L s, so it is fitted to neither window being compared. Curls and "
-          "straightenings are counted against it in the last L s before the stimulus (\"just before\") and in the first L s "
-          "of the stimulus (\"start of\"). The two windows are equally long and scored the same way, so if the stimulus "
-          "does nothing they differ only by chance.",
+          "(its value is given under the events table). A trial's resting bend is the median bend over the early baseline "
+          "windows (the part of the pre-stimulus window before its last L s) of the fly's OTHER trials, pooled over frames: "
+          "the trial itself and every trial's just-before and start-of-stimulus frames are left out, so it does not depend "
+          "on the two windows being compared or on the frames next to them. Curls and straightenings are counted against "
+          "it in the last L s before the stimulus (\"just before\") and in the first L s of the stimulus (\"start of\").",
+          "- Assumption (within-trial stationarity): with no stimulus effect the two windows of a trial are "
+          "interchangeable, which is what the swap test below needs. A fly needs at least 3 trials with a known stimulus "
+          "onset: a trial is scored only when at least 2 of the fly's other trials have a usable baseline window (tracked "
+          "in at least `abd_min_tracked_frac` of its frames); flies whose identity is not consistent are left out.",
           "- Mount pitch is rig-centred (fly value minus the median of its rig) because camera roll differs per rig; the "
           "tip pitch is rig-centred the same way, since the roll shifts it too.",
           f"- Stratified permutation p: the x variable is shuffled among flies of the same dataset × rig, two-sided on |ρ|, "
           f"{n_perm} permutations, seed {seed}.",
           f"- Window-swap permutation p: the labels of a trial's two windows (just before / start of the stimulus) are "
           f"swapped with probability 1/2, independently in each trial, and the pooled rate difference (start minus just "
-          f"before) is recomputed; two-sided, {n_perm} permutations, seed {seed}. The randomisation is trial-level "
-          f"(trials, not flies, are shuffled): it treats trials as independent, so a fly with many trials counts for "
-          f"more and a fly's trials are not kept together.",
-          "- Limitation: the stimulus comparison assumes the fly's resting posture is steady over the trial. A bend that "
-          "drifts away from the baseline can make the start of the stimulus differ from the time just before it even "
-          "when the stimulus does nothing, so a small p needs a look at the traces when the posture visibly drifts.",
+          f"before) is recomputed; two-sided, {n_perm} permutations, seed {seed}: a Monte-Carlo permutation estimate of the "
+          f"p-value. The randomisation is trial-level (trials, not flies, are shuffled): it treats trials as independent, "
+          f"so a fly with many trials counts for more and a fly's trials are not kept together.",
+          "- Limitation: a bend that drifts steadily inside the trial breaks the assumption above: the start of the "
+          "stimulus is later, and farther from the baseline, than the window before it, so it can differ even when the "
+          "stimulus does nothing, and the more trials are pooled the more a small drift shows as a difference. A small p "
+          "needs a look at the traces when the posture visibly drifts.",
           f"- \"Yes\" in a figure title means the permutation p is below {stats['alpha']} (uncorrected) with at least "
           f"{FIG.MIN_FLIES} flies to compare; fewer is \"Not enough data to tell\". **All p-values are uncorrected.**", "",
           "### Windows dropped for poor tracking", "",
@@ -721,7 +735,7 @@ def abdomen_report_section(fly_trial: pd.DataFrame, fly: pd.DataFrame, stats: Ma
           f"### {q['abdomen_curl_events_by_window']}", "",
           "Figure `abdomen_curl_events_by_window.png`: curl and straightening events per minute, pooled over trials, in the "
           "last L s before vs the first L s of the odor and of the light (light-only trials; hatched bars), each pair from "
-          "the same trials, both windows scored against the fly's resting bend from earlier in the trial.", "",
+          "the same trials, both windows scored against the fly's resting bend from its other trials.", "",
           *_apart(ph(stats, "abdomen_curl_events_by_window")),
           *_events_block(stats), "",
           *FIG.scatter_lines("abdomen_vs_spontaneous_per", q["abdomen_vs_spontaneous_per"], stats["restless"],

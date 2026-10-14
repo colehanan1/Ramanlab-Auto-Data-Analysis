@@ -12,8 +12,9 @@ Rules pinned here, on a synthetic production + geometry + secured-mirror tree un
 * pooling -- fly rates divide pooled events by pooled window-minutes, proportions pool trials, and the
   continuous abdomen measures are medians over the fly's pooled frames;
 * the placebo design -- the abdomen columns that compare the stimulus with an equal-length window just before it, both
-  against a resting bend from earlier in the trial (baseline / placebo / during, cut from the onset), are NaN without a
-  baseline or a tracked window, and every older column is unchanged;
+  against ONE resting bend: the median of the early baseline windows of the fly's OTHER trials (never the trial itself,
+  never a placebo or during frame; at least two other trials, each tracked in the gate fraction; no inconsistent fly).
+  They are NaN without that baseline or a tracked window, and every older column is unchanged;
 * the command line -- the Mounting-Posture figures and ``report.md`` go to ``--out-dir``, the Abdomen-Movement figures
   to ``--abdomen-out-dir`` (their "Abdomen movement" section stays in ``report.md``), the pictures of an earlier run are
   removed, and a failure in one part never costs the others.
@@ -1157,7 +1158,7 @@ def test_the_coupling_needs_200_frames_where_both_are_finite(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# Abdomen movement: the placebo design (equal-length windows against an out-of-sample baseline)
+# Abdomen movement: the placebo design (equal-length windows against the fly's other trials)
 # ---------------------------------------------------------------------------
 
 # the 63 columns of the table before the placebo design: all of them stay, in this order
@@ -1175,31 +1176,108 @@ OLDER_COLUMNS = [
     "fly_tip_speed_med_pre_eu_s", "fly_tip_speed_p95_pre_eu_s", "fly_tip_moving_frac_pre", "fly_tip_speed_med_stim_eu_s",
     "fly_tip_speed_p95_stim_eu_s", "fly_tip_moving_frac_stim"]
 L_FRAMES = 40                        # the stimulus (300-340) is shorter than half the pre-stimulus window (150)
+COUNTS = ("abd_curl_events_placebo", "abd_curl_events_during", "abd_straighten_events_placebo",
+          "abd_straighten_events_during")
+NO_STIMULUS = tuple(c for c in M.PLACEBO_COLUMNS if c != "abd_base_ok")
+
+
+def tracked(r):
+    """Every frame tracked, in every trial (the base scenario tracks fly 2's testing_1 in 30 % of its frames)."""
+    r["tip_ok"] = np.ones(N, bool)
+
+
+def level(value):
+    """A recipe edit: the bend is ``value`` degrees in every frame."""
+    def flat(r):
+        r["bend"] = np.full(N, float(value))
+    return flat
+
+
+def counts(t):
+    return tuple(t[c] for c in COUNTS)
+
+
+def empty(t, columns=COUNTS):
+    return all(pd.isna(t[c]) for c in columns)
 
 
 def test_the_placebo_columns_are_appended_and_every_older_column_is_where_it_was():
     assert len(OLDER_COLUMNS) == 63 and MP.FLY_TRIAL_COLUMNS[:63] == OLDER_COLUMNS
-    assert MP.FLY_TRIAL_COLUMNS[63:] == list(M.PLACEBO_COLUMNS) and len(M.PLACEBO_COLUMNS) == 9
+    assert MP.FLY_TRIAL_COLUMNS[63:] == list(M.PLACEBO_COLUMNS) and len(M.PLACEBO_COLUMNS) == 10
+
+
+def test_the_baseline_flag_is_a_boolean_column_and_the_other_placebo_columns_are_numbers(base):
+    assert base.ft["abd_base_ok"].dtype == bool                      # True / False, never NaN: a flag like the quality ones
+    assert all(pd.api.types.is_float_dtype(base.ft[c]) for c in M.PLACEBO_COLUMNS if c != "abd_base_ok")
 
 
 def test_a_trial_is_cut_into_a_baseline_a_placebo_and_a_during_window_from_its_onset(base):
     t = row(base.ft, 1, "testing", 1)                      # onset 300, stimulus 300-340: L = 40 frames = 4 s
     assert t["pb_window_min"] == pytest.approx(L_FRAMES / FPS / 60)
-    assert t["abd_rest_bend_base_deg"] == pytest.approx(5.0)
+    assert t["abd_rest_bend_loo_deg"] == pytest.approx(5.0)                             # from the fly's other two trials
     assert (t["abd_tracked_frac_base"], t["abd_tracked_frac_placebo"], t["abd_tracked_frac_during"]) == (1.0, 1.0, 1.0)
+    assert t["abd_base_ok"]
     assert (t["abd_curl_events_placebo"], t["abd_straighten_events_placebo"]) == (0, 0)
     assert (t["abd_curl_events_during"], t["abd_straighten_events_during"]) == (1, 0)           # the evoked curl, 305-335
     quiet = row(base.ft, 1, "testing", 2)                  # its only curl (200-205) is in the baseline: in neither window
     assert (quiet["abd_curl_events_placebo"], quiet["abd_curl_events_during"]) == (0, 0)
 
 
-def test_the_baseline_ends_where_the_placebo_starts_and_the_older_resting_bend_is_unchanged(base):
+def test_a_trials_resting_bend_comes_from_the_other_trials_of_its_fly_and_not_from_its_own_baseline(base):
     bend = 4.0 + 0.01 * np.arange(N)
     bend[150:155] += 15.0
-    t = row(base.ft, 1, "pretest", 1)
-    assert t["abd_rest_bend_base_deg"] == pytest.approx(np.median(bend[:ONSET - L_FRAMES]))
+    t = row(base.ft, 1, "pretest", 1)                      # its own early baseline is a ramp, whose median is not 5
+    assert np.median(bend[:ONSET - L_FRAMES]) != pytest.approx(5.0, abs=0.1)
+    assert t["abd_rest_bend_loo_deg"] == pytest.approx(5.0)                        # the flat 5 of fly 1's other trials
     assert t["abd_rest_bend_deg"] == pytest.approx(np.median(bend[:ONSET]))        # the per-fly column: the whole pre-window
-    assert t["abd_rest_bend_base_deg"] != pytest.approx(t["abd_rest_bend_deg"])
+
+
+def test_the_resting_bend_is_the_pooled_median_of_the_other_trials_of_the_same_fly_and_no_other_fly(tmp_path):
+    levels = {(1, "pretest", 1): level(5.0), (1, "testing", 1): level(7.0), (1, "testing", 2): level(9.0)}
+    ft = tables(variant(tmp_path, all_edit=tracked, edits=levels))[0]
+    assert [row(ft, 1, k, i)["abd_rest_bend_loo_deg"] for k, i in (("pretest", 1), ("testing", 1), ("testing", 2))] == \
+        pytest.approx([8.0, 7.0, 6.0])                     # 7 and 9 pooled; 5 and 9 pooled; 5 and 7 pooled: never itself
+    assert [row(ft, 2, k, i)["abd_rest_bend_loo_deg"] for k, i in (("pretest", 1), ("testing", 1), ("testing", 2))] == \
+        pytest.approx([5.0, 5.0, 5.0])                     # fly 2 does not borrow from fly 1
+
+
+def test_a_fly_of_another_batch_is_another_fly_and_shares_no_baseline(tmp_path):
+    tree = variant(tmp_path, all_edit=lambda r: (tracked(r), level(5.0)(r)))
+    tree.write_batch("october_08_batch_1_rig_3", "20261008", host="Flybehavior3",
+                     all_edit=lambda r: (tracked(r), level(9.0)(r)))
+    ft = tables(tree)[0]
+    assert ft.loc[ft["batch"] == NEW, "abd_rest_bend_loo_deg"].eq(5.0).all()
+    assert ft.loc[ft["batch"] == "october_08_batch_1_rig_3", "abd_rest_bend_loo_deg"].eq(9.0).all()
+
+
+def test_no_placebo_or_during_frame_of_any_trial_enters_a_resting_bend(tmp_path):
+    def early(meta):                                        # onset 60, stimulus 60-100: L = 30, baseline 0-30
+        meta["trial"].update(odor_on_frame=60, odor_off_frame=100)
+
+    def step(r):
+        r["tip_ok"] = np.ones(N, bool)
+        r["bend"] = np.full(N, 25.0)
+        r["bend"][:30] = 5.0                                # 5 degrees in the early baseline, 25 everywhere after it
+    ft = tables(variant(tmp_path, all_edit=step, meta_edits={t: early for t in TRIALS}))[0]
+    assert ft["abd_rest_bend_loo_deg"].eq(5.0).all()        # pooling the windows as well would have said 25
+    assert all(counts(r) == (1, 1, 0, 0) for _, r in ft.iterrows())          # a curl in each of the two windows
+
+
+def test_a_fly_with_two_trials_has_no_resting_bend_for_either_of_them(tmp_path):
+    ft = tables(variant(tmp_path, all_edit=tracked, no_prod=((1, "testing", 2),)))[0]
+    assert len(ft) == 5 and len(ft[ft["fly_number"] == 1]) == 2
+    for kind, idx in (("pretest", 1), ("testing", 1)):
+        t = row(ft, 1, kind, idx)
+        assert pd.isna(t["abd_rest_bend_loo_deg"]) and empty(t) and t["abd_base_ok"]
+        assert t["pb_window_min"] == pytest.approx(L_FRAMES / FPS / 60) and t["abd_tracked_frac_placebo"] == 1.0
+    assert row(ft, 2, "testing", 1)["abd_rest_bend_loo_deg"] == pytest.approx(5.0)       # fly 2 has its three
+
+
+def test_a_fly_whose_other_trials_cannot_lend_two_baselines_has_no_resting_bend(base):
+    for kind, idx in (("pretest", 1), ("testing", 2)):    # fly 2's testing_1 is tracked in 30 % of its frames: it lends none
+        t = row(base.ft, 2, kind, idx)
+        assert pd.isna(t["abd_rest_bend_loo_deg"]) and empty(t) and t["abd_base_ok"], (kind, idx)
+    assert row(base.ft, 2, "testing", 1)["abd_rest_bend_loo_deg"] == pytest.approx(5.0)   # its others lend two
 
 
 def test_a_curl_in_each_window_is_counted_in_its_own_and_one_in_the_baseline_in_neither(tmp_path):
@@ -1209,7 +1287,7 @@ def test_a_curl_in_each_window_is_counted_in_its_own_and_one_in_the_baseline_in_
         r["bend"][310:316] += 15.0                         # during
         r["bend"][320:326] += 15.0
         r["bend"][345:350] += 15.0                         # after the first L s of the stimulus window: counted by no one
-    t = row(tables(variant(tmp_path, edits={(2, "pretest", 1): curls}))[0], 2, "pretest", 1)
+    t = row(tables(variant(tmp_path, all_edit=tracked, edits={(2, "pretest", 1): curls}))[0], 2, "pretest", 1)
     assert (t["abd_curl_events_placebo"], t["abd_curl_events_during"]) == (1, 2)
     assert (t["abd_curl_events_pre"], t["abd_curl_events_stim"]) == (2, 2)             # the older columns, untouched
 
@@ -1219,7 +1297,7 @@ def test_a_straightening_is_counted_apart_in_the_placebo_and_during_windows(tmp_
         r["bend"][270:276] -= 15.0
         r["bend"][320:326] -= 15.0
         r["bend"][330:336] -= 15.0
-    t = row(tables(variant(tmp_path, edits={(2, "pretest", 1): dips}))[0], 2, "pretest", 1)
+    t = row(tables(variant(tmp_path, all_edit=tracked, edits={(2, "pretest", 1): dips}))[0], 2, "pretest", 1)
     assert (t["abd_straighten_events_placebo"], t["abd_straighten_events_during"]) == (1, 2)
     assert (t["abd_curl_events_placebo"], t["abd_curl_events_during"]) == (0, 0)
 
@@ -1227,7 +1305,7 @@ def test_a_straightening_is_counted_apart_in_the_placebo_and_during_windows(tmp_
 def test_a_curl_that_straddles_the_onset_is_clipped_to_each_window(tmp_path):
     def straddle(r):
         r["bend"][296:304] += 15.0
-    t = row(tables(variant(tmp_path, edits={(2, "pretest", 1): straddle}))[0], 2, "pretest", 1)
+    t = row(tables(variant(tmp_path, all_edit=tracked, edits={(2, "pretest", 1): straddle}))[0], 2, "pretest", 1)
     assert (t["abd_curl_events_placebo"], t["abd_curl_events_during"]) == (1, 1)
 
 
@@ -1237,25 +1315,39 @@ def test_a_short_pre_stimulus_window_gives_a_short_placebo_window_cut_from_its_o
 
     def ramp(r):
         r["bend"] = 0.1 * np.arange(N)
-    ft = tables(variant(tmp_path, edits={(2, "pretest", 1): ramp}, meta_edits={("pretest", 1): early}))[0]
+    ft = tables(variant(tmp_path, all_edit=tracked, edits={(2, "pretest", 1): ramp}, meta_edits={("pretest", 1): early}))[0]
     t = row(ft, 2, "pretest", 1)
     assert t["pb_window_min"] == pytest.approx(30 / FPS / 60) and t["onset_frame"] == 60
-    assert t["abd_rest_bend_base_deg"] == pytest.approx(np.median(0.1 * np.arange(30)))      # baseline 0-30, placebo 30-60
+    assert t["abd_rest_bend_loo_deg"] == pytest.approx(5.0)               # from fly 2's other trials, not from its own ramp
+    assert counts(t) == (0, 0, 0, 0)                                          # the ramp, 3 to 6 degrees, is within 10 of 5
+    assert row(ft, 2, "testing", 1)["abd_rest_bend_loo_deg"] == pytest.approx(5.0)    # its 30 baseline frames did not matter
 
 
 @pytest.mark.parametrize("onset", [1, 0])
 def test_a_pre_stimulus_window_too_short_to_halve_has_no_placebo_design(tmp_path, onset):
     def instant(meta):
         meta["trial"].update(odor_on_frame=onset, odor_off_frame=100)
-    t = row(tables(variant(tmp_path, meta_edits={("pretest", 1): instant}))[0], 2, "pretest", 1)
-    assert all(pd.isna(t[c]) for c in M.PLACEBO_COLUMNS), {c: t[c] for c in M.PLACEBO_COLUMNS}
+    t = row(tables(variant(tmp_path, all_edit=tracked, meta_edits={("pretest", 1): instant}))[0], 2, "pretest", 1)
+    assert empty(t, NO_STIMULUS) and not t["abd_base_ok"], {c: t[c] for c in M.PLACEBO_COLUMNS}
 
 
-def test_a_trial_with_no_known_stimulus_has_no_placebo_columns(tmp_path):
+def test_a_trial_with_no_known_stimulus_has_no_placebo_columns_lends_nothing_and_leaves_two_trials_without_a_rest(tmp_path):
     def none(meta):
         meta["trial"].update(has_odor=False, odor_on_frame=1201, odor_off_frame=None, light_on_s=None, light_off_s=None)
-    t = row(tables(variant(tmp_path, meta_edits={("testing", 2): none}))[0], 1, "testing", 2)
-    assert all(pd.isna(t[c]) for c in M.PLACEBO_COLUMNS)
+    ft = tables(variant(tmp_path, all_edit=tracked, meta_edits={("testing", 2): none}))[0]
+    t = row(ft, 1, "testing", 2)
+    assert empty(t, NO_STIMULUS) and not t["abd_base_ok"]
+    for kind, idx in (("pretest", 1), ("testing", 1)):      # only one other trial of the fly has a stimulus left to lend
+        assert pd.isna(row(ft, 1, kind, idx)["abd_rest_bend_loo_deg"])
+
+
+def test_a_fly_whose_identity_is_inconsistent_gets_no_placebo_counts_and_lends_nothing(tmp_path):
+    ft = tables(variant(tmp_path, all_edit=tracked, edits={(2, "testing", 2): drifting}))[0]
+    drifted = ft[ft["fly_number"] == 2]
+    assert len(drifted) == 3 and drifted["identity_consistent"].eq(False).all()
+    assert drifted[list(NO_STIMULUS)].isna().all().all() and drifted["abd_base_ok"].eq(False).all()   # no design at all
+    steady = ft[ft["fly_number"] == 1]
+    assert steady["abd_rest_bend_loo_deg"].eq(5.0).all() and steady["abd_base_ok"].all()
 
 
 def test_the_placebo_columns_use_the_frame_rate_of_the_trial(tmp_path):
@@ -1263,6 +1355,7 @@ def test_the_placebo_columns_use_the_frame_rate_of_the_trial(tmp_path):
         meta["fps"] = meta["trial"]["fps"] = 20.0
 
     def short_bump(r):
+        tracked(r)
         r["bend"][270:275] += 20.0                      # 5 frames in the placebo window: 0.5 s at 10 fps, 0.25 s at 20 fps
 
     ft, _, _ = tables(variant(tmp_path, meta_edits={("testing", 2): fps20}, all_edit=short_bump))
@@ -1274,54 +1367,56 @@ def test_the_placebo_columns_use_the_frame_rate_of_the_trial(tmp_path):
     assert fast["abd_curl_events_placebo"] == 0             # ... and 6 frames at 20 fps
 
 
-def test_a_baseline_tracked_in_less_than_the_gate_blanks_the_placebo_columns_but_not_the_older_ones(tmp_path):
+def test_a_trial_whose_own_baseline_is_tracked_in_too_few_frames_is_still_scored_but_lends_nothing(tmp_path):
     def blind_start(r):
         r["tip_ok"] = np.arange(N) >= 150       # 110 of the 260 baseline frames tracked (0.42); 150 of the 300 pre-frames
-    t = row(tables(variant(tmp_path, edits={(2, "pretest", 1): blind_start}))[0], 2, "pretest", 1)
-    assert t["abd_tracked_frac_base"] == pytest.approx(110 / 260) and math.isnan(t["abd_rest_bend_base_deg"])
-    for column in ("abd_curl_events_placebo", "abd_straighten_events_placebo", "abd_curl_events_during",
-                   "abd_straighten_events_during"):
-        assert math.isnan(t[column]), column
-    assert t["abd_tracked_frac_placebo"] == 1.0 and t["abd_tracked_frac_during"] == 1.0     # the windows themselves are fine
+    ft = tables(variant(tmp_path, all_edit=tracked, edits={(2, "pretest", 1): blind_start}))[0]
+    t = row(ft, 2, "pretest", 1)
+    assert t["abd_tracked_frac_base"] == pytest.approx(110 / 260) and not t["abd_base_ok"]
+    assert t["abd_rest_bend_loo_deg"] == pytest.approx(5.0) and counts(t) == (0, 0, 0, 0)      # its others lend two
+    assert t["abd_tracked_frac_placebo"] == 1.0 and t["abd_tracked_frac_during"] == 1.0
     assert t["abd_tracked_frac_pre"] == pytest.approx(0.5) and t["abd_quality_ok"]           # the older gate: 0.5 >= 0.5
     assert t["abd_curl_events_pre"] == 0 and t["abd_rest_bend_deg"] == pytest.approx(5.0)
+    for kind, idx in (("testing", 1), ("testing", 2)):       # one lender each is left: no resting bend, no counts
+        other = row(ft, 2, kind, idx)
+        assert pd.isna(other["abd_rest_bend_loo_deg"]) and empty(other)
+    assert row(ft, 1, "testing", 1)["abd_rest_bend_loo_deg"] == pytest.approx(5.0)           # fly 1 does not notice
 
 
 def test_the_placebo_and_during_windows_are_each_judged_on_their_own_tracking(tmp_path):
     def poor_placebo(r):
         f = np.arange(N)
         r["tip_ok"] = ~((f >= 260) & (f < 300) & (f % 10 >= 3))             # 30 % of the placebo window
-    t = row(tables(variant(tmp_path, edits={(2, "pretest", 1): poor_placebo}))[0], 2, "pretest", 1)
-    assert t["abd_tracked_frac_placebo"] == pytest.approx(0.3) and t["abd_rest_bend_base_deg"] == pytest.approx(5.0)
+    t = row(tables(variant(tmp_path, all_edit=tracked, edits={(2, "pretest", 1): poor_placebo}))[0], 2, "pretest", 1)
+    assert t["abd_tracked_frac_placebo"] == pytest.approx(0.3) and t["abd_rest_bend_loo_deg"] == pytest.approx(5.0)
     assert math.isnan(t["abd_curl_events_placebo"]) and math.isnan(t["abd_straighten_events_placebo"])
     assert (t["abd_curl_events_during"], t["abd_straighten_events_during"]) == (0, 0)
 
     def poor_during(r):
         f = np.arange(N)
         r["tip_ok"] = ~((f >= 300) & (f < 340) & (f % 10 >= 3))
-    t = row(tables(variant(tmp_path / "b", edits={(2, "pretest", 1): poor_during}))[0], 2, "pretest", 1)
+    t = row(tables(variant(tmp_path / "b", all_edit=tracked, edits={(2, "pretest", 1): poor_during}))[0], 2, "pretest", 1)
     assert (t["abd_curl_events_placebo"], t["abd_straighten_events_placebo"]) == (0, 0)
     assert math.isnan(t["abd_curl_events_during"]) and math.isnan(t["abd_straighten_events_during"])
 
 
-def test_a_trial_tracked_in_30_percent_of_its_frames_has_no_placebo_counts(base):
+def test_a_trial_tracked_in_30_percent_of_its_frames_has_no_placebo_counts_but_does_have_a_resting_bend(base):
     t = row(base.ft, 2, "testing", 1)
     assert t["abd_tracked_frac_base"] == pytest.approx(0.3) and t["abd_tracked_frac_placebo"] == pytest.approx(0.3)
-    assert t["pb_window_min"] == pytest.approx(L_FRAMES / FPS / 60)                      # the window exists ...
-    for column in M.PLACEBO_COLUMNS[4:]:
-        assert math.isnan(t[column]), column                                            # ... but nothing was measured in it
+    assert t["pb_window_min"] == pytest.approx(L_FRAMES / FPS / 60) and not t["abd_base_ok"]    # the window exists ...
+    assert t["abd_rest_bend_loo_deg"] == pytest.approx(5.0)                  # ... its others are fine ...
+    assert empty(t)                                                          # ... but nothing was measured in it
 
 
 def test_the_tracked_fraction_gate_is_the_gate_of_all_three_windows(tmp_path):
     def sparse(r):
         r["tip_ok"] = (np.arange(N) % 10) < 3                                           # 30 % of every window
     edits = {(2, "pretest", 1): sparse}
-    t = row(tables(variant(tmp_path / "a", edits=edits), mcfg=M.parse_mounting_block(
+    t = row(tables(variant(tmp_path / "a", all_edit=tracked, edits=edits), mcfg=M.parse_mounting_block(
         {"abd_min_tracked_frac": 0.3}, default_batch_date_from=CUTOFF))[0], 2, "pretest", 1)
-    assert t["abd_rest_bend_base_deg"] == pytest.approx(5.0)
-    assert (t["abd_curl_events_placebo"], t["abd_curl_events_during"]) == (0, 0)
-    t = row(tables(variant(tmp_path / "b", edits=edits))[0], 2, "pretest", 1)
-    assert math.isnan(t["abd_rest_bend_base_deg"]) and math.isnan(t["abd_curl_events_during"])
+    assert t["abd_base_ok"] and t["abd_rest_bend_loo_deg"] == pytest.approx(5.0) and counts(t) == (0, 0, 0, 0)
+    t = row(tables(variant(tmp_path / "b", all_edit=tracked, edits=edits))[0], 2, "pretest", 1)
+    assert not t["abd_base_ok"] and empty(t)                                  # 0.3 < 0.5 in the windows of the trial itself
 
 
 def test_the_curl_settings_apply_to_the_placebo_counts(tmp_path):
@@ -1330,20 +1425,21 @@ def test_the_curl_settings_apply_to_the_placebo_counts(tmp_path):
         r["bend"][320:327] += 9.0                           # 0.7 s, 9 degrees
     edits = {(2, "pretest", 1): blips}
 
-    def counts(**settings):
+    def counts_for(**settings):
         mc = M.parse_mounting_block(settings, default_batch_date_from=CUTOFF)
-        t = row(tables(variant(tmp_path / str(sorted(settings.items())), edits=edits), mcfg=mc)[0], 2, "pretest", 1)
+        tree = variant(tmp_path / str(sorted(settings.items())), all_edit=tracked, edits=edits)
+        t = row(tables(tree, mcfg=mc)[0], 2, "pretest", 1)
         return t["abd_curl_events_placebo"], t["abd_curl_events_during"]
-    assert counts() == (0, 0)
-    assert counts(curl_min_s=0.2) == (1, 0)
-    assert counts(curl_rise_deg=8.0) == (0, 1)
+    assert counts_for() == (0, 0)
+    assert counts_for(curl_min_s=0.2) == (1, 0)
+    assert counts_for(curl_rise_deg=8.0) == (0, 1)
 
 
 def test_a_non_square_frame_keeps_the_placebo_columns_they_need_no_eye_scale(tmp_path):
     def wide(meta):
         meta["frame"].update(width=1620, height=1620, sx=1.5, sy=1.5)
     t = row(tables(variant(tmp_path, meta_edits={("testing", 1): wide}))[0], 1, "testing", 1)
-    assert t["abd_curl_events_during"] == 1 and t["abd_rest_bend_base_deg"] == pytest.approx(5.0)
+    assert t["abd_curl_events_during"] == 1 and t["abd_rest_bend_loo_deg"] == pytest.approx(5.0)
     assert t["pb_window_min"] == pytest.approx(L_FRAMES / FPS / 60)
 
 
