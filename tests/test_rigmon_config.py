@@ -69,6 +69,6 @@ def test_example_config_loads():
 
 @pytest.mark.parametrize("addr", ["0.0.0.0", "::"])
 def test_bind_all_interfaces_is_refused(tmp_path, addr):
-    text = YAML.replace("100.94.160.60", addr)
+    text = YAML.replace("100.94.160.60", f'"{addr}"')
     with pytest.raises(ValueError):
         load_config(_write(tmp_path, text))
