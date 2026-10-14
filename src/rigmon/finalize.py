@@ -108,7 +108,9 @@ class Finalizer:
             raise FinalizeError(f"{len(problems)} file(s) missing or wrong size: {problems[:5]}")
         if dest.exists():
             raise FinalizeError(f"destination already exists: {dest} (staging kept at {staging})")
-        probe = dest.parent if dest.parent.exists() else self.cfg.data_root
+        probe = dest.parent
+        while not probe.exists() and probe != probe.parent:
+            probe = probe.parent
         free_gb = self.disk_free(probe) / 1e9
         if free_gb < self.cfg.min_free_gb:
             raise FinalizeError(f"only {free_gb:.0f} GB free on {probe}")
