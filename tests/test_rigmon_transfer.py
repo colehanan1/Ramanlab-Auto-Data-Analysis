@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import pytest
+
 from rigmon.config import HubConfig, RigConfig
 from rigmon.store import Store
 from rigmon.transfer import (TransferWorkers, TrialTransfer, remux_argv,
@@ -50,7 +52,7 @@ def _pi_trial(pi_dir, stem="t1", csv=b"SensorNs\n1\n"):
 
 def test_rsync_argv_is_additive_and_uses_the_key(tmp_path):
     argv = rsync_pull_argv(PI, Path("/k/pi_backup"), "/pi/b/t1.h264", tmp_path)
-    assert argv[:3] == ["rsync", "-a", "--partial"]
+    assert argv[:4] == ["rsync", "-a", "--partial", "--no-links"]
     assert not any("delete" in a for a in argv)
     assert "ssh -i /k/pi_backup -o BatchMode=yes -o ConnectTimeout=10" in argv
     assert argv[-2:] == ["ramanlab@100.93.23.70:/pi/b/t1.h264", f"{tmp_path}/"]
@@ -105,7 +107,7 @@ def test_missing_csv_fails_the_trial_with_a_reason(tmp_path):
     tt = TrialTransfer(cfg, store, runner=FakeRunner(pi_dir), sleep=lambda s: None)
     assert tt.process(LOCAL, "b", str(pi_dir), trial) == "failed"
     row = store.get_trial("fake", "b", 1)
-    assert row["state"] == "failed" and "remux t1.h264 failed" in row["error"]
+    assert row["state"] == "failed" and "Pi reported no size for t1.csv" in row["error"]
 
 
 def test_size_mismatch_fails(tmp_path):
@@ -141,3 +143,39 @@ def test_worker_exception_does_not_kill_the_queue():
     w.submit("pi2", "b", lambda: seen.append("b"))
     w.drain()
     assert seen == ["b"]
+
+
+def test_zero_reported_size_fails_with_a_reason(tmp_path):
+    cfg, pi_dir = _cfg(tmp_path), tmp_path / "pi" / "b"
+    store, trial = Store(cfg.db_path), {**_pi_trial(pi_dir), "video_bytes": 0}
+    tt = TrialTransfer(cfg, store, runner=FakeRunner(pi_dir), sleep=lambda s: None)
+    assert tt.process(LOCAL, "b", str(pi_dir), trial) == "failed"
+    assert "Pi reported no size for t1.h264" in store.get_trial("fake", "b", 1)["error"]
+
+
+def test_traversing_video_name_is_refused(tmp_path):
+    cfg, pi_dir = _cfg(tmp_path), tmp_path / "pi" / "b"
+    store, trial = Store(cfg.db_path), {**_pi_trial(pi_dir), "video": "../../evil.h264"}
+    runner = FakeRunner(pi_dir)
+    tt = TrialTransfer(cfg, store, runner=runner, sleep=lambda s: None)
+    assert tt.process(LOCAL, "b", str(pi_dir), trial) == "failed"
+    assert runner.calls == []
+    assert not (tmp_path / "evil.h264").exists()
+    assert not (cfg.staging_root.parent / "evil.h264").exists()
+
+
+def test_traversing_batch_dir_is_refused(tmp_path):
+    cfg, pi_dir = _cfg(tmp_path), tmp_path / "pi" / "b"
+    store, trial = Store(cfg.db_path), _pi_trial(pi_dir)
+    runner = FakeRunner(pi_dir)
+    tt = TrialTransfer(cfg, store, runner=runner, sleep=lambda s: None)
+    assert tt.process(LOCAL, "a/b", str(pi_dir), trial) == "failed"
+    assert runner.calls == []
+    assert not cfg.staging_root.exists()
+
+
+def test_staging_dir_rejects_non_plain_names(tmp_path):
+    tt = TrialTransfer(_cfg(tmp_path), None)
+    for rig, batch in (("fake", "a/b"), ("fake", ".."), ("../x", "b"), ("", "b")):
+        with pytest.raises(ValueError):
+            tt.staging_dir(rig, batch)

@@ -7,9 +7,8 @@ from __future__ import annotations
 import logging
 import os
 import shutil
+import threading
 from pathlib import Path, PurePosixPath
-
-from .transfer import TransferError
 
 log = logging.getLogger("rigmon.finalize")
 
@@ -22,6 +21,8 @@ def dest_from_push_to(push_to: str, batch_dir: str, data_root) -> Path:
     path = push_to.split(":", 1)[1] if ":" in push_to else push_to
     if not path.strip():
         raise FinalizeError("the Pi sent no push_to destination")
+    if not Path(path).is_absolute():
+        raise FinalizeError(f"push_to path is not absolute: {path!r}")
     if batch_dir in ("", ".", "..") or "/" in batch_dir:
         raise FinalizeError(f"bad batch_dir {batch_dir!r}")
     dest = (Path(path) / batch_dir).resolve()
@@ -60,30 +61,36 @@ class Finalizer:
                  alert=lambda title, body: None):
         self.cfg, self.store, self.transfer = cfg, store, transfer
         self.disk_free, self.alert = disk_free, alert
+        self._move_lock = threading.Lock()
 
     def _state(self, rig_name: str, batch_dir: str) -> str:
         s = self.store.get_session(rig_name, batch_dir)
         return s["state"] if s else ""
 
     def abort(self, rig_name: str, batch_dir: str) -> str:
-        if self._state(rig_name, batch_dir) == "landed":
-            return "landed"
-        self.store.set_session(rig_name, batch_dir, "aborted")
-        return "aborted"
+        with self._move_lock:
+            if self._state(rig_name, batch_dir) == "landed":
+                return "landed"
+            self.store.set_session(rig_name, batch_dir, "aborted")
+            return "aborted"
 
     def run(self, rig, batch_dir, output_dir, push_to, manifest) -> str:
         try:
             return self._run(rig, batch_dir, output_dir, push_to, manifest)
-        except (FinalizeError, TransferError, OSError) as e:
+        except Exception as e:
             log.warning("finalize %s/%s failed: %s", rig.name, batch_dir, e)
             self.store.set_session(rig.name, batch_dir, "failed", error=str(e))
             self.alert(f"{rig.label} finalize failed", f"{batch_dir}: {e}")
             return "failed"
 
     def _run(self, rig, batch_dir, output_dir, push_to, manifest) -> str:
-        if self._state(rig.name, batch_dir) == "aborted":
-            return "aborted"
+        state = self._state(rig.name, batch_dir)
+        if state in ("aborted", "landed"):
+            return state
         dest = dest_from_push_to(push_to, batch_dir, self.cfg.data_root)
+        stage_root = Path(self.cfg.staging_root).resolve()
+        if dest == stage_root or stage_root in dest.parents:
+            raise FinalizeError(f"destination {dest} is inside the staging area")
         for item in manifest:
             _safe_rel(item["path"])
         staging = self.transfer.staging_dir(rig.name, batch_dir)
@@ -105,9 +112,10 @@ class Finalizer:
         free_gb = self.disk_free(probe) / 1e9
         if free_gb < self.cfg.min_free_gb:
             raise FinalizeError(f"only {free_gb:.0f} GB free on {probe}")
-        if self._state(rig.name, batch_dir) == "aborted":
-            return "aborted"
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        os.rename(staging, dest)  # same filesystem → atomic; EXDEV → OSError → failed
-        self.store.set_session(rig.name, batch_dir, "landed", dest=str(dest))
-        return "landed"
+        with self._move_lock:
+            if self._state(rig.name, batch_dir) == "aborted":
+                return "aborted"
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            os.rename(staging, dest)  # same filesystem → atomic; EXDEV → OSError → failed
+            self.store.set_session(rig.name, batch_dir, "landed", dest=str(dest))
+            return "landed"

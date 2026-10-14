@@ -1,3 +1,4 @@
+import threading
 from pathlib import Path
 
 import pytest
@@ -99,3 +100,53 @@ def test_manifest_path_escape_is_refused(tmp_path):
     cfg, pi, manifest, store, tt, fin, push_to, _ = _setup(tmp_path)
     bad = manifest + [{"path": "../../outside.txt", "bytes": 1}]
     assert fin.run(LOCAL, "b", str(pi), push_to, bad) == "failed"
+
+
+def test_landed_session_is_not_rerun(tmp_path):
+    cfg, pi, manifest, store, tt, fin, push_to, alerts = _setup(tmp_path)
+    assert fin.run(LOCAL, "b", str(pi), push_to, manifest) == "landed"
+    dest = tmp_path / "Data" / "flys_New" / "Cohort" / "b"
+    before = sorted(p.name for p in dest.iterdir())
+    assert fin.run(LOCAL, "b", str(pi), push_to, manifest) == "landed"
+    assert sorted(p.name for p in dest.iterdir()) == before
+    assert not tt.staging_dir("fake", "b").exists()
+    assert store.get_session("fake", "b")["state"] == "landed"
+    assert alerts == []
+
+
+def test_abort_shares_the_move_lock(tmp_path):
+    cfg, pi, manifest, store, tt, fin, push_to, _ = _setup(tmp_path)
+    result = []
+    with fin._move_lock:
+        th = threading.Thread(target=lambda: result.append(fin.abort("fake", "b")))
+        th.start()
+        th.join(0.3)
+        assert th.is_alive()
+    th.join(5)
+    assert result == ["aborted"]
+
+
+def test_relative_push_to_is_refused(tmp_path):
+    for bad in ("u@h:relative/dir/", "u@h:~/x/"):
+        with pytest.raises(FinalizeError):
+            dest_from_push_to(bad, "b", tmp_path / "Data")
+
+
+def test_destination_inside_staging_is_refused(tmp_path):
+    cfg, pi, manifest, store, tt, fin, push_to, alerts = _setup(tmp_path)
+    cfg2 = HubConfig(rigs=(LOCAL,), staging_root=tmp_path / "Data" / "stage",
+                     data_root=tmp_path / "Data", db_path=tmp_path / "db2.sqlite")
+    tt2 = TrialTransfer(cfg2, store, runner=FakeRunner(pi), sleep=lambda s: None)
+    fin2 = Finalizer(cfg2, store, tt2, disk_free=lambda p: 500e9,
+                     alert=lambda t, b: alerts.append(t))
+    bad = f"u@h:{tmp_path}/Data/stage/fake/"
+    assert fin2.run(LOCAL, "b", str(pi), bad, manifest) == "failed"
+    assert "staging" in store.get_session("fake", "b")["error"]
+
+
+def test_malformed_manifest_item_fails_not_sticks(tmp_path):
+    cfg, pi, manifest, store, tt, fin, push_to, alerts = _setup(tmp_path)
+    bad = manifest + [{"path": "x.txt"}]
+    assert fin.run(LOCAL, "b", str(pi), push_to, bad) == "failed"
+    assert store.get_session("fake", "b")["state"] == "failed"
+    assert alerts == ["Fake finalize failed"]

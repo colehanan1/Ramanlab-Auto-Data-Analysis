@@ -29,7 +29,7 @@ def subprocess_runner(argv: list[str], timeout: float, env: dict | None = None) 
 
 
 def rsync_pull_argv(rig, ssh_key: Path, remote_path: str, dest_dir: Path) -> list[str]:
-    argv = ["rsync", "-a", "--partial"]
+    argv = ["rsync", "-a", "--partial", "--no-links"]
     if rig.ip == "local":
         src = remote_path
     else:
@@ -47,6 +47,11 @@ class TransferError(RuntimeError):
     pass
 
 
+def _is_plain(name) -> bool:
+    return (isinstance(name, str) and name not in ("", ".", "..")
+            and "/" not in name and "\\" not in name and "\0" not in name)
+
+
 class TrialTransfer:
     def __init__(self, cfg, store, runner=subprocess_runner, sleep=time.sleep,
                  backoff=(5.0, 15.0, 45.0)):
@@ -54,6 +59,8 @@ class TrialTransfer:
         self.sleep, self.backoff = sleep, tuple(backoff)
 
     def staging_dir(self, rig_name: str, batch_dir: str) -> Path:
+        if not _is_plain(rig_name) or not _is_plain(batch_dir):
+            raise ValueError(f"not a plain name: {rig_name!r}/{batch_dir!r}")
         return self.cfg.staging_root / rig_name / batch_dir
 
     def pull(self, rig, output_dir: str, rel_path: str, staging: Path) -> None:
@@ -83,15 +90,28 @@ class TrialTransfer:
         for name, expected in ((t["frames_csv"], t.get("csv_bytes")),
                                (t["video"], t.get("video_bytes"))):
             self.pull(rig, output_dir, name, staging)
+            if not expected:
+                raise TransferError(f"Pi reported no size for {name}")
             got = (staging / name).stat().st_size
-            if expected and got != int(expected):
+            if got != int(expected):
                 raise TransferError(f"{name}: {got} bytes here, Pi reported {expected}")
         self.store.set_trial_state(rig.name, batch_dir, idx, "remuxing")
         return self.remux(video).name
 
     def process(self, rig, batch_dir: str, output_dir: str, t: dict) -> str:
-        self.store.upsert_trial(rig.name, batch_dir, t)
         idx = int(t["index"])
+        try:
+            self.staging_dir(rig.name, batch_dir)
+            for key in ("video", "frames_csv"):
+                if not _is_plain(t.get(key)):
+                    raise TransferError(f"refusing {key} name {t.get(key)!r}")
+        except (TransferError, ValueError) as e:
+            if _is_plain(batch_dir):
+                self.store.upsert_trial(rig.name, batch_dir, t)
+                self.store.set_trial_state(rig.name, batch_dir, idx, "failed", error=str(e))
+            log.warning("%s trial %s refused: %s", rig.name, idx, e)
+            return "failed"
+        self.store.upsert_trial(rig.name, batch_dir, t)
         if not t.get("closed", True):
             self.store.set_trial_state(
                 rig.name, batch_dir, idx, "waiting",
