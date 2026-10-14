@@ -23,6 +23,7 @@ config/*
 !config/example.yaml
 !config/environment.yml
 !config/example_abdomen.yaml
+!config/example_new_abdomen.yaml
 
 # Data, outputs
 cache/

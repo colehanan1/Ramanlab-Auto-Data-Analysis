@@ -31,6 +31,12 @@ python3 scripts/pipeline/run_workflows.py --config config/config_new.yaml
 # restyle figures from existing CSVs (see the freeze caveat below)
 python3 scripts/pipeline/run_workflows.py --config config/config_new.yaml --figures-only
 
+# abdomen/mounting stage alone, no PER (a full run with the overlay does PER first, then this)
+python3 scripts/pipeline/run_workflows.py --config config/config_new_abdomen.yaml --abdomen-only
+
+# one-time backfill: also write every trial's annotated abdomen video (the nightly writes tables only)
+python3 scripts/pipeline/run_workflows.py --config config/config_new_abdomen.yaml --abdomen-only --abdomen-video
+
 # tests
 python3 -m pytest tests/ -q
 ```
@@ -44,6 +50,9 @@ directly.
 - **`config/config_new.yaml` is the operative config.** `config.yaml`,
   `config_manual.yaml`, `example.yaml` and the `src/fbpipe/config.py` dataclass
   defaults carry *different* gate values (150 / 180 / 250 vs 160 / 160 / 160).
+- `config/config_new_abdomen.yaml` = `config_new.yaml` + `abdomen:`/`mounting:` overlay
+  (`extends:`); PER stages always receive `config_new.yaml` itself. Create it with
+  `cp config/example_new_abdomen.yaml config/config_new_abdomen.yaml`.
 - `config/*` is **gitignored** — code and tests get committed, the config half of
   any change lives only on disk. Say so explicitly when handing off work.
 - Never hardcode a gate value in an analysis or figure. Load it from
@@ -63,6 +72,10 @@ directly.
 - `Results/Figures/` — hand-run one-off sets (`*_mean_traces_new`,
   `*_rig_batch_breakdowns_new`, pubfigs). A pipeline step must never write here,
   even when the reference figures were hand-made there.
+- The abdomen overlay writes `Data/flys_Abdomen/`,
+  `Data/CSVs-New-Opto-Flys/{Abdomen-Geometry-New,Mounting-Posture}/` and
+  `Results/New-Opto-Fly-Figures/{Abdomen-Geometry-New,Mounting-Posture,Abdomen-Movement}/`
+  — never `flys_New` or `/securedstorage` (read-only).
 
 ## Rigs
 
