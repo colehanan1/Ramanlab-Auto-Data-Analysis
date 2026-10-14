@@ -1,0 +1,14 @@
+[Unit]
+Description=Rig monitor hub (fly rigs dashboard + live transfer)
+After=network-online.target
+
+[Service]
+WorkingDirectory=/home/ramanlab/Documents/cole/VSCode/Ramanlab-Auto-Data-Analysis
+ExecStart=/home/ramanlab/anaconda3/envs/yolo-env/bin/python -m rigmon --config config/rigmon.yaml
+Environment=PYTHONUNBUFFERED=1
+Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

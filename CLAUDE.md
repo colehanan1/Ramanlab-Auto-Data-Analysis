@@ -16,6 +16,7 @@ apply on nearly every task.
 | `src/fbpipe/steps/` | pipeline stages: `yolo_infer`, `reject_bad_proboscis`, `distance_stats`, `distance_normalize`, `compose_videos_rms`, … |
 | `src/fbpipe/analysis/` | table/trace readers (`traces.read_wide_table`), stats |
 | `src/fbpipe/utils/` | `rig_gates.py`, `rig_anchor.py`, `trial_metadata.py`, `light_stimulus.py` |
+| `src/rigmon/` | rig monitor hub: polls Pis, dashboard :8765, pop-ups, per-trial pull+remux into Data/rigmon_staging, finalize into flys_New for `--push-mode hub` |
 | `scripts/pipeline/run_workflows.py` | the pipeline driver — every step is orchestrated here |
 | `scripts/analysis/` | figure scripts; **many are hand-run, not wired into the pipeline** |
 | `config/` | gitignored except `example.*` |
@@ -30,6 +31,10 @@ python3 scripts/pipeline/run_workflows.py --config config/config_new.yaml
 
 # restyle figures from existing CSVs (see the freeze caveat below)
 python3 scripts/pipeline/run_workflows.py --config config/config_new.yaml --figures-only
+
+# rig monitor hub (dashboard on :8765; unit file scripts/rigmon/rigmon.service)
+systemctl --user status rigmon
+python3 -m rigmon --config config/rigmon.yaml
 
 # tests
 python3 -m pytest tests/ -q
@@ -71,6 +76,9 @@ directly.
 | `behaviorlocust` (Pi 1) | `100.121.64.36` | `combinedv2_1_pi1.py` | 25 | Thorlabs TTL, digital only — all PWM stripped 2026-07-29 | `~/Documents/Cole/` (capital C) | `~/cam-env/bin/python` |
 | `flybehavior2` (Pi 2) | `100.93.23.70` | `combinedv2_1.py` + `phase_status.py` (must ship together) | 13 | LDD-L PWM, `--light-brightness` default 15 (was 10 until 2026-10-02) | `~/Documents/cole/` (lowercase c) | `~/myenv/bin/python` |
 | `flybehavior3` (Pi 3) | `100.97.155.65` | `combinedv2_1_pi3.py` | — | LDD-L PWM, `--light-brightness` default **30** in the repo since 2026-10-02 (pinned by `tests/test_light_brightness_defaults.py`) | `~/Documents/cole/` | `~/myenv/bin/python` |
+
+`--push-mode` on the recording scripts defaults to `legacy`; `hub` mode lands
+sessions via the rig-monitor hub (`src/rigmon/`) instead.
 
 `ssh <host>` is keyless via `~/.ssh/pi_backup` (do not "fix" it back to
 `id_ed25519` — that breaks the backup cron). Address rigs by **tailnet IP**;
