@@ -51,7 +51,6 @@ STATE_VERSION = 2
 #: One line about this run's auto-freeze outcome, for the end-of-run ntfy.
 _RUN_SUMMARY = ""
 
-from fbpipe.analysis.mounting import parse_mounting_block
 from fbpipe.analysis.threshold import ThresholdRule
 from fbpipe.config import Settings, discover_flagged_directories, load_settings, resolve_config_path, _expand_datasets
 from fbpipe.config_layers import OVERLAY_BLOCKS, ConfigLayers, resolve_layers
@@ -5271,11 +5270,15 @@ def _mounting_command(
     if not _block_enabled(block):
         return None
     try:
+        # Imported here, not at the top of the module: a plain run never builds this command, so a broken
+        # fbpipe.analysis.mounting (a syntax error, a scipy that will not import) must not be able to stop the nightly.
+        from fbpipe.analysis.mounting import parse_mounting_block
         mounting = parse_mounting_block(block)
     except Exception as exc:
         # Not only ValueError: Path.expanduser raises RuntimeError for "~nouser/x", math.isfinite OverflowError for an
-        # int beyond the float range. Any of them is a bad value in the block, never a reason to fail the run.
-        LOGGER.warning("[mounting] not run: the mounting block is invalid (%s: %s)", type(exc).__name__, exc)
+        # int beyond the float range, and the import itself may fail. Any of them costs this command and nothing else.
+        LOGGER.warning("[mounting] not run: the mounting block is invalid or its module cannot be loaded (%s: %s)",
+                       type(exc).__name__, exc)
         return None
     predictions = str(getattr(getattr(settings, "reaction_prediction", None), "output_csv", "") or "")
     if not predictions.strip():

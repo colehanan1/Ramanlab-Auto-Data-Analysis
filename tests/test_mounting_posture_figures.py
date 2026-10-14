@@ -391,9 +391,13 @@ def test_the_figure_and_the_report_show_the_mantel_haenszel_difference_beside_th
     text = all_text(figures["baseline_state_vs_response"])
     for key in ("proboscis", "spontaneous"):
         panel = data.stats["baseline"][key]
-        assert f"within fly × phase (MH): {F.points_text(panel['diff'])}" in text, key
+        assert f"within fly × trial type (MH): {F.points_text(panel['diff'])}" in text, key
         assert f"{F.points_text(panel['diff'], 1)} (Mantel–Haenszel" in report, key
-        assert f"pooled difference of the bars is {F.points_text(panel['diff_pooled'], 1)}" in report, key
+        # diff_pooled pools only the fly × trial-type groups seen in both states -- not the trials the bars count
+        assert ("the pooled difference over those same fly × trial-type groups (not adjusted for trial type) is "
+                f"{F.points_text(panel['diff_pooled'], 1)}") in report, key
+    assert "pooled difference of the bars" not in report
+    assert "phase" not in text.lower() and "phase" not in report.lower(), "one name for the grouping: fly × trial type"
     assert "Mantel–Haenszel" in report.split("## Exclusions")[0]
     assert "- Held out (any sub-type) minus retracted, within fly × trial type: " in report      # a sentence, not a fragment
     assert "- Spontaneous PER minus none, within fly × trial type: " in report

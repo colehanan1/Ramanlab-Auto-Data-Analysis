@@ -898,6 +898,29 @@ def test_the_abdomen_flags_are_off_unless_given():
     assert on.abdomen_only is True and on.abdomen_video is True
 
 
+def test_importing_the_driver_does_not_load_the_mounting_analysis():
+    """A plain nightly never builds a mounting command, so an error in ``fbpipe.analysis.mounting`` (a syntax error, a
+    scipy that will not import) must not be able to stop it before it starts: the driver imports the analysis only
+    inside the builder. Checked in a fresh interpreter, where nothing else has imported it."""
+    env = dict(os.environ, MPLBACKEND="Agg", FBPIPE_DISABLE_NTFY="1",
+               PYTHONPATH=os.pathsep.join([str(rw.REPO_ROOT / "src"), str(rw.REPO_ROOT)]))
+    done = subprocess.run(
+        [sys.executable, "-c", "import sys, scripts.pipeline.run_workflows; "
+                               "print('mounting loaded:', 'fbpipe.analysis.mounting' in sys.modules)"],
+        cwd=rw.REPO_ROOT, env=env, capture_output=True, text=True, timeout=300)
+    assert done.returncode == 0, done.stderr
+    assert done.stdout.splitlines()[-1] == "mounting loaded: False", done.stdout
+
+
+def test_a_mounting_analysis_that_cannot_be_imported_costs_only_the_mounting_command(monkeypatch, caplog):
+    monkeypatch.setitem(sys.modules, "fbpipe.analysis.mounting", None)    # what importing a module that is broken halts on
+    with caplog.at_level(logging.INFO):
+        assert _mounting() is None
+        assert _cmds(BOTH) == [TRACK, NORMALIZE, STATS_CMD], "the abdomen commands share the stage and must survive"
+    warnings = _warnings(caplog)
+    assert len(warnings) == 2 and all("[mounting] not run" in w and "fbpipe.analysis.mounting" in w for w in warnings)
+
+
 def _main_source() -> str:
     return inspect.getsource(rw.main)
 

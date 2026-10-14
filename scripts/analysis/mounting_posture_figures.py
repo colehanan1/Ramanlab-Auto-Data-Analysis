@@ -278,17 +278,24 @@ def _within_fly(df: pd.DataFrame, state: str, *, n_perm: int, seed: int, up: str
     and response may both shift) cannot make the p small; only groups seen in both states count, and fewer than
     ``MIN_FLIES`` flies among them is "Not enough data to tell" whatever the p. ``diff`` is the Mantel-Haenszel risk
     difference over those same groups, so a pretest-vs-testing shift cannot inflate it either; ``diff_pooled`` is the
-    pooled difference of ``within_fly_permutation`` (what the bars show), kept for the report.
+    pooled difference of ``within_fly_permutation``: the plain difference of the response rates over those same groups
+    only (the groups seen in both states), NOT adjusted for trial type -- it is not the difference of the pooled bars,
+    which count every scored trial. Kept for the report.
+
+    The shuffle moves the state among a fly's trials of one trial type and ignores everything else that varies between
+    them -- which odor a trial had and where it sat in the session; odor order is fixed per protocol, so the test
+    cannot separate the state from either.
     """
-    groups = df.assign(fly_phase=df["fly_id"].astype(str) + "|" + df["trial_type"].astype(str))
-    diff_pooled, p = M.within_fly_permutation(groups, state=state, outcome="responded", fly="fly_phase", n=n_perm, seed=seed)
-    diff = M.stratified_risk_difference(groups, state=state, outcome="responded", stratum="fly_phase")
-    states = groups.groupby("fly_phase")[state].nunique()
-    used = groups[groups["fly_phase"].isin(states[states == 2].index)]
+    groups = df.assign(fly_trial_type=df["fly_id"].astype(str) + "|" + df["trial_type"].astype(str))
+    diff_pooled, p = M.within_fly_permutation(groups, state=state, outcome="responded", fly="fly_trial_type",
+                                              n=n_perm, seed=seed)
+    diff = M.stratified_risk_difference(groups, state=state, outcome="responded", stratum="fly_trial_type")
+    states = groups.groupby("fly_trial_type")[state].nunique()
+    used = groups[groups["fly_trial_type"].isin(states[states == 2].index)]
     n_flies = int(used["fly_id"].nunique())
     answer = verdict(p if n_flies >= MIN_FLIES else float("nan"), diff, up=up, down=down, none="No clear difference")
     return {"diff": diff, "diff_pooled": diff_pooled, "p_perm": p, "n_flies_both": n_flies,
-            "n_groups_both": int(used["fly_phase"].nunique()), "n_trials_both": int(len(used)), "verdict": answer}
+            "n_groups_both": int(used["fly_trial_type"].nunique()), "n_trials_both": int(len(used)), "verdict": answer}
 
 
 def _baseline_stats(trials: pd.DataFrame, *, n_perm: int, seed: int) -> dict:
@@ -629,7 +636,7 @@ def _panel_note(panel: dict, what: str) -> str:
     have = f"{count_noun(n, 'fly', 'flies')} {'has' if n == 1 else 'have'} both states"
     if n < MIN_FLIES:
         have += f" (needs at least {MIN_FLIES})"
-    return (f"{what}, within fly × phase (MH): {points_text(panel['diff'])}; within-fly permutation "
+    return (f"{what}, within fly × trial type (MH): {points_text(panel['diff'])}; within-fly permutation "
             f"{p_text(panel['p_perm'])} (uncorrected); {have}")
 
 
@@ -917,8 +924,8 @@ def _mounting_section(stats: Mapping, missing: Sequence[str] = ()) -> str:
             groups = count_noun(panel["n_groups_both"], "fly × trial-type group", "fly × trial-type groups")
             used = (f"{points_text(panel['diff'], 1)} (Mantel–Haenszel over {groups} of "
                     f"{count_noun(panel['n_flies_both'], 'fly', 'flies')} seen in both states, "
-                    f"{count_noun(panel['n_trials_both'], 'trial', 'trials')}); the pooled difference of the bars is "
-                    f"{points_text(panel['diff_pooled'], 1)}")
+                    f"{count_noun(panel['n_trials_both'], 'trial', 'trials')}); the pooled difference over those same "
+                    f"fly × trial-type groups (not adjusted for trial type) is {points_text(panel['diff_pooled'], 1)}")
             if panel["n_flies_both"] < MIN_FLIES:
                 used += f"; fewer than {MIN_FLIES} flies, so no answer is drawn"
         else:
