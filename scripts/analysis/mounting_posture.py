@@ -9,7 +9,10 @@ geometry tables (``<abdomen out_base>/<dataset>/<batch>/geometry``) to the produ
 number. Writes to ``--csv-out-dir`` (default ``mounting.csv_out_dir``):
 
 * ``fly_trial_posture.csv`` -- one row per fly-trial, every trial type: mounting pitch, proboscis rest, held-out
-  state, spontaneous PER and pull-ins in eye units (pixels / ``eye_scale_px``), abdomen-movement metrics, the score;
+  state, spontaneous PER and pull-ins in eye units (pixels / ``eye_scale_px``), abdomen-movement metrics (the last
+  nine columns, ``pb_window_min`` ... ``abd_straighten_events_during``, are the placebo design of the stimulus
+  comparison: events in the last L s before the stimulus and in the first L s of it, both against a resting bend
+  from the earlier part of the pre-stimulus window), the score;
 * ``fly_posture.csv``       -- one row per identity-consistent fly. Event rates divide pooled events by pooled
   window-minutes and proportions pool trials, so nothing is a mean of per-trial rates; the continuous abdomen
   measures are medians over the fly's pooled frames (they ride on every row of the fly's trial table as ``fly_*``
@@ -66,6 +69,8 @@ ABDOMEN = ["abd_tracked_frac_pre", "abd_tracked_frac_stim", "abd_quality_ok", "a
            "abd_straighten_events_pre", "abd_straighten_events_stim", "abd_curl_delta_deg", "tip_pitch_rest_deg",
            "tip_speed_med_pre_eu_s", "tip_speed_p95_pre_eu_s", "tip_moving_frac_pre", "tip_speed_med_stim_eu_s",
            "tip_speed_p95_stim_eu_s", "tip_moving_frac_stim", "per_abdomen_coupling_rho"]
+# The placebo design (``fbpipe.analysis.mounting.placebo_events``): baseline / placebo / during windows cut from the onset.
+PLACEBO = list(M.PLACEBO_COLUMNS)
 FLY_TRIAL_COLUMNS = [
     "dataset", "batch", "fly_number", "fly_id", "rig", "trial", "trial_type", "trial_index", "odor", "label", "stim_kind",
     "identity_consistent", "anchor_x", "anchor_y",
@@ -73,7 +78,7 @@ FLY_TRIAL_COLUMNS = [
     "trial_body_pitch_deg",
     "rest_eu", "rest_theta_deg", "retracted_ref_eu", "held_out", "held_subtype", "spont_per_events", "spont_per_any",
     "pullin_events_pre", "pullin_events_stim", "proboscis_rest_vs_body_deg", "score", "responded",
-    *ABDOMEN, *(f"fly_{c}" for c in POOLED)]
+    *ABDOMEN, *(f"fly_{c}" for c in POOLED), *PLACEBO]
 # Per-fly columns: (events, window-minutes) pairs for the pooled rates, (known, positive, fraction) for the proportions.
 RATES = {"spont_per_rate_per_min": ("spont_per_events", "pre_min"),
          "pullin_rate_pre_per_min": ("pullin_events_pre", "pre_min"),
@@ -231,9 +236,14 @@ def _abdomen(g: dict, dist: np.ndarray, scale: float, win: Window, mcfg) -> tupl
     """Abdomen-movement columns of one trial, and the finite frames the fly-level pools take.
 
     A window whose bend is tracked in fewer than ``abd_min_tracked_frac`` of its frames is unusable, and so is every
-    window when the resting bend (the pre-window median) is: those columns stay NaN, never zero.
+    window when the resting bend (the pre-window median) is: those columns stay NaN, never zero. The placebo columns
+    (equal-length windows against a baseline from earlier in the trial) are judged on their own windows and do not depend
+    on the pre-window gate.
     """
-    bend, out, pooled, ok = g["bend"], dict.fromkeys(ABDOMEN, np.nan), {}, {}
+    bend, pooled, ok = g["bend"], {}, {}
+    out = {**dict.fromkeys(ABDOMEN, np.nan),
+           **M.placebo_events(bend, onset=win.onset, offset=win.offset, fps=win.fps, rise_deg=mcfg.curl_rise_deg,
+                              min_s=mcfg.curl_min_s, min_tracked_frac=mcfg.abd_min_tracked_frac)}
     for name, sl in (("pre", win.pre), ("stim", win.stim)):
         out[f"abd_tracked_frac_{name}"] = float(np.isfinite(bend[sl]).mean()) if bend[sl].size else np.nan
         ok[name] = bool(bend[sl].size) and out[f"abd_tracked_frac_{name}"] >= mcfg.abd_min_tracked_frac

@@ -21,7 +21,12 @@ figure silently inherits rather than any file layout:
   two windows in proportion to their lengths (exact whatever the lengths, which
   is what a 4 s odor window against 30 s before it needs); ``scheme="swap"``
   exchanges the two windows with probability 1/2, is exact only when they are
-  equally long, and refuses windows that differ by more than 1 %.
+  equally long, and refuses windows that differ by more than 1 %;
+* the placebo design -- the stimulus is tested against an EQUAL-length window just
+  before it, and both windows are scored against a resting bend taken from earlier
+  in the trial, so "the stimulus does nothing" does mean "the same events per
+  minute": a baseline fitted to the pre-stimulus window itself (the old design)
+  makes that window look quieter than the out-of-sample stimulus window.
 """
 from __future__ import annotations
 
@@ -36,7 +41,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import pytest
-from scipy import stats
+from scipy import signal, stats
 
 SRC = Path(__file__).resolve().parents[1] / "src"
 sys.path.insert(0, str(SRC))
@@ -1031,17 +1036,17 @@ def _exact_swap_p(df):
 
 def _exact_split_p(df):
     """P(|d| >= |d_obs|) when every trial's events are re-assigned to its windows independently, each one to the stimulus
-    window with probability m_stim / (m_pre + m_stim) -- the definition, by enumerating every outcome."""
+    window with probability m_stim / (m_pre + m_stim) -- the definition: the stimulus window's total is a sum of
+    independent binomials (convolved exactly), and the difference is a function of that total alone."""
     e0, m0, e1, m1 = (df[c].to_numpy(float) for c in ("e_pre", "m_pre", "e_stim", "m_stim"))
     total, share = e0 + e1, m1 / (m0 + m1)
+    dist = np.array([1.0])
+    for k, q in zip(total.astype(int), share):
+        dist = np.convolve(dist, stats.binom.pmf(np.arange(k + 1), k, q))
+    stim = np.arange(len(dist), dtype=float)
+    d = stim / m1.sum() - (total.sum() - stim) / m0.sum()
     observed = e1.sum() / m1.sum() - e0.sum() / m0.sum()
-    hits = 0.0
-    for outcome in itertools.product(*[range(int(k) + 1) for k in total]):
-        weight = np.prod([stats.binom.pmf(s, int(k), q) for s, k, q in zip(outcome, total, share)])
-        stim = float(sum(outcome))
-        d = stim / m1.sum() - (total.sum() - stim) / m0.sum()
-        hits += weight * (abs(d) >= abs(observed) - 1e-12)
-    return float(hits)
+    return float(dist[np.abs(d) >= abs(observed) - 1e-12].sum())
 
 
 EXACT = {"swap": _exact_swap_p, "split": _exact_split_p}
@@ -1320,6 +1325,278 @@ def test_the_split_needs_whole_counts_of_events():
     with pytest.raises(ValueError):
         _perm(_windows([(-1, 0.5, 2, 0.1), (1, 0.5, 2, 0.1)]), n=9)
     assert not math.isnan(_swap(_windows([(1.5, 0.5, 2, 0.5)]), n=9)[0])    # the swap has no such need
+
+
+# ---------------------------------------------------------------------------
+# Placebo design: equal-length windows scored against an out-of-sample baseline
+# ---------------------------------------------------------------------------
+
+FPS10 = 10.0                      # 3 frames = the default curl_min_s of 0.3 s
+
+
+def _placebo(bend, *, onset=300, offset=340, fps=FPS10, gate=0.5, rise=10.0, min_s=0.3):
+    return M.placebo_events(bend, onset=onset, offset=offset, fps=fps, rise_deg=rise, min_s=min_s, min_tracked_frac=gate)
+
+
+def _flat(n=400, level=5.0):
+    return np.full(n, level)
+
+
+def _excursion_at(a, b, *, n=400, height=20.0, level=5.0):
+    """A flat bend with one excursion of ``height`` degrees over frames ``a:b``."""
+    bend = _flat(n, level)
+    bend[a:b] += height
+    return bend
+
+
+def test_the_placebo_columns_are_named_in_one_place():
+    assert tuple(_placebo(_flat())) == M.PLACEBO_COLUMNS
+    assert M.PLACEBO_COLUMNS == ("pb_window_min", "abd_tracked_frac_base", "abd_tracked_frac_placebo",
+                                 "abd_tracked_frac_during", "abd_rest_bend_base_deg", "abd_curl_events_placebo",
+                                 "abd_straighten_events_placebo", "abd_curl_events_during", "abd_straighten_events_during")
+
+
+@pytest.mark.parametrize("n, onset, offset, frames", [
+    (400, 300, 340, 40),        # a stimulus shorter than half the pre-stimulus window: all of it
+    (400, 300, None, 100),      # a stimulus that runs to the end of the trial
+    (400, 300, 450, 100),       # ... or past it: only the frames that exist
+    (400, 300, 400, 100),
+    (400, 60, 100, 30),         # a short pre-stimulus window: half of it
+    (400, 61, 400, 30),         # an odd one: floor(61 / 2)
+    (400, 2, 100, 1),
+    (400, 300, 330, 30),        # stimulus and half the pre-window both 30: either way 30
+])
+def test_the_placebo_window_is_the_shorter_of_the_stimulus_and_half_the_pre_stimulus_window(n, onset, offset, frames):
+    assert _placebo(_flat(n), onset=onset, offset=offset)["pb_window_min"] == pytest.approx(frames / FPS10 / 60)
+
+
+@pytest.mark.parametrize("n, onset, offset", [
+    (400, None, None),          # no stimulus known
+    (400, 1, 100),              # half of a one-frame pre-stimulus window is nothing
+    (400, 0, 100),              # no pre-stimulus window at all
+    (400, 300, 300),            # an empty stimulus
+    (400, 300, 250),            # a stimulus that ends before it starts
+    (400, 400, 450),            # a stimulus that starts after the trial
+    (0, 300, 340),              # no trial
+])
+def test_without_a_pre_stimulus_window_and_a_stimulus_there_is_nothing_to_compare(n, onset, offset):
+    out = _placebo(_flat(n), onset=onset, offset=offset)
+    assert all(math.isnan(v) for v in out.values()), out
+
+
+def test_the_baseline_runs_from_the_start_to_the_placebo_and_its_median_is_the_resting_bend():
+    ramp = (0.05 * np.arange(400.0)) ** 2                   # every frame has its own value, and mean != median
+    for onset, offset, frames in ((300, 340, 40), (100, 400, 50), (300, None, 100)):
+        out = _placebo(ramp, onset=onset, offset=offset)
+        assert out["abd_rest_bend_base_deg"] == pytest.approx(np.median(ramp[:onset - frames])), (onset, offset)
+        assert out["abd_rest_bend_base_deg"] != pytest.approx(np.mean(ramp[:onset - frames]), rel=0.01), (onset, offset)
+
+
+def test_the_resting_bend_is_the_median_so_a_long_excursion_in_the_baseline_does_not_move_it():
+    bend = _flat()
+    bend[40:100] = 50.0                                     # 60 of the 260 baseline frames far up: the mean would say 15.4
+    assert _placebo(bend)["abd_rest_bend_base_deg"] == 5.0
+
+
+def test_the_placebo_is_the_window_just_before_the_stimulus_and_the_during_window_its_first_frames():
+    """onset 300, stimulus 40 frames: baseline 0-260, placebo 260-300, during 300-340 (3 frames = curl_min_s)."""
+    expected = {(257, 260): (0, 0), (260, 263): (1, 0), (297, 300): (1, 0), (300, 303): (0, 1),
+                (337, 340): (0, 1), (340, 343): (0, 0), (259, 262): (0, 0), (298, 301): (0, 0)}   # a straddle: 2 + 1 frames
+    for (a, b), (placebo, during) in expected.items():
+        out = _placebo(_excursion_at(a, b))
+        assert (out["abd_curl_events_placebo"], out["abd_curl_events_during"]) == (placebo, during), (a, b)
+
+
+def test_a_run_that_straddles_the_onset_is_clipped_to_each_window_and_counts_in_each_when_each_part_is_long_enough():
+    out = _placebo(_excursion_at(296, 304))                    # 4 frames before the onset, 4 after
+    assert (out["abd_curl_events_placebo"], out["abd_curl_events_during"]) == (1, 1)
+    out = _placebo(_excursion_at(298, 306))                    # 2 frames before: too short; 6 after
+    assert (out["abd_curl_events_placebo"], out["abd_curl_events_during"]) == (0, 1)
+
+
+def test_both_windows_are_scored_against_the_same_baseline_not_each_against_its_own_median():
+    bend = _flat()
+    bend[260:340] = 25.0                                        # the placebo and the stimulus window both sit 20 degrees up
+    out = _placebo(bend)
+    assert out["abd_rest_bend_base_deg"] == 5.0
+    assert (out["abd_curl_events_placebo"], out["abd_curl_events_during"]) == (1, 1)   # each against its own median: 0, 0
+
+
+def test_a_baseline_that_included_the_placebo_would_have_been_fitted_to_it():
+    bend = _flat()
+    bend[50:] = 25.0                                    # onset 100, stimulus 300 frames: baseline 0-50, placebo 50-100
+    out = _placebo(bend, onset=100, offset=400)
+    assert out["abd_rest_bend_base_deg"] == 5.0                 # (a baseline of 0-100 would say 15, and the placebo is flat)
+    assert (out["abd_curl_events_placebo"], out["abd_curl_events_during"]) == (1, 1)
+
+
+def test_curls_and_straightenings_are_counted_apart_in_each_window():
+    bend = _flat()
+    bend[262:268] += 20.0                                       # a curl in the placebo window
+    bend[310:316] -= 20.0                                       # a straightening in the stimulus window
+    bend[320:326] -= 20.0                                       # and another one
+    out = _placebo(bend)
+    assert (out["abd_curl_events_placebo"], out["abd_straighten_events_placebo"]) == (1, 0)
+    assert (out["abd_curl_events_during"], out["abd_straighten_events_during"]) == (0, 2)
+
+
+def test_the_rise_and_the_minimum_duration_are_the_curl_settings():
+    shallow = _excursion_at(262, 270, height=9.0)               # below rise_deg = 10
+    assert _placebo(shallow)["abd_curl_events_placebo"] == 0 and _placebo(shallow, rise=8.0)["abd_curl_events_placebo"] == 1
+    brief = _excursion_at(262, 264)                             # 2 frames = 0.2 s
+    assert _placebo(brief)["abd_curl_events_placebo"] == 0 and _placebo(brief, min_s=0.2)["abd_curl_events_placebo"] == 1
+    assert _placebo(_excursion_at(262, 264), fps=20.0)["abd_curl_events_placebo"] == 0       # 2 frames at 20 fps are 0.1 s
+
+
+def test_a_missing_frame_breaks_a_placebo_window_run_it_is_never_bridged():
+    bend = _excursion_at(262, 272)
+    bend[267] = np.nan
+    assert _placebo(bend)["abd_curl_events_placebo"] == 2         # 5 frames and 4 frames, each long enough
+    bend[[263, 266, 269]] = np.nan
+    assert _placebo(bend)["abd_curl_events_placebo"] == 0         # pieces of 1, 2, 2 and 2 frames: a bridged run would count
+
+
+def test_the_tracked_fractions_are_those_of_each_window():
+    bend = _flat()
+    bend[0:65] = np.nan                                         # a quarter of the 260-frame baseline
+    bend[260:270] = np.nan                                      # a quarter of the 40-frame placebo window
+    out = _placebo(bend)
+    assert out["abd_tracked_frac_base"] == pytest.approx(0.75) and out["abd_tracked_frac_placebo"] == pytest.approx(0.75)
+    assert out["abd_tracked_frac_during"] == 1.0
+
+
+def test_a_baseline_tracked_in_less_than_the_gate_has_no_resting_bend_and_blanks_both_windows():
+    ok, poor = _flat(), _flat()
+    ok[:130] = np.nan                                           # exactly half of the 260 frames: at the gate, so usable
+    poor[:131] = np.nan
+    assert _placebo(ok)["abd_rest_bend_base_deg"] == 5.0 and _placebo(ok)["abd_curl_events_during"] == 0
+    out = _placebo(poor)
+    assert out["abd_tracked_frac_base"] == pytest.approx(129 / 260) and math.isnan(out["abd_rest_bend_base_deg"])
+    for column in M.PLACEBO_COLUMNS[5:]:
+        assert math.isnan(out[column]), column
+    assert out["abd_tracked_frac_placebo"] == 1.0 and out["pb_window_min"] == pytest.approx(40 / FPS10 / 60)
+
+
+def test_each_window_is_judged_on_its_own_tracking_against_the_same_baseline():
+    bend = _flat()
+    bend[260:281] = np.nan                                      # 21 of the 40 placebo frames missing: 0.475
+    out = _placebo(bend)
+    assert out["abd_rest_bend_base_deg"] == 5.0 and out["abd_tracked_frac_placebo"] == pytest.approx(0.475)
+    assert math.isnan(out["abd_curl_events_placebo"]) and math.isnan(out["abd_straighten_events_placebo"])
+    assert out["abd_curl_events_during"] == 0 and out["abd_straighten_events_during"] == 0     # measured, not blank
+    bend = _flat()
+    bend[300:321] = np.nan
+    out = _placebo(bend)
+    assert out["abd_curl_events_placebo"] == 0 and math.isnan(out["abd_curl_events_during"])
+    bend = _flat()
+    bend[300:320] = np.nan                                      # exactly half: usable
+    assert _placebo(bend)["abd_curl_events_during"] == 0
+
+
+def test_a_window_with_no_tracked_bend_has_no_events_even_when_the_gate_is_open():
+    bend = _flat()
+    bend[300:340] = np.nan
+    out = _placebo(bend, gate=0.0)
+    assert out["abd_tracked_frac_during"] == 0 and math.isnan(out["abd_curl_events_during"])     # not 0: nothing was seen
+    assert out["abd_curl_events_placebo"] == 0
+    bend[:] = np.nan
+    out = _placebo(bend, gate=0.0)
+    assert math.isnan(out["abd_rest_bend_base_deg"]) and math.isnan(out["abd_curl_events_placebo"])
+
+
+@pytest.mark.parametrize("fps", [0.0, -10.0, float("nan"), float("inf")])
+def test_a_frame_rate_that_cannot_be_used_leaves_every_column_empty(fps):
+    out = _placebo(_excursion_at(262, 270), fps=fps)
+    assert tuple(out) == M.PLACEBO_COLUMNS and all(math.isnan(v) for v in out.values()), out
+
+
+def test_the_input_is_left_alone_and_a_list_is_as_good_as_an_array():
+    bend = _excursion_at(262, 270)
+    before = bend.copy()
+    as_array = _placebo(bend)
+    np.testing.assert_array_equal(bend, before)
+    assert _placebo(list(bend)) == as_array
+
+
+# ---- calibration: a stimulus that changes nothing -------------------------------------------------------------------
+
+FPS40 = 40.0
+ONSET40 = 1200                  # 30 s before the stimulus; the trace ends 15 s into it, so L = 15 s = 600 frames
+
+
+def _ar1_bend(rng, *, tau_s=3.0, sd=4.0, drift=0.0, n=1800, level=6.0, fps=FPS40):
+    """A bend trace: an AR(1) with time constant ``tau_s`` and stationary SD ``sd`` degrees, plus (optionally) a random walk
+    of ``drift`` degrees per sqrt(second) -- a fly that slowly changes its resting posture."""
+    a = math.exp(-1.0 / (tau_s * fps))
+    noise = rng.normal(0.0, sd * math.sqrt(1.0 - a * a), n)
+    bend, _ = signal.lfilter([1.0], [1.0, -a], noise, zi=[a * rng.normal(0.0, sd)])
+    if drift:
+        bend = bend + np.cumsum(rng.normal(0.0, drift / math.sqrt(fps), n))
+    return level + bend
+
+
+def _stimulus_trials(rng, k=40, *, evoked=0.0, **sim):
+    """The placebo columns of ``k`` simulated trials; ``evoked`` = mean number of 0.5 s, +15 degree curls added to the
+    first 15 s of the stimulus."""
+    rows = []
+    for _ in range(k):
+        bend = _ar1_bend(rng, **sim)
+        for start in rng.integers(ONSET40, ONSET40 + 580, rng.poisson(evoked)):
+            bend[start:start + 20] += 15.0
+        rows.append(M.placebo_events(bend, onset=ONSET40, offset=None, fps=FPS40, rise_deg=10.0, min_s=0.3,
+                                     min_tracked_frac=0.5))
+    return pd.DataFrame(rows)
+
+
+def _swap_p(df, event, seed=0, n=199):
+    return M.paired_window_permutation(df, events_pre=f"abd_{event}_events_placebo", min_pre="pb_window_min",
+                                       events_stim=f"abd_{event}_events_during", min_stim="pb_window_min", n=n, seed=seed,
+                                       scheme="swap")[1]
+
+
+def _false_positive_rates(reps, **sim):
+    hits = dict.fromkeys(("curl", "straighten"), 0)
+    for rep in range(reps):
+        df = _stimulus_trials(np.random.default_rng(5000 + rep), **sim)
+        for event in hits:
+            hits[event] += _swap_p(df, event, seed=rep) <= 0.05
+    return {event: count / reps for event, count in hits.items()}
+
+
+@pytest.mark.parametrize("sim", [dict(tau_s=3.0, sd=4.0), dict(tau_s=3.0, sd=6.0), dict(tau_s=3.0, sd=4.0, drift=0.3)],
+                         ids=["tau 3 s, SD 4", "tau 3 s, SD 6", "tau 3 s, SD 4 and a slow drift"])
+def test_a_stimulus_that_changes_nothing_is_not_called_significant_by_the_placebo_design(sim):
+    """40 trials of a bend that is the same before and during the stimulus, 300 replicates: the false-positive rate of the
+    real events + placebo windows + window-swap test at 0.05 stays under 0.09 (it was 0.13 to 0.5 when the pre-stimulus
+    window was scored against its own median and the stimulus window against that)."""
+    rates = _false_positive_rates(300, **sim)
+    assert max(rates.values()) <= 0.09, rates
+
+
+def test_the_old_design_whole_pre_window_against_its_own_median_is_not_calibrated():
+    """For contrast, and so that the test above can fail: the pre-stimulus window (30 s) and the stimulus window (15 s) both
+    scored against median(pre) and compared with the default test."""
+    hits = 0
+    for rep in range(150):
+        rng, rows = np.random.default_rng(5000 + rep), []
+        for _ in range(40):
+            bend = _ar1_bend(rng)
+            rest = float(np.median(bend[:ONSET40]))
+            rows.append(M.curl_events(bend, rest, rise_deg=10.0, min_frames=12, end=ONSET40) +
+                        M.curl_events(bend, rest, rise_deg=10.0, min_frames=12, start=ONSET40))
+        events = np.array(rows, float)
+        df = pd.DataFrame({"e_pre": events[:, 0], "m_pre": 0.5, "e_stim": events[:, 2], "m_stim": 0.25})
+        hits += M.paired_window_permutation(df, events_pre="e_pre", min_pre="m_pre", events_stim="e_stim",
+                                            min_stim="m_stim", n=199, seed=rep)[1] <= 0.05
+    assert hits / 150 > 0.15
+
+
+def test_a_stimulus_that_adds_curls_is_found_by_the_placebo_design():
+    for rep in range(3):
+        df = _stimulus_trials(np.random.default_rng(700 + rep), evoked=2.0)
+        assert _swap_p(df, "curl", seed=rep, n=999) < 0.01, rep
+        assert df["abd_curl_events_during"].sum() > 5 * df["abd_curl_events_placebo"].sum()
+        assert _swap_p(df, "straighten", seed=rep) > 0.01             # and nothing else moved
 
 
 # ---------------------------------------------------------------------------

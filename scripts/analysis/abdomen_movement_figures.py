@@ -6,7 +6,8 @@ the data (``Yes -- flies tilted more head-up rest more curled`` / ``No clear lin
 
 1. ``abdomen_rest_bend_per_fly``          strip plot of the resting curl (bend) by rig;
 2. ``mount_pitch_vs_abdomen_rest_bend``    per fly, two panels: rig-centred mounting angle vs resting curl / tip pitch;
-3. ``abdomen_curl_events_by_window``       pooled curl / straightening events per minute before vs during the odor and light;
+3. ``abdomen_curl_events_by_window``       pooled curl / straightening events per minute just before vs at the start of the
+                                          odor and of the light (equal-length windows);
 4. ``abdomen_vs_spontaneous_per``          per fly: spontaneous curl rate vs spontaneous PER rate;
 5. ``per_abdomen_coupling``                per-fly median proboscis-abdomen coupling by the fly's dominant proboscis state;
 6. ``mount_pitch_vs_abdomen_activity``     per fly, two panels: rig-centred mounting angle vs bend SD / tip moving fraction.
@@ -14,11 +15,20 @@ the data (``Yes -- flies tilted more head-up rest more curled`` / ``No clear lin
 The conventions are those of ``mounting_posture_figures`` (whose primitives this module imports). The fly is the unit of
 inference: the per-fly scatters use the fly table, the rig-centred mounting angle (the tip pitch is rig-centred too:
 camera roll shifts both) and a permutation p stratified by dataset x rig. Event rates pool TRIALS (events over minutes of
-the same trials, never a mean of per-trial rates). The pre-vs-stimulus p of figure 3 is the within-trial permutation of
-``fbpipe.analysis.mounting.paired_window_permutation`` in its default scheme: each trial's events are re-assigned between
-its two windows in proportion to their lengths, so the 4 s of an odor are compared fairly with the 30 s before it.
-Only quality-ok windows (``abd_quality_ok``) of identity-consistent flies enter a number. Every p is uncorrected, and says
-so; a comparison with fewer than three flies is "Not enough data to tell". Figure 5 is descriptive.
+the same trials, never a mean of per-trial rates).
+
+Figure 3 is a placebo design. For each odor or light trial L is the shorter of the stimulus and half the pre-stimulus
+window; the fly's resting bend is the median bend over the pre-stimulus window BEFORE its last L s, and curls and
+straightenings are counted against that one resting bend in the last L s before the stimulus and in the first L s of it
+(``fbpipe.analysis.mounting.placebo_events``, columns written by ``mounting_posture.py``). The two windows are as long as
+each other and scored the same way, so if the stimulus does nothing they differ only by chance, and the p is the exact
+window-label swap permutation of ``paired_window_permutation(scheme="swap")``. Scoring the whole pre-stimulus window
+against its own median instead made a stimulus that changes nothing look significant in 13 to 39 % of simulated runs at
+alpha 0.05. The randomisation is by trial (trials, not flies, are shuffled) and the design assumes a stable resting
+posture over the trial: a drifting bend still separates the two windows.
+
+Only quality-ok windows of identity-consistent flies enter a number. Every p is uncorrected, and says so; a comparison
+with fewer than three flies is "Not enough data to tell". Figure 5 is descriptive.
 
 ``compute_abdomen_stats`` does all the arithmetic once; ``build_abdomen_figures`` / ``render_abdomen_figures`` and
 ``abdomen_report_section`` only format it. An input without a usable abdomen window draws nothing (and removes the six
@@ -61,7 +71,10 @@ EVENTS = ("curl", "straighten")
 EVENT_LABELS = {"curl": "Curls", "straighten": "Straightenings"}
 EVENT_NOUN = {"curl": "Curl", "straighten": "Straightening"}
 WINDOW_LABELS = {"odor": "the odor", "light": "the light"}
-MORE, LESS = "more often than before the stimulus", "less often than before the stimulus"
+WINDOWS = ("placebo", "during")                 # the last L s before the stimulus, the first L s of it (one baseline)
+WINDOW_NAMES = {"placebo": "Just before", "during": "Start of"}
+MINUTES = "pb_window_min"                       # L in minutes: the length of both windows of a trial
+MORE, LESS = "more often than just before the stimulus", "less often than just before the stimulus"
 CENTRED_TIP = "tip_pitch_centred_deg"           # the fly table's tip pitch minus its rig's median (derived here)
 
 
@@ -86,6 +99,16 @@ def _signed_rate(v: float) -> str:
     return ("-" if v < 0 and float(text) > 0 else "+") + text
 
 
+def _seconds_text(w: Mapping, *, median: bool = True) -> str:
+    """``15 s`` / ``3.8–15 s (median 7.5 s)`` / ``n/a``: the window length L of one stimulus kind, to 0.1 s."""
+    if not np.isfinite(w["median"]):
+        return "n/a"
+    low, mid, high = (round(float(w[k]), 1) for k in ("min", "median", "max"))
+    if low == high:
+        return f"{low:g} s"
+    return f"{low:g}–{high:g} s" + (f" (median {mid:g} s)" if median else "")
+
+
 def _centred_tip(fly: pd.DataFrame) -> np.ndarray:
     """The resting tip pitch of every fly minus its rig's median (camera roll shifts it like the mount pitch)."""
     tip = pd.Series(FIG.float_column(fly, "tip_pitch_rest_deg"), index=fly.index)
@@ -105,42 +128,67 @@ def _scatter(fly: pd.DataFrame, column: str, *, x: str = "mount_pitch_centred_de
 # Statistics (the one place any number is computed)
 # ---------------------------------------------------------------------------
 
+def _count(mask: np.ndarray) -> int:
+    return int(np.count_nonzero(mask))
+
+
 def _window_counts(trials: pd.DataFrame) -> dict:
-    """How many pre-stimulus / stimulus windows exist, are usable and were dropped (from the quality flags)."""
-    ok, ok_stim = _flag(trials, "abd_quality_ok"), _flag(trials, "abd_quality_ok_stim")
-    has_pre = np.isfinite(FIG.float_column(trials, "abd_tracked_frac_pre"))
-    has_stim = np.isfinite(FIG.float_column(trials, "abd_tracked_frac_stim"))
-    return {"pre": {"with_window": int(has_pre.sum()), "usable": int((has_pre & ok).sum()),
-                    "dropped": int((has_pre & ~ok).sum())},
-            "stim": {"with_window": int(has_stim.sum()), "usable": int((has_stim & ok_stim).sum()),
-                     "dropped": int((has_stim & ok & ~ok_stim).sum()), "blank_by_pre": int((has_stim & ~ok).sum())}}
+    """How many windows of each kind exist, are usable and were dropped (from the quality flag and the NaN gates).
+
+    ``pre`` is the whole pre-stimulus window (the per-fly figures), ``base`` the part of it before the last L s (the
+    resting bend of the stimulus comparison), ``placebo`` the last L s before the stimulus and ``during`` the first L s of
+    it. A ``placebo`` / ``during`` window that exists is usable (scored), dropped (its own tracking was too poor) or blank
+    (``blank_by_base``: there was no usable baseline to score it against).
+    """
+    has = {name: np.isfinite(FIG.float_column(trials, f"abd_tracked_frac_{name}"))
+           for name in ("pre", "base", "placebo", "during")}
+    ok, rest = _flag(trials, "abd_quality_ok"), np.isfinite(FIG.float_column(trials, "abd_rest_bend_base_deg"))
+    out = {"pre": {"with_window": _count(has["pre"]), "usable": _count(has["pre"] & ok),
+                   "dropped": _count(has["pre"] & ~ok)},
+           "base": {"with_window": _count(has["base"]), "usable": _count(has["base"] & rest),
+                    "dropped": _count(has["base"] & ~rest)}}
+    for name in WINDOWS:
+        scored = np.isfinite(FIG.float_column(trials, f"abd_curl_events_{name}"))
+        out[name] = {"with_window": _count(has[name]), "usable": _count(has[name] & rest & scored),
+                     "dropped": _count(has[name] & rest & ~scored), "blank_by_base": _count(has[name] & ~rest)}
+    return out
 
 
 def _pairs(trials: pd.DataFrame) -> pd.DataFrame:
-    """The trials whose pre-stimulus AND stimulus windows are both quality-ok and have a length: what a rate uses."""
-    minutes = np.column_stack([FIG.float_column(trials, "pre_min"), FIG.float_column(trials, "stim_min")])
-    has_length = (np.nan_to_num(minutes, nan=0.0) > 0).all(axis=1)
-    return trials[_flag(trials, "abd_quality_ok") & _flag(trials, "abd_quality_ok_stim") & has_length]
+    """The trials whose just-before AND start-of-stimulus windows were both scored and have a length: what a rate uses."""
+    scored = np.zeros(len(trials), dtype=bool)
+    for event in EVENTS:
+        scored |= (np.isfinite(FIG.float_column(trials, f"abd_{event}_events_placebo"))
+                   & np.isfinite(FIG.float_column(trials, f"abd_{event}_events_during")))
+    return trials[(np.nan_to_num(FIG.float_column(trials, MINUTES), nan=0.0) > 0) & scored]
 
 
-def _window(use: pd.DataFrame, events: str, minutes: str) -> dict:
-    ev, mins = float(use[events].sum()), float(use[minutes].sum())
+def _window(use: pd.DataFrame, events: str) -> dict:
+    ev, mins = float(use[events].sum()), float(use[MINUTES].sum())
     return {"events": ev, "minutes": mins, "rate": FIG.pooled_rate(ev, mins)}
 
 
+def _window_seconds(use: pd.DataFrame) -> dict:
+    """The length L of the windows of *use* in seconds: smallest, median and largest (NaN without a trial)."""
+    seconds = 60.0 * FIG.float_column(use, MINUTES)
+    if not seconds.size:
+        return {"min": np.nan, "median": np.nan, "max": np.nan}
+    return {"min": float(seconds.min()), "median": float(np.median(seconds)), "max": float(seconds.max())}
+
+
 def _event_cell(pairs: pd.DataFrame, kind: str, event: str, *, n_perm: int, seed: int) -> dict:
-    """Pooled event rates before and during the stimulus of *kind* (the same trials) and the within-trial permutation p."""
-    col_pre, col_stim = f"abd_{event}_events_pre", f"abd_{event}_events_stim"
+    """Pooled event rates in the two windows of the stimulus of *kind* (the same trials) and the window-swap p."""
+    col_before, col_during = f"abd_{event}_events_placebo", f"abd_{event}_events_during"
     use = pairs[pairs["stim_kind"] == kind] if "stim_kind" in pairs else pairs.iloc[0:0]
-    use = use[np.isfinite(FIG.float_column(use, col_pre)) & np.isfinite(FIG.float_column(use, col_stim))]
+    use = use[np.isfinite(FIG.float_column(use, col_before)) & np.isfinite(FIG.float_column(use, col_during))]
     diff, p = np.nan, np.nan
     if len(use):
-        diff, p = M.paired_window_permutation(use, events_pre=col_pre, min_pre="pre_min", events_stim=col_stim,
-                                              min_stim="stim_min", n=n_perm, seed=seed)
+        diff, p = M.paired_window_permutation(use, events_pre=col_before, min_pre=MINUTES, events_stim=col_during,
+                                              min_stim=MINUTES, n=n_perm, seed=seed, scheme="swap")
     n_flies = int(use["fly_id"].nunique())
     answer = FIG.verdict(p if n_flies >= FIG.MIN_FLIES else np.nan, diff, up=MORE, down=LESS, none="No clear difference")
     return {"kind": kind, "event": event, "n_trials": int(len(use)), "n_flies": n_flies,
-            "pre": _window(use, col_pre, "pre_min"), "stim": _window(use, col_stim, "stim_min"),
+            "placebo": _window(use, col_before), "during": _window(use, col_during), "window_s": _window_seconds(use),
             "diff": diff, "p_perm": p, "verdict": answer}
 
 
@@ -148,8 +196,9 @@ def _event_stats(trials: pd.DataFrame, *, n_perm: int, seed: int) -> dict:
     pairs = _pairs(trials)
     out: dict = {event: {kind: _event_cell(pairs, kind, event, n_perm=n_perm, seed=seed) for kind in KINDS}
                  for event in EVENTS}
-    other = ~pairs["stim_kind"].isin(KINDS) if "stim_kind" in pairs else np.ones(len(pairs), dtype=bool)
-    out["n_other"] = int(np.sum(other))
+    kinds = pairs["stim_kind"] if "stim_kind" in pairs else pd.Series(np.nan, index=pairs.index, dtype=object)
+    out["window_s"] = {kind: _window_seconds(pairs[(kinds == kind).to_numpy()]) for kind in KINDS}
+    out["n_other"] = int(np.sum(~kinds.isin(KINDS)))
     return out
 
 
@@ -183,7 +232,9 @@ def _coupling_answer(c: Mapping) -> str:
 def compute_abdomen_stats(fly_trial: pd.DataFrame, fly: pd.DataFrame, *, n_perm: int, seed: int = 0,
                           min_tracked_frac: Optional[float] = None) -> dict:
     """Every number the figures and the section show. ``placeholders`` names the figures that cannot be drawn and why;
-    ``no_abdomen_data`` is True when no identity-consistent fly-trial has a usable pre-stimulus window.
+    ``no_abdomen_data`` is True when no identity-consistent fly-trial has a usable pre-stimulus window. The event cells
+    (``events[event][kind]``) compare the ``placebo`` window (the last L s before the stimulus) with the ``during`` window
+    (the first L s of it) of the same trials.
 
     *min_tracked_frac* is the ``abd_min_tracked_frac`` gate the windows were judged by (recorded for the section).
     """
@@ -233,7 +284,7 @@ def _placeholders(stats: dict) -> None:
                                      f"{' and '.join(str(n) for n in panels)})", "n": FIG.n_flies_label(max(panels))}
     if not any(c["n_trials"] for event in EVENTS for c in stats["events"][event].values()):
         holes["abdomen_curl_events_by_window"] = {
-            "reason": "no odor or light trial has a usable abdomen window before and during the stimulus",
+            "reason": "no odor or light trial has a usable baseline, just-before window and start-of-stimulus window",
             "n": FIG.n_label(0, 0)}
     if stats["restless"]["n_flies"] < enough:
         holes["abdomen_vs_spontaneous_per"] = {
@@ -422,15 +473,17 @@ def _fig_events(trials, fly, stats):
     panel_w = slot * (2.4 * (len(kinds) - 1) + 2.2)
     width = left + 2 * panel_w + gap + right
     fig = FIG.new_figure(width, height)
-    answer = "\n".join(f"{EVENT_LABELS[e]} before vs during {WINDOW_LABELS[k]}: {ev[e][k]['verdict']}"
+    answer = "\n".join(f"{EVENT_LABELS[e]} at the start of {WINDOW_LABELS[k]}: {ev[e][k]['verdict']}"
                        for e in EVENTS for k in kinds)
+    lengths = ", ".join(f"{_seconds_text(ev['window_s'][k], median=False)} for {WINDOW_LABELS[k]}" for k in kinds)
     used = FIG.title_block(
         fig, TITLES["abdomen_curl_events_by_window"], answer,
         "A curl is a sustained rise of the bend above the fly's resting bend, a straightening a sustained fall below it. "
-        "Bars pool trials (events over minutes of the same trials before and during the stimulus). Above each pair: during "
-        "minus before, and the p-value of a permutation within trials (each trial's events are re-assigned between its "
-        "two windows in proportion to their lengths), uncorrected")
-    rates = [ev[e][k][w]["rate"] for e in EVENTS for k in kinds for w in ("pre", "stim")]
+        f"Each pair compares the last L s before the stimulus with the first L s of it (L = {lengths}), both against the "
+        "fly's resting bend from earlier in the trial. Bars pool trials (events over minutes of the same trials). Above "
+        "each pair: during minus just before, and the p-value of a test that swaps the two window labels at random within "
+        "each trial (trial-level: trials, not flies, are shuffled), uncorrected")
+    rates = [ev[e][k][w]["rate"] for e in EVENTS for k in kinds for w in WINDOWS]
     ceiling = max(1.0, 1.4 * max([r for r in rates if np.isfinite(r)] + [0.0]))
     corner = left
     for event in EVENTS:
@@ -439,12 +492,12 @@ def _fig_events(trials, fly, stats):
         labels = []
         for j, kind in enumerate(kinds):
             cell = ev[event][kind]
-            for k, window in enumerate(("pre", "stim")):
+            for k, window in enumerate(WINDOWS):
                 rate, x = cell[window]["rate"], positions[2 * j + k]
                 if np.isfinite(rate):
-                    FIG.draw_bar(ax, x, rate, bar_w, held=window == "stim", hatch="//" if kind == "light" else None)
+                    FIG.draw_bar(ax, x, rate, bar_w, held=window == "during", hatch="//" if kind == "light" else None)
                     FIG.tip_label(ax, x, rate, FIG.num_text(rate), ceiling)
-                labels.append(f"{'Before' if window == 'pre' else 'During'} {WINDOW_LABELS[kind]}\n"
+                labels.append(f"{WINDOW_NAMES[window]}\n{WINDOW_LABELS[kind]}\n"
                               f"{FIG.n_lines(cell['n_trials'], cell['n_flies'])}")
             ax.text(positions[2 * j] + 0.5, 0.99 * ceiling, _pair_note(cell), ha="center", va="top", fontsize=8,
                     color=FIG.INK_SECONDARY, linespacing=1.3, zorder=5,
@@ -515,15 +568,26 @@ def _gate_text(gate: Optional[float]) -> str:
             else "tracked in too few of their frames")
 
 
+def _blank_clause(n: int) -> str:
+    """``; 2 more windows were blank because ...`` (nothing when none was), in the right number."""
+    return f"; {n} more {'window was' if n == 1 else 'windows were'} blank because their baseline was dropped" if n else ""
+
+
 def _windows_lines(stats: Mapping) -> List[str]:
     w, gate = stats["windows"], _gate_text(stats["min_tracked_frac"])
-    pre, stim = w["pre"], w["stim"]
-    blank = stim["blank_by_pre"]
-    return [f"- Pre-stimulus windows: {pre['dropped']} of {pre['with_window']} pre-stimulus windows dropped ({gate}, "
-            f"`abd_min_tracked_frac`); {pre['usable']} usable",
-            f"- Stimulus windows: {stim['dropped']} of {stim['with_window']} stimulus windows dropped ({gate}); "
-            f"{blank} more {'window was' if blank == 1 else 'windows were'} blank because their pre-stimulus baseline "
-            f"was dropped; {stim['usable']} usable"]
+    pre, base = w["pre"], w["base"]
+    lines = [f"- Pre-stimulus windows: {pre['dropped']} of {pre['with_window']} pre-stimulus windows dropped ({gate}, "
+             f"`abd_min_tracked_frac`); {pre['usable']} usable",
+             f"- Baseline windows (the part of the pre-stimulus window before its last L s, which sets the resting bend "
+             f"of the stimulus comparison): {base['dropped']} of {base['with_window']} baseline windows dropped ({gate}); "
+             f"{base['usable']} usable"]
+    for name, label, what in (("placebo", "Just-before windows (the last L s before the stimulus)", "just-before"),
+                              ("during", "Start-of-stimulus windows (the first L s of the stimulus)",
+                               "start-of-stimulus")):
+        win = w[name]
+        lines.append(f"- {label}: {win['dropped']} of {win['with_window']} {what} windows dropped ({gate})"
+                     f"{_blank_clause(win['blank_by_base'])}; {win['usable']} usable")
+    return lines
 
 
 def _no_data_section(stats: Mapping, figures_note: str) -> str:
@@ -545,23 +609,24 @@ def _rate_cell(w: Mapping) -> str:
 
 def _events_block(stats: Mapping) -> List[str]:
     ev = stats["events"]
-    L = ["| Stimulus | Event | Before the stimulus | During the stimulus | Difference | Trials / flies | "
-         "Event-split permutation p |", "|---|---|---|---|---|---|---|"]
+    L = ["| Stimulus | Event | Just before the stimulus | Start of the stimulus | Difference | Trials / flies | "
+         "Window-swap permutation p |", "|---|---|---|---|---|---|---|"]
     for kind in KINDS:
         for event in EVENTS:
             c = ev[event][kind]
             if not c["n_trials"]:
                 L.append(f"| {kind} | {EVENT_LABELS[event]} | no trial | no trial | n/a | {FIG.n_label(0, 0)} | n/a |")
                 continue
-            L.append(f"| {kind} | {EVENT_LABELS[event]} | {_rate_cell(c['pre'])} | {_rate_cell(c['stim'])} | "
+            L.append(f"| {kind} | {EVENT_LABELS[event]} | {_rate_cell(c['placebo'])} | {_rate_cell(c['during'])} | "
                      f"{_signed_rate(c['diff'])}/min | {FIG.n_label(c['n_trials'], c['n_flies'])} | "
                      f"{FIG.p_text(c['p_perm'], 4)} (uncorrected) |")
     L += [""]
+    L.append("- Window length L: " + ", ".join(f"{kind} {_seconds_text(ev['window_s'][kind])}" for kind in KINDS))
     for kind in KINDS:
         for event in EVENTS:
             c = ev[event][kind]
             if c["n_trials"]:
-                L.append(f"- {EVENT_LABELS[event]} before vs during {WINDOW_LABELS[kind]}: **{c['verdict']}**"
+                L.append(f"- {EVENT_LABELS[event]} at the start of {WINDOW_LABELS[kind]}: **{c['verdict']}**"
                          + (f" (fewer than {FIG.MIN_FLIES} flies)" if c["n_flies"] < FIG.MIN_FLIES else ""))
     if ev["n_other"]:
         L.append(f"- {FIG.count_noun(ev['n_other'], 'usable trial', 'usable trials')} with another stimulus (odor + light "
@@ -606,21 +671,33 @@ def abdomen_report_section(fly_trial: pd.DataFrame, fly: pd.DataFrame, stats: Ma
         L += [note, ""]
     L += ["Abdomen bend is 180° minus the eye–abdomen–tip interior angle: 0 = straight, positive = curled toward the "
           "proboscis (ventral). Tip pitch is the direction of the tip from the abdomen centre against the image horizontal "
-          "(positive = the tip points down). Only windows judged usable (`abd_quality_ok`) of identity-consistent flies "
-          "enter a number.", "",
+          "(positive = the tip points down). Only windows judged usable of identity-consistent flies enter a number: "
+          "`abd_quality_ok` for the pre-stimulus window, the same tracked-fraction gate for each window of the stimulus "
+          "comparison.", "",
           "How to read the statistics:", "",
           "- The fly is the unit of inference. Per-fly figures use the fly table; pooled rates use the trials of "
           "identity-consistent flies and divide pooled events by pooled minutes (never a mean of per-trial rates).",
-          "- A curl is a sustained rise of the bend above the fly's resting bend (the median bend before the stimulus), a "
-          "straightening a sustained fall below it; thresholds `curl_rise_deg` and `curl_min_s` of the `mounting:` block.",
+          "- A curl is a sustained rise of the bend above the fly's resting bend, a straightening a sustained fall below "
+          "it; thresholds `curl_rise_deg` and `curl_min_s` of the `mounting:` block. In the per-fly figures the resting "
+          "bend is the fly's median bend before the stimulus; the stimulus comparison uses the one described next.",
+          "- Stimulus comparison (placebo design): L is the shorter of the stimulus and half the pre-stimulus window "
+          "(its value is given under the events table). The resting bend of this comparison is the fly's median bend over "
+          "the pre-stimulus window before its last L s, so it is fitted to neither window being compared. Curls and "
+          "straightenings are counted against it in the last L s before the stimulus (\"just before\") and in the first L s "
+          "of the stimulus (\"start of\"). The two windows are equally long and scored the same way, so if the stimulus "
+          "does nothing they differ only by chance.",
           "- Mount pitch is rig-centred (fly value minus the median of its rig) because camera roll differs per rig; the "
           "tip pitch is rig-centred the same way, since the roll shifts it too.",
           f"- Stratified permutation p: the x variable is shuffled among flies of the same dataset × rig, two-sided on |ρ|, "
           f"{n_perm} permutations, seed {seed}.",
-          f"- Event-split permutation p: the events of each trial are re-assigned between its two windows at random, each "
-          f"to the stimulus window with probability proportional to that window's length (a trial's total, and what makes "
-          f"it busy, are kept, and a short stimulus window is compared fairly with the longer one before it), and the "
-          f"pooled rate difference (during minus before) is recomputed; two-sided, {n_perm} permutations, seed {seed}.",
+          f"- Window-swap permutation p: the labels of a trial's two windows (just before / start of the stimulus) are "
+          f"swapped with probability 1/2, independently in each trial, and the pooled rate difference (start minus just "
+          f"before) is recomputed; two-sided, {n_perm} permutations, seed {seed}. The randomisation is trial-level "
+          f"(trials, not flies, are shuffled): it treats trials as independent, so a fly with many trials counts for "
+          f"more and a fly's trials are not kept together.",
+          "- Limitation: the stimulus comparison assumes the fly's resting posture is steady over the trial. A bend that "
+          "drifts away from the baseline can make the start of the stimulus differ from the time just before it even "
+          "when the stimulus does nothing, so a small p needs a look at the traces when the posture visibly drifts.",
           f"- \"Yes\" in a figure title means the permutation p is below {stats['alpha']} (uncorrected) with at least "
           f"{FIG.MIN_FLIES} flies to compare; fewer is \"Not enough data to tell\". **All p-values are uncorrected.**", "",
           "### Windows dropped for poor tracking", "",
@@ -642,9 +719,10 @@ def abdomen_report_section(fly_trial: pd.DataFrame, fly: pd.DataFrame, stats: Ma
           *_panel_bullets("Resting curl", stats["bend_vs_pitch"], "mounting angle"),
           *_panel_bullets("Resting tip pitch", stats["tip_vs_pitch"], "mounting angle"),
           f"### {q['abdomen_curl_events_by_window']}", "",
-          "Figure `abdomen_curl_events_by_window.png`: curl and straightening events per minute, pooled over trials, before "
-          "vs during the odor and before vs during the light (light-only trials; hatched bars), each pair from the same "
-          "trials with a usable abdomen window on both sides.", "", *_apart(ph(stats, "abdomen_curl_events_by_window")),
+          "Figure `abdomen_curl_events_by_window.png`: curl and straightening events per minute, pooled over trials, in the "
+          "last L s before vs the first L s of the odor and of the light (light-only trials; hatched bars), each pair from "
+          "the same trials, both windows scored against the fly's resting bend from earlier in the trial.", "",
+          *_apart(ph(stats, "abdomen_curl_events_by_window")),
           *_events_block(stats), "",
           *FIG.scatter_lines("abdomen_vs_spontaneous_per", q["abdomen_vs_spontaneous_per"], stats["restless"],
                              "per fly, spontaneous curl rate vs spontaneous PER rate (events per minute, pooled over the "

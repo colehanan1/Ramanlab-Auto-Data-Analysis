@@ -9,10 +9,11 @@ Rules pinned here, on synthetic fly-trial / fly tables (the fly table is always 
   is rig-centred too: camera roll shifts both) and a permutation p stratified by dataset x rig; the coupling strip is
   descriptive;
 * displayed event rates pool trials (events over minutes of the SAME trials, odor and light windows apart, never a mean of
-  per-trial rates) and the pre-vs-stimulus p is the DEFAULT within-trial permutation of those trials, in which each
-  trial's events are re-assigned between its windows in proportion to their lengths (swapping whole windows would call a
-  stimulus that changes nothing "significant" about one time in five when 30 s before the odor are set against its 4 s,
-  and is refused for windows of different lengths);
+  per-trial rates); the stimulus comparison is a placebo design: the last L s before the stimulus against the first L s
+  of it, both scored against the fly's resting bend from the EARLIER part of the pre-stimulus window (a pre window scored
+  against a baseline fitted to itself looks "significant" in 13 to 39 % of simulated runs when the stimulus does nothing),
+  and its p is the exact window-label swap permutation (the two windows of a trial are as long as each other, so
+  exchanging them is a fair shuffle; the randomisation is by trial, not by fly);
 * only quality-ok windows of identity-consistent flies enter a number, and the windows the ``abd_min_tracked_frac`` gate
   dropped are counted in the report;
 * a comparison with fewer than 3 flies to compare is "Not enough data to tell", every p is "uncorrected", and no text says
@@ -26,6 +27,7 @@ Rules pinned here, on synthetic fly-trial / fly tables (the fly table is always 
 from __future__ import annotations
 
 import logging
+import math
 import re
 import sys
 from pathlib import Path
@@ -38,6 +40,7 @@ import pytest
 from matplotlib.collections import PathCollection
 from matplotlib.colors import to_hex, to_rgba
 from matplotlib.text import Text
+from scipy import signal
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
@@ -53,6 +56,7 @@ NAMES = ("abdomen_rest_bend_per_fly", "mount_pitch_vs_abdomen_rest_bend", "abdom
          "abdomen_vs_spontaneous_per", "per_abdomen_coupling", "mount_pitch_vs_abdomen_activity")
 TWO_PANEL = {"mount_pitch_vs_abdomen_rest_bend", "abdomen_curl_events_by_window", "mount_pitch_vs_abdomen_activity"}
 N_PERM = 300
+PLACEBO_STREAM = 11                       # the second random stream of ``abd_cohort`` (the placebo-design columns)
 
 # ---------------------------------------------------------------------------
 # Synthetic tables
@@ -62,7 +66,8 @@ CELLS = (("DS-A", "BehaviorLocust"), ("DS-A", "Flybehavior2"), ("DS-B", "Flybeha
 RIG_SHIFT = {"BehaviorLocust": 2.0, "Flybehavior2": -4.0, "Flybehavior3": 12.0}       # camera roll differs per rig
 TIP_SHIFT = {"BehaviorLocust": 5.0, "Flybehavior2": -9.0, "Flybehavior3": 20.0}      # ... and shifts the tip pitch too
 COUPLING = {"retracted": 0.05, "held_down": 0.30, "held_back": -0.20}
-ABDOMEN_COLUMNS = [c for c in MP.ABDOMEN if c not in ("abd_quality_ok", "abd_quality_ok_stim")]
+ABDOMEN_COLUMNS = ([c for c in MP.ABDOMEN if c not in ("abd_quality_ok", "abd_quality_ok_stim")]
+                   + list(MP.PLACEBO))                                  # every abdomen number a trial row carries
 
 
 def trial_table(rows) -> pd.DataFrame:
@@ -86,15 +91,20 @@ def row(fly_id, rig="R", dataset="D", **cols):
             "trial_type": "testing", "stim_kind": "odor", "identity_consistent": True, "trial_body_pitch_deg": 0.0, **cols}
 
 
-def windows(fly, events_pre=0, min_pre=0.5, events_stim=0, min_stim=0.1, *, straighten=(0, 0), kind="odor", ok=True,
-            ok_stim=True, **cols):
-    """One trial of a hand-built table: curl events (and straightenings) before / during the stimulus, quality flags set."""
-    usable = ok and ok_stim
+def windows(fly, placebo=0, during=0, *, pb=0.25, straighten=(0, 0), kind="odor", base=True, placebo_ok=True,
+            during_ok=True, **cols):
+    """One trial of a hand-built table: curl events (and straightenings) in the placebo window and in the during window of
+    ``pb`` minutes each, against a baseline that is usable (``base``) or not; a window that is not usable has NaN counts.
+    Any column can be overridden by keyword (a keyword wins over what the flags above set)."""
+    in_placebo, in_during = base and placebo_ok, base and during_ok
     nan = np.nan
-    return row(fly, stim_kind=kind, pre_min=min_pre, stim_min=min_stim, abd_quality_ok=ok, abd_quality_ok_stim=usable,
-               abd_curl_events_pre=events_pre if ok else nan, abd_curl_events_stim=events_stim if usable else nan,
-               abd_straighten_events_pre=straighten[0] if ok else nan,
-               abd_straighten_events_stim=straighten[1] if usable else nan, **cols)
+    return row(fly, **{
+        "stim_kind": kind, "pb_window_min": pb, "abd_quality_ok": True, "abd_tracked_frac_base": 0.9 if base else 0.2,
+        "abd_tracked_frac_placebo": 0.9 if placebo_ok else 0.2, "abd_tracked_frac_during": 0.9 if during_ok else 0.2,
+        "abd_rest_bend_base_deg": 3.0 if base else nan,
+        "abd_curl_events_placebo": placebo if in_placebo else nan, "abd_curl_events_during": during if in_during else nan,
+        "abd_straighten_events_placebo": straighten[0] if in_placebo else nan,
+        "abd_straighten_events_during": straighten[1] if in_during else nan, **cols})
 
 
 def abd_cohort(seed=1, per_cell=8, *, bend=0.0, tip=0.0, activity=0.0, restless=0.0, per_link=None, boost=0.0,
@@ -105,9 +115,14 @@ def abd_cohort(seed=1, per_cell=8, *, bend=0.0, tip=0.0, activity=0.0, restless=
     fraction rise with how head-up the fly is mounted relative to its rig, ``restless`` makes the spontaneous curl rate
     rise with it (and the PER rate too, unless ``per_link`` gives the PER rate its own slope), ``boost`` multiplies the curl
     rate during the stimulus (0 = no effect); ``flaws`` switches on the poorly tracked windows (10 % of pre-windows, 8 % of
-    the remaining stimulus windows).
+    the remaining stimulus windows; 8 % of baselines, 6 % of the placebo and of the during windows).
+
+    The placebo-design columns (the last L s before the stimulus, the first L s of it, L = the shorter of the stimulus and
+    half the pre-stimulus window) are drawn from a stream of their own, so every other column is the same for a seed
+    whatever they hold.
     """
     rng = np.random.default_rng(seed)
+    pb_rng = np.random.default_rng([seed, PLACEBO_STREAM])
     rows = []
     for cell, (dataset, rig) in enumerate(CELLS):
         for k in range(per_cell):
@@ -128,6 +143,10 @@ def abd_cohort(seed=1, per_cell=8, *, bend=0.0, tip=0.0, activity=0.0, restless=
                 known = rng.random() > 0.05
                 spont = rng.poisson(per_rate * pre_min)
                 nan = np.nan
+                length = min(stim_min, pre_min / 2)                                  # L, in minutes
+                base_ok = (not flaws) or pb_rng.random() > 0.08
+                placebo_ok = base_ok and ((not flaws) or pb_rng.random() > 0.06)
+                during_ok = base_ok and ((not flaws) or pb_rng.random() > 0.06)
                 rows.append({
                     "dataset": dataset, "batch": f"batch_{cell}", "fly_number": k + 1,
                     "fly_id": f"{dataset}/batch_{cell}/fly{k + 1}", "rig": rig, "trial": f"t{t}",
@@ -146,6 +165,15 @@ def abd_cohort(seed=1, per_cell=8, *, bend=0.0, tip=0.0, activity=0.0, restless=
                     "abd_straighten_events_pre": float(rng.poisson(0.5 * curl_rate * pre_min)) if pre_ok else nan,
                     "abd_straighten_events_stim": float(rng.poisson(0.5 * curl_rate * stim_min)) if stim_ok else nan,
                     "abd_curl_delta_deg": float(rng.normal(boost, 1.0)) if stim_ok else nan,
+                    "pb_window_min": length,
+                    "abd_tracked_frac_base": 0.95 if base_ok else 0.2,
+                    "abd_tracked_frac_placebo": 0.9 if placebo_ok else 0.1,
+                    "abd_tracked_frac_during": 0.9 if during_ok else 0.1,
+                    "abd_rest_bend_base_deg": rest_bend + pb_rng.normal(0.0, 0.5) if base_ok else nan,
+                    "abd_curl_events_placebo": float(pb_rng.poisson(curl_rate * length)) if placebo_ok else nan,
+                    "abd_curl_events_during": float(pb_rng.poisson(curl_rate * (1 + boost) * length)) if during_ok else nan,
+                    "abd_straighten_events_placebo": float(pb_rng.poisson(0.5 * curl_rate * length)) if placebo_ok else nan,
+                    "abd_straighten_events_during": float(pb_rng.poisson(0.5 * curl_rate * length)) if during_ok else nan,
                     "tip_pitch_rest_deg": tip_pitch + rng.normal(0.0, 0.5) if pre_ok else nan,
                     "tip_moving_frac_pre": moving if pre_ok else nan,
                     "per_abdomen_coupling_rho": COUPLING[state] + rng.normal(0.0, 0.05) if pre_ok else nan,
@@ -247,14 +275,14 @@ def test_the_rest_bend_strip_summarises_the_fly_table_by_rig(data):
 
 
 def test_the_rest_bend_answer_says_so_when_no_fly_has_a_resting_bend():
-    ft = trial_table([windows(f"fly{k + 1}", 1, trial_index=t, events_stim=1) for k in range(3) for t in range(2)])
+    ft = trial_table([windows(f"fly{k + 1}", 1, 1, trial_index=t) for k in range(3) for t in range(2)])
     stats = AM.compute_abdomen_stats(ft, fly_table(ft), n_perm=N_PERM)
     assert stats["rest_bend"]["answer"] == "No fly has a resting bend" and stats["rest_bend"]["n_flies"] == 0
     assert stats["placeholders"]["abdomen_rest_bend_per_fly"]["reason"] == "no fly has a resting bend"
 
 
 def test_the_rest_bend_answer_for_one_rig_names_it():
-    ft = trial_table([windows(f"fly{k + 1}", 1, trial_index=t, events_stim=1, rig="Flybehavior2", abd_rest_bend_deg=3.0 + k,
+    ft = trial_table([windows(f"fly{k + 1}", 1, 1, trial_index=t, rig="Flybehavior2", abd_rest_bend_deg=3.0 + k,
                               fly_abd_rest_bend_deg=3.0 + k) for k in range(3) for t in range(2)])
     stats = AM.compute_abdomen_stats(ft, fly_table(ft), n_perm=N_PERM)
     assert stats["rest_bend"]["answer"] == "One rig: the median resting bend is +4.0° (Flybehavior2)"
@@ -322,11 +350,11 @@ def test_with_no_dataset_by_rig_holding_two_flies_there_is_nothing_to_shuffle_an
 
 
 def hand_windows():
-    """Three flies, odor trials only: (curl events, minutes) before / during the stimulus with unequal minutes."""
-    spec = {"fly1": [(2, 0.5, 1, 0.1), (0, 0.5, 3, 0.2)], "fly2": [(1, 1.0, 0, 0.3)],
-            "fly3": [(4, 0.5, 2, 0.1), (0, 0.25, 0, 0.05)]}
-    rows = [windows(fid, e0, m0, e1, m1, straighten=(1, 0), trial_index=i)
-            for fid, trials in spec.items() for i, (e0, m0, e1, m1) in enumerate(trials)]
+    """Three flies, odor trials only: curl events in the placebo and during windows, which are as long as each other in a
+    trial (``pb`` minutes) and different between trials."""
+    spec = {"fly1": [(2, 1, 0.25), (0, 3, 0.25)], "fly2": [(1, 0, 0.5)], "fly3": [(4, 2, 0.25), (0, 0, 0.125)]}
+    rows = [windows(fid, placebo, during, pb=pb, straighten=(1, 0), trial_index=i)
+            for fid, trials in spec.items() for i, (placebo, during, pb) in enumerate(trials)]
     return trial_table(rows)
 
 
@@ -334,48 +362,89 @@ def test_event_rates_pool_events_over_the_minutes_of_the_same_trials_and_never_a
     ft = hand_windows()
     cell = AM.compute_abdomen_stats(ft, fly_table(ft), n_perm=N_PERM)["events"]["curl"]["odor"]
     assert (cell["n_trials"], cell["n_flies"]) == (5, 3)
-    assert (cell["pre"]["events"], cell["pre"]["minutes"]) == (7.0, pytest.approx(2.75))
-    assert (cell["stim"]["events"], cell["stim"]["minutes"]) == (6.0, pytest.approx(0.75))
-    assert cell["pre"]["rate"] == pytest.approx(7 / 2.75) and cell["stim"]["rate"] == pytest.approx(6 / 0.75)
-    assert cell["stim"]["rate"] != pytest.approx(np.mean([10, 15, 0, 20, 0]))        # what averaging trial rates would show
-    assert cell["diff"] == pytest.approx(6 / 0.75 - 7 / 2.75)
+    assert (cell["placebo"]["events"], cell["placebo"]["minutes"]) == (7.0, pytest.approx(1.375))
+    assert (cell["during"]["events"], cell["during"]["minutes"]) == (6.0, pytest.approx(1.375))
+    assert cell["placebo"]["rate"] == pytest.approx(7 / 1.375) and cell["during"]["rate"] == pytest.approx(6 / 1.375)
+    assert cell["during"]["rate"] != pytest.approx(np.mean([4, 12, 0, 8, 0]))         # what averaging trial rates would show
+    assert cell["diff"] == pytest.approx((6 - 7) / 1.375)
 
 
 def test_curls_and_straightenings_are_counted_apart():
     ft = hand_windows()
     events = AM.compute_abdomen_stats(ft, fly_table(ft), n_perm=N_PERM)["events"]
-    assert events["curl"]["odor"]["pre"]["events"] == 7.0 and events["straighten"]["odor"]["pre"]["events"] == 5.0
-    assert events["straighten"]["odor"]["stim"]["events"] == 0.0
-    assert events["straighten"]["odor"]["pre"]["minutes"] == pytest.approx(2.75)
+    assert events["curl"]["odor"]["placebo"]["events"] == 7.0 and events["straighten"]["odor"]["placebo"]["events"] == 5.0
+    assert events["straighten"]["odor"]["during"]["events"] == 0.0
+    assert events["straighten"]["odor"]["placebo"]["minutes"] == pytest.approx(1.375)
 
 
-def test_the_pre_vs_stimulus_p_is_the_within_trial_event_split_permutation_of_the_pooled_trials(data):
+def test_the_p_is_the_window_swap_permutation_of_the_placebo_and_during_counts_of_the_pooled_trials(data):
     ft = data.ft
     for event in ("curl", "straighten"):
         for kind in ("odor", "light"):
-            use = ft[(ft["stim_kind"] == kind) & ft["abd_quality_ok_stim"]]
+            use = ft[(ft["stim_kind"] == kind) & ft[f"abd_{event}_events_placebo"].notna()
+                     & ft[f"abd_{event}_events_during"].notna()]
             diff, p = M.paired_window_permutation(
-                use, events_pre=f"abd_{event}_events_pre", min_pre="pre_min", events_stim=f"abd_{event}_events_stim",
-                min_stim="stim_min", n=N_PERM, seed=0)
+                use, events_pre=f"abd_{event}_events_placebo", min_pre="pb_window_min",
+                events_stim=f"abd_{event}_events_during", min_stim="pb_window_min", n=N_PERM, seed=0, scheme="swap")
             cell = data.stats["events"][event][kind]
             assert cell["diff"] == pytest.approx(diff) and cell["p_perm"] == p, (event, kind)
             assert cell["n_trials"] == len(use) and cell["n_flies"] == use["fly_id"].nunique()
 
 
-def test_a_stimulus_that_changes_nothing_is_not_called_significant_because_its_window_is_short(null_data):
-    """The null cohort has the same event rate before and during the stimulus, in 30 s and 4 s windows (odor) or 30 s and
-    30 s (light): none of the four comparisons says "Yes". (Exchanging whole windows called the odor curls significant,
-    p = 0.003, on these very trials; the permutation now refuses windows of different lengths.)"""
+def test_a_stimulus_that_changes_nothing_is_not_called_significant(null_data):
+    """The null cohort has the same event rate in the last L s before the stimulus and in the first L s of it: none of the
+    four comparisons says "Yes"."""
     events = null_data.stats["events"]
     for event in ("curl", "straighten"):
         for kind in ("odor", "light"):
             assert events[event][kind]["verdict"] == "No clear difference", (event, kind, events[event][kind]["p_perm"])
-    assert events["curl"]["odor"]["p_perm"] > 0.1
-    use = null_data.ft[(null_data.ft["stim_kind"] == "odor") & null_data.ft["abd_quality_ok_stim"]]
-    assert (use["pre_min"] / use["stim_min"] > 1.5).all()                              # the odor windows really are unequal
-    with pytest.raises(ValueError, match="same length"):
-        M.paired_window_permutation(use, events_pre="abd_curl_events_pre", min_pre="pre_min",
-                                    events_stim="abd_curl_events_stim", min_stim="stim_min", n=N_PERM, scheme="swap")
+
+
+def _simulated_trials(rng, *, flies=6, trials=8, evoked=0.0):
+    """The placebo columns of simulated odor trials (40 fps): an AR(1) bend, time constant 3 s, SD 4 degrees, with the
+    stimulus 30 s in and running to the end of the 45 s trace, so L = 15 s; ``evoked`` = mean number of 0.5 s,
+    15 degree curls added to the first 15 s of the stimulus."""
+    a = math.exp(-1.0 / (3.0 * 40.0))
+    rows = []
+    for fly in range(flies):
+        for _ in range(trials):
+            bend, _ = signal.lfilter([1.0], [1.0, -a], rng.normal(0.0, 4.0 * math.sqrt(1.0 - a * a), 1800),
+                                     zi=[a * rng.normal(0.0, 4.0)])
+            bend = bend + 6.0
+            for start in rng.integers(1200, 1780, rng.poisson(evoked)):
+                bend[start:start + 20] += 15.0
+            rows.append({**M.placebo_events(bend, onset=1200, offset=None, fps=40.0, rise_deg=10.0, min_s=0.3,
+                                            min_tracked_frac=0.5), "fly_id": f"D/b/fly{fly}", "stim_kind": "odor"})
+    return pd.DataFrame(rows)
+
+
+def test_simulated_traces_on_which_the_stimulus_does_nothing_are_not_answered_yes():
+    """From the bend trace to the answer in the figure: the real event counter, the placebo columns and the window-swap
+    p of ``_event_stats``. 100 replicates of 6 flies x 8 trials; the old whole-window design said "Yes" here in a
+    quarter of them."""
+    yes = {"curl": 0, "straighten": 0}
+    for rep in range(100):
+        events = AM._event_stats(_simulated_trials(np.random.default_rng(9000 + rep)), n_perm=199, seed=rep)
+        for event in yes:
+            cell = events[event]["odor"]
+            assert cell["n_flies"] == 6 and cell["window_s"]["median"] == pytest.approx(15.0)
+            yes[event] += cell["verdict"].startswith("Yes")
+    assert max(yes.values()) <= 10, yes
+
+
+def test_simulated_traces_with_curls_added_to_the_stimulus_are_answered_yes_for_curls_only():
+    for rep in range(10):
+        events = AM._event_stats(_simulated_trials(np.random.default_rng(9500 + rep), evoked=1.0), n_perm=199, seed=rep)
+        assert events["curl"]["odor"]["verdict"] == "Yes — more often than just before the stimulus", rep
+        assert events["straighten"]["odor"]["verdict"] == "No clear difference", rep
+
+
+def test_the_event_stats_use_the_placebo_and_during_columns_and_not_the_pre_and_stim_ones(data):
+    wild = data.ft.copy()
+    wild[["abd_curl_events_pre", "abd_curl_events_stim", "abd_straighten_events_pre", "abd_straighten_events_stim"]] = 999.0
+    wild["pre_min"], wild["stim_min"] = 0.5, 0.01
+    again = AM.compute_abdomen_stats(wild, data.fly, n_perm=N_PERM, seed=0)
+    assert again["events"] == data.stats["events"]
 
 
 def test_the_permutation_p_values_use_the_seed_that_was_given(null_data):
@@ -385,10 +454,11 @@ def test_the_permutation_p_values_use_the_seed_that_was_given(null_data):
     p_events, p_scatters = [], []
     for event in ("curl", "straighten"):
         for kind in ("odor", "light"):
-            use = ft[(ft["stim_kind"] == kind) & ft["abd_quality_ok_stim"]]
+            use = ft[(ft["stim_kind"] == kind) & ft[f"abd_{event}_events_placebo"].notna()
+                     & ft[f"abd_{event}_events_during"].notna()]
             expected = M.paired_window_permutation(
-                use, events_pre=f"abd_{event}_events_pre", min_pre="pre_min", events_stim=f"abd_{event}_events_stim",
-                min_stim="stim_min", n=N_PERM, seed=3)[1]
+                use, events_pre=f"abd_{event}_events_placebo", min_pre="pb_window_min",
+                events_stim=f"abd_{event}_events_during", min_stim="pb_window_min", n=N_PERM, seed=3, scheme="swap")[1]
             assert other["events"][event][kind]["p_perm"] == expected, (event, kind)
             p_events.append((other["events"][event][kind]["p_perm"], null_data.stats["events"][event][kind]["p_perm"]))
     for key, column in (("bend_vs_pitch", "abd_rest_bend_deg"), ("restless", None), ("tip_vs_pitch", None)):
@@ -404,79 +474,80 @@ def test_the_permutation_p_values_use_the_seed_that_was_given(null_data):
             strata_of(fly), n=N_PERM, seed=3), key
 
 
-def test_only_quality_ok_windows_enter_the_event_rates():
-    ft = trial_table([windows("fly1", 2, trial_index=0, events_stim=1), windows("fly2", 1, trial_index=0, events_stim=1),
-                      windows("fly3", 3, trial_index=0, events_stim=2),
-                      windows("fly4", 50, trial_index=0, events_stim=50, ok=False),                # pre window dropped
-                      windows("fly5", 60, trial_index=0, events_stim=60, ok_stim=False)])          # stimulus window dropped
-    ft.loc[ft["fly_id"].str.endswith("fly4"), "abd_curl_events_pre"] = 50.0    # a count that survived next to a False flag
-    ft.loc[ft["fly_id"].str.endswith("fly5"), "abd_curl_events_stim"] = 60.0
+def test_only_trials_with_a_usable_baseline_and_both_windows_enter_the_event_rates():
+    ft = trial_table([windows("fly1", 2, 1, trial_index=0), windows("fly2", 1, 1, trial_index=0),
+                      windows("fly3", 3, 2, trial_index=0),
+                      windows("fly4", 50, 50, trial_index=0, placebo_ok=False),            # the placebo window is not usable
+                      windows("fly5", 60, 60, trial_index=0, during_ok=False),            # the stimulus window is not usable
+                      windows("fly6", 70, 70, trial_index=0, base=False)])                # no baseline: no resting bend
     cell = AM.compute_abdomen_stats(ft, fly_table(ft), n_perm=N_PERM)["events"]["curl"]["odor"]
     assert (cell["n_trials"], cell["n_flies"]) == (3, 3)
-    assert cell["pre"]["events"] == 6.0 and cell["stim"]["events"] == 4.0
+    assert cell["placebo"]["events"] == 6.0 and cell["during"]["events"] == 4.0
+    assert cell["placebo"]["minutes"] == pytest.approx(0.75) and cell["during"]["minutes"] == pytest.approx(0.75)
 
 
 def test_a_trial_whose_count_is_missing_never_enters_a_pooled_rate_or_its_minutes():
-    """The flags say the windows are usable but one count is missing (an inconsistent table): the trial is left out of the
-    events AND of the minutes, so it cannot dilute a rate."""
-    ft = trial_table([windows("fly1", 2, trial_index=0, events_stim=1), windows("fly2", 1, trial_index=0, events_stim=1),
-                      windows("fly3", 3, trial_index=0, events_stim=2),
-                      windows("fly4", 9, trial_index=0, events_stim=np.nan),             # no count during the stimulus
-                      windows("fly5", np.nan, trial_index=0, events_stim=9)])            # no count before it
+    ft = trial_table([windows("fly1", 2, 1, trial_index=0), windows("fly2", 1, 1, trial_index=0),
+                      windows("fly3", 3, 2, trial_index=0, pb=0.5),
+                      windows("fly4", 9, 9, trial_index=0, pb=0.5, placebo_ok=False),        # its minutes must not dilute
+                      windows("fly5", 9, 9, trial_index=0, pb=0.5, during_ok=False)])
     cell = AM.compute_abdomen_stats(ft, fly_table(ft), n_perm=N_PERM)["events"]["curl"]["odor"]
     assert (cell["n_trials"], cell["n_flies"]) == (3, 3)
-    assert cell["pre"]["minutes"] == pytest.approx(1.5) and cell["stim"]["minutes"] == pytest.approx(0.3)
-    assert cell["pre"]["events"] == 6.0 and cell["stim"]["events"] == 4.0
+    assert cell["placebo"]["minutes"] == pytest.approx(1.0) and cell["during"]["minutes"] == pytest.approx(1.0)
+    assert cell["placebo"]["events"] == 6.0 and cell["during"]["events"] == 4.0
+    assert cell["placebo"]["rate"] == pytest.approx(6.0) and cell["during"]["rate"] == pytest.approx(4.0)
 
 
-def test_a_trial_without_a_usable_length_in_either_window_is_left_out():
-    ft = trial_table([windows("fly1", 2, trial_index=0, events_stim=1), windows("fly2", 1, trial_index=0, events_stim=1),
-                      windows("fly3", 3, trial_index=0, events_stim=2),
-                      windows("fly4", 9, trial_index=0, events_stim=9, min_stim=np.nan),
-                      windows("fly5", 9, trial_index=0, events_stim=9, min_pre=np.nan),
-                      windows("fly6", 9, trial_index=0, events_stim=9, min_stim=0.0),
-                      windows("fly7", 9, trial_index=0, events_stim=9, min_pre=0.0)])
+def test_an_event_cell_leaves_out_a_trial_that_has_only_one_count_of_that_event():
+    ft = trial_table([windows("fly1", 2, 1, trial_index=0), windows("fly2", 1, 1, trial_index=0),
+                      windows("fly3", 3, 2, trial_index=0),
+                      windows("fly3", 9, 9, trial_index=1, straighten=(5, np.nan))])    # no straightening count at the start
+    events = AM.compute_abdomen_stats(ft, fly_table(ft), n_perm=N_PERM)["events"]
+    curl, straighten = events["curl"]["odor"], events["straighten"]["odor"]
+    assert (curl["n_trials"], curl["placebo"]["events"], curl["during"]["events"]) == (4, 15.0, 13.0)
+    assert curl["placebo"]["minutes"] == pytest.approx(1.0) and curl["during"]["minutes"] == pytest.approx(1.0)
+    assert (straighten["n_trials"], straighten["placebo"]["events"]) == (3, 0.0)         # not the 5 of the half pair
+    assert straighten["placebo"]["minutes"] == pytest.approx(0.75) and straighten["during"]["minutes"] == pytest.approx(0.75)
+
+
+def test_a_trial_without_a_usable_window_length_is_left_out():
+    ft = trial_table([windows("fly1", 2, 1, trial_index=0), windows("fly2", 1, 1, trial_index=0),
+                      windows("fly3", 3, 2, trial_index=0),
+                      windows("fly4", 9, 9, trial_index=0, pb=np.nan), windows("fly5", 9, 9, trial_index=0, pb=0.0),
+                      windows("fly6", 9, 9, trial_index=0, pb=-0.25)])
     cell = AM.compute_abdomen_stats(ft, fly_table(ft), n_perm=N_PERM)["events"]["curl"]["odor"]
-    assert (cell["n_trials"], cell["n_flies"]) == (3, 3) and cell["pre"]["events"] == 6.0
+    assert (cell["n_trials"], cell["n_flies"]) == (3, 3) and cell["placebo"]["events"] == 6.0
 
 
-def test_a_stimulus_window_flagged_usable_over_a_pre_window_flagged_unusable_is_not_trusted():
-    bad = windows("fly4", 50, trial_index=0, events_stim=50)
-    bad["abd_quality_ok"] = False                                                   # disagreeing flags: the baseline is gone
-    ft = trial_table([windows("fly1", 2, trial_index=0, events_stim=1), windows("fly2", 1, trial_index=0, events_stim=1),
-                      windows("fly3", 3, trial_index=0, events_stim=2), bad])
+def test_the_placebo_bar_comes_from_the_trials_whose_stimulus_window_is_usable_too():
+    ft = trial_table([windows("fly1", 2, 1, trial_index=0), windows("fly2", 1, 1, trial_index=0),
+                      windows("fly3", 3, 2, trial_index=0),
+                      windows("fly3", 9, 5, trial_index=1, during_ok=False)])     # a good placebo window, no stimulus window
     cell = AM.compute_abdomen_stats(ft, fly_table(ft), n_perm=N_PERM)["events"]["curl"]["odor"]
-    assert (cell["n_trials"], cell["n_flies"]) == (3, 3) and cell["pre"]["events"] == 6.0
-
-
-def test_the_pre_bar_comes_from_the_trials_whose_stimulus_window_is_usable_too():
-    ft = trial_table([windows("fly1", 2, trial_index=0, events_stim=1), windows("fly2", 1, trial_index=0, events_stim=1),
-                      windows("fly3", 3, trial_index=0, events_stim=2),
-                      windows("fly3", 9, trial_index=1, events_stim=5, ok_stim=False)])   # a good pre window, no stimulus
-    cell = AM.compute_abdomen_stats(ft, fly_table(ft), n_perm=N_PERM)["events"]["curl"]["odor"]
-    assert cell["pre"]["events"] == 6.0 and cell["pre"]["minutes"] == pytest.approx(1.5) and cell["n_trials"] == 3
+    assert cell["placebo"]["events"] == 6.0 and cell["placebo"]["minutes"] == pytest.approx(0.75) and cell["n_trials"] == 3
 
 
 def test_odor_and_light_trials_are_kept_apart_and_odor_plus_light_trials_are_in_neither():
-    ft = trial_table([windows("fly1", 2, trial_index=0, events_stim=1), windows("fly2", 1, trial_index=0, events_stim=1),
-                      windows("fly3", 3, trial_index=0, events_stim=2),
-                      windows("fly1", 4, trial_index=1, events_stim=9, kind="light", min_stim=0.5),
-                      windows("fly2", 2, trial_index=1, events_stim=7, kind="light", min_stim=0.5),
-                      windows("fly3", 1, trial_index=1, events_stim=8, kind="light", min_stim=0.5),
-                      windows("fly1", 70, trial_index=2, events_stim=70, kind="odor+light"),
-                      windows("fly2", 70, trial_index=2, events_stim=70, kind="none")])
+    ft = trial_table([windows("fly1", 2, 1, trial_index=0), windows("fly2", 1, 1, trial_index=0),
+                      windows("fly3", 3, 2, trial_index=0),
+                      windows("fly1", 4, 9, trial_index=1, kind="light", pb=0.5),
+                      windows("fly2", 2, 7, trial_index=1, kind="light", pb=0.5),
+                      windows("fly3", 1, 8, trial_index=1, kind="light", pb=0.5),
+                      windows("fly1", 70, 70, trial_index=2, kind="odor+light"),
+                      windows("fly2", 70, 70, trial_index=2, kind="none"),
+                      windows("fly3", 70, 70, trial_index=2, kind="none", during_ok=False)])    # not scored: not counted
     events = AM.compute_abdomen_stats(ft, fly_table(ft), n_perm=N_PERM)["events"]
     odor, light = events["curl"]["odor"], events["curl"]["light"]
-    assert (odor["pre"]["events"], odor["stim"]["events"], odor["n_trials"]) == (6.0, 4.0, 3)
-    assert (light["pre"]["events"], light["stim"]["events"], light["n_trials"]) == (7.0, 24.0, 3)
-    assert light["stim"]["minutes"] == pytest.approx(1.5) and events["n_other"] == 2
+    assert (odor["placebo"]["events"], odor["during"]["events"], odor["n_trials"]) == (6.0, 4.0, 3)
+    assert (light["placebo"]["events"], light["during"]["events"], light["n_trials"]) == (7.0, 24.0, 3)
+    assert light["during"]["minutes"] == pytest.approx(1.5) and events["n_other"] == 2
 
 
 def test_trials_of_a_drifted_fly_never_enter_a_pooled_rate(data):
     ft = data.ft
     ghost = ft[ft["fly_id"] == ft["fly_id"].iloc[0]].copy()
     ghost["fly_id"], ghost["identity_consistent"] = "DS-A/batch_0/ghost", False
-    ghost[["abd_curl_events_pre", "abd_curl_events_stim"]] = 99.0
+    ghost[["abd_curl_events_placebo", "abd_curl_events_during", "abd_curl_events_pre", "abd_curl_events_stim"]] = 99.0
     ghost[["abd_quality_ok", "abd_quality_ok_stim"]] = True
     both = pd.concat([ft, ghost], ignore_index=True)
     stats = AM.compute_abdomen_stats(both, fly_table(both), n_perm=N_PERM, seed=0)
@@ -495,10 +566,10 @@ def test_a_flag_that_came_back_from_a_csv_as_text_is_still_read_as_a_flag(data):
 
 @pytest.mark.parametrize("n_flies, answer", [(0, "Not enough data to tell"), (1, "Not enough data to tell"),
                                              (2, "Not enough data to tell"),
-                                             (3, "Yes — more often than before the stimulus")])
-def test_a_pre_vs_stimulus_comparison_needs_three_flies(n_flies, answer):
-    rows = [windows(f"fly{k + 1}", 0, trial_index=t, events_stim=3) for k in range(n_flies) for t in range(12)]
-    rows += [windows(f"fly{k + 10}", 0, trial_index=t, events_stim=0, kind="light") for k in range(3) for t in range(2)]
+                                             (3, "Yes — more often than just before the stimulus")])
+def test_a_stimulus_comparison_needs_three_flies(n_flies, answer):
+    rows = [windows(f"fly{k + 1}", 0, 3, trial_index=t) for k in range(n_flies) for t in range(12)]
+    rows += [windows(f"fly{k + 10}", 0, 0, trial_index=t, kind="light") for k in range(3) for t in range(2)]
     ft = trial_table(rows)
     cell = AM.compute_abdomen_stats(ft, fly_table(ft), n_perm=2000, seed=0)["events"]["curl"]["odor"]
     assert cell["n_flies"] == n_flies and cell["verdict"] == answer
@@ -507,16 +578,15 @@ def test_a_pre_vs_stimulus_comparison_needs_three_flies(n_flies, answer):
 
 
 def test_a_stimulus_that_lowers_the_curl_rate_is_answered_in_the_other_direction():
-    rows = [windows(f"fly{k + 1}", 2, trial_index=t, events_stim=0) for k in range(4) for t in range(12)]
+    rows = [windows(f"fly{k + 1}", 2, 0, trial_index=t) for k in range(4) for t in range(12)]
     ft = trial_table(rows)
     cell = AM.compute_abdomen_stats(ft, fly_table(ft), n_perm=2000, seed=0)["events"]["curl"]["odor"]
-    assert cell["diff"] < 0 and cell["verdict"] == "Yes — less often than before the stimulus"
+    assert cell["diff"] < 0 and cell["verdict"] == "Yes — less often than just before the stimulus"
 
 
 def test_a_stimulus_that_changes_nothing_is_no_clear_difference():
-    rows = [windows(f"fly{k + 1}", t % 3, trial_index=t, events_stim=(t + 1) % 3, min_pre=0.5, min_stim=0.5)
-            for k in range(4) for t in range(9)]                       # the same counts before and during, in another order
-    ft = trial_table(rows)
+    rows = [windows(f"fly{k + 1}", t % 3, (t + 1) % 3, trial_index=t) for k in range(4) for t in range(9)]
+    ft = trial_table(rows)                                              # the same counts before and during, in another order
     cell = AM.compute_abdomen_stats(ft, fly_table(ft), n_perm=2000, seed=0)["events"]["curl"]["odor"]
     assert cell["diff"] == pytest.approx(0.0, abs=1e-12) and cell["p_perm"] == 1.0
     assert cell["verdict"] == "No clear difference"
@@ -587,25 +657,29 @@ def test_the_activity_scatters_use_the_bend_sd_and_the_tip_moving_fraction(data)
         assert a[key]["n_flies"] == int(fly[["mount_pitch_centred_deg", column]].notna().all(axis=1).sum()), key
 
 
-def test_the_dropped_windows_are_counted_from_the_quality_flags_of_the_consistent_flies():
+def test_the_dropped_windows_are_counted_for_the_pre_stimulus_window_and_the_three_windows_of_the_placebo_design():
+    nan = np.nan
+    no_stimulus = dict.fromkeys(("abd_tracked_frac_placebo", "abd_tracked_frac_during", "abd_curl_events_placebo",
+                                 "abd_curl_events_during", "abd_straighten_events_placebo",
+                                 "abd_straighten_events_during"), nan)      # a trial whose placebo / during window is absent
     ft = trial_table([
-        windows("fly1", 1, trial_index=0, events_stim=1, abd_tracked_frac_pre=0.9, abd_tracked_frac_stim=0.9),
-        windows("fly1", 1, trial_index=1, events_stim=1, abd_tracked_frac_pre=0.9, abd_tracked_frac_stim=0.9),
-        windows("fly1", 1, trial_index=2, events_stim=1, ok_stim=False, abd_tracked_frac_pre=0.9, abd_tracked_frac_stim=0.3),
-        windows("fly2", 1, trial_index=0, ok=False, abd_tracked_frac_pre=0.2, abd_tracked_frac_stim=0.9),
-        windows("fly2", 1, trial_index=1, ok=False, abd_tracked_frac_pre=0.1, abd_tracked_frac_stim=0.1),
-        windows("fly2", 1, trial_index=2, events_stim=1, abd_tracked_frac_pre=0.8, abd_tracked_frac_stim=np.nan),
-        windows("fly3", 1, trial_index=0, ok=False, abd_tracked_frac_pre=np.nan,
-                abd_tracked_frac_stim=np.nan),                                                      # no windows at all
-        windows("fly3", 1, trial_index=1, ok=False, abd_tracked_frac_pre=0.1,
-                abd_tracked_frac_stim=np.nan),                                                      # no stimulus window
-        windows("fly3", 1, trial_index=2, events_stim=1, abd_tracked_frac_pre=np.nan,
-                abd_tracked_frac_stim=0.9),                                                         # no pre-stimulus window
-        windows("fly9", 1, trial_index=0, ok=False, identity_consistent=False, abd_tracked_frac_pre=0.0,
-                abd_tracked_frac_stim=0.0)])
+        windows("fly1", 1, 1, trial_index=0, abd_tracked_frac_pre=0.9),
+        windows("fly1", 1, 1, trial_index=1, abd_tracked_frac_pre=0.9),
+        windows("fly1", 1, 1, trial_index=2, during_ok=False, abd_tracked_frac_pre=0.9),        # the stimulus window is poor
+        windows("fly1", 1, 1, trial_index=3, placebo_ok=False, abd_tracked_frac_pre=0.9),       # so is a placebo window
+        windows("fly2", 1, 1, trial_index=0, base=False, abd_tracked_frac_pre=0.2, abd_quality_ok=False),
+        windows("fly2", 1, 1, trial_index=1, base=False, abd_tracked_frac_pre=0.1, abd_quality_ok=False),
+        windows("fly2", 1, 1, trial_index=2, abd_tracked_frac_pre=0.8, **no_stimulus),
+        windows("fly3", 1, 1, trial_index=0, base=False, abd_quality_ok=False,                 # no window of any kind
+                **{**no_stimulus, "abd_tracked_frac_pre": nan, "abd_tracked_frac_base": nan}),
+        windows("fly2", 1, 1, trial_index=3, abd_rest_bend_base_deg=nan),         # counts, but no resting bend to score by
+        windows("fly9", 1, 1, trial_index=0, base=False, identity_consistent=False, abd_tracked_frac_pre=0.0,
+                abd_quality_ok=False)])
     w = AM.compute_abdomen_stats(ft, fly_table(ft), n_perm=N_PERM, min_tracked_frac=0.5)["windows"]
-    assert w["pre"] == {"with_window": 7, "usable": 4, "dropped": 3}
-    assert w["stim"] == {"with_window": 6, "usable": 3, "dropped": 1, "blank_by_pre": 2}
+    assert w["pre"] == {"with_window": 7, "usable": 5, "dropped": 2}
+    assert w["base"] == {"with_window": 8, "usable": 5, "dropped": 3}
+    for name in ("placebo", "during"):                  # usable + dropped + blank = the windows that exist
+        assert w[name] == {"with_window": 7, "usable": 3, "dropped": 1, "blank_by_base": 3}, name
 
 
 def test_the_gate_value_is_recorded_when_it_is_given(data):
@@ -705,10 +779,44 @@ def test_the_stimulus_effect_is_answered_per_event_and_window(figures, data, nul
     curl = data.stats["events"]["curl"]
     assert curl["odor"]["p_perm"] < 0.05 and curl["odor"]["diff"] > 0
     text = all_text(figures["abdomen_curl_events_by_window"])
-    assert "Curls before vs during the odor: Yes — more often than before the stimulus" in text
-    assert "Straightenings before vs during the odor: No clear difference" in text
+    assert "Curls at the start of the odor: Yes — more often than just before the stimulus" in text
+    assert "Straightenings at the start of the odor: No clear difference" in text
     nulls = AM.build_abdomen_figures(null_data.ft, null_data.fly, null_data.stats)
-    assert "Curls before vs during the odor: No clear difference" in all_text(nulls["abdomen_curl_events_by_window"])
+    assert "Curls at the start of the odor: No clear difference" in all_text(nulls["abdomen_curl_events_by_window"])
+
+
+def test_the_event_figure_says_in_plain_words_what_is_compared(figures):
+    text = all_text(figures["abdomen_curl_events_by_window"])
+    assert ("Each pair compares the last L s before the stimulus with the first L s of it "
+            "(L = 4 s for the odor, 15 s for the light), both against the fly's resting bend from earlier in the trial"
+            in text)
+    assert "during minus just before" in text and "uncorrected" in text
+    assert "swaps the two window labels at random within each trial" in text
+    assert "trial-level: trials, not flies, are shuffled" in text
+
+
+def test_no_text_claims_the_windows_are_compared_fairly(figures, section):
+    sources = [Path(AM.__file__), Path(M.__file__)]
+    for text in [section, *(all_text(f) for f in figures.values()), *(s.read_text(encoding="utf-8") for s in sources)]:
+        assert "compared fairly" not in text
+
+
+def test_the_window_length_is_reported_for_each_stimulus(data, section):
+    odor, light = data.stats["events"]["curl"]["odor"], data.stats["events"]["curl"]["light"]
+    assert odor["window_s"] == {"min": pytest.approx(4.0), "median": pytest.approx(4.0), "max": pytest.approx(4.0)}
+    assert light["window_s"]["median"] == pytest.approx(15.0)
+    assert "Window length L: odor 4 s, light 15 s" in section
+
+
+def test_the_window_length_says_its_range_when_the_trials_differ():
+    ft = trial_table([windows("fly1", 2, 1, trial_index=0, pb=0.25), windows("fly2", 1, 1, trial_index=0, pb=0.125),
+                      windows("fly3", 3, 2, trial_index=0, pb=0.125), windows("fly3", 1, 1, trial_index=1, pb=0.0625)])
+    fly = fly_table(ft)
+    stats = AM.compute_abdomen_stats(ft, fly, n_perm=N_PERM)
+    cell = stats["events"]["curl"]["odor"]
+    assert cell["window_s"] == {"min": pytest.approx(3.75), "median": pytest.approx(7.5), "max": pytest.approx(15.0)}
+    assert "Window length L: odor 3.8–15 s (median 7.5 s), light n/a" in AM.abdomen_report_section(ft, fly, stats)
+    assert "L = 3.8–15 s for the odor" in all_text(AM.build_abdomen_figures(ft, fly, stats)["abdomen_curl_events_by_window"])
 
 
 def test_the_coupling_answer_is_descriptive_and_computed(figures, data):
@@ -830,11 +938,11 @@ def test_per_fly_points_are_blue_with_a_surface_ring(figures, data):
             assert strip and all(np.allclose(c.get_facecolors(), to_rgba(BLUE), atol=0.01) for c in strip), name
 
 
-def test_before_bars_are_blue_odor_bars_orange_and_light_bars_orange_with_the_slash_hatch(figures):
+def test_the_just_before_bars_are_blue_odor_bars_orange_and_light_bars_orange_with_the_slash_hatch(figures):
     for ax in figures["abdomen_curl_events_by_window"].axes:
         bars = sorted((p for p in ax.patches if p.get_height() > 0), key=lambda p: p.get_x())
         assert len(bars) == 4
-        before_odor, during_odor, before_light, during_light = bars
+        before_odor, during_odor, before_light, during_light = bars          # just before, start of, just before, start of
         for bar in (before_odor, before_light):
             assert to_hex(bar.get_facecolor()) == BLUE and not bar.get_hatch()
         assert to_hex(during_odor.get_facecolor()) == ORANGE and not during_odor.get_hatch()
@@ -843,13 +951,12 @@ def test_before_bars_are_blue_odor_bars_orange_and_light_bars_orange_with_the_sl
 
 def test_the_window_labels_name_what_each_bar_is(figures):
     ax = figures["abdomen_curl_events_by_window"].axes[0]
-    labels = [t.get_text().split("\n")[0] for t in ax.get_xticklabels()]
-    assert labels == ["Before the odor", "During the odor", "Before the light", "During the light"]
+    labels = [" ".join(t.get_text().split("\n")[:2]) for t in ax.get_xticklabels()]
+    assert labels == ["Just before the odor", "Start of the odor", "Just before the light", "Start of the light"]
 
 
 def test_a_cohort_with_odor_trials_only_draws_the_odor_pair_only():
-    ft = trial_table([windows(f"fly{k + 1}", 1, trial_index=t, events_stim=2, straighten=(1, 1))
-                      for k in range(4) for t in range(3)])
+    ft = trial_table([windows(f"fly{k + 1}", 1, 2, trial_index=t, straighten=(1, 1)) for k in range(4) for t in range(3)])
     fly = fly_table(ft)
     figs = AM.build_abdomen_figures(ft, fly, AM.compute_abdomen_stats(ft, fly, n_perm=N_PERM))
     for ax in figs["abdomen_curl_events_by_window"].axes:
@@ -900,8 +1007,8 @@ def test_the_jitter_of_a_strip_follows_the_seed_and_nothing_else(data):
 def test_the_bars_are_drawn_at_the_pooled_rates_of_the_stats(figures, data):
     for ax, event in zip(figures["abdomen_curl_events_by_window"].axes, ("curl", "straighten")):
         cells = data.stats["events"][event]
-        expected = [cells["odor"]["pre"]["rate"], cells["odor"]["stim"]["rate"],
-                    cells["light"]["pre"]["rate"], cells["light"]["stim"]["rate"]]
+        expected = [cells["odor"]["placebo"]["rate"], cells["odor"]["during"]["rate"],
+                    cells["light"]["placebo"]["rate"], cells["light"]["during"]["rate"]]
         assert bar_heights(ax) == pytest.approx(expected)
 
 
@@ -909,7 +1016,7 @@ def test_a_bar_value_is_written_at_its_tip_and_the_p_of_each_pair_above_it(figur
     ax = figures["abdomen_curl_events_by_window"].axes[0]
     cells = data.stats["events"]["curl"]
     tips = sorted(t.get_text() for t in ax.texts if re.fullmatch(r"\d+(\.\d+)?", t.get_text()))
-    assert tips == sorted(FIG.num_text(v) for c in cells.values() for v in (c["pre"]["rate"], c["stim"]["rate"]))
+    assert tips == sorted(FIG.num_text(v) for c in cells.values() for v in (c["placebo"]["rate"], c["during"]["rate"]))
     text = squash(" ".join(t.get_text() for t in ax.texts))
     for cell in cells.values():
         assert f"{FIG.p_text(cell['p_perm'])} (uncorrected)" in text
@@ -925,7 +1032,7 @@ def test_bars_are_thin(figures):
 
 def test_both_event_panels_share_one_scale_that_leaves_room_for_the_notes(figures, data):
     ev = data.stats["events"]
-    tallest = max(c[w]["rate"] for e in ("curl", "straighten") for c in ev[e].values() for w in ("pre", "stim"))
+    tallest = max(c[w]["rate"] for e in ("curl", "straighten") for c in ev[e].values() for w in ("placebo", "during"))
     for ax in figures["abdomen_curl_events_by_window"].axes:
         assert ax.get_ylim() == (0.0, pytest.approx(1.4 * tallest))
 
@@ -943,12 +1050,12 @@ def test_every_point_lies_inside_its_axes(figures):
 
 
 def test_a_pair_with_fewer_than_three_flies_says_so_instead_of_giving_a_p():
-    ft = trial_table([windows(f"fly{k + 1}", 0, trial_index=t, events_stim=3) for k in range(2) for t in range(12)])
+    ft = trial_table([windows(f"fly{k + 1}", 0, 3, trial_index=t) for k in range(2) for t in range(12)])
     fly = fly_table(ft)
     stats = AM.compute_abdomen_stats(ft, fly, n_perm=2000)
     assert stats["events"]["curl"]["odor"]["p_perm"] < 0.05                         # the p alone would have said "Yes"
     text = all_text(AM.build_abdomen_figures(ft, fly, stats)["abdomen_curl_events_by_window"])
-    assert "fewer than 3 flies" in text and "Curls before vs during the odor: Not enough data to tell" in text
+    assert "fewer than 3 flies" in text and "Curls at the start of the odor: Not enough data to tell" in text
     assert not re.search(r"\bp[=<]", text)
 
 
@@ -1043,6 +1150,7 @@ def test_the_event_figure_is_a_placeholder_when_no_odor_or_light_trial_has_both_
     fig = AM.build_abdomen_figures(ft, fly, stats)["abdomen_curl_events_by_window"]
     text = all_text(fig)
     assert fig.axes == [] and "Not enough data" in text and "n=0 trials / 0 flies" in text
+    assert "usable baseline, just-before window and start-of-stimulus window" in text      # what the figure needs
 
 
 def test_a_two_panel_figure_with_one_empty_panel_keeps_both_panels():
@@ -1067,7 +1175,7 @@ def test_a_cohort_with_only_unknown_states_still_renders_every_figure(tmp_path):
 
 
 def test_a_single_rig_single_fly_cohort_does_not_crash_the_figures(tmp_path):
-    ft = trial_table([windows("fly1", 1, 0.5, 2, 0.1, trial_body_pitch_deg=4.0, abd_rest_bend_deg=3.0,
+    ft = trial_table([windows("fly1", 1, 2, trial_body_pitch_deg=4.0, abd_rest_bend_deg=3.0,
                               fly_abd_rest_bend_deg=3.0, per_abdomen_coupling_rho=0.2, held_subtype="retracted",
                               spont_per_events=0.0, spont_per_any=0.0)])
     written = AM.render_abdomen_figures(ft, fly_table(ft), tmp_path, n_perm=N_PERM)
@@ -1163,7 +1271,7 @@ def test_the_section_lists_the_pooled_rates_per_window_with_trials_and_flies(sec
     for event in ("curl", "straighten"):
         for kind, cell in data.stats["events"][event].items():
             assert FIG.n_label(cell["n_trials"], cell["n_flies"]) in section, (event, kind)
-            for window in ("pre", "stim"):
+            for window in ("placebo", "during"):
                 w = cell[window]
                 assert f"{w['events']:g} / {w['minutes']:.2f} min = {w['rate']:.2f}/min" in section, (event, kind, window)
 
@@ -1189,17 +1297,43 @@ def test_the_section_gives_every_permutation_p_and_what_was_shuffled(section, da
     assert re.search(rf"Stratified permutation p: .*dataset × rig.*{N_PERM} permutations, seed 0", section)
     assert "curl rate shuffled within dataset × rig strata" in section                 # what each scatter shuffled
     assert section.count("mounting angle shuffled within dataset × rig strata") == 4
-    assert re.search(rf"Event-split permutation p: .*events of each trial.*{N_PERM} permutations, seed 0", section)
+    assert re.search(rf"Window-swap permutation p: .*labels of a trial's two windows.*{N_PERM} permutations, seed 0",
+                     section)
     assert section.count("uncorrected") >= 12
 
 
 def test_the_section_counts_the_windows_the_tracked_fraction_gate_dropped(section, data):
     w = data.stats["windows"]
-    assert w["pre"]["dropped"] > 0 and w["stim"]["dropped"] > 0                      # the cohort has poorly tracked windows
+    assert all(w[k]["dropped"] > 0 for k in ("pre", "base", "placebo", "during"))    # the cohort has poorly tracked windows
     assert f"{w['pre']['dropped']} of {w['pre']['with_window']} pre-stimulus windows" in section
-    assert f"{w['stim']['dropped']}" in section and "abd_min_tracked_frac" in section
+    assert f"{w['base']['dropped']} of {w['base']['with_window']} baseline windows" in section
+    assert f"{w['placebo']['dropped']} of {w['placebo']['with_window']} just-before windows" in section
+    assert f"{w['during']['dropped']} of {w['during']['with_window']} start-of-stimulus windows" in section
+    assert "abd_min_tracked_frac" in section
     stats = AM.compute_abdomen_stats(data.ft, data.fly, n_perm=N_PERM, min_tracked_frac=0.5)
     assert "tracked in fewer than 50% of their frames" in AM.abdomen_report_section(data.ft, data.fly, stats)
+
+
+def test_the_section_describes_the_placebo_design_in_plain_words(section):
+    assert "L is the shorter of the stimulus and half the pre-stimulus window" in section
+    assert "median bend over the pre-stimulus window before its last L s" in section
+    assert "in the last L s before the stimulus" in section and "in the first L s of the stimulus" in section
+    assert "fitted to neither window being compared" in section
+    assert "if the stimulus does nothing they differ only by chance" in section
+    assert "Event-split" not in section
+
+
+def test_the_section_says_the_window_swap_is_trial_level_and_names_its_limitation(section):
+    assert "Window-swap permutation p" in section and "trial-level" in section
+    assert "trials, not flies, are shuffled" in section and "treats trials as independent" in section
+    assert "Limitation: the stimulus comparison assumes the fly's resting posture is steady over the trial" in section
+    assert "drifts" in section
+
+
+def test_the_events_table_names_its_two_windows_and_the_test(section):
+    header = next(line for line in section.splitlines() if line.startswith("| Stimulus | Event |"))
+    assert header == ("| Stimulus | Event | Just before the stimulus | Start of the stimulus | Difference | "
+                      "Trials / flies | Window-swap permutation p |")
 
 
 def test_the_section_says_the_alpha_the_other_stimulus_trials_and_has_a_heading_for_the_windows(section, data):
@@ -1208,7 +1342,7 @@ def test_the_section_says_the_alpha_the_other_stimulus_trials_and_has_a_heading_
 
 
 def test_the_section_has_a_row_for_every_stimulus_and_state_even_when_there_is_nothing_in_it():
-    ft = trial_table([windows(f"fly{k + 1}", 1, trial_index=t, events_stim=2, straighten=(1, 1),
+    ft = trial_table([windows(f"fly{k + 1}", 1, 2, trial_index=t, straighten=(1, 1),
                               held_subtype="retracted" if k < 3 else "held_down", per_abdomen_coupling_rho=0.1 * k)
                       for k in range(4) for t in range(3)])
     fly = fly_table(ft)
@@ -1224,7 +1358,7 @@ def test_the_section_defines_the_signs_and_the_events(section):
 
 
 def test_the_section_says_one_fly_for_a_single_fly_and_one_stratum_for_a_single_stratum():
-    ft = trial_table([windows("fly1", 1, trial_index=t, events_stim=2, trial_body_pitch_deg=1.0, abd_rest_bend_deg=3.0,
+    ft = trial_table([windows("fly1", 1, 2, trial_index=t, trial_body_pitch_deg=1.0, abd_rest_bend_deg=3.0,
                               fly_abd_rest_bend_deg=3.0) for t in range(4)])
     fly = fly_table(ft)
     text = AM.abdomen_report_section(ft, fly, AM.compute_abdomen_stats(ft, fly, n_perm=N_PERM))
@@ -1247,14 +1381,14 @@ def test_a_placeholder_bullet_is_followed_by_a_blank_line_so_markdown_keeps_the_
 
 
 def test_the_section_counts_a_single_blank_window_in_the_singular():
-    ft = trial_table([windows("fly1", 1, trial_index=0, events_stim=1, abd_tracked_frac_pre=0.9, abd_tracked_frac_stim=0.9),
-                      windows("fly1", 1, trial_index=1, events_stim=1, abd_tracked_frac_pre=0.9, abd_tracked_frac_stim=0.9),
-                      windows("fly1", 1, trial_index=2, ok=False, abd_tracked_frac_pre=0.1, abd_tracked_frac_stim=0.9)])
+    ft = trial_table([windows("fly1", 1, 1, trial_index=0), windows("fly1", 1, 1, trial_index=1),
+                      windows("fly1", 1, 1, trial_index=2, base=False, abd_tracked_frac_placebo=0.9,
+                              abd_tracked_frac_during=np.nan)])
     fly = fly_table(ft)
     text = AM.abdomen_report_section(ft, fly, AM.compute_abdomen_stats(ft, fly, n_perm=N_PERM))
     assert "1 more window was blank because" in text and "windows were blank" not in text
-    more = trial_table([windows("fly1", 1, trial_index=t, ok=False, abd_tracked_frac_pre=0.1, abd_tracked_frac_stim=0.9)
-                        for t in range(2)] + [windows("fly1", 1, trial_index=9, events_stim=1)])
+    more = trial_table([windows("fly1", 1, 1, trial_index=t, base=False) for t in range(2)]
+                       + [windows("fly1", 1, 1, trial_index=9)])
     text = AM.abdomen_report_section(more, fly_table(more), AM.compute_abdomen_stats(more, fly_table(more), n_perm=N_PERM))
     assert "2 more windows were blank because" in text
 
