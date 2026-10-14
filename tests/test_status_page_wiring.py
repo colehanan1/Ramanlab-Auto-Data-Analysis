@@ -11,12 +11,13 @@ from pathlib import Path
 
 import pytest
 
-SCRIPT = Path(__file__).resolve().parent.parent / "PiCode" / "combinedv2_1.py"
+PICODE = Path(__file__).resolve().parent.parent / "PiCode"
+SCRIPTS = ["combinedv2_1.py", "combinedv2_1_pi1.py"]
 
 
-@pytest.fixture(scope="module")
-def tree() -> ast.Module:
-    return ast.parse(SCRIPT.read_text(encoding="utf-8"))
+@pytest.fixture(scope="module", params=SCRIPTS)
+def tree(request) -> ast.Module:
+    return ast.parse((PICODE / request.param).read_text(encoding="utf-8"))
 
 
 def _find_class(tree, name):
