@@ -12,7 +12,14 @@ differs between A and A' -- whatever is not reproducible from one run to the nex
 
 ``--exclude 'Abdomen-Geometry*' --exclude 'Mounting-Posture*' --exclude 'Abdomen-Movement*'`` leaves out the abdomen and
 mounting stages' own trees. Only reads the roots; ``--out`` must lie outside them (a snapshot file inside a root would
-show up as a new file in the next one).
+show up as a new file in the next one; symlinks are resolved for that check). ``snapshot`` never overwrites an existing
+``--out`` unless ``--force``: A.json is the irreplaceable reference.
+
+``compare`` exits 0 (unchanged), 1 (differs) or 2 (it refused, or a file was unusable). It refuses snapshots that cannot
+honestly be compared, because each would end in a false "identical": any empty snapshot, snapshots taken from other
+roots or with other ``--exclude`` globs (a wrong noise snapshot turns every path missing from it into "noise"), and the
+same file given twice. And it prints every path it ignored as noise, with counts per extension, svg and pdf last: those
+are rewritten with fresh ids and dates on every run, so what matters is whether a PNG, CSV or parquet is on the list.
 
 A digest is a function of what a file CONTAINS, not of how it was written:
 
@@ -62,6 +69,7 @@ from typing import Mapping, Optional, Sequence
 SNAPSHOT_VERSION = 2
 KEY_SEP = "::"
 LISTED = 50                   # paths ``compare`` prints per category
+_VOLATILE_SUFFIXES = (".svg", ".pdf")      # carry random ids and dates: they differ on every run
 DEFAULT_WORKERS = 8
 
 _READ_CHUNK = 1 << 20         # raw bytes are hashed 1 MiB at a time
@@ -289,7 +297,37 @@ def _load_snapshot(path: str) -> dict:
     if snapshot.get("version") != SNAPSHOT_VERSION:
         raise ValueError(f"{path}: snapshot version {snapshot.get('version')!r}, but this tool reads version "
                          f"{SNAPSHOT_VERSION}: take the snapshot again")
+    for field in ("roots", "exclude"):
+        value = snapshot.get(field)
+        if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+            raise ValueError(f"{path}: not an output-digest snapshot (no usable {field!r} list)")
+    if not all(isinstance(digest, str) for digest in snapshot["digests"].values()):
+        raise ValueError(f"{path}: not an output-digest snapshot (a digest is not a string)")
     return snapshot
+
+
+def _require_comparable(named: Sequence[tuple]) -> None:
+    """Refuse snapshots that cannot honestly be compared; ``named`` is ``[(role, file, snapshot), ...]``, A first.
+
+    A noise snapshot of other paths than A's turns every path missing from it into "noise", and the same file given
+    twice turns every difference into one: both end in a false "identical". An empty snapshot proves nothing.
+    """
+    who = [f"{role} snapshot {name}" for role, name, _ in named]
+    files = [os.path.realpath(name) for _, name, _ in named]
+    for i in range(1, len(named)):
+        if files[i] in files[:i]:
+            raise ValueError(f"{who[i]} is the same file as {who[files.index(files[i])]}: "
+                             "compare needs distinct snapshots")
+    for label, (_, _, snapshot) in zip(who, named):
+        if not snapshot["digests"]:
+            raise ValueError(f"{label}: holds no files (a wrong --root, or everything excluded?)")
+    reference = named[0][2]
+    for label, (_, _, snapshot) in zip(who[1:], named[1:]):
+        for field, what in (("roots", "root(s)"), ("exclude", "--exclude glob(s)")):
+            theirs, ours = sorted(set(snapshot[field])), sorted(set(reference[field]))
+            if theirs != ours:
+                raise ValueError(f"{label}: taken with other {what} than {who[0]}: {theirs} against {ours}; "
+                                 "snapshots of different trees cannot be compared")
 
 
 def _print_paths(label: str, paths: Sequence[str]) -> None:
@@ -298,6 +336,25 @@ def _print_paths(label: str, paths: Sequence[str]) -> None:
         print(f"  {path}")
     if len(paths) > LISTED:
         print(f"  ... and {len(paths) - LISTED} more")
+
+
+def _suffix(path: str) -> str:
+    return os.path.splitext(path)[1].lower() or "(none)"
+
+
+def _print_ignored_noise(dropped: Sequence[str]) -> None:
+    """Every path ``compare`` ignored as noise (capped), svg and pdf last, with the counts per extension."""
+    print(f"ignored as noise: {len(dropped)}")
+    if not dropped:
+        return
+    counts = Counter(_suffix(path) for path in dropped)
+    by_extension = sorted(counts.items(), key=lambda item: (item[0] in _VOLATILE_SUFFIXES, item[0]))
+    print("  by extension (svg and pdf last): " + ", ".join(f"{extension} {n}" for extension, n in by_extension))
+    ordered = sorted(dropped, key=lambda path: (_suffix(path) in _VOLATILE_SUFFIXES, path))
+    for path in ordered[:LISTED]:
+        print(f"  {path}")
+    if len(ordered) > LISTED:
+        print(f"  ... and {len(ordered) - LISTED} more")
 
 
 def _error_kind(digest: str) -> str:
@@ -324,10 +381,14 @@ def _cmd_snapshot(args: argparse.Namespace) -> int:
     for root in roots:
         if not os.path.isdir(root):
             raise NotADirectoryError(f"--root is not a directory: {root}")
-        if _inside(out, root):
-            raise ValueError(f"--out {out} lies inside the root {root}: the next snapshot would digest it")
+        if _inside(os.path.realpath(out), os.path.realpath(root)):
+            raise ValueError(f"--out {out} lies inside the root {root} (symlinks resolved): "
+                             "the next snapshot would digest it")
     if os.path.isdir(out):
         raise IsADirectoryError(f"--out is a directory: {out}")
+    if os.path.lexists(out) and not args.force:
+        raise FileExistsError(f"--out already exists: {out} (a reference snapshot is not re-taken; "
+                              "pass --force to overwrite it)")
     os.makedirs(os.path.dirname(out), exist_ok=True)         # a bad --out should fail now, not after the digesting
     exclude = args.exclude or []
     started = time.monotonic()
@@ -337,7 +398,8 @@ def _cmd_snapshot(args: argparse.Namespace) -> int:
         digests.update(digest_tree(root, exclude=exclude, workers=args.workers))
     payload = {"version": SNAPSHOT_VERSION, "roots": roots, "exclude": list(exclude),
                "digests": dict(sorted(digests.items()))}
-    with open(out, "w", encoding="utf-8") as f:
+    mode = "w" if args.force else "x"                        # "x": never over a file that appeared meanwhile
+    with open(out, mode, encoding="utf-8") as f:
         json.dump(payload, f, indent=1)
         f.write("\n")
     errors = Counter(_error_kind(d) for d in digests.values() if d.startswith("error:"))
@@ -351,22 +413,28 @@ def _cmd_snapshot(args: argparse.Namespace) -> int:
 
 
 def _cmd_compare(args: argparse.Namespace) -> int:
-    a, b = _load_snapshot(args.a), _load_snapshot(args.b)
-    noise = _load_snapshot(args.noise) if args.noise else None
+    named = [("A", args.a, _load_snapshot(args.a)), ("B", args.b, _load_snapshot(args.b))]
+    if args.noise is not None:
+        named.append(("noise", args.noise, _load_snapshot(args.noise)))
+    _require_comparable(named)
+    a, b = named[0][2], named[1][2]
+    noise = named[2][2] if args.noise is not None else None
     result = compare(a["digests"], b["digests"], noise["digests"] if noise else None)
     print(f"A: {len(a['digests'])} files ({args.a})")
     print(f"B: {len(b['digests'])} files ({args.b})")
     if noise is not None:
-        print(f"noise: {len(result['noise'])} paths differ between A and {args.noise}; "
-              f"{len(result['dropped'])} of them also differ in B and are ignored")
+        print(f"noise: {len(result['noise'])} paths differ between A and {args.noise}")
     for kind in ("changed", "added", "removed"):
         _print_paths(kind, result[kind])
+    if noise is not None:
+        _print_ignored_noise(result["dropped"])
     unreadable = sorted(p for p, d in a["digests"].items() if d.startswith("error:") and b["digests"].get(p) == d)
     if unreadable:
         _print_paths("WARNING: unreadable in both snapshots",
                      [_unreadable_line(p, a["digests"][p]) for p in unreadable])
     remaining = sum(len(result[kind]) for kind in ("added", "removed", "changed"))
-    verdict = f"RESULT: {remaining} difference(s)" if remaining else "RESULT: identical (noise removed)"
+    scope = " (noise removed)" if noise is not None else ""
+    verdict = f"RESULT: {remaining} difference(s){scope}" if remaining else f"RESULT: identical{scope}"
     if unreadable:
         blind = sum(1 for p in unreadable if not _has_raw_hash(a["digests"][p]))
         verdict += f"; {len(unreadable)} unreadable path(s) in both snapshots"
@@ -384,6 +452,7 @@ def _parser() -> argparse.ArgumentParser:
                           help="skip paths with a component, or a whole relative path, matching GLOB (repeatable)")
     snapshot.add_argument("--workers", type=int, metavar="N", help=f"threads (default {DEFAULT_WORKERS}; 1 = serial)")
     snapshot.add_argument("--out", required=True, metavar="X.json", help="snapshot file to write (outside every root)")
+    snapshot.add_argument("--force", action="store_true", help="overwrite an existing --out file (refused otherwise)")
     snapshot.set_defaults(run=_cmd_snapshot)
     compare_ = commands.add_parser("compare", help="B against A, minus what already differs between A and --noise")
     compare_.add_argument("a", metavar="A.json", help="reference snapshot")

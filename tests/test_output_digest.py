@@ -15,7 +15,13 @@ compare B with A ignoring every path that already differs between A and A'. Pinn
   either (permission, I/O error, dangling link) keeps the bare ``error:<ExceptionType>``; the CLI counts and warns
   about both;
 * ``compare`` removes every path that differs between A and the noise snapshot, and the CLI exits 0 when nothing
-  remains and 1 when something does.
+  remains and 1 when something does. It lists what it ignored as noise (a dropped PNG, CSV or parquet is the one way
+  it could still say "identical" wrongly) and says "(noise removed)" only when a noise snapshot was given;
+* ``compare`` refuses (exit 2) snapshots that cannot honestly be compared: one that is empty, one taken from other roots
+  or with other ``--exclude`` globs (a wrong noise snapshot would turn every path missing from it into "noise" and
+  print a false "identical"), or the same file given twice;
+* ``snapshot`` never overwrites an existing ``--out`` without ``--force`` (A.json is the irreplaceable reference) and
+  checks that ``--out`` lies outside the roots after resolving symlinks.
 """
 from __future__ import annotations
 
@@ -23,6 +29,7 @@ import hashlib
 import io
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -82,6 +89,18 @@ def _run(*args) -> subprocess.CompletedProcess:
 def _write_snapshot(path: Path, digests: dict) -> Path:
     path.write_text(json.dumps({"version": od.SNAPSHOT_VERSION, "roots": [], "exclude": [], "digests": digests}))
     return path
+
+
+def _snapshot(out: Path, *roots: Path, exclude=()) -> Path:
+    """Take a snapshot through the CLI, as the parity procedure does."""
+    command = ["snapshot"]
+    for root in roots:
+        command += ["--root", root]
+    for glob in exclude:
+        command += ["--exclude", glob]
+    result = _run(*command, "--out", out)
+    assert result.returncode == 0, result.stderr
+    return out
 
 
 def _png_bytes() -> bytes:
@@ -621,12 +640,56 @@ def test_cli_snapshot_refuses_to_write_inside_a_snapshotted_root(tmp_path):
     assert not (tree / "sub" / "A.json").exists()
 
 
-def test_cli_snapshot_refuses_an_out_path_that_is_a_directory_before_digesting(tmp_path):
+@pytest.mark.parametrize("extra", [(), ("--force",)])
+def test_cli_snapshot_refuses_an_out_path_that_is_a_directory_before_digesting(tmp_path, extra):
     tree = _tree(tmp_path / "tree")
     (tmp_path / "snaps").mkdir()
-    result = _run("snapshot", "--root", tree, "--out", tmp_path / "snaps")
+    result = _run("snapshot", "--root", tree, "--out", tmp_path / "snaps", *extra)
     assert result.returncode == 2
     assert "[digest]" not in result.stderr                              # failed before any root was walked
+
+
+def test_cli_snapshot_refuses_to_overwrite_an_existing_out_file_unless_forced(tmp_path):
+    tree = _tree(tmp_path / "tree")
+    out = _snapshot(tmp_path / "A.json", tree)
+    reference = out.read_bytes()
+    (tree / "wide.csv").write_text("fly,t0,t1\nA,9.9,1.5\nB,2.5,3.0\n")
+    refused = _run("snapshot", "--root", tree, "--out", out)
+    assert refused.returncode == 2 and "--force" in refused.stderr
+    assert "[digest]" not in refused.stderr                             # refused before any digesting
+    assert out.read_bytes() == reference                                # the reference is untouched
+    forced = _run("snapshot", "--root", tree, "--out", out, "--force")
+    assert forced.returncode == 0, forced.stderr
+    assert out.read_bytes() != reference
+
+
+def test_cli_snapshot_never_overwrites_an_out_file_that_appears_while_it_is_digesting(tmp_path, monkeypatch):
+    tree = _tree(tmp_path / "tree")
+    out = tmp_path / "A.json"
+    digest_tree = od.digest_tree
+
+    def digest_while_another_run_writes_the_reference(root, **kwargs):
+        digests = digest_tree(root, **kwargs)
+        out.write_text("the reference")                                 # a concurrent snapshot run finished first
+        return digests
+
+    monkeypatch.setattr(od, "digest_tree", digest_while_another_run_writes_the_reference)
+    assert od.main(["snapshot", "--root", str(tree), "--out", str(out)]) == 2
+    assert out.read_text() == "the reference"
+
+
+@pytest.mark.parametrize("through", ["a symlinked out directory", "a symlinked root"])
+def test_cli_snapshot_refuses_an_out_file_that_reaches_a_root_through_a_symlink(tmp_path, through):
+    tree = _tree(tmp_path / "tree")
+    if through == "a symlinked out directory":
+        (tmp_path / "alias").symlink_to(tree / "sub", target_is_directory=True)
+        root, out = tree, tmp_path / "alias" / "A.json"
+    else:
+        (tmp_path / "rootlink").symlink_to(tree, target_is_directory=True)
+        root, out = tmp_path / "rootlink", tree / "sub" / "A.json"
+    result = _run("snapshot", "--root", root, "--out", out)
+    assert result.returncode == 2 and "inside" in result.stderr
+    assert not (tree / "sub" / "A.json").exists()
 
 
 def test_cli_compare_exits_zero_for_identical_snapshots_and_one_when_a_file_differs(tmp_path):
@@ -658,11 +721,14 @@ def test_cli_compare_ignores_paths_that_differ_between_a_and_the_noise_snapshot(
     assert _run("compare", a, b, "--noise", rerun).returncode == 0
 
     (tree / "wide.csv").write_text("fly,t0,t1\nA,9.9,1.5\nB,2.5,3.0\n")  # a real change, on top of the jitter
-    assert _run("snapshot", "--root", tree, "--out", b).returncode == 0
-    real = _run("compare", a, b, "--noise", rerun)
+    b_real = tmp_path / "B_real.json"
+    assert _run("snapshot", "--root", tree, "--out", b_real).returncode == 0
+    real = _run("compare", a, b_real, "--noise", rerun)
     assert real.returncode == 1
-    assert "changed: 1" in real.stdout                                  # the jitter is not counted ...
-    assert _key(tree, "wide.csv") in real.stdout and _key(tree, "notes.txt") not in real.stdout
+    shown, ignored = real.stdout.split("ignored as noise", 1)
+    assert "changed: 1" in shown                                        # the jitter is not counted as a difference ...
+    assert _key(tree, "wide.csv") in shown and _key(tree, "notes.txt") not in shown
+    assert _key(tree, "notes.txt") in ignored                           # ... but it is named as ignored
 
 
 def test_cli_compare_lists_at_most_fifty_paths_per_category(tmp_path):
@@ -700,3 +766,162 @@ def test_cli_compare_rejects_a_file_that_is_not_a_current_snapshot(tmp_path):
         assert result.returncode == 2, bad
         assert "Traceback" not in result.stderr
     assert "version 1" in _run("compare", good, too_old).stderr         # and says which version it found
+
+
+# --------------------------------------------------------------------------
+# compare: never a false "identical"
+# --------------------------------------------------------------------------
+
+@pytest.mark.parametrize("wrong", ["another root", "another exclude", "an empty directory"])
+def test_cli_compare_refuses_a_noise_snapshot_that_does_not_cover_the_same_tree(tmp_path, wrong):
+    tree = _tree(tmp_path / "tree")
+    copy = tmp_path / "copy"
+    shutil.copytree(tree, copy)                                         # the same files under another root
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    a = _snapshot(tmp_path / "A.json", tree)
+    rerun = _snapshot(tmp_path / "A2.json", tree)                       # the honest noise snapshot
+    (tree / "wide.csv").write_text("fly,t0,t1\nA,9.9,1.5\nB,2.5,3.0\n")  # a real difference
+    b = _snapshot(tmp_path / "B.json", tree)
+    assert _run("compare", a, b, "--noise", rerun).returncode == 1      # honest noise: the difference is found
+
+    if wrong == "another root":
+        noise = _snapshot(tmp_path / "wrong.json", copy)
+    elif wrong == "another exclude":
+        noise = _snapshot(tmp_path / "wrong.json", tree, exclude=("*.csv",))
+    else:
+        noise = _snapshot(tmp_path / "wrong.json", empty)
+    refused = _run("compare", a, b, "--noise", noise)
+    assert refused.returncode == 2
+    assert "identical" not in refused.stdout                            # no verdict at all
+    assert "wrong.json" in refused.stderr                               # and it names the snapshot at fault
+
+
+def test_cli_compare_refuses_a_b_snapshot_of_another_root(tmp_path):
+    tree = _tree(tmp_path / "tree")
+    copy = tmp_path / "copy"
+    shutil.copytree(tree, copy)
+    refused = _run("compare", _snapshot(tmp_path / "A.json", tree), _snapshot(tmp_path / "B.json", copy))
+    assert refused.returncode == 2 and "root" in refused.stderr and "B.json" in refused.stderr
+    assert "identical" not in refused.stdout
+
+
+def test_cli_compare_refuses_snapshots_taken_with_other_exclude_globs(tmp_path):
+    tree = _tree(tmp_path / "tree")
+    a = _snapshot(tmp_path / "A.json", tree, exclude=("*.txt",))
+    b = _snapshot(tmp_path / "B.json", tree)
+    refused = _run("compare", a, b)
+    assert refused.returncode == 2 and "--exclude" in refused.stderr and "B.json" in refused.stderr
+    assert "identical" not in refused.stdout
+
+
+def test_cli_compare_accepts_snapshots_that_list_the_same_roots_and_excludes_in_another_order(tmp_path):
+    one, two = _tree(tmp_path / "one"), _tree(tmp_path / "two")
+    a = _snapshot(tmp_path / "A.json", one, two, exclude=("*.txt", "deeper"))
+    b = _snapshot(tmp_path / "B.json", two, one, exclude=("deeper", "*.txt", "*.txt"))
+    result = _run("compare", a, b)
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize("empty_one", ["A", "B", "noise"])
+def test_cli_compare_refuses_any_empty_snapshot(tmp_path, empty_one):
+    files = {name: _write_snapshot(tmp_path / f"{name}.json", {} if name == empty_one else {"/r::a": "1", "/r::b": "2"})
+             for name in ("A", "B", "noise")}
+    refused = _run("compare", files["A"], files["B"], "--noise", files["noise"])
+    assert refused.returncode == 2 and "no files" in refused.stderr and f"{empty_one}.json" in refused.stderr
+    assert "identical" not in refused.stdout
+
+
+def test_cli_compare_refuses_two_empty_snapshots(tmp_path):
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    refused = _run("compare", _snapshot(tmp_path / "A.json", empty), _snapshot(tmp_path / "B.json", empty))
+    assert refused.returncode == 2 and "no files" in refused.stderr
+    assert "identical" not in refused.stdout
+
+
+@pytest.mark.parametrize("command, later, earlier", [
+    ("a a", "B", "A"), ("a b --noise b", "noise", "B"), ("a b --noise a", "noise", "A"),
+    ("a b --noise link_to_b", "noise", "B")])
+def test_cli_compare_refuses_the_same_snapshot_file_given_twice(tmp_path, command, later, earlier):
+    tree = _tree(tmp_path / "tree")
+    a = _snapshot(tmp_path / "a.json", tree)
+    (tree / "wide.csv").write_text("fly,t0,t1\nA,9.9,1.5\nB,2.5,3.0\n")
+    b = _snapshot(tmp_path / "b.json", tree)
+    (tmp_path / "link_to_b").symlink_to(b)                              # another spelling of b.json
+    files = {"a": a, "b": b, "link_to_b": tmp_path / "link_to_b", "--noise": "--noise"}
+    refused = _run("compare", *[files[word] for word in command.split()])
+    assert refused.returncode == 2
+    assert re.search(rf"{later} snapshot \S+ is the same file as {earlier} snapshot ", refused.stderr), refused.stderr
+    assert "identical" not in refused.stdout
+
+
+def test_cli_compare_refuses_a_snapshot_that_lacks_its_roots_and_excludes(tmp_path):
+    good = _write_snapshot(tmp_path / "A.json", {"/r::a": "1"})
+    bare = tmp_path / "bare.json"
+    bare.write_text(json.dumps({"version": od.SNAPSHOT_VERSION, "digests": {"/r::a": "1"}}))
+    for command in (("compare", good, bare), ("compare", bare, good)):
+        refused = _run(*command)
+        assert refused.returncode == 2 and "bare.json" in refused.stderr and "Traceback" not in refused.stderr
+
+
+def test_cli_compare_refuses_a_snapshot_whose_digests_are_not_strings(tmp_path):
+    good = _write_snapshot(tmp_path / "A.json", {"/r::a": "1"})
+    broken = _write_snapshot(tmp_path / "B.json", {"/r::a": 1})
+    refused = _run("compare", good, broken)
+    assert refused.returncode == 2 and "B.json" in refused.stderr and "Traceback" not in refused.stderr
+
+
+def test_cli_compare_prints_the_paths_it_ignored_as_noise_with_extension_counts_svg_and_pdf_last(tmp_path):
+    names = ["figs/z.png", "figs/y.svg", "figs/x.pdf", "tables/w.csv", "figs/v.svg", "model.parquet", "figs/u.SVG"]
+
+    def snapshot_of(name, digest):
+        digests = {f"/r::{n}": digest for n in names}
+        return _write_snapshot(tmp_path / f"{name}.json", {**digests, "/r::stable.txt": "s"})
+
+    result = _run("compare", snapshot_of("A", "a"), snapshot_of("B", "b"), "--noise", snapshot_of("noise", "jitter"))
+    assert result.returncode == 0                                       # every difference is noise ...
+    out = result.stdout
+    assert "ignored as noise: 7" in out
+    for name in names:                                                  # ... but each one is named, so a dropped PNG,
+        assert f"/r::{name}" in out                                     # CSV or parquet can be seen
+    loud = [out.index(f"/r::{n}") for n in ("figs/z.png", "tables/w.csv", "model.parquet")]
+    quiet = [out.index(f"/r::{n}") for n in ("figs/y.svg", "figs/x.pdf", "figs/v.svg", "figs/u.SVG")]
+    assert max(loud) < min(quiet)                                       # svg / pdf carry random ids: they come last
+    counts = out[out.index("by extension"):].splitlines()[0]
+    for extension, n in ((".png", 1), (".csv", 1), (".parquet", 1), (".pdf", 1), (".svg", 3)):     # .SVG is .svg
+        assert f"{extension} {n}" in counts
+    assert max(counts.index(e) for e in (".png", ".csv", ".parquet")) < min(counts.index(e) for e in (".pdf", ".svg"))
+
+
+def test_cli_compare_lists_at_most_fifty_ignored_noise_paths_keeping_the_non_svg_ones_in_front(tmp_path):
+    svgs = [f"/r::fig{i:03d}.svg" for i in range(60)]
+    others = ["/r::zz1.png", "/r::zz2.csv", "/r::zz3.parquet"]          # these sort after every svg
+    keys = svgs + others
+
+    def snapshot_of(name, digest):
+        return _write_snapshot(tmp_path / f"{name}.json", {key: digest for key in keys})
+
+    result = _run("compare", snapshot_of("A", "a"), snapshot_of("B", "b"), "--noise", snapshot_of("noise", "jitter"))
+    assert result.returncode == 0
+    out = result.stdout
+    assert all(path in out for path in others)                          # 60 svgs sort first, yet the others are listed
+    assert out.count("/r::fig") == 47                                   # 50 paths in all: 3 others and 47 svgs
+    assert "13 more" in out and ".svg 60" in out
+
+
+def test_cli_compare_says_noise_removed_only_when_a_noise_snapshot_was_given(tmp_path):
+    tree = _tree(tmp_path / "tree")
+    a, b, noise = (_snapshot(tmp_path / f"{name}.json", tree) for name in ("a", "b", "noise"))
+
+    def last_line(*command):
+        return _run("compare", *command).stdout.strip().splitlines()[-1]
+
+    assert last_line(a, b) == "RESULT: identical"
+    assert last_line(a, b, "--noise", noise) == "RESULT: identical (noise removed)"
+    (tree / "wide.csv").write_text("fly,t0,t1\nA,9.9,1.5\nB,2.5,3.0\n")
+    c = _snapshot(tmp_path / "c.json", tree)
+    assert last_line(a, c) == "RESULT: 1 difference(s)"
+    assert last_line(a, c, "--noise", noise) == "RESULT: 1 difference(s) (noise removed)"
+    assert "ignored as noise: 0" in _run("compare", a, c, "--noise", noise).stdout      # consulted, nothing to ignore
+    assert "ignored as noise" not in _run("compare", a, c).stdout                       # nothing to ignore without one
