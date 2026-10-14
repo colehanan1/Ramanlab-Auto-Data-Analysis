@@ -10,13 +10,17 @@ compare B with A ignoring every path that already differs between A and A'. Pinn
   it (a dictionary column is hashed by its VALUES, not only by its codes);
 * a CSV is hashed as raw bytes and never parsed (the real wide CSV is 1.4 GB);
 * ``exclude`` globs match any path component, or the whole relative path, at any depth;
-* an unreadable, corrupt or dangling file gets an ``error:`` digest instead of crashing the snapshot;
+* a corrupt file gets ``error:<ExceptionType>:<sha256 of its raw bytes>`` instead of crashing the snapshot, so the same
+  corrupt file still compares equal and a different one compares as changed; a file whose raw bytes cannot be read
+  either (permission, I/O error, dangling link) keeps the bare ``error:<ExceptionType>``; the CLI counts and warns
+  about both;
 * ``compare`` removes every path that differs between A and the noise snapshot, and the CLI exits 0 when nothing
   remains and 1 when something does.
 """
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import os
 import shutil
@@ -76,8 +80,23 @@ def _run(*args) -> subprocess.CompletedProcess:
 
 
 def _write_snapshot(path: Path, digests: dict) -> Path:
-    path.write_text(json.dumps({"version": 1, "roots": [], "exclude": [], "digests": digests}))
+    path.write_text(json.dumps({"version": od.SNAPSHOT_VERSION, "roots": [], "exclude": [], "digests": digests}))
     return path
+
+
+def _png_bytes() -> bytes:
+    buffer = io.BytesIO()
+    Image.fromarray(PIXELS).save(buffer, format="PNG")
+    return buffer.getvalue()
+
+
+def _write_corrupt(path: Path, variant: int = 0) -> bytes:
+    """Write a file that cannot be parsed as its extension says; another ``variant`` is another corrupt file."""
+    data = {".parquet": b"PAR1 not a parquet file, take %d" % variant,
+            ".json": b'{"not": json, take %d' % variant,
+            ".png": _png_bytes()[: 400 + 100 * variant]}[path.suffix]      # truncated inside the image data
+    path.write_bytes(data)
+    return data
 
 
 # --------------------------------------------------------------------------
@@ -408,16 +427,82 @@ def test_corrupt_files_get_an_error_digest_and_the_rest_of_the_tree_is_still_dig
     assert {k for k, v in digests.items() if not v.startswith("error:")} == TREE_FILES
 
 
-@pytest.mark.skipif(os.geteuid() == 0, reason="root can read any file")
-def test_a_file_that_cannot_be_opened_gets_an_error_digest(tmp_path):
+@pytest.mark.parametrize("name", ["bad.parquet", "bad.png", "bad.json"])
+def test_a_corrupt_file_gets_an_error_digest_that_carries_the_sha256_of_its_raw_bytes(tmp_path, name):
+    data = _write_corrupt(tmp_path / name)
+    marker, error_type, raw_hash = od.digest_file(tmp_path / name).split(":")   # error:<ExceptionType>:<sha256>
+    assert marker == "error" and error_type.isidentifier()
+    assert raw_hash == hashlib.sha256(data).hexdigest()
+
+
+def test_two_different_corrupt_parquet_files_compare_as_changed(tmp_path):
     tree = _tree(tmp_path / "tree")
-    (tree / "wide.csv").chmod(0)
+    a, b = tmp_path / "A.json", tmp_path / "B.json"
+    _write_corrupt(tree / "bad.parquet", variant=0)
+    before = od.digest_tree(tree)
+    assert _run("snapshot", "--root", tree, "--out", a).returncode == 0
+    _write_corrupt(tree / "bad.parquet", variant=1)                     # still unparsable, but not the same bytes
+    after = od.digest_tree(tree)
+    assert _run("snapshot", "--root", tree, "--out", b).returncode == 0
+    assert before[_key(tree, "bad.parquet")].startswith("error:")
+    assert after[_key(tree, "bad.parquet")].startswith("error:")
+    assert od.diff_digests(before, after) == {"added": [], "removed": [], "changed": [_key(tree, "bad.parquet")]}
+    result = _run("compare", a, b)
+    assert result.returncode == 1
+    assert "changed: 1" in result.stdout and _key(tree, "bad.parquet") in result.stdout
+
+
+def test_the_same_corrupt_bytes_in_a_and_b_compare_equal_but_are_still_counted_and_warned(tmp_path):
+    tree = _tree(tmp_path / "tree")
+    _write_corrupt(tree / "bad.parquet")
+    a, b = tmp_path / "A.json", tmp_path / "B.json"
+    for snapshot in (a, b):
+        taken = _run("snapshot", "--root", tree, "--out", snapshot)
+        assert taken.returncode == 0, taken.stderr
+        assert "1 unreadable" in taken.stdout                           # counted when it is taken ...
+    assert json.loads(a.read_text())["digests"] == json.loads(b.read_text())["digests"]
+    result = _run("compare", a, b)
+    assert result.returncode == 0                                       # ... the same bytes: nothing changed, but ...
+    assert _key(tree, "bad.parquet") in result.stdout                   # ... it is named, ...
+    assert "raw bytes identical" in result.stdout                       # ... with what was compared, ...
+    assert "1 unreadable" in result.stdout.strip().splitlines()[-1]     # ... and the verdict line says so too
+
+
+def test_a_corrupt_file_whose_raw_bytes_cannot_be_read_either_keeps_the_bare_error_digest(tmp_path, monkeypatch):
+    path = tmp_path / "bad.parquet"
+    _write_corrupt(path)
+
+    def unreadable(_path):
+        raise OSError("input/output error")
+
+    monkeypatch.setattr(od, "_hash_bytes", unreadable)
+    digest = od.digest_file(path)
+    assert digest.startswith("error:") and digest.count(":") == 1       # error:<ExceptionType> and no hash
+
+
+def test_cli_snapshot_counts_unreadable_files_by_exception_type_whatever_their_raw_hash(tmp_path):
+    tree = _tree(tmp_path / "tree")
+    _write_corrupt(tree / "one.parquet", variant=0)
+    _write_corrupt(tree / "two.parquet", variant=1)                     # a different corrupt file: another digest
+    out = tmp_path / "A.json"
+    result = _run("snapshot", "--root", tree, "--out", out)
+    digests = json.loads(out.read_text())["digests"]
+    assert digests[_key(tree, "one.parquet")] != digests[_key(tree, "two.parquet")]
+    error_type = digests[_key(tree, "one.parquet")].split(":")[1]
+    assert f"2 unreadable (error:{error_type} x2)" in result.stdout
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root can read any file")
+@pytest.mark.parametrize("name", ["wide.csv", "sub/deeper/t.parquet"])
+def test_a_file_that_cannot_be_opened_gets_the_bare_error_digest(tmp_path, name):
+    tree = _tree(tmp_path / "tree")
+    (tree / name).chmod(0)
     try:
         digests = _rel(od.digest_tree(tree))
     finally:
-        (tree / "wide.csv").chmod(0o644)
-    assert digests["wide.csv"] == "error:PermissionError"
-    assert {k for k, v in digests.items() if not v.startswith("error:")} == TREE_FILES - {"wide.csv"}
+        (tree / name).chmod(0o644)
+    assert digests[name] == "error:PermissionError"                     # no raw bytes to hash: no hash after the type
+    assert {k for k, v in digests.items() if not v.startswith("error:")} == TREE_FILES - {name}
 
 
 def test_a_file_that_is_not_a_regular_file_gets_an_error_digest_instead_of_blocking(tmp_path):
@@ -503,7 +588,7 @@ def test_cli_snapshot_writes_the_documented_json_and_prints_the_file_count(tmp_p
     assert result.returncode == 0, result.stderr
     assert "3 files" in result.stdout
     snapshot = json.loads(out.read_text())
-    assert snapshot["version"] == 1
+    assert snapshot["version"] == 2                                     # 2: error digests carry the raw-byte hash
     assert snapshot["roots"] == [os.path.abspath(tree)]
     assert snapshot["exclude"] == ["*.txt", "deeper"]
     assert snapshot["digests"] == od.digest_tree(tree, exclude=("*.txt", "deeper"))
@@ -597,16 +682,21 @@ def test_cli_compare_warns_about_paths_that_are_unreadable_in_both_snapshots(tmp
     result = _run("compare", a, b)
     assert result.returncode == 0                                       # equal digests: nothing to report ...
     assert "/r::bad.parquet" in result.stdout                           # ... but say what was not compared
-    assert "1 unreadable" in result.stdout.strip().splitlines()[-1]     # ... on the verdict line too
+    assert "NOT compared" in result.stdout                              # no raw hash after the type: not even the bytes
+    verdict = result.stdout.strip().splitlines()[-1]
+    assert "1 unreadable" in verdict and "1 of them NOT compared" in verdict    # ... and the verdict line says so too
 
 
-def test_cli_compare_rejects_a_file_that_is_not_a_version_1_snapshot(tmp_path):
+def test_cli_compare_rejects_a_file_that_is_not_a_current_snapshot(tmp_path):
     good = _write_snapshot(tmp_path / "A.json", {"/r::a": "1"})
-    wrong_version = tmp_path / "B.json"
-    wrong_version.write_text(json.dumps({"version": 2, "digests": {"/r::a": "1"}}))
+    too_old = tmp_path / "old.json"                                     # version 1: its error digests had no raw hash
+    too_old.write_text(json.dumps({"version": 1, "digests": {"/r::a": "1"}}))
+    too_new = tmp_path / "new.json"
+    too_new.write_text(json.dumps({"version": od.SNAPSHOT_VERSION + 1, "digests": {"/r::a": "1"}}))
     not_json = tmp_path / "C.json"
     not_json.write_text("garbage")
-    for bad in (wrong_version, not_json, tmp_path / "missing.json"):
+    for bad in (too_old, too_new, not_json, tmp_path / "missing.json"):
         result = _run("compare", good, bad)
         assert result.returncode == 2, bad
         assert "Traceback" not in result.stderr
+    assert "version 1" in _run("compare", good, too_old).stderr         # and says which version it found

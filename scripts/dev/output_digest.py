@@ -25,10 +25,13 @@ A digest is a function of what a file CONTAINS, not of how it was written:
 * ``.json`` -- sha256 of ``json.dumps(obj, sort_keys=True, separators=(",", ":"))``; one over 64 MiB is hashed as raw
   bytes instead of being parsed into memory.
 
-Digest keys are ``<absolute root>::<path relative to the root>``, so several roots share one snapshot. A file that
-cannot be read or parsed gets the digest ``error:<ExceptionType>`` rather than crashing the snapshot, so two unreadable
-files always compare equal: ``snapshot`` and ``compare`` therefore count them out loud. Two other entries are not
-files: a directory that could not be listed (key ending in ``/``) is ``error:<ExceptionType>``, and a symlinked
+Digest keys are ``<absolute root>::<path relative to the root>``, so several roots share one snapshot. A file whose
+content cannot be parsed (a corrupt parquet, PNG or JSON) gets ``error:<ExceptionType>:<sha256 of its raw bytes>``
+rather than crashing the snapshot: the same corrupt file still compares equal and a different one compares as changed.
+A file whose raw bytes cannot be read either (permission, I/O error, a dangling link, a FIFO) gets the bare
+``error:<ExceptionType>``, and any two of those compare equal. ``snapshot`` and ``compare`` count every ``error:``
+digest out loud, because an unparsed file has not had its content compared. Two other entries are not files: a
+directory that could not be listed (key ending in ``/``) is the bare ``error:<ExceptionType>``, and a symlinked
 directory is ``symlink:<target>`` and is not followed. A symlink to a file is hashed by the content it points at.
 
 ``exclude`` globs (fnmatch, case-sensitive) match any single path component or the whole relative path, so
@@ -54,7 +57,9 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Mapping, Optional, Sequence
 
-SNAPSHOT_VERSION = 1          # bump with anything below that changes what a digest means
+# Bump with anything below that changes what a digest means. 1: first version. 2: ``error:<ExceptionType>`` became
+# ``error:<ExceptionType>:<sha256 of the raw bytes>`` for a file that can be read but not parsed.
+SNAPSHOT_VERSION = 2
 KEY_SEP = "::"
 LISTED = 50                   # paths ``compare`` prints per category
 DEFAULT_WORKERS = 8
@@ -141,8 +146,16 @@ def _hash_parquet(path: Path) -> str:
 _HASHERS = {".parquet": _hash_parquet, ".png": _hash_png, ".json": _hash_json}
 
 
+def _with_raw_hash(path: Path, error: str) -> str:
+    """``error`` plus the sha256 of the file's raw bytes, so that a different corrupt file still compares as changed."""
+    try:
+        return f"{error}:{_hash_bytes(path)}"
+    except Exception:                              # noqa: BLE001 -- not even readable: the bare error is all there is
+        return error
+
+
 def digest_file(path) -> str:
-    """The digest of one file (see the module docstring), or ``error:<ExceptionType>`` if it cannot be read."""
+    """The digest of one file (see the module docstring), or an ``error:`` digest if it cannot be read or parsed."""
     path = Path(path)
     try:
         if not stat.S_ISREG(os.stat(path).st_mode):
@@ -151,7 +164,7 @@ def digest_file(path) -> str:
     except ImportError:
         raise                                      # a missing library is not a bad file: every digest would be wrong
     except Exception as exc:                       # noqa: BLE001 -- a bad file must never abort a snapshot
-        return f"error:{type(exc).__name__}"
+        return _with_raw_hash(path, f"error:{type(exc).__name__}")
 
 
 # --------------------------------------------------------------------------
@@ -271,9 +284,11 @@ def compare(a: Mapping[str, str], b: Mapping[str, str], noise: Optional[Mapping[
 def _load_snapshot(path: str) -> dict:
     with open(path, encoding="utf-8") as f:
         snapshot = json.load(f)
-    if (not isinstance(snapshot, dict) or snapshot.get("version") != SNAPSHOT_VERSION
-            or not isinstance(snapshot.get("digests"), dict)):
-        raise ValueError(f"{path}: not a version-{SNAPSHOT_VERSION} output-digest snapshot")
+    if not isinstance(snapshot, dict) or not isinstance(snapshot.get("digests"), dict):
+        raise ValueError(f"{path}: not an output-digest snapshot")
+    if snapshot.get("version") != SNAPSHOT_VERSION:
+        raise ValueError(f"{path}: snapshot version {snapshot.get('version')!r}, but this tool reads version "
+                         f"{SNAPSHOT_VERSION}: take the snapshot again")
     return snapshot
 
 
@@ -283,6 +298,20 @@ def _print_paths(label: str, paths: Sequence[str]) -> None:
         print(f"  {path}")
     if len(paths) > LISTED:
         print(f"  ... and {len(paths) - LISTED} more")
+
+
+def _error_kind(digest: str) -> str:
+    """``error:<ExceptionType>`` of an error digest, whatever raw-byte hash follows it."""
+    return ":".join(digest.split(":", 2)[:2])
+
+
+def _has_raw_hash(digest: str) -> bool:
+    return digest.count(":") == 2
+
+
+def _unreadable_line(path: str, digest: str) -> str:
+    how = "raw bytes identical" if _has_raw_hash(digest) else "NOT compared"
+    return f"{path}  [{_error_kind(digest)}; {how}]"
 
 
 def _inside(path: str, root: str) -> bool:
@@ -311,7 +340,7 @@ def _cmd_snapshot(args: argparse.Namespace) -> int:
     with open(out, "w", encoding="utf-8") as f:
         json.dump(payload, f, indent=1)
         f.write("\n")
-    errors = Counter(d for d in digests.values() if d.startswith("error:"))
+    errors = Counter(_error_kind(d) for d in digests.values() if d.startswith("error:"))
     unreadable = ""
     if errors:
         kinds = ", ".join(f"{kind} x{n}" for kind, n in sorted(errors.items()))
@@ -334,10 +363,15 @@ def _cmd_compare(args: argparse.Namespace) -> int:
         _print_paths(kind, result[kind])
     unreadable = sorted(p for p, d in a["digests"].items() if d.startswith("error:") and b["digests"].get(p) == d)
     if unreadable:
-        _print_paths("WARNING: unreadable in both snapshots, so NOT compared", unreadable)
+        _print_paths("WARNING: unreadable in both snapshots",
+                     [_unreadable_line(p, a["digests"][p]) for p in unreadable])
     remaining = sum(len(result[kind]) for kind in ("added", "removed", "changed"))
     verdict = f"RESULT: {remaining} difference(s)" if remaining else "RESULT: identical (noise removed)"
-    print(verdict + (f"; {len(unreadable)} unreadable path(s) NOT compared" if unreadable else ""))
+    if unreadable:
+        blind = sum(1 for p in unreadable if not _has_raw_hash(a["digests"][p]))
+        verdict += f"; {len(unreadable)} unreadable path(s) in both snapshots"
+        verdict += f", {blind} of them NOT compared" if blind else ""
+    print(verdict)
     return 1 if remaining else 0
 
 
