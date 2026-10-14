@@ -42,7 +42,8 @@
   h3 { font-size: 14px; margin: 20px 0 8px; }
   table { width: 100%; border-collapse: collapse; background: var(--card); border-radius: 12px; overflow: hidden; }
   td { padding: 8px; border-top: 1px solid var(--line); font-size: 13px; }
-  .offline { opacity: .55; }
+  .offline { opacity: .7; }
+  .big.idle-msg { font-size: 20px; font-weight: 600; color: var(--muted); }
   dialog { border: none; border-radius: 12px; padding: 0; background: #000; max-width: 96vw; }
   dialog video { display: block; max-width: 96vw; max-height: 80vh; }
   dialog form { position: absolute; top: 6px; right: 6px; }
@@ -82,10 +83,30 @@ function piNow(rig) {
   return Date.now() / 1000 + hubSkew + piOffset;
 }
 
+// What the rig is doing, in plain words. An unreachable rig is normal between
+// batches (the status page lives inside the experiment script); it is only an
+// alarm if the last thing we saw was a run in progress.
+function rigMode(rig) {
+  const run = (rig.status || {}).run || {};
+  if (!(rig.reachable && !rig.offline)) return run.state === "running" ? "lost" : "notrunning";
+  if (run.state === "complete") return "complete";
+  if (run.state === "failed") return "failed";
+  if (run.state === "running") return "running";
+  return "idle";
+}
+const MODE_CHIP = {
+  notrunning: ["Not running", "--idle"], lost: ["Lost contact", "--bad"],
+  idle: ["Starting", "--wait"], complete: ["Experiment complete", "--done"],
+  failed: ["FAILED", "--bad"],
+};
+
 function countText(rig) {
   const st = rig.status || {}, now = piNow(rig);
-  if (!(rig.reachable && !rig.offline)) return "—";
-  if (st.phase === "COMPLETE") return "✓";
+  const mode = rigMode(rig);
+  if (mode === "notrunning") return "No experiment running";
+  if (mode === "lost") return "—";
+  if (mode === "idle") return "Waiting for intake";
+  if (mode === "complete" || st.phase === "COMPLETE") return "✓";
   return st.phase === "STIMULUS" ? fmt(now - st.started_at) : fmt(st.ends_at - now);
 }
 function progOf(rig) {
@@ -101,6 +122,20 @@ function card(name, rig) {
   const counting = countText(rig), prog = progOf(rig);
   const tDone = Number(run.trials_done) || 0, tTotal = Number(run.trials_total) || 0;
   const online = rig.reachable && !rig.offline;
+  const mode = rigMode(rig);
+  const [chipName, chipColor] = mode === "running" ? [phaseName, color] : MODE_CHIP[mode];
+  if (mode === "notrunning" || mode === "lost") {
+    const why = mode === "lost"
+      ? `Lost contact during a run · last seen ${hhmm(rig.last_seen)} — check the rig`
+      : `Start the rig script to see it here${rig.last_seen ? ` · last run seen ${hhmm(rig.last_seen)}` : ""}`;
+    return `<div class="card offline">
+    <h2><span>${esc(rig.label)}</span><span class="chip" style="background:var(${chipColor})">${chipName}</span></h2>
+    <div class="big idle-msg" data-count="${esc(name)}">${countText(rig)}</div>
+    <div class="sub">${why}</div>
+    <div class="row">
+      <button data-mute="${esc(name)}" data-muted="${rig.muted ? 1 : 0}">${rig.muted ? "🔕 Muted" : "🔔 Mute"}</button>
+    </div></div>`;
+  }
   const trials = run.trials || [];
   const rows = (S.trials || []).filter(t => t.rig === name && t.batch_dir === run.batch_dir);
   const stateOf = i => (rows.find(t => t.idx === i) || {}).state || "";
@@ -110,13 +145,13 @@ function card(name, rig) {
     strip += `<span class="${s === "done" ? "done" : s === "failed" ? "failed" : (s ? "busy" : "")}" title="trial ${i} ${esc(s)}"></span>`;
   }
   return `<div class="card ${online ? "" : "offline"}">
-    <h2><span>${esc(rig.label)}</span><span class="chip" style="background:var(${online ? color : "--idle"})">${online ? phaseName : "offline"}</span></h2>
+    <h2><span>${esc(rig.label)}</span><span class="chip" style="background:var(${chipColor})">${chipName}</span></h2>
     <div class="sub">${esc(st.trial_label || "")} ${esc(st.label || "")} ${esc(st.odor || "")}</div>
     <div class="big" data-count="${esc(name)}">${counting}</div>
     <div class="bar"><i data-bar="${esc(name)}" style="width:${(prog * 100).toFixed(1)}%"></i></div>
     <div class="sub">${tDone}/${tTotal} trials · done ≈ ${hhmm(run.expected_end_at)}
       ${run.state === "failed" ? ` · <b style="color:var(--bad)">FAILED</b> ${esc(run.error)}` : ""}
-      ${online ? "" : ` · last seen ${hhmm(rig.last_seen)}`}</div>
+      </div>
     <div class="strip">${strip}</div>
     <div class="row">
       <a class="btn" href="${esc(rig.live_url)}" target="_blank" rel="noopener">Live</a>

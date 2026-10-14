@@ -43,3 +43,12 @@ def test_page_has_no_inline_handlers_and_escapes_quotes():
 def test_page_ticks_without_rebuilding_and_guards_phase_lookup():
     assert "setInterval(tick" in PAGE and "setInterval(render" not in PAGE
     assert "hasOwnProperty" in PAGE
+
+
+def test_page_says_plainly_when_nothing_is_running():
+    """An unreachable rig between batches is normal: say so instead of 'offline'.
+    Only a rig that vanished mid-run is an alarm."""
+    for text in ("No experiment running", "Not running", "Lost contact",
+                 "Waiting for intake", "Experiment complete"):
+        assert text in PAGE
+    assert 'phaseName : "offline"' not in PAGE
