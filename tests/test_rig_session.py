@@ -251,7 +251,8 @@ def test_due_messages_use_the_tracker_eta(tmp_path):
 # ── hub hand-off ─────────────────────────────────────────────────────────────
 
 class FakeHub:
-    def __init__(self, states, fail_complete=False):
+    def __init__(self, states, fail_complete=False, abort_reply=None):
+        self.abort_reply = abort_reply or {}
         self.states = list(states)
         self.fail_complete = fail_complete
         self.posts = []
@@ -260,6 +261,8 @@ class FakeHub:
         self.posts.append((url, payload))
         if self.fail_complete and url.endswith("/complete"):
             raise OSError("connection refused")
+        if url.endswith("/abort"):
+            return self.abort_reply
         return {}
 
     def get(self, url, timeout=10.0):
@@ -357,3 +360,14 @@ def test_unknown_mark_position_warns_once(tmp_path, capsys):
     run.mark(99, 0, 0)
     err = capsys.readouterr().err
     assert err.count("[RUN] mark: unknown step position (99, 0, 0)") == 1
+
+
+def test_handoff_abort_reply_landed_wins_over_timeout():
+    hub = FakeHub(["pending"] * 20, abort_reply={"state": "landed"})
+    assert _handoff(hub, timeout_s=30.0) == "landed"
+    assert hub.posts[-1][0].endswith("/abort")
+
+
+def test_handoff_abort_reply_aborted_keeps_prior_result():
+    hub = FakeHub(["pending"] * 20, abort_reply={"state": "aborted"})
+    assert _handoff(hub, timeout_s=30.0) == "timeout"
