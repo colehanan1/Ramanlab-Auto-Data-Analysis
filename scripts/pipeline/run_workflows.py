@@ -59,7 +59,6 @@ from fbpipe.config_layers import OVERLAY_BLOCKS, ConfigLayers, resolve_layers
 from fbpipe.pipeline import ORDERED_STEPS
 from fbpipe.steps import predict_reactions
 from fbpipe.utils.data_secured_sync import sync_data_secured
-from fbpipe.utils.process_guard import die_with_parent_preexec
 from fbpipe.utils.run_lock import RunLockTimeout, run_lock
 from fbpipe.utils.stage_locks import abdomen_lock, acquire_per_run_lock, per_run_active, release_run_lock
 from fbpipe.utils.smb_copy import copy_to_smb
@@ -5497,6 +5496,10 @@ def _run_budgeted(cmd: Sequence[str], env: Mapping[str, str], seconds: float) ->
     SIGTERM or SIGHUP of the driver, see :func:`_stage_signals_raise`), the group does not outlive it; and the command is
     spawned to die with the driver (``die_with_parent_preexec``), which also covers a SIGKILL of the driver.
     """
+    # Imported here, not at the top of the module: only the stage starts these children, and a plain run must not load
+    # anything the stage alone uses.
+    from fbpipe.utils.process_guard import die_with_parent_preexec
+
     proc = subprocess.Popen(list(cmd), env=dict(env), start_new_session=True, preexec_fn=die_with_parent_preexec())
     try:
         try:

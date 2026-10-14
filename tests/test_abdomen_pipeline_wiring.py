@@ -776,8 +776,9 @@ def test_ctrl_c_during_a_command_still_stops_its_process_group_and_frees_the_loc
 # ---- the stage: a killed driver must not orphan its commands ------------------------------------------------
 
 def test_every_stage_command_is_spawned_to_die_with_the_driver(tmp_path, procs, monkeypatch):
+    from fbpipe.utils import process_guard
     sentinel = object()
-    monkeypatch.setattr(rw, "die_with_parent_preexec", lambda: sentinel)
+    monkeypatch.setattr(process_guard, "die_with_parent_preexec", lambda: sentinel)
     _run(tmp_path, _layers(tmp_path, mounting=MOUNTING))
     assert len(procs.kwargs) == 4
     for kwargs in procs.kwargs:
@@ -1266,18 +1267,23 @@ def test_the_abdomen_flags_are_off_unless_given():
     assert on.abdomen_only is True and on.abdomen_video is True
 
 
-def test_importing_the_driver_does_not_load_the_mounting_analysis():
-    """A plain nightly never builds a mounting command, so an error in ``fbpipe.analysis.mounting`` (a syntax error, a
-    scipy that will not import) must not be able to stop it before it starts: the driver imports the analysis only
-    inside the builder. Checked in a fresh interpreter, where nothing else has imported it."""
+ABDOMEN_ONLY_MODULES = ("fbpipe.analysis.mounting", "fbpipe.utils.process_guard", "fbpipe.geometry_pipeline",
+                        "fbpipe.geometry.steps", "scripts.analysis.mounting_posture")
+
+
+def test_importing_the_driver_loads_nothing_that_only_the_abdomen_stage_uses():
+    """A plain nightly never builds a mounting command nor starts a stage command, so an error in
+    ``fbpipe.analysis.mounting`` (a syntax error, a scipy that will not import), in the parent-death guard or in the
+    geometry code must not be able to stop it before it starts: the driver imports those only where the stage uses
+    them. Checked in a fresh interpreter, where nothing else has imported them."""
     env = dict(os.environ, MPLBACKEND="Agg", FBPIPE_DISABLE_NTFY="1",
                PYTHONPATH=os.pathsep.join([str(rw.REPO_ROOT / "src"), str(rw.REPO_ROOT)]))
     done = subprocess.run(
         [sys.executable, "-c", "import sys, scripts.pipeline.run_workflows; "
-                               "print('mounting loaded:', 'fbpipe.analysis.mounting' in sys.modules)"],
+                               f"print('loaded:', [m for m in {ABDOMEN_ONLY_MODULES!r} if m in sys.modules])"],
         cwd=rw.REPO_ROOT, env=env, capture_output=True, text=True, timeout=300)
     assert done.returncode == 0, done.stderr
-    assert done.stdout.splitlines()[-1] == "mounting loaded: False", done.stdout
+    assert done.stdout.splitlines()[-1] == "loaded: []", done.stdout
 
 
 def test_a_mounting_analysis_that_cannot_be_imported_costs_only_the_mounting_command(monkeypatch, caplog):
