@@ -15,11 +15,10 @@ The conventions are those of ``mounting_posture_figures`` (whose primitives this
 inference: the per-fly scatters use the fly table, the rig-centred mounting angle (the tip pitch is rig-centred too:
 camera roll shifts both) and a permutation p stratified by dataset x rig. Event rates pool TRIALS (events over minutes of
 the same trials, never a mean of per-trial rates). The pre-vs-stimulus p of figure 3 is the within-trial permutation of
-``fbpipe.analysis.mounting.paired_window_permutation`` in its ``"split"`` scheme: each trial's events are re-assigned
-between its two windows in proportion to their lengths. (Exchanging the two whole windows is exact only when they are
-equally long; with 30 s before an odor against its 4 s it calls about one stimulus in five that changes nothing
-"significant".) Only quality-ok windows (``abd_quality_ok``) of identity-consistent flies enter a number. Every p is
-uncorrected, and says so; a comparison with fewer than three flies is "Not enough data to tell". Figure 5 is descriptive.
+``fbpipe.analysis.mounting.paired_window_permutation`` in its default scheme: each trial's events are re-assigned between
+its two windows in proportion to their lengths, so the 4 s of an odor are compared fairly with the 30 s before it.
+Only quality-ok windows (``abd_quality_ok``) of identity-consistent flies enter a number. Every p is uncorrected, and says
+so; a comparison with fewer than three flies is "Not enough data to tell". Figure 5 is descriptive.
 
 ``compute_abdomen_stats`` does all the arithmetic once; ``build_abdomen_figures`` / ``render_abdomen_figures`` and
 ``abdomen_report_section`` only format it. An input without a usable abdomen window draws nothing (and removes the six
@@ -64,7 +63,6 @@ EVENT_NOUN = {"curl": "Curl", "straighten": "Straightening"}
 WINDOW_LABELS = {"odor": "the odor", "light": "the light"}
 MORE, LESS = "more often than before the stimulus", "less often than before the stimulus"
 CENTRED_TIP = "tip_pitch_centred_deg"           # the fly table's tip pitch minus its rig's median (derived here)
-P_SCHEME = "split"                              # how paired_window_permutation re-draws a trial's split (see above)
 
 
 # ---------------------------------------------------------------------------
@@ -138,7 +136,7 @@ def _event_cell(pairs: pd.DataFrame, kind: str, event: str, *, n_perm: int, seed
     diff, p = np.nan, np.nan
     if len(use):
         diff, p = M.paired_window_permutation(use, events_pre=col_pre, min_pre="pre_min", events_stim=col_stim,
-                                              min_stim="stim_min", n=n_perm, seed=seed, scheme=P_SCHEME)
+                                              min_stim="stim_min", n=n_perm, seed=seed)
     n_flies = int(use["fly_id"].nunique())
     answer = FIG.verdict(p if n_flies >= FIG.MIN_FLIES else np.nan, diff, up=MORE, down=LESS, none="No clear difference")
     return {"kind": kind, "event": event, "n_trials": int(len(use)), "n_flies": n_flies,

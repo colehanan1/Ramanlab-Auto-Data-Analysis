@@ -38,6 +38,7 @@ from scipy.spatial.distance import pdist
 
 _PERM_TOL = 1e-12          # slack (x the outcome scale) on "permuted diff >= observed diff": subset sums round differently
 _CHUNK_CELLS = 2_000_000   # permuted values held in memory at once (~16 MB of float64)
+_SWAP_LENGTH_RATIO = 1.01  # the window swap needs the two windows of a trial within 1 % of each other's length
 _PRED_KEY = ["dataset", "fly", "fly_number", "trial_label"]
 
 
@@ -409,7 +410,7 @@ def stratified_risk_difference(df: pd.DataFrame, *, state: str, outcome: str, st
 
 
 def paired_window_permutation(df: pd.DataFrame, *, events_pre: str, min_pre: str, events_stim: str, min_stim: str,
-                              n: int, seed: int = 0, scheme: str = "swap") -> tuple[float, float]:
+                              n: int, seed: int = 0, scheme: str = "split") -> tuple[float, float]:
     """``(diff, p)``: the pooled event rate during the stimulus minus before it, and its within-trial permutation p.
 
     Every row is one trial with two windows: ``events_pre`` events in ``min_pre`` minutes before the stimulus and
@@ -420,14 +421,15 @@ def paired_window_permutation(df: pd.DataFrame, *, events_pre: str, min_pre: str
     ``default_rng(seed)``, two-sided. Trials missing a window (a NaN count or length, or a length that is not positive)
     are left out first; ``(nan, nan)`` when no trial is left. *scheme* says how the split is re-drawn:
 
-    * ``"swap"`` (the default): the trial's two windows, events AND minutes, are exchanged with probability 1/2. That is
-      exact when the two windows are equally long. When they are not (30 s before an odor against the 4 s of the odor),
-      the short window is far noisier than the long one, a swap does not preserve that, and the p comes out too small:
-      about one in five stimuli that change nothing reads p < 0.05.
-    * ``"split"``: the trial's events (whole numbers) are re-assigned to its windows at random, each to the stimulus
-      window with probability ``min_stim / (min_pre + min_stim)``, the minutes staying with their windows. That is exact
-      for any lengths if the events of a trial come at a constant rate (the null "the stimulus changes nothing"), and
-      keeps the false-positive rate at its level where the swap does not.
+    * ``"split"`` (the default): the trial's events (whole numbers) are re-assigned to its windows at random, each to the
+      stimulus window with probability ``min_stim / (min_pre + min_stim)``, the minutes staying with their windows. That
+      is exact for any window lengths if the events of a trial come at a constant rate (the null "the stimulus changes
+      nothing"), and it keeps the false-positive rate at its level for 30 s before an odor against the 4 s of the odor.
+    * ``"swap"``: the trial's two windows, events AND minutes, are exchanged with probability 1/2. **Valid only when the
+      two windows of every trial have the same length.** With unequal windows the short one is far noisier than the long
+      one, a swap does not preserve that, and the p comes out too small (about one stimulus in five that changes nothing
+      reads p < 0.05 for 30 s against 4 s), so a trial whose two windows differ in length by more than 1 % is a
+      ``ValueError``.
     """
     if n < 1:
         raise ValueError("n must be at least 1")
@@ -438,6 +440,9 @@ def paired_window_permutation(df: pd.DataFrame, *, events_pre: str, min_pre: str
     e0, m0, e1, m1 = e0[keep], m0[keep], e1[keep], m1[keep]
     if not e0.size:
         return float("nan"), float("nan")
+    if scheme == "swap" and (np.maximum(m0, m1) > _SWAP_LENGTH_RATIO * np.minimum(m0, m1)).any():
+        raise ValueError("scheme='swap' needs every trial's two windows to have the same length (within 1 %); "
+                         "use scheme='split' for windows of different lengths")
     total_e, total_m = float(e0.sum() + e1.sum()), float(m0.sum() + m1.sum())
     if scheme == "split":
         events = e0 + e1

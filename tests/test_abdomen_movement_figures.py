@@ -9,9 +9,10 @@ Rules pinned here, on synthetic fly-trial / fly tables (the fly table is always 
   is rig-centred too: camera roll shifts both) and a permutation p stratified by dataset x rig; the coupling strip is
   descriptive;
 * displayed event rates pool trials (events over minutes of the SAME trials, odor and light windows apart, never a mean of
-  per-trial rates) and the pre-vs-stimulus p is the within-trial permutation of those trials in which each trial's events
-  are re-assigned between its windows in proportion to their lengths (swapping whole windows would call a stimulus that
-  changes nothing "significant" about one time in five when 30 s before the odor are set against its 4 s);
+  per-trial rates) and the pre-vs-stimulus p is the DEFAULT within-trial permutation of those trials, in which each
+  trial's events are re-assigned between its windows in proportion to their lengths (swapping whole windows would call a
+  stimulus that changes nothing "significant" about one time in five when 30 s before the odor are set against its 4 s,
+  and is refused for windows of different lengths);
 * only quality-ok windows of identity-consistent flies enter a number, and the windows the ``abd_min_tracked_frac`` gate
   dropped are counted in the report;
 * a comparison with fewer than 3 flies to compare is "Not enough data to tell", every p is "uncorrected", and no text says
@@ -355,7 +356,7 @@ def test_the_pre_vs_stimulus_p_is_the_within_trial_event_split_permutation_of_th
             use = ft[(ft["stim_kind"] == kind) & ft["abd_quality_ok_stim"]]
             diff, p = M.paired_window_permutation(
                 use, events_pre=f"abd_{event}_events_pre", min_pre="pre_min", events_stim=f"abd_{event}_events_stim",
-                min_stim="stim_min", n=N_PERM, seed=0, scheme="split")
+                min_stim="stim_min", n=N_PERM, seed=0)
             cell = data.stats["events"][event][kind]
             assert cell["diff"] == pytest.approx(diff) and cell["p_perm"] == p, (event, kind)
             assert cell["n_trials"] == len(use) and cell["n_flies"] == use["fly_id"].nunique()
@@ -363,16 +364,18 @@ def test_the_pre_vs_stimulus_p_is_the_within_trial_event_split_permutation_of_th
 
 def test_a_stimulus_that_changes_nothing_is_not_called_significant_because_its_window_is_short(null_data):
     """The null cohort has the same event rate before and during the stimulus, in 30 s and 4 s windows (odor) or 30 s and
-    30 s (light): none of the four comparisons says "Yes", although exchanging whole windows calls the odor curls
-    significant (p = 0.003) on these very trials."""
+    30 s (light): none of the four comparisons says "Yes". (Exchanging whole windows called the odor curls significant,
+    p = 0.003, on these very trials; the permutation now refuses windows of different lengths.)"""
     events = null_data.stats["events"]
     for event in ("curl", "straighten"):
         for kind in ("odor", "light"):
             assert events[event][kind]["verdict"] == "No clear difference", (event, kind, events[event][kind]["p_perm"])
+    assert events["curl"]["odor"]["p_perm"] > 0.1
     use = null_data.ft[(null_data.ft["stim_kind"] == "odor") & null_data.ft["abd_quality_ok_stim"]]
-    swapped = M.paired_window_permutation(use, events_pre="abd_curl_events_pre", min_pre="pre_min",
-                                          events_stim="abd_curl_events_stim", min_stim="stim_min", n=N_PERM, seed=0)
-    assert swapped[1] < 0.01 and events["curl"]["odor"]["p_perm"] > 0.1
+    assert (use["pre_min"] / use["stim_min"] > 1.5).all()                              # the odor windows really are unequal
+    with pytest.raises(ValueError, match="same length"):
+        M.paired_window_permutation(use, events_pre="abd_curl_events_pre", min_pre="pre_min",
+                                    events_stim="abd_curl_events_stim", min_stim="stim_min", n=N_PERM, scheme="swap")
 
 
 def test_the_permutation_p_values_use_the_seed_that_was_given(null_data):
@@ -385,7 +388,7 @@ def test_the_permutation_p_values_use_the_seed_that_was_given(null_data):
             use = ft[(ft["stim_kind"] == kind) & ft["abd_quality_ok_stim"]]
             expected = M.paired_window_permutation(
                 use, events_pre=f"abd_{event}_events_pre", min_pre="pre_min", events_stim=f"abd_{event}_events_stim",
-                min_stim="stim_min", n=N_PERM, seed=3, scheme="split")[1]
+                min_stim="stim_min", n=N_PERM, seed=3)[1]
             assert other["events"][event][kind]["p_perm"] == expected, (event, kind)
             p_events.append((other["events"][event][kind]["p_perm"], null_data.stats["events"][event][kind]["p_perm"]))
     for key, column in (("bend_vs_pitch", "abd_rest_bend_deg"), ("restless", None), ("tip_vs_pitch", None)):
