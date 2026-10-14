@@ -227,3 +227,16 @@ def test_release_frees_the_lock_even_while_a_forked_worker_still_has_the_descrip
         worker.terminate()
         worker.join()
         assert os.path.isfile(tmp_path / "locks" / "per.lock")
+
+
+def test_the_lock_modules_are_not_per_trial_code_for_the_auto_freeze_report():
+    """Auto-freeze reports -- never acts on -- frozen datasets built under other per-trial code, by hashing
+    ``src/fbpipe/utils/*.py`` minus the files that cannot change a row. This lock module is no per-trial code: left on
+    the list it would put a "per-trial code changed" notice naming every frozen dataset in the first night after it
+    lands."""
+    from fbpipe import autofreeze
+
+    hashed = {Path(rel).name for rel in autofreeze.code_provenance()}
+    assert "run_locks.py" not in hashed
+    assert "run_lock.py" not in hashed, "main's whole-run lock is skipped the same way"
+    assert "threshold.py" in hashed and "reject_bad_proboscis.py" in hashed, "the list is not empty"
