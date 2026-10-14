@@ -128,17 +128,19 @@ def _feed(mgr: EyeAnchorManager, eyes: Sequence[Part]) -> None:
                                  np.array([_score(e) for e in eyes], dtype=np.float32))
 
 
+# What a production fly table that cannot be used as a seed raises: a torn write or another schema (OSError, ValueError,
+# KeyError) and anchor columns that hold text or objects instead of numbers (ValueError, TypeError on the float conversion).
+_UNUSABLE_TABLE = (OSError, ValueError, TypeError, KeyError)
+
+
 def _first_anchor(path: Path) -> Optional[Tuple[float, float]]:
-    """The eye anchor in the first row of a production fly table whose x and y are both finite; None when the table has
-    none, cannot be read, or has no such columns."""
-    try:
-        if path.suffix.lower() == ".parquet":
-            table = read_table(path, columns=SEED_COLUMNS)
-        else:
-            table = read_table(path, usecols=SEED_COLUMNS)
-    except (OSError, ValueError) as exc:                       # a torn write, another schema: no seed for this fly
-        print(f"[GEOMETRY] cannot read the production eye anchor in {path}: {type(exc).__name__}: {exc}")
-        return None
+    """The eye anchor in the first row of a production fly table whose x and y are both finite; None when no row has
+    one (production never found this fly's eye). Raises one of ``_UNUSABLE_TABLE`` when the table cannot be read or its
+    anchor columns are not numbers: the caller decides what that means (``production_eye_seeds``: the whole trial waits)."""
+    if path.suffix.lower() == ".parquet":
+        table = read_table(path, columns=SEED_COLUMNS)
+    else:
+        table = read_table(path, usecols=SEED_COLUMNS)
     xy = table[SEED_COLUMNS].to_numpy(dtype=float)
     finite = np.isfinite(xy).all(axis=1)
     if not finite.any():
@@ -152,7 +154,11 @@ def production_eye_seeds(prod_trial_dir: Path) -> Dict[int, Tuple[float, float]]
     the first row of each ``<trial>_fly{N}_distances.{parquet,csv}`` with a finite anchor (the columns are constant per
     file and, on real data, never NaN). A Parquet table wins over a CSV sibling and only the two columns are read.
     Empty when the folder is absent, cannot be listed (a secured mirror with a stale handle) or holds no usable fly
-    table -- the trial has no production identity yet."""
+    table -- the trial has no production identity yet. A table with no finite anchor in any row gives no seed for that
+    fly and the others still count; a table that CANNOT BE USED (torn, another schema, text in the anchor columns) makes
+    the whole result empty, with one line naming the file: numbering the slots by the other flies alone would clear the
+    trial's good outputs down to fewer slots, whereas an empty result leaves the trial awaited until PER's tables are
+    whole."""
     folder = Path(prod_trial_dir)
     try:
         if not folder.is_dir():
@@ -165,7 +171,13 @@ def production_eye_seeds(prod_trial_dir: Path) -> Dict[int, Tuple[float, float]]
     seeds: Dict[int, Tuple[float, float]] = {}
     for path, _token, n in tables:
         if int(n) not in seeds:
-            anchor = _first_anchor(Path(path))
+            try:
+                anchor = _first_anchor(Path(path))
+            except _UNUSABLE_TABLE as exc:
+                why = " ".join(str(exc).split())[:240]          # one line: pyarrow's schema errors run over several
+                print(f"[GEOMETRY] cannot read the production eye anchor in {path}: {type(exc).__name__}: {why}; "
+                      "the trial is awaited (no seeds) until its tables are whole")
+                return {}
             if anchor is not None:
                 seeds[int(n)] = anchor
     return seeds

@@ -24,6 +24,7 @@ import json
 import os
 import re
 import time
+import traceback
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
@@ -286,10 +287,18 @@ def trial_status(job: BatchJob, gcfg: GeometrySettings, video: Path) -> TrialSta
 
 def pending_trials(settings: Settings, gcfg: GeometrySettings) -> int:
     """How many trial videos of the live batches ``run_track`` would track without ``--force`` (:func:`trial_status`).
-    A trial awaiting production seeds is not counted: there is nothing a worker could do for it yet. The CLI starts no
-    worker, and loads no model, when this is 0."""
-    return sum(1 for job in iter_batch_jobs(settings, gcfg) for video in videos_for_job(job, gcfg)
-               if trial_status(job, gcfg, video).state == PENDING)
+    A trial awaiting production seeds is not counted: there is nothing a worker could do for it yet, and neither is one
+    whose status cannot be read (an unreadable secured mirror): it counts as awaiting, with a line naming it, and never
+    stops the count. The CLI starts no worker, and loads no model, when this is 0."""
+    pending = 0
+    for job in iter_batch_jobs(settings, gcfg):
+        for video in videos_for_job(job, gcfg):
+            try:
+                pending += trial_status(job, gcfg, video).state == PENDING
+            except Exception as exc:                  # noqa: BLE001  (one trial that cannot be judged stops no count)
+                print(f"[GEOMETRY] cannot tell what {video.name} needs ({type(exc).__name__}: {exc}); "
+                      "counted as awaiting, not pending")
+    return pending
 
 
 def _clear_trial_outputs(trial_dir: Path, trial_name: str, *, out_base: str | Path) -> List[Path]:
@@ -382,22 +391,25 @@ def run_track(settings: Settings, gcfg: GeometrySettings, *, force: bool = False
             if only_trial and only_trial not in name:
                 continue
             out_dir = trial_out_dir(job.out_dir, gcfg, video)
-            status = trial_status(job, gcfg, video)
-            if status.state == AWAITING_SEEDS:
-                print(f"[GEOMETRY] skip {video.name}: awaiting production seeds ({name}_fly*_distances not found in "
-                      f"{job.prod_dir / name} or the secured mirrors); retried next run")
-                awaiting += 1
-                continue
-            if status.state == TRACKED and not force:
-                print(f"[GEOMETRY] skip {video.name}: {out_dir.name} already tracked (use --force to redo)")
-                skipped += 1
-                continue
-            if gcfg.out_base and per_run_active(settings.cache_dir):
-                print("[GEOMETRY] PER run active — yielding; remaining trials resume next run")
-                yielded = True
-                break
             t0 = time.time()
             try:
+                # The status is read inside the try like everything else about the video: a trial whose production folder
+                # cannot be read (a stale handle on the secured mirror) is one failed video, not an aborted shard.
+                status = trial_status(job, gcfg, video)
+                if status.state == AWAITING_SEEDS:
+                    print(f"[GEOMETRY] skip {video.name}: awaiting production seeds ({name}_fly*_distances not found in "
+                          f"{job.prod_dir / name} or the secured mirrors); retried next run")
+                    awaiting += 1
+                    continue
+                if status.state == TRACKED and not force:
+                    print(f"[GEOMETRY] skip {video.name}: {out_dir.name} already tracked (use --force to redo)")
+                    skipped += 1
+                    continue
+                if gcfg.out_base and per_run_active(settings.cache_dir):
+                    print("[GEOMETRY] PER run active — yielding; remaining trials resume next run")
+                    yielded = True
+                    break
+                t0 = time.time()
                 if status.stale:
                     removed = _clear_trial_outputs(out_dir, name, out_base=gcfg.out_base)
                     print(f"[GEOMETRY] {name}: {status.reason}; cleared {len(removed)} old output file(s), tracking again")
@@ -417,7 +429,9 @@ def run_track(settings: Settings, gcfg: GeometrySettings, *, force: bool = False
                             dataset=job.dataset)
                 C.meta_path(out_dir, name).write_text(json.dumps(meta, indent=2, default=str), encoding="utf-8")
             except Exception as exc:                             # one bad video must not stop the batch
+                # The first line keeps the prefix fan_out_track counts failed videos by; the traceback follows it.
                 print(f"[GEOMETRY] failed {video}: {type(exc).__name__}: {exc}")
+                print(traceback.format_exc().rstrip())
                 failed += 1
                 continue
             print(f"[GEOMETRY] {video.name}: {len(result.tables)} slot(s), {result.meta['n_frames_processed']} frames "

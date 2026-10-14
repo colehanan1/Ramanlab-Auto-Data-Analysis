@@ -5283,7 +5283,7 @@ def _mounting_command(
         # Not only ValueError: Path.expanduser raises RuntimeError for "~nouser/x", math.isfinite OverflowError for an
         # int beyond the float range, and the import itself may fail. Any of them costs this command and nothing else.
         LOGGER.warning("[mounting] not run: the mounting block is invalid or its module cannot be loaded (%s: %s)",
-                       type(exc).__name__, exc)
+                       type(exc).__name__, exc, exc_info=True)
         return None
     predictions = str(getattr(getattr(settings, "reaction_prediction", None), "output_csv", "") or "")
     if not predictions.strip():
@@ -5611,7 +5611,7 @@ def _run_abdomen_stages(
         # `abdomen.python: ~nouser/py`, and nothing the stage or its config does may fail the finished PER run.
         # (KeyboardInterrupt and SystemExit are not Exceptions and still propagate.)
         result["error"] = f"{type(exc).__name__}: {exc}"
-        LOGGER.warning("[abdomen] stage failed (%s); PER outputs are not affected", result["error"])
+        LOGGER.warning("[abdomen] stage failed (%s); PER outputs are not affected", result["error"], exc_info=True)
     result["ran"] = any(command["ran"] for command in result["commands"])
     result["summary"] = _abdomen_summary(result)
     LAST_ABDOMEN_SUMMARY = result["summary"]

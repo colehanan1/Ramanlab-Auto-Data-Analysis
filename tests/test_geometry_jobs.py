@@ -529,6 +529,42 @@ def test_an_error_while_tracking_a_video_is_isolated_the_same_way(tree, fake_mod
     assert tree.meta(1).is_file() and tree.meta(2).is_file() and not tree.meta(3).exists()
 
 
+def test_a_failed_video_logs_its_traceback_under_the_failed_line_and_the_fan_out_still_counts_one(
+        tree, fake_model, monkeypatch, capsys, tmp_path):
+    from fbpipe.geometry import track as T
+    real = T.track_video
+
+    def flaky(video_path, *a, **kw):
+        if "_pretest_3_" in Path(video_path).name:
+            raise ValueError("boom")
+        return real(video_path, *a, **kw)
+
+    monkeypatch.setattr(T, "track_video", flaky)
+    S.run_track(tree.settings(), tree.gcfg())
+    log = capsys.readouterr().out
+    lines = log.splitlines()
+    first = next(i for i, ln in enumerate(lines) if ln.startswith("[GEOMETRY] failed "))
+    assert "_pretest_3_" in lines[first] and lines[first].endswith("ValueError: boom"), "the line the fan-out counts"
+    assert lines[first + 1] == "Traceback (most recent call last):"
+    assert any("in flaky" in ln for ln in lines[first + 1:])
+    assert lines[-2] == "ValueError: boom", "the traceback ends with the error, then comes the summary line"
+    assert log.count("[GEOMETRY] failed ") == 1, "the traceback adds no second failure to the fan-out's count"
+
+    class FakePopen:
+        def __init__(self, cmd, **kwargs):
+            kwargs["stdout"].write(log)                            # a worker whose log is exactly what the run printed
+            kwargs["stdout"].flush()
+            self.pid = 1
+
+        def wait(self):
+            return 0
+
+    monkeypatch.setattr(GP.subprocess, "Popen", FakePopen)
+    settings = Settings(model_path="x", main_directories=[], cache_dir=str(tmp_path / "fan_out"))
+    assert GP.fan_out_track(Path("c.yaml"), 1, settings=settings, options={}) == 0
+    assert "failed~1" in capsys.readouterr().out
+
+
 def test_workers_split_the_per_trial_video_list_without_overlap(tree, fake_model, monkeypatch):
     monkeypatch.setattr(S, "_cap_cpu_threads", lambda n: None)      # keep cv2/torch thread settings out of the suite
     tracked = []

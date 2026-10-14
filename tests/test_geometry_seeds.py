@@ -8,6 +8,7 @@ attached) and leaves a seed that finds none unmatched; what the meta records; wh
 not processed yet is awaited, with no meta; one whose meta records other seeds loses its old outputs and is tracked
 again; one with the same seeds is skipped); and that non-contiguous slots ({1, 3}) run from track to figures.
 """
+import dataclasses
 import hashlib
 import json
 import shutil
@@ -139,12 +140,51 @@ def test_no_tables_means_no_seeds(tmp_path):
 def test_a_table_with_no_usable_anchor_gives_no_seed_for_that_fly_and_the_others_still_count(tmp_path, capsys):
     write_fly_table(tmp_path, "t", 1, 754.3, 116.8)
     write_fly_table(tmp_path, "t", 2, np.nan, np.nan)                               # production never found its eye
-    (tmp_path / "t_fly3_distances.parquet").write_bytes(b"not a parquet file")      # a torn write
-    pd.DataFrame({"frame": [0, 1]}).to_parquet(tmp_path / "t_fly4_distances.parquet")   # some other schema
+    write_fly_table(tmp_path, "t", 3, 624.8, 872.4, lead_nan=6)                     # ... nor in any row of this one
     assert T.production_eye_seeds(tmp_path) == {1: (754.3, 116.8)}
     out = capsys.readouterr().out
-    assert "t_fly3_distances.parquet" in out, "the unreadable table is named"
-    assert "FLYFILES" not in out, "the file finder's per-file chatter stays out of the track log"
+    assert out == "", "no failure: nothing is logged, and the file finder's per-file chatter stays out of the track log"
+
+
+def torn(folder):
+    (folder / "t_fly2_distances.parquet").write_bytes(b"not a parquet file")
+
+
+def other_schema(folder):
+    pd.DataFrame({"frame": [0, 1]}).to_parquet(folder / "t_fly2_distances.parquet")
+
+
+def text_anchor(folder):                                                           # ValueError on the float conversion
+    pd.DataFrame({"x_class0": ["left", "right"], "y_class0": ["a", "b"]}).to_parquet(folder / "t_fly2_distances.parquet")
+
+
+def object_anchor(folder):                                                         # TypeError on the float conversion
+    pd.DataFrame({"x_class0": [{"x": 1.0}, {"x": 2.0}], "y_class0": [{"y": 1.0}, {"y": 2.0}]}).to_parquet(
+        folder / "t_fly2_distances.parquet")
+
+
+def text_anchor_csv(folder):
+    (folder / "t_fly2_distances.csv").write_text("x_class0,y_class0\nleft,a\nright,b\n", encoding="utf-8")
+
+
+def other_schema_csv(folder):
+    (folder / "t_fly2_distances.csv").write_text("frame,distance\n0,1.0\n", encoding="utf-8")
+
+
+@pytest.mark.parametrize("damage", [torn, other_schema, text_anchor, object_anchor, text_anchor_csv, other_schema_csv],
+                         ids=["torn write", "other schema", "text in the anchor", "objects in the anchor",
+                              "text in the anchor (csv)", "other schema (csv)"])
+def test_a_table_that_cannot_be_read_as_numbers_leaves_its_trial_without_seeds_not_with_fewer_flies(
+        tmp_path, capsys, damage):
+    """Fly 1's table is fine. Numbering the slots by it alone would clear the good outputs of the trial down to fewer slots
+    and re-track it, so ANY table that fails leaves the whole trial without seeds (it is awaited until PER's tables are
+    whole), with one line that names the file -- and nothing raises, whatever the table holds."""
+    write_fly_table(tmp_path, "t", 1, 754.3, 116.8)
+    damage(tmp_path)
+    assert T.production_eye_seeds(tmp_path) == {}
+    lines = capsys.readouterr().out.splitlines()
+    assert len(lines) == 1 and lines[0].startswith("[GEOMETRY] ") and "t_fly2_distances." in lines[0]
+    assert "awaited" in lines[0] or "awaiting" in lines[0]
 
 
 def test_a_folder_that_cannot_be_listed_has_no_seeds_instead_of_stopping_the_run(tmp_path, monkeypatch, capsys):
@@ -310,6 +350,60 @@ def test_a_trial_whose_production_seeds_are_not_there_yet_is_awaited_not_tracked
     assert (result["tracked"], result["awaiting_seeds"]) == (1, 2)
     assert tree.meta(1).is_file() and not tree.meta(2).exists() and not tree.meta(3).exists()
     assert S.pending_trials(settings, gcfg) == 0
+
+
+def test_a_malformed_production_table_makes_its_trial_wait_and_stops_nothing_else(tree, fake_model, capsys):
+    settings, gcfg = production(tree)
+    put_seeds(tree, {1: TOP, 3: BOTTOM})
+    bad = tree.batch_dir / trial_stem(2) / f"{trial_stem(2)}_fly3_distances.parquet"
+    pd.DataFrame({"x_class0": ["left"], "y_class0": ["up"]}).to_parquet(bad)         # no float in it
+    assert S.pending_trials(settings, gcfg) == 2, "trial 2 waits for PER"
+    result = S.run_track(settings, gcfg)
+    assert (result["tracked"], result["failed"], result["awaiting_seeds"]) == (2, 0, 1)
+    assert tree.meta(1).is_file() and tree.meta(3).is_file() and not tree.meta(2).exists()
+    assert bad.name in capsys.readouterr().out
+
+
+def failing_status(monkeypatch, name="_pretest_2_", error=OSError(116, "Stale file handle")):
+    """``trial_status`` raising *error* for the video whose name holds *name*: what an unreadable secured mirror does."""
+    real = S.trial_status
+
+    def status(job, gcfg, video):
+        if name in video.name:
+            raise error
+        return real(job, gcfg, video)
+
+    monkeypatch.setattr(S, "trial_status", status)
+
+
+def test_a_trial_whose_status_cannot_be_read_is_a_failed_video_not_an_aborted_shard(tree, fake_model, monkeypatch, capsys):
+    failing_status(monkeypatch)
+    settings, gcfg = production(tree)
+    put_seeds(tree, {1: TOP, 3: BOTTOM})
+    result = S.run_track(settings, gcfg)
+    assert (result["tracked"], result["failed"]) == (2, 1)
+    failed = [ln for ln in capsys.readouterr().out.splitlines() if ln.startswith("[GEOMETRY] failed ")]
+    assert len(failed) == 1 and "_pretest_2_" in failed[0] and "OSError" in failed[0]
+    assert tree.meta(1).is_file() and tree.meta(3).is_file() and not tree.meta(2).exists()
+
+
+def test_a_trial_whose_status_cannot_be_read_counts_as_awaiting_never_as_pending_and_never_crashes(
+        tree, fake_model, monkeypatch, capsys):
+    settings, gcfg = production(tree)
+    put_seeds(tree, {1: TOP, 3: BOTTOM})
+    assert S.pending_trials(settings, gcfg) == 3
+    failing_status(monkeypatch)
+    assert S.pending_trials(settings, gcfg) == 2, "no worker could do anything for it"
+    assert "_pretest_2_" in capsys.readouterr().out, "the trial that could not be judged is named"
+
+
+def test_the_cli_survives_a_trial_whose_status_cannot_be_read(tree, fake_model, monkeypatch):
+    from fbpipe import geometry_pipeline as GP
+    failing_status(monkeypatch)
+    settings, gcfg = dataclasses.replace(tree.settings(), yolo_num_workers=1), tree.gcfg()
+    monkeypatch.setattr("fbpipe.geometry.config.load_geometry_config", lambda path: (settings, gcfg))
+    assert GP.main(["--config", "c.yaml", "track"]) == 0
+    assert tree.meta(1).is_file() and tree.meta(3).is_file() and not tree.meta(2).exists()
 
 
 def test_seeds_come_from_the_production_trial_folder_then_from_the_secured_mirror(tree, fake_model):

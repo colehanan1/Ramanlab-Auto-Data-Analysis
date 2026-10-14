@@ -220,6 +220,13 @@ def test_a_mounting_block_that_does_not_parse_is_a_warning_and_no_command_never_
     assert len(_warnings(caplog)) == 1 and "mounting" in _warnings(caplog)[0]
 
 
+def test_a_mounting_block_that_does_not_parse_is_logged_with_its_traceback(caplog):
+    with caplog.at_level(logging.INFO):
+        assert _mounting(_with(typo_key=1)) is None
+    (record,) = [r for r in caplog.records if r.levelname == "WARNING"]
+    assert record.exc_info and record.exc_info[0] is ValueError, "the log must say where it was raised"
+
+
 @pytest.mark.parametrize("key", ["out_dir", "abdomen_out_dir", "csv_out_dir"])
 def test_a_directory_whose_home_does_not_exist_is_a_warning_naming_the_error_never_an_exception(key, caplog):
     """``Path.expanduser`` raises RuntimeError -- not ValueError -- for ``~name`` when ``name`` is no user."""
@@ -630,6 +637,14 @@ def test_the_stage_never_raises(tmp_path, monkeypatch, caplog, exc):
     assert len(procs.calls) == 1 and result["ran"] is False and type(exc).__name__ in result["error"]
     assert any(r.levelname == "WARNING" and str(exc) in r.getMessage() for r in caplog.records)
     assert rw.LAST_ABDOMEN_SUMMARY.startswith("ABDOMEN:") and type(exc).__name__ in rw.LAST_ABDOMEN_SUMMARY
+
+
+def test_a_stage_that_fails_is_logged_with_its_traceback(tmp_path, monkeypatch, caplog):
+    _Procs(monkeypatch, script=[OSError("disk gone")])
+    with caplog.at_level(logging.INFO):
+        _run(tmp_path)
+    (record,) = [r for r in caplog.records if r.levelname == "WARNING" and "stage failed" in r.getMessage()]
+    assert record.exc_info and record.exc_info[0] is OSError and "disk gone" in str(record.exc_info[1])
 
 
 def test_a_command_that_cannot_start_stops_the_stage_after_the_ones_that_ran(tmp_path, monkeypatch):
