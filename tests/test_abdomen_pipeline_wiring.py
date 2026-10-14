@@ -8,16 +8,18 @@ budget, each in its own process group, and never raises: a failed command is a w
 ``--folder`` run skips the stage. The mounting command only reads what the others wrote, so it does not depend on
 ``abdomen.enabled``, survives ``--figures-only``, and may be the stage's only command; it is refused (a warning, no
 command) when it would write outside ``Results/New-Opto-Fly-Figures`` or inside the hand-run ``Results/Figures``.
-``--abdomen-only`` runs just that stage, before any PER work and without the PER lock; a full run holds the shared
-PER lock for its PER work and lets go of it right before the stage. Pinned here: the pure command builders,
-``main()``'s source order, the stage with a fake Popen, the flags and the ntfy. (The PER call trace itself is pinned
-in test_layered_parity.py.)
+``--abdomen-only`` runs just that stage, before any PER work and without either lock. A full run takes the shared
+PER lock inside main's whole-run lock (``run_lock``) for its PER work only, and the stage runs after both are let go:
+it may take hours and the next PER run must not wait behind it. Pinned here: the pure command builders, ``main()``'s
+source order and lock behaviour, the stage with a fake Popen, the flags and the ntfy. (The PER call trace itself is
+pinned in test_layered_parity.py.)
 """
 from __future__ import annotations
 
 import argparse
 import ast
 import dataclasses
+import fcntl
 import inspect
 import logging
 import os
@@ -38,7 +40,7 @@ import yaml
 from fbpipe import geometry_pipeline
 from fbpipe.config import ReactionPredictionSettings, Settings
 from fbpipe.config_layers import ConfigLayers, LayeredConfigError
-from fbpipe.utils.run_locks import abdomen_lock
+from fbpipe.utils.run_locks import abdomen_lock, per_run_active
 from scripts.pipeline import run_workflows as rw
 from test_eye_drift_qc_summary import _run_main_guard
 
@@ -907,29 +909,65 @@ def test_the_layers_are_resolved_before_any_config_is_read_and_per_gets_the_base
     assert src.index("config_path = layers.base_path") < src.index("yaml.safe_load(")
 
 
-def test_the_abdomen_only_early_return_precedes_all_per_work():
+def _main_def() -> ast.FunctionDef:
+    return ast.parse(inspect.getsource(rw.main)).body[0]
+
+
+def _is_call(node: ast.AST, name: str) -> bool:
+    return isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == name
+
+
+def _calls(tree: ast.AST, name: str) -> list[ast.Call]:
+    return sorted((n for n in ast.walk(tree) if _is_call(n, name)), key=lambda n: (n.lineno, n.col_offset))
+
+
+def _whole_run_with(main: ast.FunctionDef) -> ast.With:
+    (block,) = [n for n in ast.walk(main)
+                if isinstance(n, ast.With) and any(_is_call(item.context_expr, "run_lock") for item in n.items)]
+    return block
+
+
+def test_the_abdomen_only_early_return_precedes_both_locks_and_all_per_work():
     src = _main_source()
-    early = src.index("if args.abdomen_only:")
-    assert src.index("_validate_thaw(") < early < src.index("_run_pipeline(")
+    early, whole_run = src.index("if args.abdomen_only:"), src.index("with run_lock(")
+    assert src.index("_validate_thaw(") < early < whole_run < src.index("_main_locked(")
     assert early < src.index("acquire_per_run_lock("), "an --abdomen-only run is not a PER run: no PER lock"
-    body = src[early:src.index("acquire_per_run_lock(")]
+    body = src[early:whole_run]
     assert "_run_abdomen_stages(" in body and re.search(r"^\s+return\s*$", body, re.MULTILINE), \
         "a bare return, so the legacy shim's SystemExit(main()) exits 0"
     assert "no abdomen/mounting block" in body
 
 
-def test_the_per_lock_spans_the_per_work_and_is_released_before_the_abdomen_stage():
-    src = _main_source()
-    acquire, sync = src.index("acquire_per_run_lock("), src.index("_run_data_secured_sync(data)")
-    release, hook = src.index("release_run_lock("), src.rindex("_run_abdomen_stages(")
-    assert acquire < src.index("_run_pipeline(") < sync < release < hook
+def test_the_per_lock_is_taken_inside_the_whole_run_lock_around_the_per_work_and_released_in_a_finally():
+    main = _main_def()
+    whole_run = _whole_run_with(main)
+    (acquire,), (per_work,), (release,) = (_calls(main, name) for name in
+                                           ("acquire_per_run_lock", "_main_locked", "release_run_lock"))
+    for call in (acquire, per_work, release):
+        assert whole_run.lineno < call.lineno <= whole_run.end_lineno
+    assert acquire.lineno < per_work.lineno < release.lineno
+    (guard,) = [n for n in ast.walk(whole_run)
+                if isinstance(n, ast.Try) and any(release in ast.walk(stmt) for stmt in n.finalbody)]
+    assert any(per_work in ast.walk(stmt) for stmt in guard.body), \
+        "a crashing PER run must not leave the lock to the process' exit"
 
 
-def test_the_abdomen_stage_follows_the_data_secured_sync_and_only_runs_for_an_overlay():
-    src = _main_source()
-    assert src.rindex("_run_abdomen_stages(") > src.index("_run_data_secured_sync(data)")
-    assert re.search(r"if layers\.overlay:\s*\n\s+_run_abdomen_stages\(", src), \
-        "a plain config_new.yaml run must not even call the stage"
+def test_the_nightly_body_knows_nothing_of_the_overlay_or_the_per_lock():
+    """_main_locked is main's own code: everything about the overlay lives in main(), around it."""
+    names = {n.id for n in ast.walk(ast.parse(inspect.getsource(rw._main_locked))) if isinstance(n, ast.Name)}
+    assert not names & {"layers", "per_lock", "acquire_per_run_lock", "release_run_lock", "_run_abdomen_stages"}
+
+
+def test_the_abdomen_stage_follows_the_per_run_outside_both_locks_and_only_runs_for_an_overlay():
+    main = _main_def()
+    whole_run = _whole_run_with(main)
+    stage_calls = _calls(main, "_run_abdomen_stages")
+    assert len(stage_calls) == 2, "the --abdomen-only run and the hook after a full run"
+    hook = stage_calls[-1]
+    assert _calls(main, "_main_locked")[0].lineno < whole_run.end_lineno < hook.lineno, \
+        "an abdomen stage may run for hours: it must not hold the whole-run lock the next PER run waits on"
+    (guard,) = [n for n in main.body if isinstance(n, ast.If) and ast.unparse(n.test) == "layers.overlay"]
+    assert hook in list(ast.walk(guard)), "a plain config_new.yaml run must not even call the stage"
 
 
 # ---- main(): --abdomen-only --------------------------------------------------------------------------------
@@ -1064,6 +1102,105 @@ def test_an_invalid_overlay_aborts_at_startup_before_any_work(tmp_path, monkeypa
             rw.main(argv)
 
 
+# ---- main(): the whole-run lock, the PER lock and the stage ----------------------------------------------
+
+def _locks_held(cache: Path) -> tuple[bool, bool]:
+    """(whole-run lock, PER lock): whether anybody holds each right now, probed through a new open file description."""
+    whole = cache / "run_workflows.lock"
+    held = False
+    if whole.exists():
+        fd = os.open(whole, os.O_RDWR)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            held = True
+        finally:
+            os.close(fd)
+    return held, per_run_active(cache)
+
+
+def _stub_the_night_and_the_stage(monkeypatch, cache: Path, seen: dict, crash: Exception | None = None) -> None:
+    """Replace the PER body and the abdomen stage with recorders of which locks are held when each is called."""
+
+    def night(args, config_path, data, settings):
+        seen["per"], seen["per_config"] = _locks_held(cache), config_path
+        if crash is not None:
+            raise crash
+
+    def stage(layers, settings, **kwargs):
+        seen["stage"], seen["stage_kwargs"] = _locks_held(cache), kwargs
+        return {}
+
+    monkeypatch.setattr(rw, "_main_locked", night)
+    monkeypatch.setattr(rw, "_run_abdomen_stages", stage)
+
+
+def test_an_overlay_run_holds_both_locks_for_the_per_work_and_neither_for_the_abdomen_stage(tmp_path, monkeypatch):
+    base, overlay = _configs(tmp_path)
+    seen: dict = {}
+    _stub_the_night_and_the_stage(monkeypatch, tmp_path / "cache", seen)
+    assert rw.main(["--config", str(overlay)]) is None
+    assert seen["per"] == (True, True)
+    assert seen["stage"] == (False, False), "a stage of hours must not keep the next PER run waiting on either lock"
+    assert seen["per_config"] == base.resolve(), "PER gets the base file"
+    assert _locks_held(tmp_path / "cache") == (False, False)
+
+
+def test_a_plain_run_holds_both_locks_for_the_per_work_and_never_calls_the_stage(tmp_path, monkeypatch):
+    base, _ = _configs(tmp_path)
+    seen: dict = {}
+    _stub_the_night_and_the_stage(monkeypatch, tmp_path / "cache", seen)
+    assert rw.main(["--config", str(base)]) is None
+    assert seen["per"] == (True, True) and "stage" not in seen
+
+
+def test_the_abdomen_hook_forwards_the_flags_of_the_full_run(tmp_path, monkeypatch):
+    _, overlay = _configs(tmp_path)
+    seen: dict = {}
+    _stub_the_night_and_the_stage(monkeypatch, tmp_path / "cache", seen)
+    rw.main(["--config", str(overlay), "--figures-only", "--folder", "X", "--abdomen-video"])
+    assert seen["stage_kwargs"] == {"figures_only": True, "folder": "X", "annotated_video": True}
+
+
+def test_a_run_that_cannot_get_the_whole_run_lock_takes_no_per_lock_and_runs_no_stage(tmp_path, monkeypatch):
+    _, overlay = _configs(tmp_path)
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    holder = os.open(cache / "run_workflows.lock", os.O_RDWR | os.O_CREAT)
+    fcntl.flock(holder, fcntl.LOCK_EX)                     # another PER run, in a different open file description
+    monkeypatch.setenv("FBPIPE_RUN_LOCK_WAIT_MIN", "0")
+    monkeypatch.setattr(rw, "_main_locked", lambda *a, **k: pytest.fail("PER must wait for the other run"))
+    monkeypatch.setattr(rw, "_run_abdomen_stages", lambda *a, **k: pytest.fail("a skipped run runs no stage"))
+    try:
+        with pytest.raises(rw.RunLockTimeout):
+            rw.main(["--config", str(overlay)])
+    finally:
+        os.close(holder)
+    assert not (cache / "locks").exists(), "the PER lock marks PER work, not time spent queueing"
+    assert not per_run_active(cache)
+
+
+def test_a_crashing_per_run_lets_go_of_both_locks_and_runs_no_stage(tmp_path, monkeypatch):
+    _, overlay = _configs(tmp_path)
+    seen: dict = {}
+    _stub_the_night_and_the_stage(monkeypatch, tmp_path / "cache", seen, crash=RuntimeError("yolo died"))
+    with pytest.raises(RuntimeError, match="yolo died"):
+        rw.main(["--config", str(overlay)])
+    assert seen["per"] == (True, True) and "stage" not in seen
+    assert _locks_held(tmp_path / "cache") == (False, False)
+
+
+def test_freeze_status_reads_the_base_config_takes_no_lock_and_runs_no_stage(tmp_path, monkeypatch):
+    base, overlay = _configs(tmp_path)
+    seen: dict = {}
+    monkeypatch.setattr(rw, "_print_freeze_status", lambda args, config_path, data, settings: seen.update(read=config_path))
+    monkeypatch.setattr(rw, "_main_locked", lambda *a, **k: pytest.fail("a read-only report is no PER run"))
+    monkeypatch.setattr(rw, "_run_abdomen_stages", lambda *a, **k: pytest.fail("a read-only report runs no stage"))
+    assert rw.main(["--config", str(overlay), "--freeze-status"]) is None
+    assert seen == {"read": base.resolve()}
+    assert not (tmp_path / "cache").exists(), "it writes nothing and takes no lock"
+
+
 # ---- the ntfy ----------------------------------------------------------------------------------------------
 
 def test_the_pipeline_complete_ntfy_appends_the_abdomen_summary_after_the_eye_qc_line():
@@ -1077,6 +1214,19 @@ def test_the_pipeline_complete_ntfy_appends_the_abdomen_summary_after_the_eye_qc
     assert sent == [("Pipeline Complete",
                      "Pipeline finished successfully.\n\nEYE-QC: 1 of 4 flagged\n\nABDOMEN: track rc=0",
                      {"tags": "white_check_mark"})]
+
+
+def test_the_pipeline_complete_ntfy_orders_the_eye_qc_freeze_and_abdomen_lines():
+    sent = []
+
+    def finishing(namespace):
+        namespace.update(LAST_EYE_QC_SUMMARY="EYE-QC: 1 of 4 flagged", _RUN_SUMMARY="auto-freeze: 2 frozen",
+                         LAST_ABDOMEN_SUMMARY="ABDOMEN: track rc=0")
+
+    _run_main_guard(finishing, sent)
+    assert sent == [("Pipeline Complete",
+                     "Pipeline finished successfully.\n\nEYE-QC: 1 of 4 flagged\nauto-freeze: 2 frozen"
+                     "\n\nABDOMEN: track rc=0", {"tags": "white_check_mark"})]
 
 
 def test_the_abdomen_summary_alone_is_appended_when_there_is_no_eye_qc_line():

@@ -6,18 +6,24 @@ even writes its --config argument into a JSON, and three cache keys embed it) --
 abdomen stage, once PER is done. This test runs ``main()`` twice, once per config, with every call that writes a
 file, launches a process or mutates module state replaced by a recorder, and compares the two call traces: the PER
 calls (names, arguments, order) must be identical, every config path in them must be ``config_new.yaml`` itself, and
-the overlay run may add only ``_run_abdomen_stages``. It also pins the one thing a PER run gains, the shared run
-lock: held across the PER stages, released before the abdomen stage, and the only file created.
+the overlay run may add only ``_run_abdomen_stages``. It also pins the one thing a PER run gains, the shared PER
+lock: held across the PER stages (inside main's whole-run lock), released before the abdomen stage, and the only
+file created beside the whole-run lock's two.
 
 The overlay is built in ``tmp_path`` and extends the LIVE ``config/config_new.yaml`` by absolute path (skipped when
 that gitignored file is absent). The cache dir and the predictions CSV are redirected into ``tmp_path`` so nothing
-outside it is touched.
+outside it is touched, and each run starts from an empty cache. Auto-freeze's plan (``fbpipe.autofreeze.plan_run``)
+is replaced by "no plan": it walks every dataset tree of the live config, which takes seconds and changes while the
+nightly runs; it is main's code, identical for both runs, and pinned by test_autofreeze_*. Without a plan the
+explicit ``freeze:`` flags decide, exactly as under ``--figures-only``.
 """
 from __future__ import annotations
 
 import dataclasses
+import fcntl
 import inspect
 import os
+import shutil
 import subprocess
 import types
 from pathlib import Path
@@ -25,6 +31,7 @@ from pathlib import Path
 import pytest
 import yaml
 
+from fbpipe import autofreeze
 from fbpipe.config import resolve_config_path
 from fbpipe.utils.run_locks import per_run_active
 from scripts.analysis import envelope_combined, envelope_exports
@@ -50,19 +57,36 @@ def _plain(value):
     return repr(value)
 
 
+def _whole_run_lock_held(cache_dir: Path) -> bool:
+    """Whether some process holds main's whole-run lock (``run_workflows.lock``), probed through a new open file."""
+    lock = cache_dir / "run_workflows.lock"
+    if not lock.exists():
+        return False
+    fd = os.open(lock, os.O_RDWR)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        return True
+    finally:
+        os.close(fd)
+    return False
+
+
 class Trace:
-    """What one ``main()`` did: ``calls`` as (name, args, kwargs) plain data, ``raw`` the same as received, and
-    ``lock_held`` whether a PER run held the shared run lock when each call was made."""
+    """What one ``main()`` did: ``calls`` as (name, args, kwargs) plain data, ``raw`` the same as received,
+    ``lock_held`` whether a PER run held the shared PER lock when each call was made and ``whole_run_held`` whether
+    main's whole-run lock was held then."""
 
     def __init__(self, cache_dir: Path):
         self.cache_dir = cache_dir
-        self.calls, self.raw, self.lock_held = [], [], []
+        self.calls, self.raw, self.lock_held, self.whole_run_held = [], [], [], []
 
     def recorder(self, name, result=None):
         def record(*args, **kwargs):
             self.calls.append((name, _plain(args), _plain(kwargs)))
             self.raw.append((name, args, kwargs))
             self.lock_held.append(per_run_active(self.cache_dir))
+            self.whole_run_held.append(_whole_run_lock_held(self.cache_dir))
             return result(*args, **kwargs) if callable(result) else result
 
         record.__name__ = name
@@ -85,9 +109,11 @@ def harness(tmp_path):
     environment = dict(os.environ)
 
     def run(argv) -> Trace:
+        shutil.rmtree(cache, ignore_errors=True)       # every run starts from an empty cache
         trace = Trace(cache)
         with pytest.MonkeyPatch.context() as mp:
             mp.setenv("FBPIPE_DISABLE_NTFY", "1")
+            mp.setattr(autofreeze, "plan_run", lambda *args, **kwargs: None)    # no plan: see the module docstring
             for name, empty in (("LAST_EYE_QC_SUMMARY", ""), ("LAST_ABDOMEN_SUMMARY", ""),
                                 ("LAST_RUN_ABDOMEN_ONLY", False)):
                 mp.setattr(rw, name, empty)             # main() sets these; put them back afterwards
@@ -211,26 +237,33 @@ def test_the_abdomen_stage_gets_the_overlay_and_the_flags_of_the_run(harness, ov
     assert kwargs == {"figures_only": "--figures-only" in argv,
                       "folder": argv[argv.index("--folder") + 1] if "--folder" in argv else None,
                       "annotated_video": "--abdomen-video" in argv}
-    assert layered.names()[-2:] == ["_run_abdomen_stages", "_eye_qc_summary"], "after PER, before the QC line"
+    assert layered.names()[-2:] == ["_eye_qc_summary", "_run_abdomen_stages"], "after PER, the QC line included"
 
 
-def test_the_shared_lock_covers_the_per_stages_and_is_released_before_the_abdomen_stage(harness, overlay):
+def test_both_locks_cover_the_per_stages_and_are_released_before_the_abdomen_stage(harness, overlay):
     layered = harness(["--config", str(overlay)])
-    stages = [(name, held) for name, held in zip(layered.names(), layered.lock_held)
+    stages = [(name, held, whole) for name, held, whole in zip(layered.names(), layered.lock_held,
+                                                               layered.whole_run_held)
               if name.startswith("_run_") or name in ("_batch_copy_to_smb", "_write_state", "deferred_secure_cleanup")]
-    per = [(name, held) for name, held in stages if name != "_run_abdomen_stages"]
-    assert {"_run_reactions", "_run_dataset_means", "_batch_copy_to_smb"} <= {name for name, _ in per}
-    assert all(held for _, held in per), f"PER work ran outside the lock: {[n for n, held in per if not held]}"
-    assert stages[-1] == ("_run_abdomen_stages", False), "the abdomen tracker must not see this very run as PER"
-    assert not per_run_active(layered.cache_dir), "nothing holds the lock after main() returns"
+    per = [(name, held, whole) for name, held, whole in stages if name != "_run_abdomen_stages"]
+    assert {"_run_reactions", "_run_dataset_means", "_batch_copy_to_smb"} <= {name for name, _, _ in per}
+    assert all(held for _, held, _ in per), f"PER work ran outside the PER lock: {[n for n, h, _ in per if not h]}"
+    assert all(whole for _, _, whole in per), \
+        f"PER work ran outside the whole-run lock: {[n for n, _, w in per if not w]}"
+    assert stages[-1] == ("_run_abdomen_stages", False, False), \
+        "the abdomen tracker must not see this very run as PER, and the stage must not hold the whole-run lock"
+    assert not per_run_active(layered.cache_dir) and not _whole_run_lock_held(layered.cache_dir), \
+        "nothing holds either lock after main() returns"
 
 
-def test_the_shared_lock_file_is_the_only_thing_a_run_adds_under_the_cache_dir(harness, overlay, tmp_path):
-    harness(["--config", RELATIVE])
+def test_a_run_adds_only_the_per_lock_file_to_what_the_whole_run_lock_leaves_in_the_cache_dir(harness, overlay,
+                                                                                            tmp_path):
+    expected = ["locks", "locks/per.lock", "run_workflows.lock", "run_workflows.lock.info"]
     cache = tmp_path / "cache"
-    assert sorted(str(p.relative_to(cache)) for p in cache.rglob("*")) == ["locks", "locks/per.lock"]
+    harness(["--config", RELATIVE])
+    assert sorted(str(p.relative_to(cache)) for p in cache.rglob("*")) == expected
     assert not per_run_active(cache)
     harness(["--config", str(overlay)])
-    assert sorted(str(p.relative_to(cache)) for p in cache.rglob("*")) == ["locks", "locks/per.lock"]
+    assert sorted(str(p.relative_to(cache)) for p in cache.rglob("*")) == expected
     assert sorted(p.name for p in tmp_path.iterdir()) == [
         "cache", "config_new_abdomen.yaml", "model_predictions.csv"], "nothing else was written"
