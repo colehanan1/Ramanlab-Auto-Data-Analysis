@@ -5220,6 +5220,7 @@ def _run_data_secured_sync(raw_cfg: Dict[str, Any]) -> None:
 ABDOMEN_MAX_HOURS_DEFAULT = 10.0     # abdomen.max_hours when the block does not say
 ABDOMEN_NUM_WORKERS_DEFAULT = 3      # abdomen.yolo.num_workers, the geometry loader's own default
 ABDOMEN_TERM_GRACE_S = 30.0          # between SIGTERM and SIGKILL of a command that ran out of time
+ABDOMEN_YIELD_EXIT = getattr(os, "EX_TEMPFAIL", 75)   # what the geometry CLI exits with when track yielded to a PER run
 ABDOMEN_TAIL_MAX_S = 1800.0          # the most a timed-out track can cost the commands after it ...
 ABDOMEN_TAIL_FRACTION = 0.1          # ... and the fraction of the whole budget it keeps back for them (the smaller wins)
 
@@ -5419,6 +5420,8 @@ def _abdomen_summary(result: Mapping[str, Any]) -> str:
         label = command["label"]
         if command["timed_out"]:
             parts.append(f"{label} TIMED OUT (killed)")
+        elif command.get("yielded"):
+            parts.append(f"{label} yielded to a PER run (resumes next run)")
         elif command.get("skipped"):
             parts.append(f"{label} skipped ({command['skipped']})")
         elif not command["ran"]:
@@ -5574,7 +5577,8 @@ def _run_abdomen_commands(
         with _stage_signals_raise():
             for i, cmd in enumerate(commands):
                 label = _abdomen_command_label(cmd)
-                entry = {"label": label, "returncode": None, "timed_out": False, "ran": False, "skipped": ""}
+                entry = {"label": label, "returncode": None, "timed_out": False, "ran": False, "skipped": "",
+                         "yielded": False}
                 result["commands"].append(entry)
                 remaining = deadline - time.monotonic()
                 keeps_tail = label == "track" and i < len(commands) - 1
@@ -5605,6 +5609,12 @@ def _run_abdomen_commands(
                         "[abdomen] %s timed out with %s and was killed; what it did not get to resumes next run",
                         label, share
                     )
+                elif returncode == ABDOMEN_YIELD_EXIT and label == "track":
+                    # The track stopped at the next video because a PER run holds the PER lock: not a failure (the
+                    # trials left resume next run), so below warning level and worded on its own in the summary.
+                    entry["yielded"] = True
+                    LOGGER.info("[abdomen] %s yielded to a PER run (exit %d); what it did not get to resumes next run",
+                                label, returncode)
                 elif returncode != 0:
                     LOGGER.warning("[abdomen] %s exited with code %d", label, returncode)
 
@@ -5628,13 +5638,16 @@ def _run_abdomen_stages(
     is left. A non-zero exit is a warning and the next command still runs (a failed track must not stop the figures of
     what was tracked); but the stats and the mounting analysis, which read ``model_predictions.csv``, are skipped (with
     a warning and in the summary) whenever a PER run holds the PER lock when they would start, since PER rewrites that
-    file. A SIGTERM or SIGHUP of the driver kills the running command's group and frees the lock
+    file. A track that exits with ``ABDOMEN_YIELD_EXIT`` (75, EX_TEMPFAIL) stopped for a PER run: that is not a failure,
+    the commands after it still run, and the summary (and so the ntfy) says "track yielded to a PER run (resumes next
+    run)" instead of an exit code. A SIGTERM or SIGHUP of the driver kills the running command's group and frees the lock
     (:func:`_stage_signals_raise`), and every command dies with the driver even on a SIGKILL. The stage is skipped, with
     a log line, when there is nothing to run, for ``--folder`` runs, and while another abdomen run holds ``abdomen.lock``.
 
     Never raises on anything that goes wrong in the stage or its configuration: a PER run that has finished
     must not be failed by it. Returns ``{"ran", "skipped_reason", "error", "timed_out", "commands", "summary"}``
-    (``commands`` one ``{"label", "returncode", "timed_out", "ran", "skipped"}`` per command) and leaves ``summary`` in
+    (``commands`` one ``{"label", "returncode", "timed_out", "ran", "skipped", "yielded"}`` per command) and leaves
+    ``summary`` in
     ``LAST_ABDOMEN_SUMMARY`` for the ntfy.
     """
     global LAST_ABDOMEN_SUMMARY

@@ -7,6 +7,11 @@ block (``config/config_new_abdomen.yaml``). Steps run in order: track -> normali
 figures. ``list`` prints them. ``--annotated-video`` (the one-time backfill) writes the annotated
 mp4 per trial even where the config says tables only (the nightly). ``track`` is dropped (no
 workers, no model load) when every trial video already has its meta JSON, unless ``--force``.
+
+Exit status: 0; 75 (``EX_TEMPFAIL``, "try again later") when the track step stopped early for a PER run
+(``run_track`` returned ``yielded``, or a fanned-out worker exited 75), because a track that did not
+finish is not a success -- the steps after it still run, and what was not tracked resumes next run; a
+failed worker raises ``SystemExit`` with its message.
 """
 from __future__ import annotations
 
@@ -24,6 +29,9 @@ from .utils.process_guard import die_with_parent_preexec
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
+#: The exit status of a track that stopped early for a PER run: neither success nor failure (``os.EX_TEMPFAIL``).
+EX_TEMPFAIL = getattr(os, "EX_TEMPFAIL", 75)
+
 STEP_NAMES = ("track", "normalize", "wide", "figures")
 DESCRIPTIONS = {
     "track": "Run the 4-class model + fly_geometry rules per trial video; per-fly geometry tables + annotated mp4",
@@ -33,12 +41,15 @@ DESCRIPTIONS = {
 }
 
 
-def run_steps(names: Iterable[str], settings, gcfg, **options) -> None:
+def run_steps(names: Iterable[str], settings, gcfg, **options) -> Dict[str, object]:
+    """Run the named steps in order; ``{step name: what its runner returned}`` (``run_track``'s dict says ``yielded``)."""
+    results: Dict[str, object] = {}
     for name in names:
         runner = getattr(steps, f"run_{name}")
         accepted = inspect.signature(runner).parameters
         kwargs = {k: v for k, v in options.items() if k in accepted}
-        runner(settings, gcfg, **kwargs)
+        results[name] = runner(settings, gcfg, **kwargs)
+    return results
 
 
 def worker_commands(config_path: Path, n_workers: int, *, cores: Optional[int] = None,
@@ -70,8 +81,21 @@ def worker_commands(config_path: Path, n_workers: int, *, cores: Optional[int] =
     return [(list(cmd), dict(base_env, NUM_WORKERS=str(n), WORKER_INDEX=str(k))) for k in range(n)]
 
 
-def fan_out_track(config_path: Path, n_workers: int, *, settings, options: Dict[str, object]) -> int:
-    """Run the track step in ``n_workers`` processes; returns the number of failed workers."""
+class FanOutResult(int):
+    """What :func:`fan_out_track` returns: the number of FAILED workers (so it still compares with 0, like the plain count it
+    replaces), and in ``yielded`` how many workers stopped early for a PER run (exit 75, not a failure)."""
+
+    yielded: int = 0
+
+    def __new__(cls, failed: int = 0, yielded: int = 0):
+        obj = super().__new__(cls, failed)
+        obj.yielded = int(yielded)
+        return obj
+
+
+def fan_out_track(config_path: Path, n_workers: int, *, settings, options: Dict[str, object]) -> FanOutResult:
+    """Run the track step in ``n_workers`` processes; returns the number of failed workers (a worker that exited with
+    ``EX_TEMPFAIL`` yielded to a PER run: it is counted in the result's ``yielded``, not as failed)."""
     logdir = Path(getattr(settings, "cache_dir", "") or (REPO_ROOT / "cache")) / "geometry_workers"
     logdir.mkdir(parents=True, exist_ok=True)
     procs = []
@@ -85,19 +109,21 @@ def fan_out_track(config_path: Path, n_workers: int, *, settings, options: Dict[
                                   preexec_fn=die_with_parent_preexec())
         procs.append((k, worker, logf, log_path))
         print(f"[GEOMETRY] worker {k + 1}/{n_workers} pid={procs[-1][1].pid} -> {log_path}")
-    failed = 0
+    failed = yielded = 0
     for k, proc, logf, log_path in procs:
         rc = proc.wait()
         logf.close()
         text = log_path.read_text(errors="ignore")
         tracked = text.count(" slot(s), ")
         failed_videos = text.count("[GEOMETRY] failed ")
-        print(f"[GEOMETRY] worker {k + 1}/{n_workers}: {'OK' if rc == 0 else f'FAILED rc={rc}'} | "
-              f"tracked~{tracked} failed~{failed_videos}")
-        if rc != 0:
+        verdict = "OK" if rc == 0 else "YIELDED to a PER run" if rc == EX_TEMPFAIL else f"FAILED rc={rc}"
+        print(f"[GEOMETRY] worker {k + 1}/{n_workers}: {verdict} | tracked~{tracked} failed~{failed_videos}")
+        if rc == EX_TEMPFAIL:
+            yielded += 1
+        elif rc != 0:
             failed += 1
             print("\n".join(text.splitlines()[-15:]))
-    return failed
+    return FanOutResult(failed, yielded)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -138,13 +164,19 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
               "no workers started, no model loaded (--force re-tracks)")
         names = [n for n in names if n != "track"]
     n_workers = args.workers if args.workers is not None else int(getattr(settings, "yolo_num_workers", 1) or 1)
+    yielded = False                      # the track stopped early for a PER run: the steps after it still run
     if "track" in names and n_workers > 1 and not args.no_fan_out:
-        failed = fan_out_track(Path(args.config), n_workers, settings=settings, options=options)
-        if failed:
-            raise SystemExit(f"[GEOMETRY] {failed} track worker(s) failed; see the worker logs")
+        outcome = fan_out_track(Path(args.config), n_workers, settings=settings, options=options)
+        if outcome:
+            raise SystemExit(f"[GEOMETRY] {int(outcome)} track worker(s) failed; see the worker logs")
+        yielded = bool(getattr(outcome, "yielded", 0))
         names = [n for n in names if n != "track"]
-    run_steps(names, settings, gcfg, **options)
-    return 0
+    results = run_steps(names, settings, gcfg, **options)
+    track = results.get("track")
+    yielded = yielded or (isinstance(track, dict) and bool(track.get("yielded")))
+    if yielded:
+        print(f"[GEOMETRY] track yielded to a PER run: exit {EX_TEMPFAIL} (what is left resumes next run)")
+    return EX_TEMPFAIL if yielded else 0
 
 
 if __name__ == "__main__":

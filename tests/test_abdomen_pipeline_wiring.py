@@ -711,6 +711,45 @@ def test_a_stage_that_fails_is_logged_with_its_traceback(tmp_path, monkeypatch, 
     assert record.exc_info and record.exc_info[0] is OSError and "disk gone" in str(record.exc_info[1])
 
 
+def test_a_track_that_yielded_to_a_per_run_is_not_a_failure_and_the_commands_after_it_still_run(
+        tmp_path, monkeypatch, caplog):
+    """The geometry CLI exits 75 (EX_TEMPFAIL) when its track stopped for a PER run: what it did not get to resumes next
+    run. That is neither success nor an error, so the stage logs it below warning level and words it on its own."""
+    procs = _Procs(monkeypatch, script=[75, 0, 0])
+    with caplog.at_level(logging.INFO):
+        result = _run(tmp_path)
+    assert len(procs.calls) == 3, "normalize and the stats still read what track got done"
+    track = result["commands"][0]
+    assert track["returncode"] == 75 and track["yielded"] is True and track["ran"] is True
+    assert [c["yielded"] for c in result["commands"]] == [True, False, False]
+    assert _warnings(caplog) == [], "a yield is not a warning"
+    assert any("track yielded to a PER run" in r.getMessage() and r.levelname == "INFO" for r in caplog.records)
+    assert result["summary"] == ("ABDOMEN: track yielded to a PER run (resumes next run); normalize+wide+figures rc=0; "
+                                 "abdomen_geometry_stats rc=0")
+    assert rw.LAST_ABDOMEN_SUMMARY == result["summary"] and "rc=75" not in result["summary"]
+    assert result["error"] == "" and result["timed_out"] is False
+
+
+def test_an_exit_75_of_any_other_command_is_an_ordinary_failure(tmp_path, monkeypatch, caplog):
+    procs = _Procs(monkeypatch, script=[0, 75, 0])
+    with caplog.at_level(logging.INFO):
+        result = _run(tmp_path)
+    assert [c["yielded"] for c in result["commands"]] == [False, False, False]
+    assert _warnings(caplog) == ["[abdomen] normalize+wide+figures exited with code 75"]
+    assert "normalize+wide+figures rc=75" in result["summary"]
+
+
+def test_real_processes_that_all_exit_75_yield_only_for_track(tmp_path):
+    if shutil.which("bash") is None:
+        pytest.skip("needs bash")
+    tempfail = tmp_path / "tempfail_python"
+    tempfail.write_text("#!/bin/bash\nexit 75\n", encoding="utf-8")
+    tempfail.chmod(tempfail.stat().st_mode | stat.S_IXUSR)
+    result = _run(tmp_path, _layers(tmp_path, {"enabled": True, "python": str(tempfail)}))
+    assert [c["returncode"] for c in result["commands"]] == [75, 75, 75]
+    assert [c["yielded"] for c in result["commands"]] == [True, False, False]
+
+
 def test_a_command_that_cannot_start_stops_the_stage_after_the_ones_that_ran(tmp_path, monkeypatch):
     procs = _Procs(monkeypatch, script=[0, FileNotFoundError("no such interpreter")])
     result = _run(tmp_path)

@@ -636,6 +636,89 @@ def test_a_pass_that_holds_the_real_per_lock_makes_track_yield_before_the_first_
     assert resumed["yielded"] is False and resumed["tracked"] == 3
 
 
+def cli_settings(tree, tmp_path, monkeypatch, *, workers=1):
+    """``GP.main`` over *tree*, one worker unless asked (the fan-out is replaced where a test needs it)."""
+    settings = dataclasses.replace(tree.settings(cache_dir=str(tmp_path / "cache")), yolo_num_workers=workers)
+    gcfg = tree.gcfg()
+    monkeypatch.setattr("fbpipe.geometry.config.load_geometry_config", lambda path: (settings, gcfg))
+    return settings, gcfg
+
+
+def test_a_track_that_yielded_to_a_per_run_exits_75_not_0_and_resumes_as_0(tree, tmp_path, fake_model, monkeypatch):
+    """A track that stopped for a PER run did not finish: exit 75 (EX_TEMPFAIL, "try again later") says so, where 0 would
+    say success. The next run, with PER done, resumes and exits 0."""
+    settings, gcfg = cli_settings(tree, tmp_path, monkeypatch)
+    assert GP.EX_TEMPFAIL == 75 == os.EX_TEMPFAIL
+    with per_run_lock(settings.cache_dir):
+        assert GP.main(["--config", "c.yaml", "track"]) == 75
+    assert not tree.out_base.exists(), "it yielded before the first video"
+    assert GP.main(["--config", "c.yaml", "track"]) == 0
+    assert all(tree.meta(n).is_file() for n in (1, 2, 3))
+
+
+def test_the_steps_after_a_yielded_track_still_run_and_the_exit_is_still_75(tree, tmp_path, fake_model, monkeypatch):
+    settings, gcfg = cli_settings(tree, tmp_path, monkeypatch)
+    ran = []
+    monkeypatch.setattr(S, "run_normalize", lambda settings, gcfg, *, force=False: ran.append("normalize"))
+    with per_run_lock(settings.cache_dir):
+        assert GP.main(["--config", "c.yaml", "track", "normalize"]) == 75
+    assert ran == ["normalize"], "what exists is still normalized"
+
+
+def test_a_track_that_finished_exits_0_even_when_other_steps_follow(tree, tmp_path, fake_model, monkeypatch):
+    cli_settings(tree, tmp_path, monkeypatch)
+    ran = []
+    monkeypatch.setattr(S, "run_normalize", lambda settings, gcfg, *, force=False: ran.append("normalize"))
+    assert GP.main(["--config", "c.yaml", "track", "normalize"]) == 0 and ran == ["normalize"]
+
+
+def test_a_run_without_a_track_step_never_exits_75(tree, tmp_path, fake_model, monkeypatch):
+    settings, gcfg = cli_settings(tree, tmp_path, monkeypatch)
+    monkeypatch.setattr(S, "run_normalize", lambda settings, gcfg, *, force=False: None)
+    with per_run_lock(settings.cache_dir):
+        assert GP.main(["--config", "c.yaml", "normalize"]) == 0
+
+
+@pytest.mark.parametrize("outcome, code", [(0, 0), (GP.FanOutResult(0, 0), 0), (GP.FanOutResult(0, 2), 75)],
+                         ids=["a plain count of none failed", "none failed, none yielded", "two workers yielded"])
+def test_the_fan_out_exits_75_when_a_worker_yielded_and_none_failed(tree, tmp_path, fake_model, monkeypatch, outcome, code):
+    cli_settings(tree, tmp_path, monkeypatch, workers=3)
+    ran = []
+    monkeypatch.setattr(GP, "fan_out_track", lambda cfg, n, *, settings, options: outcome)
+    monkeypatch.setattr(S, "run_normalize", lambda settings, gcfg, *, force=False: ran.append("normalize"))
+    assert GP.main(["--config", "c.yaml", "track", "normalize"]) == code
+    assert ran == ["normalize"], "the steps after the fan-out run either way"
+
+
+def test_a_failed_worker_is_a_failure_whatever_the_others_did(tree, tmp_path, fake_model, monkeypatch):
+    cli_settings(tree, tmp_path, monkeypatch, workers=3)
+    monkeypatch.setattr(GP, "fan_out_track", lambda cfg, n, *, settings, options: GP.FanOutResult(1, 2))
+    with pytest.raises(SystemExit) as stop:
+        GP.main(["--config", "c.yaml", "track"])
+    assert "1 track worker(s) failed" in str(stop.value.code)
+
+
+def test_the_fan_out_counts_a_worker_that_exited_75_as_yielded_not_failed(tmp_path, monkeypatch, capsys):
+    codes = iter([0, 75, 1, 75])
+
+    class FakePopen:
+        def __init__(self, cmd, **kwargs):
+            kwargs["stdout"].write("[GEOMETRY] a.avi: 3 slot(s), 40 frames in 0.1s -> /out\n")
+            kwargs["stdout"].flush()
+            self.pid = 1
+
+        def wait(self):
+            return next(codes)
+
+    monkeypatch.setattr(GP.subprocess, "Popen", FakePopen)
+    settings = Settings(model_path="x", main_directories=[], cache_dir=str(tmp_path))
+    result = GP.fan_out_track(Path("c.yaml"), 4, settings=settings, options={})
+    assert result == 1 and result.yielded == 2 and isinstance(result, int), "an int (the failed workers), plus the yielded"
+    out = capsys.readouterr().out
+    assert out.count("YIELDED to a PER run") == 2 and out.count("FAILED rc=1") == 1 and "FAILED rc=75" not in out
+    assert out.count("OK |") == 1
+
+
 def test_a_run_with_nothing_left_to_track_does_not_report_yielding(tree, fake_model, monkeypatch, capsys):
     settings, gcfg = tree.settings(), tree.gcfg()
     S.run_track(settings, gcfg)
