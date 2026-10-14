@@ -158,3 +158,158 @@ def test_messages_are_ascii_titles_with_times():
     assert "14:05" in body and "15:05" in body
     title, body = rs.reminder_message("Pi2 Fly 3", 5400, t)
     assert title == "Pi2 Fly 3 - 1 h 30 min left" and "14:05" in body
+
+
+# ── RunTracker ───────────────────────────────────────────────────────────────
+
+class Clock:
+    def __init__(self, t=1000.0):
+        self.t = t
+
+    def __call__(self):
+        return self.t
+
+
+def _tracker(tmp_path, clock):
+    phase = ps.PhaseState(clock=clock)
+    run = rs.RunTracker(phase, rs.RunPlan(CYCLES), host="flybehavior2",
+                        batch_dir="october_14_batch_3", output_dir=tmp_path,
+                        push_to="u@h:/data/flys_New/X/", push_mode="hub",
+                        prefix="Pi2 Fly 3", clock=clock)
+    return phase, run
+
+
+def test_tracker_publishes_idle_run_metadata(tmp_path):
+    phase, _ = _tracker(tmp_path, Clock())
+    run = phase.snapshot()["run"]
+    assert run["state"] == "idle" and run["batch_dir"] == "october_14_batch_3"
+    assert run["push_mode"] == "hub" and run["trials_total"] == 3 and run["trials"] == []
+
+
+def test_begin_sets_eta_from_startup_plus_plan(tmp_path):
+    clock = Clock(1000.0)
+    phase, run = _tracker(tmp_path, clock)
+    training_at, end = run.begin(5400)
+    assert training_at == 6400.0 and end == 6400.0 + 1187
+    snap = phase.snapshot()["run"]
+    assert snap["state"] == "running" and snap["expected_end_at"] == end
+    assert snap["planned_total_s"] == 5400 + 1187 and snap["progress"] == 0.0
+
+
+def test_mark_recomputes_eta_and_progress(tmp_path):
+    clock = Clock(1000.0)
+    phase, run = _tracker(tmp_path, clock)
+    run.begin(0)
+    clock.t = 1500.0
+    run.mark(1, 1, rs.DELAY_STEP)              # 647 s left
+    snap = phase.snapshot()["run"]
+    assert snap["expected_end_at"] == 1500.0 + 647
+    assert snap["progress"] == pytest.approx(1 - 647 / 1187)
+
+
+def test_mark_unknown_position_keeps_eta(tmp_path):
+    clock = Clock(1000.0)
+    phase, run = _tracker(tmp_path, clock)
+    run.begin(0)
+    run.mark(99, 0, 0)
+    assert phase.snapshot()["run"]["expected_end_at"] == 1000.0 + 1187
+
+
+def test_trial_closed_publishes_the_list(tmp_path):
+    phase, run = _tracker(tmp_path, Clock())
+    run.trial_closed(phase_tag="training_1", label="Training 1/2", odor="ACV",
+                     video="a.h264", frames_csv="a.csv", started_at=1, ended_at=2,
+                     closed=True)
+    snap = phase.snapshot()["run"]
+    assert snap["trials_done"] == 1 and snap["trials"][0]["phase_tag"] == "training_1"
+
+
+def test_finish_complete_and_failed(tmp_path):
+    clock = Clock(1000.0)
+    phase, run = _tracker(tmp_path, clock)
+    run.begin(0)
+    clock.t = 1200.0
+    run.finish("complete")
+    snap = phase.snapshot()["run"]
+    assert snap["state"] == "complete" and snap["progress"] == 1.0
+    assert snap["expected_end_at"] == 1200.0
+    run.finish("failed", error="boom")
+    assert phase.snapshot()["run"]["error"] == "boom"
+
+
+def test_due_messages_use_the_tracker_eta(tmp_path):
+    clock = Clock(0.0)
+    _, run = _tracker(tmp_path, clock)
+    run.begin(10800 - 1187)                    # ends at 10800
+    clock.t = 5400.0
+    (title, body), = run.due_messages()
+    assert title == "Pi2 Fly 3 - 1 h 30 min left"
+    assert run.due_messages() == []
+
+
+# ── hub hand-off ─────────────────────────────────────────────────────────────
+
+class FakeHub:
+    def __init__(self, states, fail_complete=False):
+        self.states = list(states)
+        self.fail_complete = fail_complete
+        self.posts = []
+
+    def post(self, url, payload, timeout=10.0):
+        self.posts.append((url, payload))
+        if self.fail_complete and url.endswith("/complete"):
+            raise OSError("connection refused")
+        return {}
+
+    def get(self, url, timeout=10.0):
+        state = self.states.pop(0)
+        if isinstance(state, Exception):
+            raise state
+        return {"state": state}
+
+
+def _handoff(hub, timeout_s=100.0):
+    t = [0.0]
+    return rs.hub_handoff(
+        "http://hub:8765/", "flybehavior2", "october_14_batch_3",
+        output_dir="/pi/october_14_batch_3", push_to="u@h:/d/", manifest=[{"path": "a", "bytes": 1}],
+        timeout_s=timeout_s, poll_s=10.0, post=hub.post, get=hub.get,
+        sleep=lambda s: t.__setitem__(0, t[0] + s), clock=lambda: t[0], log=lambda m: None)
+
+
+def test_session_url_quotes_parts():
+    assert rs.session_url("http://h:1/", "pi 2", "a/b", "status") == \
+        "http://h:1/api/sessions/pi%202/a%2Fb/status"
+
+
+def test_handoff_landed_after_polls_and_sends_manifest():
+    hub = FakeHub(["pending", "remuxing", "landed"])
+    assert _handoff(hub) == "landed"
+    url, payload = hub.posts[0]
+    assert url == "http://hub:8765/api/sessions/flybehavior2/october_14_batch_3/complete"
+    assert payload == {"output_dir": "/pi/october_14_batch_3", "push_to": "u@h:/d/",
+                       "manifest": [{"path": "a", "bytes": 1}]}
+    assert not any(u.endswith("/abort") for u, _ in hub.posts)
+
+
+def test_handoff_failed_posts_abort():
+    hub = FakeHub(["pending", "failed"])
+    assert _handoff(hub) == "failed"
+    assert hub.posts[-1][0].endswith("/abort")
+
+
+def test_handoff_timeout_posts_abort():
+    hub = FakeHub(["pending"] * 20)
+    assert _handoff(hub, timeout_s=30.0) == "timeout"
+    assert hub.posts[-1][0].endswith("/abort")
+
+
+def test_handoff_transient_poll_error_keeps_polling():
+    hub = FakeHub([OSError("blip"), "landed"])
+    assert _handoff(hub) == "landed"
+
+
+def test_handoff_unreachable_still_tries_abort():
+    hub = FakeHub([], fail_complete=True)
+    assert _handoff(hub) == "unreachable"
+    assert hub.posts[-1][0].endswith("/abort")
