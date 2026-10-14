@@ -24,6 +24,7 @@ the wrong rows.
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Any, Iterable, Mapping, NamedTuple, Optional
 
@@ -81,12 +82,23 @@ def freeze_flags(
 
     ``thawed`` names datasets to treat as unfrozen for this run only;
     ``thaw_all`` unfreezes everything. Neither edits config.
+
+    While a pipeline run's auto-freeze plan is active (``fbpipe.autofreeze``;
+    in-process, or ``FBPIPE_FREEZE_PLAN`` in its figure subprocesses) the plan
+    answers for every dataset it covers. Otherwise -- hand-run scripts,
+    ``--figures-only``, ``auto_freeze: {enabled: false}`` -- the explicit
+    ``freeze:`` flags do, as before.
     """
     if thaw_all:
         return (False, False)
     key = _freeze_key(dataset)
     if key and key in {_freeze_key(name) for name in thawed}:
         return (False, False)
+    from .autofreeze import active_flags
+
+    planned = active_flags(dataset)
+    if planned is not None:
+        return planned
     overrides = getattr(cfg, "dataset_overrides", None) or {}
     override = overrides.get(dataset)
     if override is None and key:
@@ -156,6 +168,31 @@ def build_fingerprint(
             }
         trial_type_norm = sorted(_trial_type_allow) if _trial_type_allow else None
 
+    override_fp = {
+        "trial_type_override": getattr(override, "trial_type_override", None),
+        "odor_on_s": getattr(override, "odor_on_s", None),
+        "odor_off_s": getattr(override, "odor_off_s", None),
+        "light_only": bool(getattr(override, "light_only", False)),
+        "light_start_s": getattr(override, "light_start_s", None),
+        "light_duration_s": getattr(override, "light_duration_s", None),
+        "odor_remap": dict(getattr(override, "odor_remap", {}) or {}),
+        # Folder freeze changes which rows carry frozen=True, so a slice
+        # cached under one folder policy must not be served under another --
+        # that would leave one CSV mixing two freeze policies, the same
+        # failure mode trial_type_filter guards against above. Sorted so
+        # list order (which never changes the outcome) cannot cause drift.
+        "freeze_folders": sorted(
+            f"{getattr(f, 'pattern', f)}@{getattr(f, 'before', None)}"
+            for f in (getattr(override, "freeze_folders", ()) or ())
+        ),
+    }
+    # The cutoff exemption moves folders the other way, so it is folder policy
+    # too -- but recorded ONLY when set, so every dataset without it keeps the
+    # fingerprint (and the valid slice) it had before the key existed.
+    exempt_before = getattr(override, "cutoff_exempt_before", None)
+    if exempt_before is not None:
+        override_fp["cutoff_exempt_before"] = str(exempt_before)
+
     return {
         "protocol": str(protocol),
         "measure_cols": [str(c) for c in measure_cols],
@@ -175,24 +212,7 @@ def build_fingerprint(
         # one CSV with nothing to distinguish them. Stringified because the
         # fingerprint is JSON-serialised.
         "threshold_rule": None if threshold_rule is None else str(threshold_rule),
-        "override": {
-            "trial_type_override": getattr(override, "trial_type_override", None),
-            "odor_on_s": getattr(override, "odor_on_s", None),
-            "odor_off_s": getattr(override, "odor_off_s", None),
-            "light_only": bool(getattr(override, "light_only", False)),
-            "light_start_s": getattr(override, "light_start_s", None),
-            "light_duration_s": getattr(override, "light_duration_s", None),
-            "odor_remap": dict(getattr(override, "odor_remap", {}) or {}),
-            # Folder freeze changes which rows carry frozen=True, so a slice
-            # cached under one folder policy must not be served under another --
-            # that would leave one CSV mixing two freeze policies, the same
-            # failure mode trial_type_filter guards against above. Sorted so
-            # list order (which never changes the outcome) cannot cause drift.
-            "freeze_folders": sorted(
-                f"{getattr(f, 'pattern', f)}@{getattr(f, 'before', None)}"
-                for f in (getattr(override, "freeze_folders", ()) or ())
-            ),
-        },
+        "override": override_fp,
         # The global date cutoff, for the same reason. Stringified so a
         # datetime.date survives the JSON round-trip load_slice compares over.
         "freeze_folders_before": (
@@ -267,16 +287,29 @@ def save_slice(
     dataset: str,
     rows: pd.DataFrame,
     fingerprint: Mapping[str, Any],
+    *,
+    built_by: Optional[str] = None,
 ) -> None:
     """Persist *rows* as *dataset*'s slice of *wide_block*.
 
     Stores the rows exactly as written, across ALL trial types -- the splice
     routes them to the main output or an extra trial export the same way live
     rows are routed.
+
+    Each file is written to a temporary name and renamed into place, rows
+    first: a crash leaves the old slice, or new rows under the old meta (whose
+    row count and columns then disagree with them), never a torn file.
+
+    *built_by* is the auto-freeze run whose walk produced the rows
+    (``meta["built_by_run"]``): a rebuilt dataset is recorded frozen only from
+    a slice its own run wrote (:func:`slice_built_by`). Omitted, meta.json is
+    exactly what it always was.
     """
     target = slice_dir(cache_dir, wide_block, dataset)
     target.mkdir(parents=True, exist_ok=True)
-    rows.to_parquet(target / "rows.parquet", index=False)
+    tmp_rows = target / f".rows.parquet.{os.getpid()}.tmp"
+    rows.to_parquet(tmp_rows, index=False)
+    os.replace(tmp_rows, target / "rows.parquet")
     meta = {
         "schema_version": FREEZE_SCHEMA_VERSION,
         "dataset": str(dataset),
@@ -286,7 +319,21 @@ def save_slice(
         "columns": [str(c) for c in rows.columns],
         "fingerprint": dict(fingerprint),
     }
-    (target / "meta.json").write_text(json.dumps(meta, indent=2, sort_keys=True))
+    if built_by is not None:
+        meta["built_by_run"] = str(built_by)
+    tmp_meta = target / f".meta.json.{os.getpid()}.tmp"
+    tmp_meta.write_text(json.dumps(meta, indent=2, sort_keys=True))
+    os.replace(tmp_meta, target / "meta.json")
+
+
+def slice_built_by(cache_dir: str | Path, wide_block: str, dataset: str) -> Optional[str]:
+    """The run that wrote *dataset*'s slice (``save_slice(built_by=...)``), or None."""
+    try:
+        meta = json.loads((slice_dir(cache_dir, wide_block, dataset) / "meta.json").read_text())
+    except Exception:  # noqa: BLE001 -- unreadable: written by no run we can name
+        return None
+    value = meta.get("built_by_run") if isinstance(meta, dict) else None
+    return None if value is None else str(value)
 
 
 def load_slice(
@@ -322,6 +369,96 @@ def load_slice(
     return FrozenSlice(rows=rows, own_max_len=int(meta.get("own_max_len", 0)))
 
 
+def slice_status(
+    cache_dir: str | Path,
+    wide_block: str,
+    dataset: str,
+    fingerprint: Mapping[str, Any],
+) -> tuple[bool, str]:
+    """``(True, "")`` when :func:`load_slice` would serve this slice; else why not.
+
+    The cheap form auto-freeze plans with: meta.json and the Parquet footer,
+    never the rows. A slice whose footer reads but whose rows do not is
+    caught by load_slice at splice time, which then rebuilds it once.
+    """
+    target = slice_dir(cache_dir, wide_block, dataset)
+    meta_path, rows_path = target / "meta.json", target / "rows.parquet"
+    if not meta_path.is_file() or not rows_path.is_file():
+        return False, "missing"
+    try:
+        meta = json.loads(meta_path.read_text())
+    except Exception:
+        return False, "unreadable (meta.json)"
+    if meta.get("schema_version") != FREEZE_SCHEMA_VERSION:
+        return False, "from another cache schema"
+    current = json.loads(json.dumps(dict(fingerprint)))
+    if meta.get("fingerprint") != current:
+        return False, "fingerprint drift: " + str(drift_reason(meta.get("fingerprint") or {}, current))
+    try:
+        import pyarrow.parquet as pq
+
+        n_rows = pq.read_metadata(rows_path).num_rows
+    except Exception:
+        return False, "unreadable (rows.parquet)"
+    if "row_count" in meta and int(meta["row_count"]) != int(n_rows):
+        return False, "rows.parquet and meta.json disagree"
+    return True, ""
+
+
+def _exact_duplicates(rows: pd.DataFrame) -> pd.Series:
+    """True for every row that repeats an EARLIER row in every column.
+
+    NaN equals NaN here (``DataFrame.duplicated``), which is exactly "the same
+    bytes in the CSV". Only rows sharing the trial key are compared cell by
+    cell, so a slice with no repeated key costs one cheap pass.
+    """
+    import numpy as np
+
+    key = [c for c in ("dataset", "fly", "fly_number", "trial_type", "trial_label") if c in rows.columns]
+    if not key:
+        return pd.Series(rows.duplicated(keep="first").to_numpy(), index=rows.index)
+    # Positional throughout: label alignment (and pandas 2's dtype upcast on a
+    # partial boolean assignment) must never decide which row is dropped.
+    candidates = rows.duplicated(subset=key, keep=False).to_numpy()
+    dup = np.zeros(len(rows), dtype=bool)
+    if candidates.any():
+        # An exact duplicate shares its trial key, and the subset keeps row
+        # order, so "first copy" means the same row as over the whole frame.
+        dup[candidates] = rows.iloc[np.flatnonzero(candidates)].duplicated(keep="first").to_numpy()
+    return pd.Series(dup, index=rows.index)
+
+
+def count_duplicate_rows(cache_dir: str | Path, wide_block: str, dataset: str) -> tuple[int, int]:
+    """``(rows, rows without exact duplicates)`` of a cached slice."""
+    rows_path = slice_dir(cache_dir, wide_block, dataset) / "rows.parquet"
+    if not rows_path.is_file():
+        return (0, 0)
+    rows = pd.read_parquet(rows_path)
+    return (len(rows), int(len(rows) - _exact_duplicates(rows).sum()))
+
+
+def dedupe_slice(cache_dir: str | Path, wide_block: str, dataset: str) -> tuple[int, int]:
+    """Drop a cached slice's byte-identical duplicate rows; ``(before, after)``.
+
+    Lossless: a row is dropped only when an earlier row equals it in every
+    column, so the first copy of every trial stays and the set of distinct rows
+    is unchanged. Rows sharing a trial key but differing anywhere are kept. The
+    fingerprint is kept as stored, so the slice stays valid exactly when it was.
+    """
+    target = slice_dir(cache_dir, wide_block, dataset)
+    rows_path, meta_path = target / "rows.parquet", target / "meta.json"
+    if not rows_path.is_file() or not meta_path.is_file():
+        return (0, 0)
+    rows = pd.read_parquet(rows_path)
+    dup = _exact_duplicates(rows).to_numpy()
+    if not dup.any():
+        return (len(rows), len(rows))
+    kept = rows.iloc[(~dup).nonzero()[0]].reset_index(drop=True)
+    fingerprint = json.loads(meta_path.read_text()).get("fingerprint") or {}
+    save_slice(cache_dir, wide_block, dataset, kept, fingerprint)
+    return (len(rows), len(kept))
+
+
 def drift_reason(
     cached: Mapping[str, Any], current: Mapping[str, Any]
 ) -> Optional[str]:
@@ -349,16 +486,39 @@ def figure_frozen_from_raw(
     re-derive the rows", and those cached rows still redraw. Anything
     unreadable counts as LIVE: the failure mode of a config we cannot parse has
     to be a redundant figure, never a silently missing one.
+
+    Inside a pipeline run the auto-freeze plan (``FBPIPE_FREEZE_PLAN``) answers
+    instead for every dataset it covers: a dataset's figures are held exactly
+    when the plan holds them. Datasets it does not cover keep the flags.
     """
     if thaw_all:
         return set()
+    skip = {_freeze_key(n) for n in thawed}
+    from .autofreeze import active_plan
+
+    plan = active_plan()
+    planned_keys: set[str] = set()
+    frozen: set[str] = set()
+    if plan is not None:
+        for name, entry in (plan.get("datasets") or {}).items():
+            planned_keys.add(_freeze_key(name))
+            if _freeze_key(name) in skip or not isinstance(entry, Mapping):
+                continue
+            if entry.get("figures_frozen"):
+                frozen.add(str(name))
+                try:
+                    from .odor_constants import canon_dataset
+
+                    frozen.add(canon_dataset(str(name)))
+                except Exception:  # noqa: BLE001
+                    pass
     overrides = (raw or {}).get("dataset_overrides") if isinstance(raw, Mapping) else None
     if not isinstance(overrides, Mapping):
-        return set()
-    skip = {_freeze_key(n) for n in thawed}
-    frozen = set()
+        return frozen
     for name, block in overrides.items():
-        if _freeze_key(name) in skip or not isinstance(block, Mapping):
+        if _freeze_key(name) in skip or _freeze_key(name) in planned_keys:
+            continue
+        if not isinstance(block, Mapping):
             continue
         fz = block.get("freeze")
         if isinstance(fz, Mapping) and fz.get("figures") is True:

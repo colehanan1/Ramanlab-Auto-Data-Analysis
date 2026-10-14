@@ -72,6 +72,32 @@ def test_frozen_slice_round_trips_identically_when_frozen_is_longer(tmp_path):
     assert "dir_val_20" not in spliced.columns
 
 
+def test_the_flagged_fly_list_covers_a_spliced_dataset(tmp_path):
+    """build_wide_csv lists the non-reactive flies as it walks them, so a
+    spliced dataset used to drop off ``<out>_flagged_flies.txt`` -- under
+    auto-freeze that is nearly every dataset on a quiet night. Its entries are
+    read back from the cached rows instead: the list is byte-identical whether
+    the dataset was walked or spliced."""
+    live = _make_dataset(tmp_path / "LIVE", 8)
+    frozen = tmp_path / "FROZEN"
+    out = frozen / "october_01_fly1" / "angle_distance_rms_envelope"
+    out.mkdir(parents=True)
+    pd.DataFrame({"envelope_of_rms": np.linspace(40.0, 45.0, 12)}).to_csv(  # 5 px span
+        out / "october_01_fly1_testing_1_angle_distance_rms_envelope.csv", index=False
+    )
+
+    baseline_csv = tmp_path / "baseline.csv"
+    baseline = _build([live, frozen], baseline_csv)
+    walked = baseline_csv.with_name("baseline_flagged_flies.txt").read_bytes()
+    assert b"\nFROZEN,october_01_fly1," in walked
+
+    frozen_rows = baseline[baseline["dataset"] == "FROZEN"].reset_index(drop=True)
+    spliced_csv = tmp_path / "spliced.csv"
+    _build([live, frozen], spliced_csv,
+           frozen_slices={"FROZEN": (frozen_rows, int(frozen_rows["trace_len"].max()))})
+    assert spliced_csv.with_name("spliced_flagged_flies.txt").read_bytes() == walked
+
+
 def test_frozen_rows_not_truncated_when_no_live_dataset_is_as_long(tmp_path):
     """Directly pins the failure the own_max_len fold prevents: silent chopping."""
     live = _make_dataset(tmp_path / "LIVE", 5)

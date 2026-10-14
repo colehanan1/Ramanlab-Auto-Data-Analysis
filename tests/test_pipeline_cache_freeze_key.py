@@ -146,26 +146,17 @@ def test_changing_the_global_cutoff_invalidates_the_pipeline_cache(tmp_path):
     )
 
 
-def test_thaw_flag_invalidates_the_pipeline_cache(tmp_path):
-    """``--thaw <DATASET>`` is an escape hatch; a cache hit would neuter it."""
+def test_thaw_flag_no_longer_changes_the_folder_policy_key(tmp_path):
+    """``--thaw <DATASET>`` keeps the folder rules live, so it changes no folder
+    a run walks and the key stays put. The thawed dataset is rebuilt anyway:
+    auto-freeze runs its steps regardless of this cache
+    (tests/test_autofreeze_runs.py)."""
     root = _dataset_root(tmp_path)
 
     settings = _settings(tmp_path, folders=(FolderRule("*_rig_3", None),))
-    _seed_cache(settings, root)
-
+    before = _pipeline_expectation(settings, root)
     settings._thawed = ("EB-Training-24-1",)
-
-    assert (
-        _should_skip_with_manifest(
-            settings,
-            category="pipeline",
-            key=str(root),
-            expected=_pipeline_expectation(settings, root),
-            force_flag=False,
-            dataset_root=root,
-        )
-        is False
-    )
+    assert _pipeline_expectation(settings, root) == before
 
 
 def test_rule_order_does_not_cause_spurious_invalidation(tmp_path):

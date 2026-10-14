@@ -891,7 +891,8 @@ def test_frozen_row_mask_marks_rows_of_frozen_batches(tmp_path):
     )
     cfg = _cfg(root, tmp_path / "qc", dataset_overrides={DATASET: DatasetOverride(freeze_folders=("may_22*",))})
     assert qc.frozen_row_mask(report, cfg).tolist() == [True, False, True]
-    assert qc.frozen_row_mask(report, cfg, thaw_all=True).tolist() == [False, False, False]
+    # Auto-freeze rule: --thaw-all rebuilds with folder retirements still applied.
+    assert qc.frozen_row_mask(report, cfg, thaw_all=True).tolist() == [True, False, True]
     assert qc.frozen_row_mask(report.iloc[:0], cfg).tolist() == []
 
 

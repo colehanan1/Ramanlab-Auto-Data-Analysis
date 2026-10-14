@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import hashlib
 import json
 import logging
@@ -47,6 +48,9 @@ for path in (str(SRC_ROOT), str(REPO_ROOT)):
 # fly_dir/trial_dir/file depth (>=3 parts). Bumping invalidates v1 caches.
 STATE_VERSION = 2
 
+#: One line about this run's auto-freeze outcome, for the end-of-run ntfy.
+_RUN_SUMMARY = ""
+
 from fbpipe.analysis.mounting import parse_mounting_block
 from fbpipe.analysis.threshold import ThresholdRule
 from fbpipe.config import Settings, discover_flagged_directories, load_settings, resolve_config_path, _expand_datasets
@@ -54,6 +58,7 @@ from fbpipe.config_layers import OVERLAY_BLOCKS, ConfigLayers, resolve_layers
 from fbpipe.pipeline import ORDERED_STEPS
 from fbpipe.steps import predict_reactions
 from fbpipe.utils.data_secured_sync import sync_data_secured
+from fbpipe.utils.run_lock import RunLockTimeout, run_lock
 from fbpipe.utils.run_locks import abdomen_lock, acquire_per_run_lock, release_run_lock
 from fbpipe.utils.smb_copy import copy_to_smb
 
@@ -201,9 +206,32 @@ def _load_state(settings: Settings, category: str, key: str) -> dict[str, Any] |
         return None
 
 
-def _write_state(settings: Settings, category: str, key: str, payload: dict[str, Any]) -> None:
-    """Write state with file manifest for relevant categories."""
+def _write_state(
+    settings: Settings,
+    category: str,
+    key: str,
+    payload: dict[str, Any],
+    *,
+    build_manifest: bool = True,
+) -> None:
+    """Write state with file manifest for relevant categories.
+
+    ``build_manifest=False`` is for a FORCED run of a manifest category
+    (pipeline / combined): its check returns before it ever loads the state,
+    and hashing every tracked table for it cost ~45 s (pipeline) and ~50 s
+    (combined) a night. Without a manifest the state could vouch for nothing,
+    so none is kept -- an older one is removed -- and a later non-force run
+    finds no state and recomputes. An empty manifest is no safe stand-in: a
+    dataset that has since lost every tracked table would compare {} with {}
+    and read as unchanged.
+    """
     state_path = _state_path(settings, category, key)
+    if not build_manifest and category in ("pipeline", "combined"):
+        state_path.unlink(missing_ok=True)
+        # INFO, not DEBUG: this timestamped line replaces "Built file manifest
+        # for <dataset>" as the per-dataset marker in the nightly log.
+        LOGGER.info(f"Forced {category} run for {Path(key).name}: no file manifest built, no state kept")
+        return
     state_path.parent.mkdir(parents=True, exist_ok=True)
     data = dict(payload)
     data.setdefault("version", STATE_VERSION)
@@ -566,20 +594,25 @@ def _pipeline_expectation(settings, dataset_root: Path) -> dict[str, Any]:
     }
 
 
-def _resolve_frozen_folders(settings, roots) -> dict[str, set[str]]:
+def _resolve_frozen_folders(settings, roots, skip=()) -> dict[str, set[str]]:
     """``{dataset: {frozen experiment folder, ...}}`` across *roots*.
 
     Datasets with nothing frozen are OMITTED rather than mapped to an empty set,
     so a caller's ``if frozen_folders:`` guard stays honest and the log line
-    cannot claim a folder freeze that did not happen.
+    cannot claim a folder freeze that did not happen. Datasets in *skip* (those
+    spliced from the freeze cache, whose roots build_wide_csv never walks) are
+    not resolved at all.
     """
     from fbpipe.utils.frozen_folders import frozen_folders_for_root
 
     thawed = getattr(settings, "_thawed", ())
     thaw_all = getattr(settings, "_thaw_all", False)
+    skipped = {str(name) for name in (skip or ())}
     out: dict[str, set[str]] = {}
     for root in roots:
         root_path = Path(root)
+        if root_path.name in skipped:
+            continue
         names = frozen_folders_for_root(
             settings, root_path, thawed=thawed, thaw_all=thaw_all
         )
@@ -646,6 +679,81 @@ def _resolve_frozen_slices(
     return out
 
 
+def _read_wide_for_cache(csv_path: Path, *, use_sibling: bool = True) -> pd.DataFrame:
+    """``pd.read_csv(csv_path)``, served from its Parquet sibling when current.
+
+    build_wide_csv writes ``<stem>.parquet`` as ``pd.read_csv(<stem>.csv)``
+    right after the CSV, so the sibling holds the same frame (same dtypes) at a
+    fraction of the cost of re-parsing ~2 GB of CSV. That write is best-effort
+    (a warning on failure), so a missing, older or unreadable sibling falls
+    back to the CSV. Not ``fbpipe.analysis.traces.read_wide_table``: it drops
+    folder-frozen rows by default, and the cache must keep them.
+    """
+    try:
+        # Where build_wide_csv writes it: next to the resolved output path.
+        sibling = csv_path.expanduser().resolve().with_suffix(".parquet")
+        if (
+            use_sibling
+            and sibling.is_file()
+            and sibling.stat().st_mtime_ns >= csv_path.stat().st_mtime_ns
+        ):
+            return pd.read_parquet(sibling, engine="pyarrow")
+    except Exception as exc:
+        print(f"[FREEZE] Parquet sibling of {csv_path.name} unreadable ({exc}); reading the CSV.")
+    return pd.read_csv(csv_path)
+
+
+def _spliced_slice_unchanged(cache_dir, wide_block, dataset, group, fingerprint, cached) -> bool:
+    """True when saving ``group`` with ``fingerprint`` would write ``cached`` back as is.
+
+    A spliced dataset's rows came from its cache, but ``group`` is cut from the
+    whole re-read output: its dtypes are settled over EVERY dataset's rows and
+    its dir_val_* width is the run's global max. Both can move while the cached
+    slice stands still -- a live NaN turns an int column float64 (the next
+    splice then prints ``2.0``, not ``2``), a longer live trace widens every
+    row -- and a config number re-spelled ``30`` -> ``30.0`` still matches the
+    fingerprint yet rewrites meta.json. A re-save follows all of that, so only
+    an identical slice is skipped: same columns, dtypes and values, and a
+    meta.json that reads exactly as the re-save would write it -- so one an
+    older save_slice wrote under the same fingerprint (another own_max_len,
+    another layout) is rewritten, as it always was.
+    """
+    from fbpipe import freeze as _freeze
+
+    try:
+        old = cached[0]  # FrozenSlice.rows, or a (rows, own_max_len) tuple
+        if (
+            len(group) != len(old)
+            or list(group.columns) != list(old.columns)
+            or list(group.dtypes) != list(old.dtypes)
+        ):
+            return False
+        # equals() also compares the row labels: the slice was saved after
+        # reset_index(drop=True). Relabel a shallow copy -- frozen rows are
+        # most of the table, and reset_index would copy them all.
+        rows = group.copy(deep=False)
+        rows.index = old.index
+        if not rows.equals(old):
+            return False
+        # The meta.json fbpipe.freeze.save_slice writes for these rows: same
+        # keys, same own_max_len, same json.dumps call. A save_slice that
+        # writes more (a new key, another layout) no longer matches this, and
+        # its slices are simply re-saved every run until this follows suit.
+        meta = {
+            "schema_version": _freeze.FREEZE_SCHEMA_VERSION,
+            "dataset": str(dataset),
+            "wide_block": str(wide_block),
+            "own_max_len": _freeze.own_max_len(rows),
+            "row_count": int(len(rows)),
+            "columns": [str(c) for c in rows.columns],
+            "fingerprint": dict(fingerprint),
+        }
+        meta_path = _freeze.slice_dir(cache_dir, wide_block, dataset) / "meta.json"
+        return meta_path.read_text() == json.dumps(meta, indent=2, sort_keys=True)
+    except Exception:  # anything unexpected: re-save, as before
+        return False
+
+
 def _write_freeze_cache(
     settings,
     wide_block: str,
@@ -653,6 +761,8 @@ def _write_freeze_cache(
     extra_export_paths,
     *,
     fingerprint_for,
+    spliced=None,
+    walked=None,
 ) -> None:
     """Cache each dataset's slice of a freshly written wide CSV.
 
@@ -662,20 +772,45 @@ def _write_freeze_cache(
     Reads the main output plus every extra trial export, so a slice holds ALL
     trial types -- the splice routes them back the same way live rows are.
 
+    ``spliced`` is the ``{dataset: slice}`` mapping build_wide_csv spliced from
+    this block's cache (``_resolve_frozen_slices``: fingerprint already
+    matched). Such a slice is not re-saved when the re-save would write it back
+    unchanged (``_spliced_slice_unchanged``); otherwise it is, as before.
+
+    Under auto-freeze (an active plan, fbpipe.autofreeze) a spliced slice is
+    never re-saved: it IS the frozen dataset's record, and a re-save would
+    carry the run's other datasets' dtypes and width into it (and any stale
+    duplicate rows forward). Only the datasets walked this run -- *walked*, the
+    block's roots minus the spliced ones -- are cached, minus any exact
+    duplicate row, and a block that walked none is not even read back.
+
     "A cache write must never fail the run" covers the whole function, not just
     the per-dataset loop: building ``allrows`` (the concat + groupby below) can
     itself raise -- e.g. mismatched columns across the main output and an extra
     trial export -- so that step is guarded too.
     """
+    from fbpipe import autofreeze as _autofreeze
     from fbpipe import freeze as _freeze
 
+    paths = [Path(str(path)) for path in [output_csv, *(extra_export_paths or [])]]
+    if _autofreeze.active_plan() is not None:
+        names = None if walked is None else set(walked) - set(spliced or {})
+        if names is None or names:
+            _cache_walked_rows(settings, wide_block, paths, fingerprint_for, spliced or {}, names)
+        return
+    try:
+        # Two outputs with one stem (wide.csv, wide.txt) share one sibling,
+        # which holds only the rows of whichever was written last.
+        resolved = {p.expanduser().resolve() for p in paths}
+        use_siblings = len({r.with_suffix(".parquet") for r in resolved}) == len(resolved)
+    except Exception:
+        use_siblings = False
     frames = []
-    for path in [output_csv, *(extra_export_paths or [])]:
-        p = Path(str(path))
+    for p in paths:
         if not p.is_file():
             continue
         try:
-            frames.append(pd.read_csv(p))
+            frames.append(_read_wide_for_cache(p, use_sibling=use_siblings))
         except Exception as exc:
             print(f"[FREEZE] Skipping cache read of {p}: {exc}")
     if not frames:
@@ -690,15 +825,132 @@ def _write_freeze_cache(
         return
     for dataset, group in groups:
         try:
+            fingerprint = fingerprint_for(dataset)
+            cached = (spliced or {}).get(dataset)
+            if cached is not None and _spliced_slice_unchanged(
+                settings.cache_dir, wide_block, dataset, group, fingerprint, cached
+            ):
+                continue
             _freeze.save_slice(
                 settings.cache_dir,
                 wide_block,
                 dataset,
                 group.reset_index(drop=True),
-                fingerprint_for(dataset),
+                fingerprint,
             )
         except Exception as exc:  # a cache write must never fail the run
             print(f"[FREEZE] Could not cache {dataset}/{wide_block}: {exc}")
+
+
+def _csv_field(line: bytes, at: int) -> Optional[str]:
+    try:
+        return next(csv.reader([line.decode("utf-8")]))[at]
+    except (IndexError, StopIteration, UnicodeDecodeError):
+        return None
+
+
+def _read_walked_rows(paths, names) -> list[pd.DataFrame]:
+    """The rows of datasets *names* (None: every row) in each wide output.
+
+    Lines are picked by their leading ``dataset`` field before parsing, so a
+    night that rebuilt one dataset parses only that dataset's rows. Floats are
+    parsed ``round_trip``: pandas' default parser can land one ULP off the
+    written value, and a slice holding that value would splice back a
+    different last digit than the walk wrote -- the frozen night's table would
+    not be byte-identical to the night that built it.
+
+    build_wide_csv writes ``dataset`` first. Were it another column, the
+    leading-field pick would match nothing and every walked dataset would be
+    cached empty, so each line's field is read with the csv module instead
+    (slower, same rows); an output with no ``dataset`` column raises, and the
+    caller caches nothing -- no dataset is recorded frozen from rows that
+    could not be told apart.
+    """
+    import io
+
+    keys = None
+    if names is not None:
+        keys = tuple(
+            key for n in sorted(names) for key in (f"{n},".encode(), f'"{n}",'.encode())
+        )
+    frames = []
+    for p in paths:
+        if not p.is_file():
+            continue
+        with p.open("rb") as fh:
+            header = fh.readline()
+            if keys is None:
+                body = fh.read()
+            else:
+                columns = next(csv.reader([header.decode("utf-8-sig")]), [])
+                if "dataset" not in columns:
+                    raise ValueError(f"{p.name} has no 'dataset' column")
+                at = columns.index("dataset")
+                if at == 0:
+                    body = b"".join(line for line in fh if line.startswith(keys))
+                else:
+                    wanted = {str(n) for n in names}
+                    body = b"".join(line for line in fh if _csv_field(line, at) in wanted)
+        if body:
+            frames.append(pd.read_csv(io.BytesIO(header + body), float_precision="round_trip"))
+    return frames
+
+
+def _cache_walked_rows(settings, wide_block, paths, fingerprint_for, spliced, names) -> None:
+    """Auto-freeze's cache write: the walked datasets only, never a spliced one.
+
+    See ``_write_freeze_cache``. Exact duplicate rows are not cached (a fresh
+    build emits each trial once; a repeat could only come from overlapping
+    outputs). Each slice carries this run's id -- the plan records a rebuilt
+    dataset frozen only from a slice its own run wrote -- and a walked dataset
+    that produced no rows gets an empty slice: no rows is then its truth. A
+    cache write must never fail the run.
+    """
+    from fbpipe import autofreeze as _autofreeze
+    from fbpipe import freeze as _freeze
+
+    run_id = (_autofreeze.active_plan() or {}).get("run_id")
+    try:
+        frames = _read_walked_rows(paths, names)
+        allrows = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+        groups = (
+            list(allrows.groupby(allrows["dataset"].astype(str)))
+            if "dataset" in allrows.columns else []
+        )
+    except Exception as exc:  # a cache write must never fail the run
+        print(f"[FREEZE] Could not prepare rows to cache for {wide_block}: {exc}")
+        return
+    cached: set[str] = set()
+    for dataset, group in groups:
+        if dataset in spliced:
+            continue
+        try:
+            rows = group.reset_index(drop=True)
+            dup = _freeze._exact_duplicates(rows).to_numpy()
+            if dup.any():
+                print(f"[FREEZE] {dataset}/{wide_block}: {int(dup.sum())} exact duplicate row(s) not cached")
+                rows = rows.iloc[(~dup).nonzero()[0]].reset_index(drop=True)
+            _freeze.save_slice(settings.cache_dir, wide_block, dataset, rows, fingerprint_for(dataset),
+                               built_by=run_id)
+            cached.add(dataset)
+        except Exception as exc:  # a cache write must never fail the run
+            print(f"[FREEZE] Could not cache {dataset}/{wide_block}: {exc}")
+    for dataset in sorted(set(names or ()) - cached - set(spliced) - {d for d, _ in groups}):
+        try:
+            _freeze.save_slice(settings.cache_dir, wide_block, dataset, pd.DataFrame(),
+                               fingerprint_for(dataset), built_by=run_id)
+        except Exception as exc:  # a cache write must never fail the run
+            print(f"[FREEZE] Could not cache {dataset}/{wide_block}: {exc}")
+
+
+def _plan_forces_combined(plan) -> bool:
+    """Whether tonight's auto-freeze plan needs the combined step despite its cache.
+
+    A rebuilt dataset's rows must be walked and cached before it can be
+    recorded frozen again; an adoption that removed duplicate rows from a
+    slice leaves them in the wide tables until those are rebuilt from it.
+    """
+    return plan is not None and any(d.commit or d.deduped for d in plan.decisions.values())
 
 
 def _should_skip_with_manifest(
@@ -931,7 +1183,9 @@ def _figure_frozen_datasets(settings: Any) -> list[str]:
 
     ``freeze.data`` alone is not enough: a data-frozen dataset still redraws
     from its cached rows (that is the point of the two independent flags), so
-    only ``freeze.figures`` suppresses a render.
+    only ``freeze.figures`` suppresses a render. Under auto-freeze the plan
+    holds a dataset's figures exactly while it is frozen -- a dataset need not
+    have an override block for that, so every configured dataset is asked.
     """
     from fbpipe.freeze import freeze_flags
 
@@ -940,8 +1194,10 @@ def _figure_frozen_datasets(settings: Any) -> list[str]:
     overrides = getattr(settings, "dataset_overrides", None) or {}
     thawed = getattr(settings, "_thawed", ())
     thaw_all = getattr(settings, "_thaw_all", False)
+    candidates = list(overrides)
+    candidates += [d for d in (getattr(settings, "datasets", ()) or ()) if d not in overrides]
     names: list[str] = []
-    for name in overrides:
+    for name in candidates:
         if not freeze_flags(settings, name, thawed=thawed, thaw_all=thaw_all)[1]:
             continue
         names.append(str(name))
@@ -1601,7 +1857,7 @@ def _run_combined(
             non_reactive_threshold=non_reactive_threshold,
             use_per_trial_baseline=use_per_trial_baseline,
             frozen_slices=_frozen or None,
-            frozen_folders=_resolve_frozen_folders(settings, roots) or None,
+            frozen_folders=_resolve_frozen_folders(settings, roots, skip=_frozen) or None,
         )
         _write_freeze_cache(
             settings,
@@ -1609,6 +1865,8 @@ def _run_combined(
             str(output_csv),
             list(extra_exports.values()),
             fingerprint_for=lambda ds: _freeze_fingerprint(settings, ds, **_fp_kw),
+            spliced=_frozen,
+            walked={Path(str(r)).name for r in roots},
         )
 
         for trial_key, matrix_dir in extra_matrix_dirs.items():
@@ -1765,7 +2023,7 @@ def _run_combined(
                 use_per_trial_baseline=base_use_per_trial_baseline,
                 threshold_rule=base_threshold_rule,
                 frozen_slices=_frozen or None,
-                frozen_folders=_resolve_frozen_folders(settings, roots) or None,
+                frozen_folders=_resolve_frozen_folders(settings, roots, skip=_frozen) or None,
             )
             _write_freeze_cache(
                 settings,
@@ -1773,6 +2031,8 @@ def _run_combined(
                 str(output_csv),
                 list(extra_exports.values()),
                 fingerprint_for=lambda ds: _freeze_fingerprint(settings, ds, **_fp_kw),
+                spliced=_frozen,
+                walked={Path(str(r)).name for r in roots},
             )
 
             for trial_key, matrix_dir in extra_matrix_dirs.items():
@@ -1948,7 +2208,7 @@ def _run_combined(
                 frozen_slices=_frozen or None,
                 # resolved_roots, matching the roots this call actually builds
                 # from -- `roots` is a different list in this branch.
-                frozen_folders=_resolve_frozen_folders(settings, resolved_roots) or None,
+                frozen_folders=_resolve_frozen_folders(settings, resolved_roots, skip=_frozen) or None,
             )
             _write_freeze_cache(
                 settings,
@@ -1956,6 +2216,8 @@ def _run_combined(
                 str(pair_wide_csv),
                 list(extra_exports.values()),
                 fingerprint_for=lambda ds: _freeze_fingerprint(settings, ds, **_fp_kw),
+                spliced=_frozen,
+                walked={Path(str(r)).name for r in resolved_roots},
             )
 
             print(f"[analysis] combined.pair_groups[{pair_name}].matrix → {pair_matrix_dir}")
@@ -2173,9 +2435,18 @@ def _pubfig_commands(
     script = REPO_ROOT / "scripts" / "analysis" / "pubfig_score_train_vs_control.py"
     flagged_csv = str(getattr(settings, "flagged_flies_csv", "") or "")
     frozen_figures = set(_figure_frozen_datasets(settings))
+    from fbpipe.autofreeze import active_plan
+
+    auto = active_plan() is not None
     commands: list[list[str]] = []
     for cohort in pub.cohorts:
-        if cohort.train_dataset in frozen_figures:
+        arms = [cohort.train_dataset]
+        control = cohort.train_dataset.replace("-Training-", "-Control-", 1)
+        if auto and control != cohort.train_dataset:
+            # Auto-frozen arms freeze independently: a control arm that got
+            # new data must redraw the figure its trained arm keys.
+            arms.append(control)
+        if all(arm in frozen_figures for arm in arms):
             # The cohort is keyed by its trained arm; frozen there means the
             # published figure is final.
             continue
@@ -2543,6 +2814,15 @@ def _run_pipeline(
         worker_env = dict(env)
         worker_env["NUM_WORKERS"] = str(n)
         worker_env["WORKER_INDEX"] = str(i)
+        # One BLAS thread per worker, stated outright. Until now the cap held
+        # only by accident: importing ultralytics here sets OMP_NUM_THREADS=1
+        # when it is unset, and OpenBLAS falls back to that. Without it (a
+        # preset OMP_NUM_THREADS, another ultralytics) numpy's 16-thread
+        # OpenBLAS pool spins at 100% CPU between the tracker's tiny per-frame
+        # np.linalg.inv calls. It has to be exactly 1: 2 still leaves a
+        # spinner. Outputs are identical. OMP/torch threads are left alone.
+        for var in ("OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS", "NUMEXPR_NUM_THREADS"):
+            worker_env[var] = "1"
         procs.append(subprocess.Popen(cmd, env=worker_env))
     return_codes = [p.wait() for p in procs]
     failed = [(i, rc) for i, rc in enumerate(return_codes) if rc != 0]
@@ -2550,6 +2830,287 @@ def _run_pipeline(
         idx, rc = failed[0]
         print(f"[ERROR] {len(failed)} of {n} YOLO worker(s) failed; first: worker {idx} exit {rc}")
         raise subprocess.CalledProcessError(rc, cmd)
+
+
+#: What the pre-checks count as a video (matched case-insensitively): yolo_infer's
+#: own .mp4/.avi, the rigs' raw .h264 the secure cleanup prunes with .mp4, and
+#: every container the per-trial move_videos step relocates. Wider only ever
+#: means more launches; tests/test_yolo_launch_precheck.py pins the coverage.
+_PRECHECK_VIDEO_SUFFIXES = (".mp4", ".avi", ".h264", ".mov", ".mkv", ".mpg", ".mpeg", ".m4v")
+
+
+def _tree_has_video(root: str | Path) -> bool:
+    """True if any entry anywhere under *root* has a video suffix.
+
+    A deliberately wide SUPERSET of yolo_infer.main's discovery (a video
+    directly inside a live batch dir): folder freeze, depth and entry type are
+    ignored, symlinked dirs are followed (iter_live_batch_dirs keeps them too)
+    and an unlistable dir reads as "may hold a video". A pending video this
+    missed would be copied to secured storage and deleted by the secure
+    cleanup without ever being inferred, so it may only err towards launching.
+    A missing root has nothing to launch for -- yolo_infer skips it as well.
+    """
+    start = Path(root)
+    try:
+        if not start.is_dir():
+            return False
+    except OSError:  # e.g. EACCES: let the worker meet it, as today's launch would
+        return True
+    seen: set[tuple[int, int]] = set()
+    stack = [start]
+    while stack:
+        current = stack.pop()
+        try:
+            st = current.stat()
+            if (st.st_dev, st.st_ino) in seen:  # symlink loop
+                continue
+            seen.add((st.st_dev, st.st_ino))
+            with os.scandir(current) as entries:
+                for entry in entries:
+                    if entry.name.lower().endswith(_PRECHECK_VIDEO_SUFFIXES):
+                        return True
+                    if entry.is_dir():
+                        stack.append(Path(entry.path))
+        except OSError:
+            return True
+    return False
+
+
+def _pipeline_run_walks_beyond_root(settings, root: str | Path) -> bool:
+    """Whether the ``fbpipe.pipeline`` run ``_run_pipeline`` starts for *root*
+    walks anything but *root* itself, so that *root* cannot show it has nothing
+    to do.
+
+    The worker reads MAIN_DIRECTORIES ahead of the MAIN_DIRECTORY it is handed,
+    splits and strips that value (config._parse_env_paths, so a root with a
+    comma, an os.pathsep or edge whitespace arrives as other paths), and
+    get_main_directories appends every auto-discovered flagged dir to each run.
+    """
+    from fbpipe.config import _parse_env_paths
+
+    if os.environ.get("MAIN_DIRECTORIES") is not None:
+        return True
+    if _parse_env_paths(str(root)) != str(root):
+        return True
+    flagged_root = getattr(settings, "flagged_root", "")
+    if flagged_root and getattr(settings, "auto_discover_flagged", True):
+        return bool(discover_flagged_directories(flagged_root))
+    return False
+
+
+def _yolo_work_reason(settings, root: str | Path) -> str | None:
+    """Why the YOLO launch for *root* must go ahead; None only when it would
+    certainly run to completion without finding a video.
+
+    Mirrors what yolo_infer.main does before it looks for one: without CUDA
+    (allow_cpu off) it raises, and so does YOLO() when neither the .engine
+    sibling nor the model file exists. Today's launch then fails the night
+    loudly, even for an empty root. Skipped, the night would go on, and without
+    CUDA the per-trial steps would run their CPU variants (fbpipe.pipeline
+    picks them), whose outputs differ from the GPU path's. torch settles the
+    CUDA answer once per process, and fbpipe.pipeline's import has already
+    asked here: the check is free and reflects CUDA as the run started.
+    """
+    import torch
+
+    if not getattr(settings, "allow_cpu", False) and not torch.cuda.is_available():
+        return "CUDA is unavailable (allow_cpu off), so its YOLO launch must fail the run as today"
+    model = Path(settings.model_path)
+    if not model.with_suffix(".engine").exists() and not model.exists():
+        return f"its YOLO model {model} is missing, so its YOLO launch must fail the run as today"
+    if _pipeline_run_walks_beyond_root(settings, root):
+        return "its pipeline run walks more than its root (MAIN_DIRECTORIES, flagged dirs or a split path)"
+    if _tree_has_video(root):
+        return "it holds video files"
+    return None
+
+
+def _yolo_may_have_work(settings, root: str | Path) -> bool:
+    """False only when a YOLO launch for *root* is certainly a no-op."""
+    return _yolo_work_reason(settings, root) is not None
+
+
+def _freeze_cache_blocks(combined_cfg, settings) -> list[tuple[str, frozenset[str], dict]]:
+    """``(wide_block, dataset names, fingerprint kwargs)`` for every
+    ``_resolve_frozen_slices`` call ``_run_combined`` will make.
+
+    Derived from the config the way ``_run_combined`` derives them, so the
+    dataset loop can tell before any per-trial work whether build_wide_csv will
+    splice a data-frozen dataset's cached rows or rebuild them from its
+    per-trial files. Not for --folder runs, whose combined step differs.
+    tests/test_frozen_dataset_skip.py pins this against the calls a real
+    ``_run_combined`` makes -- change the two together.
+    """
+    cfg = combined_cfg if isinstance(combined_cfg, Mapping) else {}
+    limits = (settings.class2_min, settings.class2_max)
+    flagged_names = (
+        [d.name for d in discover_flagged_directories(settings.flagged_root)]
+        if settings.flagged_root
+        else []
+    )
+
+    def _root_names(roots_cfg, field: str) -> list[str]:
+        if isinstance(roots_cfg, Sequence) and not isinstance(roots_cfg, (str, bytes, Path)):
+            roots_iter = list(roots_cfg)
+        else:
+            roots_iter = [roots_cfg]
+        return [_ensure_path(root, field).name for root in roots_iter]
+
+    def _with_flagged(names: list[str]) -> list[str]:
+        present = {name.lower() for name in names}
+        return names + [n for n in flagged_names if n.lower() not in present]
+
+    def _kw(measure_cols, fps_fallback, use_per_trial_baseline, threshold_rule, trial_type_filter):
+        return dict(
+            measure_cols=measure_cols,
+            fps_fallback=fps_fallback,
+            distance_limits=limits,
+            non_reactive_threshold=settings.non_reactive_span_px,
+            low_max_threshold_px=LOW_MAX_FLAG_THRESHOLD_PX,
+            use_per_trial_baseline=use_per_trial_baseline,
+            threshold_rule=threshold_rule,
+            trial_type_filter=trial_type_filter,
+        )
+
+    blocks: list[tuple[str, frozenset[str], dict]] = []
+    wide_cfg = cfg.get("wide")
+    wide_threshold_rule = ThresholdRule.from_mapping(wide_cfg or {})
+    wide_names: list[str] = []
+    wide_measure_cols: Sequence[str] = ["envelope_of_rms"]
+    wide_fps_fallback = 40.0
+    use_per_trial_baseline = False
+    if wide_cfg:
+        if not wide_cfg.get("roots", []):
+            raise ValueError("combined.wide.roots must list at least one directory.")
+        wide_names = _with_flagged(_root_names(wide_cfg.get("roots"), "roots"))
+        wide_measure_cols = wide_cfg.get("measure_cols") or ["envelope_of_rms"]
+        wide_fps_fallback = float(wide_cfg.get("fps_fallback", 40.0))
+        use_per_trial_baseline = wide_cfg.get("use_per_trial_baseline", False)
+        blocks.append((
+            "wide",
+            frozenset(wide_names),
+            _kw(wide_measure_cols, wide_fps_fallback, use_per_trial_baseline,
+                wide_threshold_rule, wide_cfg.get("trial_type_filter")),
+        ))
+
+    for base_key, default_cols in (
+        ("combined_base", ["combined_pct", "combined_base"]),
+        ("distance_base", ["distance_percentage"]),
+    ):
+        base_cfg = cfg.get(base_key)
+        base_wide_cfg = base_cfg.get("wide") if base_cfg else None
+        if not base_wide_cfg:
+            continue
+        if base_wide_cfg.get("roots"):
+            names = _root_names(base_wide_cfg.get("roots"), f"{base_key}.wide.roots")
+        elif wide_names:
+            names = list(wide_names)
+        else:
+            raise ValueError(f"combined.{base_key}.wide.roots must list at least one directory.")
+        trial_type_filter = base_wide_cfg.get("trial_type_filter")
+        if trial_type_filter is None and wide_cfg:
+            trial_type_filter = wide_cfg.get("trial_type_filter")
+        blocks.append((
+            base_key,
+            frozenset(_with_flagged(names)),
+            _kw(
+                base_wide_cfg.get("measure_cols") or list(default_cols),
+                float(base_wide_cfg.get("fps_fallback", wide_fps_fallback)),
+                bool(base_wide_cfg.get("use_per_trial_baseline", use_per_trial_baseline)),
+                ThresholdRule.from_mapping({**(wide_cfg or {}), **base_wide_cfg}),
+                trial_type_filter,
+            ),
+        ))
+
+    pair_groups_cfg = cfg.get("pair_groups") or []
+    if pair_groups_cfg:
+        if not wide_names:
+            raise ValueError("combined.pair_groups requires combined.wide.roots to be configured.")
+        # pair_groups resolve their datasets among the wide AND combine roots.
+        known = set(wide_names)
+        combine_cfg = cfg.get("combine")
+        if combine_cfg:
+            if combine_cfg.get("roots"):
+                combine_names = _root_names(combine_cfg.get("roots"), "combine.root")
+            elif combine_cfg.get("root") is not None:
+                combine_names = _root_names([combine_cfg.get("root")], "combine.root")
+            else:
+                raise ValueError("combined.combine requires 'root' or 'roots'.")
+            by_lower = {name.lower(): name for name in combine_names + flagged_names}
+            known.update(by_lower.values())
+        entries = (
+            pair_groups_cfg
+            if isinstance(pair_groups_cfg, Sequence) and not isinstance(pair_groups_cfg, (str, bytes))
+            else [pair_groups_cfg]
+        )
+        for entry in entries:
+            if not isinstance(entry, Mapping) or not entry.get("datasets"):
+                raise ValueError("combined.pair_groups entries must be mappings with 'datasets'.")
+            datasets_cfg = entry.get("datasets")
+            if isinstance(datasets_cfg, Sequence) and not isinstance(datasets_cfg, (str, bytes, Path)):
+                names = [Path(str(ds)).name for ds in datasets_cfg]
+            else:
+                names = [Path(str(datasets_cfg)).name]
+            missing = [name for name in names if name not in known]
+            if missing:
+                raise ValueError(f"combined.pair_groups datasets not found among combined.wide.roots: {missing}")
+            blocks.append((
+                "pair_groups",
+                frozenset(names),
+                _kw(wide_measure_cols, wide_fps_fallback, use_per_trial_baseline,
+                    wide_threshold_rule, entry.get("trial_type_filter")),
+            ))
+    return blocks
+
+
+def _skip_frozen_dataset(settings, root: str, blocks, *, thawed, thaw_all) -> bool:
+    """True when *root*'s YOLO launch and per-trial steps can sit out tonight.
+
+    Only a data-frozen dataset (``--thaw`` / ``--thaw-all`` honoured) whose YOLO
+    launch would certainly be a no-op (_yolo_work_reason: no video at all, a
+    run that walks nothing beyond its own root, CUDA and the model file there)
+    and for which every freeze-cache slice the combined step will consult loads
+    under the current fingerprint: build_wide_csv then splices its rows and
+    never walks its root, combine skips it, and no other nightly step reads its
+    per-trial files, so re-deriving them changes no output. A missing or stale
+    slice means build_wide_csv rebuilds its rows tonight; the dataset then runs
+    exactly as today, so that rebuild and the slice it re-caches see exactly
+    today's inputs. Says why for every data-frozen dataset.
+    """
+    from fbpipe import freeze as _freeze
+
+    dataset = Path(root).name
+    freeze_data, _ = _freeze.freeze_flags(settings, dataset, thawed=thawed, thaw_all=thaw_all)
+    if not freeze_data:
+        return False
+    why = _yolo_work_reason(settings, root)
+    if why is not None:
+        print(f"[FROZEN] {dataset}: data-frozen, but {why} - running YOLO + per-trial steps as usual.")
+        return False
+    consulted = [(block, kw) for block, names, kw in blocks if dataset in names]
+    if not consulted:
+        print(
+            f"[FROZEN] {dataset}: data-frozen but no wide table caches it - "
+            f"running per-trial steps as usual."
+        )
+        return False
+    for block, kw in consulted:
+        try:
+            valid = _freeze.load_slice(
+                settings.cache_dir, block, dataset,
+                _freeze_fingerprint(settings, dataset, **kw),
+            ) is not None
+        except Exception:  # never skip on doubt; the combined step reports it
+            valid = False
+        if not valid:
+            print(
+                f"[FROZEN] {dataset}: data-frozen but its {block} freeze cache is "
+                f"missing or stale, so build_wide_csv rebuilds its rows tonight - "
+                f"running per-trial steps as usual."
+            )
+            return False
+    print(f"[FROZEN] {dataset}: data-frozen, no videos, cache valid - skipping YOLO + per-trial steps")
+    return True
 
 
 def _build_arg_parser() -> argparse.ArgumentParser:
@@ -2585,14 +3146,27 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         default=[],
         metavar="DATASET",
         help=(
-            "Ignore freeze for DATASET this run (repeatable). Re-derives and "
-            "re-caches it. Does not edit config."
+            "Rebuild DATASET this run (repeatable): YOLO for unprocessed videos, "
+            "the per-trial steps, combine and its wide rows, then it refreezes. "
+            "Folder retirements and cutoffs stay live. Does not edit config."
         ),
     )
     parser.add_argument(
         "--thaw-all",
         action="store_true",
-        help="Ignore every dataset freeze this run.",
+        help=(
+            "Rebuild every dataset this run (folder retirements stay live; "
+            "retired folders are still not scored -- see --include-frozen)."
+        ),
+    )
+    parser.add_argument(
+        "--freeze-status",
+        action="store_true",
+        help=(
+            "Print what auto-freeze would decide for every dataset tonight "
+            "(frozen / rebuilt and why, cascade notices) and exit. Writes "
+            "nothing and takes no lock."
+        ),
     )
     parser.add_argument(
         "--include-frozen",
@@ -2610,8 +3184,8 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         help=(
             "Run only the abdomen/mounting stages of an extends-overlay config "
             "(config/config_new_abdomen.yaml): no YOLO, combine, reactions, figures, "
-            "cleanup, SMB copy or sync, and no PER lock. Exits with an error when "
-            "the config has no enabled abdomen/mounting block."
+            "cleanup, SMB copy or sync, and neither the PER lock nor the whole-run lock. "
+            "Exits with an error when the config has no enabled abdomen/mounting block."
         ),
     )
     parser.add_argument(
@@ -2675,9 +3249,14 @@ def main(argv: Sequence[str] | None = None) -> None:
     # Fail fast on a typo'd --thaw name before any YOLO/pipeline work runs.
     _validate_thaw(args.thaw, datasets=getattr(settings, "datasets", ()))
 
+    if args.freeze_status:
+        _print_freeze_status(args, config_path, data, settings)
+        return
+
     # --abdomen-only: just the overlay's abdomen/mounting stages. Nothing of PER runs
-    # (no YOLO, combine, reactions, figures, cleanup, SMB copy or sync) and no PER
-    # lock is taken, so the stage's own tracker never mistakes this run for PER.
+    # (no YOLO, combine, reactions, figures, cleanup, SMB copy or sync) and neither
+    # lock is taken: not the PER lock, so the stage's own tracker never mistakes this
+    # run for PER, and not the whole-run lock, so it never waits behind a PER run.
     # A bare `return`: the legacy shim's SystemExit(main()) must exit 0.
     global LAST_RUN_ABDOMEN_ONLY
     LAST_RUN_ABDOMEN_ONLY = bool(args.abdomen_only)
@@ -2696,12 +3275,102 @@ def main(argv: Sequence[str] | None = None) -> None:
         )
         return
 
-    # Everything below is PER work: hold the shared advisory run lock for it. An
-    # abdomen backfill running at the same time asks before each video and stops at
-    # the next one, resuming on a later run. The lock fails open and adds nothing to
-    # the run but an empty file under <cache_dir>/locks; it is released just before
-    # the abdomen stage, below.
-    per_lock = acquire_per_run_lock(settings.cache_dir)
+    # One pipeline run at a time (fbpipe.utils.run_lock): a daytime run and the
+    # 00:00 nightly overlapped on 2026-10-05/06, both rewriting the same tables.
+    # A second run waits for the first. The plan auto-freeze publishes for this
+    # run's figure subprocesses never outlives it.
+    from fbpipe import autofreeze as _autofreeze
+
+    with run_lock(_cache_root(settings), label=" ".join(["run_workflows.py", *(argv or sys.argv[1:])])):
+        # Everything the run does from here is PER work: hold the shared advisory PER
+        # lock (fbpipe.utils.run_locks, not the whole-run lock above) for it. An abdomen
+        # backfill running at the same time asks before each video and stops at the
+        # next one, resuming on a later run. The lock fails open and adds nothing to the
+        # run but an empty file under <cache_dir>/locks; it is released before the
+        # abdomen stage, below.
+        per_lock = acquire_per_run_lock(settings.cache_dir)
+        try:
+            try:
+                _main_locked(args, config_path, data, settings)
+            finally:
+                _autofreeze.set_active_plan(None)
+        finally:
+            release_run_lock(per_lock)
+
+    # The overlay's abdomen/mounting stages, after PER is done and both locks are let
+    # go: the tracker would otherwise see this very run as PER and yield at its first
+    # video, and a stage of up to abdomen.max_hours must not keep the next PER run
+    # waiting on the whole-run lock. A plain config has no overlay, so it never even
+    # calls the stage. The stage never raises and leaves its one-line summary in
+    # LAST_ABDOMEN_SUMMARY for the ntfy.
+    if layers.overlay:
+        _run_abdomen_stages(
+            layers,
+            settings,
+            figures_only=args.figures_only,
+            folder=args.folder,
+            annotated_video=args.abdomen_video,
+        )
+
+
+def _print_freeze_status(args: argparse.Namespace, config_path: Path, data: dict, settings: Settings) -> None:
+    """``--freeze-status``: tonight's auto-freeze decisions, computed read-only."""
+    from fbpipe import autofreeze as _autofreeze
+
+    roots = data.get("main_directories") or []
+    if isinstance(roots, str):
+        roots = [roots]
+    blocks = _freeze_cache_blocks((data.get("analysis") or {}).get("combined"), settings)
+    plan = _autofreeze.plan_run(
+        settings,
+        config_path=config_path,
+        roots=[str(Path(r).expanduser()) for r in roots],
+        blocks=blocks,
+        fingerprint=lambda ds, kw: _freeze_fingerprint(settings, ds, **kw),
+        thawed=args.thaw or (),
+        thaw_all=args.thaw_all,
+        folder=args.folder,
+        pairs=[(t, c) for t, c, _ in _mean_trace_cohorts(getattr(settings, "datasets", ()) or ())],
+        read_only=True,
+    )
+    if not getattr(settings, "auto_freeze", True):
+        print("[FREEZE] auto_freeze is disabled in this config: the explicit freeze: flags apply.")
+    for line in plan.summary_lines():
+        print(line)
+
+
+def _commit_freeze_plan(plan, combined_ran: bool) -> str:
+    """Record tonight's rebuilt datasets as frozen, write the status file, and
+    return the one-line run summary.
+
+    Never raises: data and figures are already done when this runs, so a
+    failure here must not skip the secure cleanup, the SMB copy or the eye-QC
+    summary. Datasets a failed commit leaves ``thawing`` are rebuilt next run.
+    """
+    try:
+        committed = plan.commit(combined_ran=combined_ran)
+        for line in committed:
+            print(line)
+        status = plan.write_status(committed)
+        summary = plan.short_summary()
+        print(f"[FREEZE] {summary} (status: {status})")
+        return summary
+    except Exception as exc:  # noqa: BLE001 -- see docstring
+        LOGGER.exception("[FREEZE] recording tonight's freezes failed")
+        summary = (
+            f"auto-freeze bookkeeping FAILED ({exc}); "
+            "tonight's rebuilt datasets stay thawing and rebuild next run"
+        )
+        print(f"[FREEZE] ERROR: {summary}")
+        return summary
+
+
+def _main_locked(args: argparse.Namespace, config_path: Path, data: dict, settings: Settings) -> None:
+    """The whole run, under the run lock (see ``main``)."""
+    from fbpipe import autofreeze as _autofreeze
+
+    global _RUN_SUMMARY
+    _RUN_SUMMARY = ""
 
     # Register light-only datasets so envelope_visuals draws a light span
     # instead of the odor span for those plots.
@@ -2798,6 +3467,10 @@ def main(argv: Sequence[str] | None = None) -> None:
             ),
         )
 
+    # This run's auto-freeze plan (None: --figures-only, auto_freeze disabled,
+    # or planning failed -- the explicit freeze: flags then apply, as before).
+    plan = None
+
     # --- Single-folder mode filtering ---
     folder_filter: str | None = args.folder
     if not figures_only:
@@ -2823,7 +3496,51 @@ def main(argv: Sequence[str] | None = None) -> None:
             remaining_steps = [step.name for step in ORDERED_STEPS if step.name != "yolo"]
 
             yolo_targets: list[str] = []
-            pipeline_targets: list[tuple[str, dict[str, Any]]] = []
+            # Per-trial runs in root order; held_back marks a frozen dataset
+            # skipped below, which runs only if a video turns up by its YOLO slot.
+            planned_runs: list[tuple[str, dict[str, Any], bool]] = []
+
+            # Every wide table the combined step builds, with the datasets it
+            # reads -- which freeze-cache slices a frozen dataset needs.
+            freeze_blocks = None
+            try:
+                freeze_blocks = _freeze_cache_blocks(
+                    (data.get("analysis") or {}).get("combined"), settings
+                )
+            except Exception as exc:  # the combined step reports it properly
+                print(f"[FROZEN] Cannot predict the freeze-cache splice ({exc}); no dataset skips its steps.")
+
+            # Auto-freeze (fbpipe.autofreeze): each dataset is rebuilt only when
+            # something new arrived or the user unfroze it; the rest sit out
+            # YOLO, the per-trial steps and combine, and splice their cached
+            # rows. Planned once, before any launch.
+            if freeze_blocks is not None and getattr(settings, "auto_freeze", True):
+                try:
+                    plan = _autofreeze.plan_run(
+                        settings,
+                        config_path=config_path,
+                        roots=dataset_roots,
+                        blocks=freeze_blocks,
+                        fingerprint=lambda ds, kw: _freeze_fingerprint(settings, ds, **kw),
+                        thawed=args.thaw or (),
+                        thaw_all=args.thaw_all,
+                        folder=folder_filter,
+                        pairs=[
+                            (train, control)
+                            for train, control, _ in _mean_trace_cohorts(getattr(settings, "datasets", ()) or ())
+                        ],
+                    )
+                except Exception as exc:  # never lose a night to the planner itself
+                    plan = None
+                    print(
+                        f"[FREEZE] ERROR: auto-freeze planning failed ({type(exc).__name__}: {exc}); "
+                        f"this run uses the explicit freeze: flags."
+                    )
+                    _RUN_SUMMARY = f"auto-freeze planning FAILED ({exc}); explicit freeze flags used"
+                if plan is not None:
+                    _autofreeze.set_active_plan(plan)
+                    for line in plan.summary_lines():
+                        print(line)
 
             for root in pipeline_dataset_roots:
                 resolved = str(Path(root).expanduser())
@@ -2832,6 +3549,54 @@ def main(argv: Sequence[str] | None = None) -> None:
                 pipeline_expectation = _pipeline_expectation(
                     settings, Path(resolved)
                 )
+                decision = plan.decision_for_root(resolved) if plan is not None else None
+                if decision is not None and decision.decision == "frozen":
+                    if _pipeline_run_walks_beyond_root(settings, resolved):
+                        print(
+                            f"[FREEZE] {decision.dataset}: frozen, but its pipeline run walks more "
+                            f"than its root - running YOLO + per-trial steps as usual."
+                        )
+                    else:
+                        # Still a YOLO target: its slot re-checks for a video
+                        # YOLO would process, just before that launch.
+                        yolo_targets.append(resolved)
+                        planned_runs.append((resolved, dict(pipeline_expectation), True))
+                        continue
+                if decision is not None and decision.decision == "thawed":
+                    # Something new arrived (or an explicit thaw): YOLO and the
+                    # per-trial steps run whatever the manifest says -- it
+                    # tracks no videos, and a hit would leave them unprocessed.
+                    yolo_targets.append(resolved)
+                    planned_runs.append((resolved, dict(pipeline_expectation), False))
+                    continue
+                skip_frozen = False
+                if plan is None and freeze_blocks is not None and not folder_filter:
+                    try:
+                        skip_frozen = _skip_frozen_dataset(
+                            settings,
+                            resolved,
+                            freeze_blocks,
+                            thawed=args.thaw or (),
+                            thaw_all=args.thaw_all,
+                        )
+                    except Exception as exc:  # an optimisation must never cost a dataset
+                        print(
+                            f"[FROZEN] {Path(resolved).name}: could not decide on a skip "
+                            f"({exc}) - running YOLO + per-trial steps as usual."
+                        )
+                if skip_frozen:
+                    # Still a YOLO target: its slot re-checks for a video just
+                    # before the launch would have happened, as the launch would.
+                    yolo_targets.append(resolved)
+                    planned_runs.append((resolved, dict(pipeline_expectation), True))
+                    continue
+                if plan is None and (args.thaw_all or Path(resolved).name in set(args.thaw or ())):
+                    # --thaw without auto-freeze (its kill switch): rebuild whatever
+                    # the cache says. Folder rules now stay live under --thaw, so the
+                    # thaw no longer changes this dataset's pipeline key.
+                    yolo_targets.append(resolved)
+                    planned_runs.append((resolved, dict(pipeline_expectation), False))
+                    continue
                 skip_pipeline = _should_skip_with_manifest(
                     settings,
                     category="pipeline",
@@ -2848,23 +3613,77 @@ def main(argv: Sequence[str] | None = None) -> None:
                     yolo_targets.append(resolved)
 
                 if not skip_pipeline:
-                    pipeline_targets.append((resolved, dict(pipeline_expectation)))
+                    planned_runs.append((resolved, dict(pipeline_expectation), False))
 
-            if yolo_targets:
-                for resolved in yolo_targets:
+            held_back = {resolved for resolved, _, held in planned_runs if held}
+            launched: set[str] = set()
+            for resolved in yolo_targets:
+                if plan is not None and resolved in held_back:
+                    # A frozen dataset's slot: a video YOLO would process that
+                    # arrived after the plan thaws it now, so it is processed,
+                    # rebuilt and refrozen tonight rather than kept for tomorrow
+                    # (a video YOLO already failed on twice does not).
+                    try:
+                        pending = plan.pending_now(resolved)
+                        why = None
+                    except Exception as exc:  # doubt runs the dataset, as today
+                        pending, why = [], f"its video check failed: {exc}"
+                    if not pending and why is None:
+                        continue
+                    plan.late_thaw(resolved, pending)
+                    _autofreeze.refresh_active_plan(plan)
+                    print(
+                        f"[FREEZE] {Path(resolved).name}: thawed at its YOLO slot - "
+                        f"{why or f'{len(pending)} video(s) YOLO has not processed arrived during the run'}; "
+                        f"running YOLO + per-trial steps and rebuilding it tonight."
+                    )
                     _run_pipeline(
                         config_path,
                         main_directory=resolved,
                         steps=("yolo",),
                         num_workers=settings.yolo_num_workers,
                     )
+                    launched.add(resolved)
+                    continue
+                # Checked at the launch's own slot, not up front, so a video
+                # landing mid-run is seen exactly when today's launch would.
+                try:
+                    why = _yolo_work_reason(settings, resolved)
+                except Exception as exc:  # launch: the worker meets it as today
+                    print(f"[analysis] yolo → video pre-check failed for {resolved} ({exc}); launching as usual.")
+                    why = f"its video pre-check failed: {exc}"
+                if why is None:
+                    if resolved not in held_back:
+                        print(f"[analysis] yolo → no video files under {resolved}; skipping the worker launch.")
+                    continue
+                if resolved in held_back:
+                    print(
+                        f"[FROZEN] {Path(resolved).name}: no longer skippable at its YOLO "
+                        f"slot ({why}) - running YOLO + per-trial steps after all."
+                    )
+                _run_pipeline(
+                    config_path,
+                    main_directory=resolved,
+                    steps=("yolo",),
+                    num_workers=settings.yolo_num_workers,
+                )
+                launched.add(resolved)
 
+            pipeline_targets = [
+                (resolved, expected)
+                for resolved, expected, held in planned_runs
+                if not held or resolved in launched
+            ]
             if pipeline_targets:
                 for resolved, expected in pipeline_targets:
                     _run_pipeline(config_path, main_directory=resolved, steps=remaining_steps)
                     payload = dict(expected)
                     payload["version"] = STATE_VERSION
-                    _write_state(settings, "pipeline", resolved, payload)
+                    # A forced check never reads this state: skip the manifest.
+                    _write_state(
+                        settings, "pipeline", resolved, payload,
+                        build_manifest=not settings.force.pipeline,
+                    )
             elif not yolo_targets:
                 print("[analysis] pipeline skipped for all datasets (cached).")
         else:
@@ -2879,9 +3698,10 @@ def main(argv: Sequence[str] | None = None) -> None:
     settings._thawed = tuple(args.thaw or ())
     settings._thaw_all = bool(args.thaw_all)
     # Read by predict_reactions to decide whether frozen folders are scored.
-    # --thaw-all implies it: "ignore every freeze this run" would be a lie if
-    # the retired flies still sat out the predictions.
-    settings.include_frozen = bool(args.include_frozen or args.thaw_all)
+    # Only --include-frozen asks for it: folder retirements stay live under
+    # --thaw/--thaw-all (fbpipe.utils.frozen_folders), so a full rebuild keeps
+    # the retired flies out of the predictions too.
+    settings.include_frozen = bool(args.include_frozen)
     if settings.include_frozen:
         print("[FREEZE] Frozen experiment folders WILL be scored this run.")
     if settings._thaw_all:
@@ -2915,6 +3735,7 @@ def main(argv: Sequence[str] | None = None) -> None:
 
     # Deferred local→secured copy (runs after ALL figures; see _run_combined).
     deferred_secure_cleanup: Callable[[], None] | None = None
+    combined_ran = False
     combined_cfg_input = analysis_cfg.get("combined")
     if combined_cfg_input:
         combined_expected = {
@@ -2973,6 +3794,10 @@ def main(argv: Sequence[str] | None = None) -> None:
                 expected=combined_expected,
                 force_flag=settings.force.combined,
             )
+            if skip_combined and _plan_forces_combined(plan):
+                skip_combined = False
+                print("[FREEZE] combined → running despite its cache: datasets are being rebuilt "
+                      "or lost duplicate rows.")
             if skip_combined:
                 print(
                     "[analysis] combined analysis cached → skipping. Set force.combined=true to recompute."
@@ -2986,12 +3811,17 @@ def main(argv: Sequence[str] | None = None) -> None:
                 defer_secure_cleanup=True,
                 config_path=config_path,
             )
+            combined_ran = True
             # Only write combined cache when running ALL folders; a single-folder
             # run is partial so the next full run must recompute.
             if not folder_filter:
                 payload = dict(combined_expected)
                 payload["version"] = STATE_VERSION
-                _write_state(settings, "combined", "analysis", payload)
+                # A forced check never reads this state: skip the manifest.
+                _write_state(
+                    settings, "combined", "analysis", payload,
+                    build_manifest=not settings.force.combined,
+                )
             else:
                 LOGGER.info(
                     "Single-folder mode: skipping combined cache write so next full run recomputes."
@@ -3213,6 +4043,12 @@ def main(argv: Sequence[str] | None = None) -> None:
             scores_csv,
         )
 
+    # Data and figures are done: record every dataset rebuilt tonight as frozen
+    # (with the inputs seen when the run started). A run that died before this
+    # point left them ``thawing``, and the next run rebuilds them.
+    if plan is not None:
+        _RUN_SUMMARY = _commit_freeze_plan(plan, combined_ran)
+
     # All figures are now rendered (combined, envelope_visuals, deferred
     # model-annotated re-renders, dataset_means). NOW copy local experiment data
     # to secured storage (and optionally delete local) — deferred to here so the
@@ -3230,23 +4066,7 @@ def main(argv: Sequence[str] | None = None) -> None:
     LOGGER.info("=" * 70 + "\n")
     _run_data_secured_sync(data)
 
-    # PER is done: let go of the lock before the abdomen stage, whose tracker would
-    # otherwise see this very run and yield at its first video.
-    release_run_lock(per_lock)
-
-    # The overlay's abdomen/mounting stages. A plain config has none, so it never
-    # even calls the stage. The stage never raises and leaves its one-line summary
-    # in LAST_ABDOMEN_SUMMARY for the ntfy.
-    if layers.overlay:
-        _run_abdomen_stages(
-            layers,
-            settings,
-            figures_only=figures_only,
-            folder=folder_filter,
-            annotated_video=args.abdomen_video,
-        )
-
-    # After everything else: one line on the eye-drift QC report, kept in the module
+    # Last of all: one line on the eye-drift QC report, kept in the module
     # global the __main__ block adds to the "Pipeline Complete" ntfy (main()
     # itself must return None; see LAST_EYE_QC_SUMMARY). Never raises.
     global LAST_EYE_QC_SUMMARY
@@ -3446,11 +4266,26 @@ def _dataset_mean_traces_commands(
                 phase_cmd += ["--config", str(config_path)]
             commands.append(phase_cmd)
 
+    # --with-naive also draws a naive arm: the random panel run at each odor's
+    # concentration (pubfig_naive_vs_trained.NAIVE_BY_CONC). It contributes to
+    # the figure like the two arms do.
+    with_naive = bool(cfg.get("with_naive", True))
+    naive_panels: tuple[str, ...] = ()
+    if with_naive:
+        from scripts.analysis.pubfig_naive_vs_trained import NAIVE_BY_CONC
+
+        # Only a panel this run configures can contribute: an unconfigured one is
+        # never figure-frozen, so counting it would redraw every frozen pair.
+        configured = set(getattr(settings, "datasets", ()) or ())
+        naive_panels = tuple(
+            p for p in NAIVE_BY_CONC.values() if not configured or p in configured
+        )
     for train, control, out_dir, batch in entries:
-        if train in frozen_figures and control in frozen_figures:
-            # Both arms frozen for figures -> the pair is final. A frozen arm
-            # paired with a live one still redraws, or new flies in the live arm
-            # would never appear in the comparison.
+        if all(arm in frozen_figures for arm in (train, control, *naive_panels)):
+            # Every contributor frozen for figures -> the pair is final. A frozen
+            # arm paired with a live one still redraws, or new flies in the live
+            # arm would never appear in the comparison -- and so does a frozen
+            # pair whose naive panel changed (auto-freeze dedupes those rows).
             continue
         out_path = Path(out_dir)
         if not out_path.is_absolute():
@@ -3478,7 +4313,7 @@ def _dataset_mean_traces_commands(
         # The naive arm (black): the random panel run at each odor's own
         # concentration. Writes a second copy of every figure under
         # Trained_vs_Control_vs_Naive/, leaving the two-arm files untouched.
-        if bool(cfg.get("with_naive", True)):
+        if with_naive:
             cmd.append("--with-naive")
         if config_path is not None:
             # Carries dataset_overrides.odor_remap, so ACV reads
@@ -3720,6 +4555,63 @@ def _cohort_figures_expected(
     }
 
 
+#: The cross-cohort sidecar training_auc_vs_control_response.py rewrites from
+#: the datasets of each run of it.
+_TRAINING_AUC_SIDECAR = "training_auc_vs_control_response.json"
+
+
+def _held_training_auc_entries(analysis_cfg, settings) -> tuple[Path | None, dict]:
+    """``(sidecar, entries)``: what the training-AUC sidecar holds now for the
+    cohorts held this run (configured, but frozen for figures)."""
+    cfg = (analysis_cfg or {}).get("cohort_figures") or {}
+    out_dir = str(cfg.get("training_auc_out_dir", "") or "")
+    if not out_dir:
+        return None, {}
+    sidecar = Path(out_dir) / _TRAINING_AUC_SIDECAR
+    configured = {
+        str(d).strip()
+        for d in [*(cfg.get("datasets") or []), *(cfg.get("trained_raster_datasets") or [])]
+        if str(d).strip()
+    }
+    held = configured & set(_figure_frozen_datasets(settings))
+    if not held or not sidecar.is_file():
+        return sidecar, {}
+    try:
+        previous = json.loads(sidecar.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return sidecar, {}
+    if not isinstance(previous, dict):
+        return sidecar, {}
+    return sidecar, {k: v for k, v in previous.items() if k in held}
+
+
+def _keep_held_training_auc_entries(sidecar: Path | None, held: dict) -> None:
+    """Put the held cohorts' entries back into the training-AUC sidecar.
+
+    The script rewrites it from the datasets it drew; a held cohort is not
+    drawn, and under auto-freeze most cohorts sit out most nights, so without
+    this the sidecar would shrink to whatever was rebuilt.
+    """
+    if sidecar is None or not held or not sidecar.is_file():
+        return
+    try:
+        current = json.loads(sidecar.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return
+    if not isinstance(current, dict):
+        return
+    missing = {k: v for k, v in held.items() if k not in current}
+    if not missing:
+        return
+    sidecar.write_text(
+        json.dumps({**current, **missing}, indent=2, default=float), encoding="utf-8"
+    )
+    LOGGER.info(
+        "[analysis] cohort_figures: kept the training-AUC entries of %d held dataset(s)",
+        len(missing),
+    )
+
+
 def _run_cohort_figures(
     analysis_cfg: Mapping[str, Any] | None,
     settings: Any,
@@ -3742,6 +4634,7 @@ def _run_cohort_figures(
     env["PYTHONPATH"] = os.pathsep.join(
         filter(None, [str(REPO_ROOT / "src"), env.get("PYTHONPATH")])
     )
+    auc_sidecar, held_auc = _held_training_auc_entries(analysis_cfg, settings)
     for cmd in cmds:
         LOGGER.info("[analysis] cohort_figures → %s", " ".join(cmd))
         result = subprocess.run(cmd, env=env, capture_output=False)
@@ -3752,6 +4645,7 @@ def _run_cohort_figures(
                 "[analysis] cohort_figures command exited with code %d: %s",
                 result.returncode, " ".join(cmd),
             )
+    _keep_held_training_auc_entries(auc_sidecar, held_auc)
     LOGGER.info("[analysis] cohort_figures complete.")
 
 
@@ -4778,22 +5672,29 @@ def ntfy_notify(title, message, priority="default", tags=""):
         pass
 
 if __name__ == "__main__":  # pragma: no cover
-    try:
-        main()
-        if LAST_RUN_ABDOMEN_ONLY:
-            ntfy_notify(
-                "Abdomen stage complete",
-                LAST_ABDOMEN_SUMMARY or "Abdomen stage finished.",
-                tags="white_check_mark",
-            )
-        else:
-            ntfy_notify(
-                "Pipeline Complete",
-                "Pipeline finished successfully."
-                + (f"\n\n{LAST_EYE_QC_SUMMARY}" if LAST_EYE_QC_SUMMARY else "")
-                + (f"\n\n{LAST_ABDOMEN_SUMMARY}" if LAST_ABDOMEN_SUMMARY else ""),
-                tags="white_check_mark",
-            )
-    except Exception as exc:
-        ntfy_notify("Pipeline FAILED", f"Pipeline crashed with error:\n{exc}", priority="high", tags="x")
-        raise
+    if "--freeze-status" in sys.argv[1:]:
+        main()  # a read-only report: no run happened, nothing to notify about
+    else:
+        try:
+            main()
+            if LAST_RUN_ABDOMEN_ONLY:
+                ntfy_notify(
+                    "Abdomen stage complete",
+                    LAST_ABDOMEN_SUMMARY or "Abdomen stage finished.",
+                    tags="white_check_mark",
+                )
+            else:
+                _message = "Pipeline finished successfully."
+                if LAST_EYE_QC_SUMMARY:
+                    _message += f"\n\n{LAST_EYE_QC_SUMMARY}"
+                if _RUN_SUMMARY:
+                    _message += "\n" + _RUN_SUMMARY
+                if LAST_ABDOMEN_SUMMARY:
+                    _message += f"\n\n{LAST_ABDOMEN_SUMMARY}"
+                ntfy_notify("Pipeline Complete", _message, tags="white_check_mark")
+        except RunLockTimeout as exc:
+            ntfy_notify("Pipeline SKIPPED", f"Another pipeline run held the lock:\n{exc}", priority="high", tags="hourglass")
+            raise SystemExit(75)
+        except Exception as exc:
+            ntfy_notify("Pipeline FAILED", f"Pipeline crashed with error:\n{exc}", priority="high", tags="x")
+            raise

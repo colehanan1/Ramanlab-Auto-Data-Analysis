@@ -17,11 +17,11 @@ Semantics pinned here:
 
 * the cutoff is INCLUSIVE of the keep side — a batch recorded ON the cutoff
   date is KEPT (``freeze_folders_before`` reads "freeze what is before this");
-* a dataset already frozen for DATA is never folder-frozen — its root is never
-  walked, so there are no folders to judge (the "live datasets only" rule);
+* the rules apply to a dataset frozen for DATA and under ``--thaw <dataset>`` /
+  ``--thaw-all`` too: a rebuild must never revive a retired folder (they used
+  to switch off in both cases);
 * a batch whose date cannot be derived stays LIVE and is reported, because
-  silently dropping data is worse than silently keeping it;
-* ``--thaw <dataset>`` / ``--thaw-all`` lift folder freezes too.
+  silently dropping data is worse than silently keeping it.
 """
 
 from __future__ import annotations
@@ -163,34 +163,34 @@ def test_config_list_needs_no_recording_date(tmp_path):
 # ── interaction with the existing whole-dataset freeze ────────────────────
 
 
-def test_data_frozen_dataset_is_never_folder_frozen(tmp_path):
-    """"Live datasets only": a dataset with ``freeze.data: true`` never has its
-    root walked, so its cached rows must splice in whole. Folder-freezing one of
-    its batches would silently delete rows from the wide CSV."""
+def test_data_frozen_dataset_keeps_its_folder_rules(tmp_path):
+    """Its cached rows splice whole while it is frozen (the root is never
+    walked), but the day it is rebuilt the rules must apply. They used to
+    switch off, so every rebuild revived the dataset's retired folders."""
     batch = make_batch(tmp_path, "april_11_batch_2", "20260411")
     cfg = _Cfg(
         freeze_folders_before=date(2026, 6, 26),
         overrides={"EB-Control-24-0.1": _Override(freeze_data=True)},
     )
-    assert is_frozen_folder(cfg, "EB-Control-24-0.1", batch) is False
+    assert is_frozen_folder(cfg, "EB-Control-24-0.1", batch) is True
 
 
 # ── thaw ──────────────────────────────────────────────────────────────────
 
 
-def test_thawed_dataset_ignores_folder_freeze(tmp_path):
+def test_thawed_dataset_keeps_its_folder_freeze(tmp_path):
     batch = make_batch(tmp_path, "may_22_batch_1_rig_2", "20260522")
     cfg = _Cfg(freeze_folders_before=date(2026, 6, 26))
     assert (
         is_frozen_folder(cfg, "Hex-Training-24-0.1", batch, thawed=["Hex-Training-24-0.1"])
-        is False
+        is True
     )
 
 
-def test_thaw_all_ignores_folder_freeze(tmp_path):
+def test_thaw_all_keeps_folder_freezes(tmp_path):
     batch = make_batch(tmp_path, "may_22_batch_1_rig_2", "20260522")
     cfg = _Cfg(freeze_folders_before=date(2026, 6, 26))
-    assert is_frozen_folder(cfg, "Hex-Training-24-0.1", batch, thaw_all=True) is False
+    assert is_frozen_folder(cfg, "Hex-Training-24-0.1", batch, thaw_all=True) is True
 
 
 # ── undated batches fail OPEN ─────────────────────────────────────────────

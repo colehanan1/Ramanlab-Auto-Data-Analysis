@@ -163,6 +163,24 @@ def test_generate_skips_frozen_datasets(tmp_path):
     print("PASS: test_generate_skips_frozen_datasets")
 
 
+def test_generate_keeps_the_summary_rows_of_held_datasets(tmp_path):
+    """A dataset held for figures is not redrawn and its summary rows are not
+    recomputed -- but rows an earlier run wrote must not vanish either: under
+    auto-freeze most datasets sit out most nights, and a summary rebuilt from
+    the drawn datasets alone would shrink to nothing on a quiet night."""
+    csv = _synthetic_csv(tmp_path / "wide.csv")
+    out = tmp_path / "Light-Only"
+    lt.generate(csv, out)  # both drawn
+    summary = out / "light_trial_summary.csv"
+    full = summary.read_bytes()
+    assert {"DS-Light-A", "DS-Light-B"} <= set(pd.read_csv(summary)["dataset"])
+
+    lt.generate(csv, out, skip_datasets=["DS-Light-A", "DS-Light-B"])  # a quiet night
+    assert summary.read_bytes() == full
+    lt.generate(csv, out, skip_datasets=["DS-Light-B"])  # A redrawn, B held
+    assert summary.read_bytes() == full
+
+
 def test_pipeline_stage_skips_figure_frozen_dataset(tmp_path):
     from scripts.pipeline.run_workflows import _run_light_only_traces
 

@@ -196,31 +196,31 @@ def test_born_cutoff_unions_with_the_recording_cutoff(tmp_path):
 # ── interaction with the existing escape hatches ──────────────────────────
 
 
-def test_data_frozen_dataset_is_never_born_frozen(tmp_path):
-    """Its root is never walked and its rows splice in whole; folder-freezing
-    one of its batches would silently delete rows from that cached slice."""
+def test_data_frozen_dataset_keeps_the_born_cutoff(tmp_path):
+    """Its rows splice whole while it is frozen, but the day it is rebuilt the
+    cohort rule must apply -- it used to switch off and revive the cohort."""
     batch = make_batch(tmp_path, "august_25_batch_1_rig_2", born="2026-08-19")
     cfg = _Cfg(
         freeze_folders_born_on_or_after=date(2026, 8, 11),
         overrides={"RandomPanel-24-1": _Override(freeze_data=True)},
     )
-    assert is_frozen_folder(cfg, "RandomPanel-24-1", batch) is False
+    assert is_frozen_folder(cfg, "RandomPanel-24-1", batch) is True
 
 
-def test_thaw_all_reaches_the_born_cutoff(tmp_path):
+def test_thaw_all_keeps_the_born_cutoff(tmp_path):
     batch = make_batch(tmp_path, "august_25_batch_1_rig_2", born="2026-08-19")
     cfg = _Cfg(freeze_folders_born_on_or_after=date(2026, 8, 11))
-    assert is_frozen_folder(cfg, "Hex-Control-24-0.1", batch, thaw_all=True) is False
+    assert is_frozen_folder(cfg, "Hex-Control-24-0.1", batch, thaw_all=True) is True
 
 
-def test_thawing_one_dataset_reaches_the_born_cutoff(tmp_path):
+def test_thawing_one_dataset_keeps_the_born_cutoff(tmp_path):
     batch = make_batch(tmp_path, "august_25_batch_1_rig_2", born="2026-08-19")
     cfg = _Cfg(freeze_folders_born_on_or_after=date(2026, 8, 11))
     assert (
         is_frozen_folder(
             cfg, "Hex-Control-24-0.1", batch, thawed=["Hex-Control-24-0.1"]
         )
-        is False
+        is True
     )
 
 
