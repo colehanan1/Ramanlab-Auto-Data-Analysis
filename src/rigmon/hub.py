@@ -41,13 +41,16 @@ class Hub:
             self.latest[rig_name], self.fetched_at[rig_name] = snap, now
         events = self.trackers[rig_name].update(snap, now)
         for ev in events:
-            if ev.kind != "phase_changed":
-                self.store.add_event(ev)
-            self.notifier.handle(ev, rig.label)
-            if ev.kind == "trial_finished":
-                self.store.upsert_trial(rig_name, ev.data["batch_dir"], ev.data["trial"])
-                if self.cfg.transfer_enabled:
-                    self._queue_trial(rig, ev.data)
+            try:
+                if ev.kind != "phase_changed":
+                    self.store.add_event(ev)
+                if ev.kind == "trial_finished":
+                    self.store.upsert_trial(rig_name, ev.data["batch_dir"], ev.data["trial"])
+                    if self.cfg.transfer_enabled:
+                        self._queue_trial(rig, ev.data)
+                self.notifier.handle(ev, rig.label)
+            except Exception:
+                log.exception("event %s for %s failed", ev.kind, rig_name)
         return events
 
     def _queue_trial(self, rig, d: dict) -> None:
@@ -62,6 +65,9 @@ class Hub:
         self.workers.submit(rig.name, ("trial", rig.name, batch, int(t["index"])), job)
 
     def request_finalize(self, rig, batch_dir, output_dir, push_to, manifest) -> None:
+        cur = self.store.get_session(rig.name, batch_dir)
+        if cur and cur.get("state") == "landed":
+            return
         self.store.set_session(rig.name, batch_dir, "pending")
         self.workers.submit(rig.name, ("finalize", rig.name, batch_dir),
                             lambda: self.finalizer.run(rig, batch_dir, output_dir, push_to, manifest))

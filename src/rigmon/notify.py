@@ -37,7 +37,12 @@ def describe(ev, label: str):
                 t.get("odor") or "", "normal")
     if ev.kind == "session_started":
         end = d.get("expected_end_at")
-        body = d.get("batch_dir", "") + (f" · done ≈ {_hhmm(end)}" if end else "")
+        body = d.get("batch_dir", "")
+        if end:
+            try:
+                body += f" · done ≈ {_hhmm(end)}"
+            except (TypeError, ValueError, OverflowError, OSError):
+                pass
         return (f"{label} · session started", body, "normal")
     if ev.kind == "session_complete":
         return (f"{label} · experiment complete", d.get("batch_dir", ""), "normal")

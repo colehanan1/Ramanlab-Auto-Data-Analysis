@@ -71,3 +71,9 @@ def test_no_topic_no_ntfy(tmp_path):
 
 def test_phase_changes_are_not_announced():
     assert describe(Event("phase_changed", "pi2", 1.0, {}), "Pi 2") is None
+
+
+def test_describe_tolerates_bad_expected_end():
+    t, b, _ = describe(Event("session_started", "pi2", 1.0,
+                             {"batch_dir": "b", "expected_end_at": "garbage"}), "Pi 2")
+    assert t == "Pi 2 · session started" and b == "b"

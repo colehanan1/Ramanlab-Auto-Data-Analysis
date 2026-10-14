@@ -110,3 +110,24 @@ def test_fetch_status_handles_errors():
             return ok, bad
 
     assert asyncio.run(go()) == ({"phase": "GAP"}, None)
+
+
+def test_notifier_exception_does_not_drop_trial(tmp_path):
+    hub, store, notifier, transfer, _, workers = _hub(tmp_path)
+
+    def boom(*a, **k):
+        raise RuntimeError("x")
+    notifier.handle = boom
+    hub.ingest("flybehavior2", snap(), 100.0)
+    workers.drain()
+    assert [t["idx"] for t in store.trials()] == [1]
+    assert transfer.calls and transfer.calls[0][0] == "process"
+
+
+def test_request_finalize_skips_landed_session(tmp_path):
+    hub, store, _, _, finalizer, workers = _hub(tmp_path)
+    store.set_session("flybehavior2", "b", "landed")
+    hub.request_finalize(PI2, "b", "/pi/b", "u@h:/d/", [])
+    workers.drain()
+    assert store.get_session("flybehavior2", "b")["state"] == "landed"
+    assert finalizer.calls == []
