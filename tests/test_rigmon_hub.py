@@ -126,8 +126,53 @@ def test_notifier_exception_does_not_drop_trial(tmp_path):
 
 def test_request_finalize_skips_landed_session(tmp_path):
     hub, store, _, _, finalizer, workers = _hub(tmp_path)
+    hub.ingest("flybehavior2", snap(), 100.0)
     store.set_session("flybehavior2", "b", "landed")
     hub.request_finalize(PI2, "b", "/pi/b", "u@h:/d/", [])
     workers.drain()
     assert store.get_session("flybehavior2", "b")["state"] == "landed"
     assert finalizer.calls == []
+
+
+def test_request_finalize_refuses_without_or_mismatched_snapshot(tmp_path):
+    import pytest
+    hub, store, _, _, finalizer, workers = _hub(tmp_path)
+    with pytest.raises(ValueError):
+        hub.request_finalize(PI2, "b", "/pi/b", "u@h:/d/", [])
+    hub.ingest("flybehavior2", snap(), 100.0)
+    for batch, out in (("other", "/pi/b"), ("b", "/etc")):
+        with pytest.raises(ValueError):
+            hub.request_finalize(PI2, batch, out, "u@h:/d/", [])
+    workers.drain()
+    assert store.get_session("flybehavior2", "b") is None
+    assert store.get_session("flybehavior2", "other") is None
+    assert finalizer.calls == []
+
+
+def test_replayed_trials_of_a_landed_session_are_not_requeued(tmp_path):
+    hub, store, _, transfer, _, workers = _hub(tmp_path)
+    store.set_session("flybehavior2", "b", "landed")
+    hub.ingest("flybehavior2", snap(), 100.0)
+    workers.drain()
+    assert transfer.calls == []
+
+
+def test_replayed_done_trial_is_not_requeued(tmp_path):
+    hub, store, _, transfer, _, workers = _hub(tmp_path)
+    store.upsert_trial("flybehavior2", "b", {"index": 1, "video": "t1.h264"})
+    store.set_trial_state("flybehavior2", "b", 1, "done", mp4="t1.mp4")
+    hub.ingest("flybehavior2", snap(trials=(1, 2)), 100.0)
+    workers.drain()
+    assert [c[1][3]["index"] for c in transfer.calls] == [2]
+
+
+def test_state_hides_push_to_and_output_dir_without_mutating(tmp_path):
+    hub, *_ = _hub(tmp_path)
+    s = snap()
+    s["run"]["push_to"] = "u@h:/secret/"
+    hub.ingest("flybehavior2", s, 100.0)
+    run = hub.state()["rigs"]["flybehavior2"]["status"]["run"]
+    assert "push_to" not in run and "output_dir" not in run
+    assert run["batch_dir"] == "b" and run["trials"][0]["index"] == 1
+    assert hub.latest["flybehavior2"]["run"]["push_to"] == "u@h:/secret/"
+    assert hub.latest["flybehavior2"]["run"]["output_dir"] == "/pi/b"

@@ -24,6 +24,16 @@ async def fetch_status(client: httpx.AsyncClient, rig, timeout: float = 2.0) -> 
         return None
 
 
+def _public(snap: dict | None) -> dict | None:
+    """Dashboard copy of a Pi snapshot: no rsync destination or Pi paths."""
+    if not isinstance(snap, dict):
+        return snap
+    out = dict(snap)
+    if isinstance(out.get("run"), dict):
+        out["run"] = {k: v for k, v in out["run"].items() if k not in ("push_to", "output_dir")}
+    return out
+
+
 class Hub:
     def __init__(self, cfg, store, notifier, transfer, finalizer, workers, clock=time.time):
         self.cfg, self.store, self.notifier = cfg, store, notifier
@@ -45,6 +55,8 @@ class Hub:
                 if ev.kind != "phase_changed":
                     self.store.add_event(ev)
                 if ev.kind == "trial_finished":
+                    if self._already_landed(rig_name, ev.data["batch_dir"]):
+                        continue  # replay of a finished run the hub already filed
                     self.store.upsert_trial(rig_name, ev.data["batch_dir"], ev.data["trial"])
                     if self.cfg.transfer_enabled:
                         self._queue_trial(rig, ev.data)
@@ -53,8 +65,15 @@ class Hub:
                 log.exception("event %s for %s failed", ev.kind, rig_name)
         return events
 
+    def _already_landed(self, rig_name: str, batch: str) -> bool:
+        s = self.store.get_session(rig_name, batch)
+        return bool(s and s.get("state") == "landed")
+
     def _queue_trial(self, rig, d: dict) -> None:
         t, batch = d["trial"], d["batch_dir"]
+        row = self.store.get_trial(rig.name, batch, int(t["index"]))
+        if row and row.get("state") == "done":
+            return  # replayed after a hub restart; staging was already moved
 
         def job():
             if self.transfer.process(rig, batch, d["output_dir"], t) == "failed":
@@ -68,6 +87,11 @@ class Hub:
         cur = self.store.get_session(rig.name, batch_dir)
         if cur and cur.get("state") == "landed":
             return
+        run = ((self.latest.get(rig.name) or {}).get("run") or {})
+        if not run:
+            raise ValueError(f"no status seen from {rig.name} yet; cannot confirm the session")
+        if run.get("batch_dir") != batch_dir or run.get("output_dir") != output_dir:
+            raise ValueError(f"{rig.name} is not reporting batch {batch_dir!r} at {output_dir!r}")
         self.store.set_session(rig.name, batch_dir, "pending")
         self.workers.submit(rig.name, ("finalize", rig.name, batch_dir),
                             lambda: self.finalizer.run(rig, batch_dir, output_dir, push_to, manifest))
@@ -93,7 +117,7 @@ class Hub:
                 "label": r.label, "live_url": r.live_url,
                 "reachable": self.reachable[r.name], "offline": tr.offline,
                 "last_seen": tr.last_seen, "fetched_at": self.fetched_at[r.name],
-                "status": self.latest[r.name], "muted": mutes.get(r.name, False),
+                "status": _public(self.latest[r.name]), "muted": mutes.get(r.name, False),
             }
         return {"server_time": self.clock(), "rigs": rigs,
                 "trials": self.store.trials(limit=150),

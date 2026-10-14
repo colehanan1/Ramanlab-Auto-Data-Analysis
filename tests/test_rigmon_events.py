@@ -64,3 +64,13 @@ def test_offline_after_threshold_once_then_online():
 
 def test_never_seen_rig_is_never_offline():
     assert RigTracker("pi2").update(None, 1e6) == []
+
+
+def test_malformed_trial_is_skipped_and_tracking_continues():
+    tr = RigTracker("r")
+    good = {"index": 2, "label": "x"}
+    snap = {"phase": "GAP", "run": {"state": "running", "batch_dir": "b",
+                                    "trials": [{"label": "no index"}, {"index": "nan"}, good]}}
+    evs = tr.update(snap, 1.0)
+    assert [e.data["trial"] for e in evs if e.kind == "trial_finished"] == [good]
+    assert tr.last is snap and tr.last_seen == 1.0

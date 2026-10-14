@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
+
+log = logging.getLogger("rigmon.events")
 
 
 @dataclass(frozen=True)
@@ -25,6 +28,7 @@ class RigTracker:
         self.last_seen: float | None = None
         self.offline = False
         self._first = True
+        self._warned = False
         self._seen: set[tuple[str, int]] = set()
 
     def update(self, snap: dict | None, now: float) -> list[Event]:
@@ -58,7 +62,13 @@ class RigTracker:
                                  "trial_label": snap.get("trial_label"),
                                  "label": snap.get("label")})
         for t in cur.get("trials") or []:
-            key = (batch, int(t["index"]))
+            try:
+                key = (batch, int(t["index"]))
+            except (KeyError, TypeError, ValueError):
+                if not self._warned:
+                    self._warned = True
+                    log.warning("%s: skipping malformed trial entry %r", self.rig, t)
+                continue
             if key in self._seen:
                 continue
             self._seen.add(key)

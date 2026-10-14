@@ -80,7 +80,10 @@ def create_app(hub, start_polling: bool = True) -> FastAPI:
     @app.post("/api/sessions/{host}/{batch_dir}/complete", status_code=202)
     def complete(host: str, batch_dir: str, body: CompleteBody, request: Request):
         rig = session_rig(host, request)
-        hub.request_finalize(rig, batch_dir, body.output_dir, body.push_to, body.manifest)
+        try:
+            hub.request_finalize(rig, batch_dir, body.output_dir, body.push_to, body.manifest)
+        except ValueError as e:
+            raise HTTPException(409, str(e))
         return {"state": "pending"}
 
     @app.get("/api/sessions/{host}/{batch_dir}/status")

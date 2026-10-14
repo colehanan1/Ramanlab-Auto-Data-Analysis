@@ -35,6 +35,7 @@ def test_mute_round_trip_and_unknown_rig(ctx):
 def test_complete_status_abort(ctx):
     hub, store, workers, finalizer, client, _ = ctx
     url = "/api/sessions/flybehavior2/b"
+    hub.ingest("flybehavior2", snap(), 100.0)
     r = client.post(f"{url}/complete", json={"output_dir": "/pi/b", "push_to": "u@h:/d/",
                                              "manifest": [{"path": "a", "bytes": 1}]})
     assert r.status_code == 202 and r.json() == {"state": "pending"}
@@ -91,3 +92,16 @@ def test_sse_frames_emit_state_until_disconnect():
 
 async def _async(v):
     return v
+
+
+def test_complete_refuses_unconfirmed_batch_or_output_dir(ctx):
+    hub, store, workers, finalizer, client, _ = ctx
+    body = {"output_dir": "/pi/b", "push_to": "u@h:/d/", "manifest": []}
+    url = "/api/sessions/flybehavior2/b/complete"
+    assert client.post(url, json=body).status_code == 409  # no snapshot yet
+    hub.ingest("flybehavior2", snap(), 100.0)
+    assert client.post(url, json={**body, "output_dir": "/etc"}).status_code == 409
+    assert client.post("/api/sessions/flybehavior2/zzz/complete", json=body).status_code == 409
+    assert store.get_session("flybehavior2", "b") is None
+    assert store.get_session("flybehavior2", "zzz") is None
+    assert client.post(url, json=body).status_code == 202
