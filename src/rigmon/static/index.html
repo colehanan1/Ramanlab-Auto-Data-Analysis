@@ -216,7 +216,12 @@ function connect() {
     conn.textContent = "live";
     render();
   };
-  es.onerror = () => { conn.textContent = "reconnecting…"; };
+  es.onerror = () => {
+    conn.textContent = "reconnecting…";
+    // EventSource gives up for good on some failures (e.g. the hub restarting):
+    // start a fresh connection instead of showing a frozen page.
+    if (es.readyState === EventSource.CLOSED) setTimeout(connect, 3000);
+  };
 }
 connect();
 setInterval(tick, 100);  // countdowns tick between pushes

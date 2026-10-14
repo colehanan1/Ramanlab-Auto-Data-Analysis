@@ -32,6 +32,7 @@ def main(argv=None) -> None:
     ap.add_argument("--config", type=Path, default=REPO / "config" / "rigmon.yaml")
     args = ap.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
+    logging.getLogger("httpx").setLevel(logging.WARNING)  # one line per rig per second otherwise
 
     cfg = load_config(args.config)
     store = Store(cfg.db_path)

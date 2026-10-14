@@ -52,3 +52,7 @@ def test_page_says_plainly_when_nothing_is_running():
                  "Waiting for intake", "Experiment complete"):
         assert text in PAGE
     assert 'phaseName : "offline"' not in PAGE
+
+
+def test_page_reconnects_after_the_stream_closes():
+    assert "EventSource.CLOSED" in PAGE and "setTimeout(connect" in PAGE
