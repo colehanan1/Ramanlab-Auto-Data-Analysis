@@ -14,7 +14,13 @@ figure silently inherits rather than any file layout:
   stratum-level (fly-level) confound alone cannot produce a small p;
 * the stratified risk difference -- the effect size that goes with them: a
   Mantel-Haenszel-weighted mean of the within-stratum differences, so a stratum
-  confound cannot make it large either.
+  confound cannot make it large either;
+* the paired window permutation -- the statistic is the difference of the POOLED
+  rates (events over minutes, before vs during the stimulus), never a mean of
+  rates. ``scheme="swap"`` exchanges a trial's two windows with probability 1/2
+  (exact only when they are equally long); ``scheme="split"`` re-assigns the
+  trial's events between its windows in proportion to their lengths (exact
+  whatever the lengths).
 """
 from __future__ import annotations
 
@@ -983,6 +989,331 @@ def test_a_trial_type_confound_leaves_the_pooled_difference_large_and_the_strati
 
 
 # ---------------------------------------------------------------------------
+# Paired window permutation (events per minute, before vs during the stimulus)
+# ---------------------------------------------------------------------------
+
+def _windows(rows):
+    """One row per trial: (events, minutes) of its first window, then of its second."""
+    return pd.DataFrame(rows, columns=["e_pre", "m_pre", "e_stim", "m_stim"])
+
+
+def _swap(df, **kw):
+    return M.paired_window_permutation(df, events_pre="e_pre", min_pre="m_pre", events_stim="e_stim",
+                                       min_stim="m_stim", **kw)
+
+
+def _exact_swap_p(df):
+    """P(|d| >= |d_obs|) over every one of the 2^k ways to exchange the windows of whole trials -- the definition."""
+    e0, m0, e1, m1 = (df[c].to_numpy(float) for c in ("e_pre", "m_pre", "e_stim", "m_stim"))
+
+    def diff(swap):
+        s = np.array(swap, bool)
+        stim_e, stim_m = np.where(s, e0, e1).sum(), np.where(s, m0, m1).sum()
+        return stim_e / stim_m - (e0.sum() + e1.sum() - stim_e) / (m0.sum() + m1.sum() - stim_m)
+
+    observed = diff([False] * len(df))
+    every = [diff(s) for s in itertools.product([False, True], repeat=len(df))]
+    return float(np.mean([abs(d) >= abs(observed) - 1e-12 for d in every]))
+
+
+def _burst_trials(k=30, stim_events=3):
+    """Every trial: 0 or 1 events in 0.5 min before the stimulus, ``stim_events`` in the 0.1 min of the stimulus."""
+    return _windows([(i % 2, 0.5, stim_events, 0.1) for i in range(k)])
+
+
+def test_the_difference_is_the_pooled_stimulus_rate_minus_the_pooled_rate_before():
+    df = _windows([(2, 0.5, 1, 0.1), (0, 0.5, 3, 0.2), (1, 1.0, 0, 0.3)])
+    diff, _ = _swap(df, n=99)
+    assert diff == pytest.approx(4 / 0.6 - 3 / 2.0)             # (1 + 3 + 0) / 0.6 min  -  (2 + 0 + 1) / 2.0 min
+    per_trial = np.mean([1 / 0.1 - 2 / 0.5, 3 / 0.2 - 0 / 0.5, 0 / 0.3 - 1 / 1.0])
+    assert per_trial == pytest.approx(20 / 3) and diff != pytest.approx(per_trial)      # a mean of rates would say 6.67
+
+
+def test_a_strong_effect_of_the_stimulus_inside_every_trial_is_significant():
+    diff, p = _swap(_burst_trials(), n=999)
+    assert diff == pytest.approx(90 / 3.0 - 15 / 15.0) and diff > 0         # 30 events/min during, 1/min before
+    assert p == pytest.approx(1 / 1000)                                     # not one of the 999 swaps comes close
+
+
+def test_a_stimulus_that_lowers_the_rate_is_just_as_significant():
+    flipped = _burst_trials().rename(columns={"e_pre": "e_stim", "m_pre": "m_stim", "e_stim": "e_pre", "m_stim": "m_pre"})
+    diff, p = _swap(flipped, n=999)
+    assert diff == pytest.approx(15 / 15.0 - 90 / 3.0) and diff < 0 and p == pytest.approx(1 / 1000)
+
+
+def test_windows_with_the_same_events_and_minutes_show_nothing_and_p_is_one():
+    df = _windows([(2, 0.5, 2, 0.5), (0, 0.5, 0, 0.5), (3, 0.4, 3, 0.4), (1, 1.0, 1, 1.0)])
+    diff, p = _swap(df, n=500)
+    assert diff == pytest.approx(0.0, abs=1e-12) and p == 1.0
+
+
+def test_windows_that_differ_only_by_chance_are_not_significant():
+    df = _windows([(2, 0.5, 1, 0.5), (0, 0.5, 1, 0.5), (1, 0.5, 2, 0.5), (3, 0.5, 2, 0.5), (1, 0.5, 1, 0.5),
+                   (2, 0.5, 0, 0.5), (0, 0.5, 1, 0.5), (1, 0.5, 2, 0.5), (2, 0.5, 1, 0.5), (1, 0.5, 2, 0.5)])
+    diff, p = _swap(df, n=4000, seed=1)
+    assert abs(diff) < 0.6 and p > 0.4
+
+
+def test_the_p_matches_the_exact_distribution_of_window_swaps_when_the_windows_differ_in_length():
+    df = _windows([(2, 0.5, 1, 0.4), (0, 0.5, 1, 0.3), (1, 0.8, 0, 0.3), (3, 0.4, 1, 0.1), (1, 0.5, 1, 0.25),
+                   (0, 0.6, 1, 0.3), (2, 0.5, 1, 0.2), (1, 0.7, 0, 0.1), (4, 0.5, 2, 0.2)])
+    exact = _exact_swap_p(df)                                  # 2^9 = 512 arrangements
+    assert 0.2 < exact < 0.9                                   # a fixture that can tell a wrong null apart
+    diff, p = _swap(df, n=20000, seed=3)
+    assert p == pytest.approx(exact, abs=0.02)
+    assert diff == pytest.approx(df["e_stim"].sum() / df["m_stim"].sum() - df["e_pre"].sum() / df["m_pre"].sum())
+
+
+def test_the_p_counts_both_tails():
+    """Pushing the same data the other way gives the same two-sided p (a one-tailed count would give 1 - p)."""
+    df = _windows([(2, 0.5, 1, 0.5), (0, 0.5, 1, 0.5), (1, 0.5, 2, 0.5), (3, 0.5, 2, 0.5), (1, 0.5, 1, 0.5),
+                   (2, 0.5, 0, 0.5), (0, 0.5, 4, 0.5), (1, 0.5, 2, 0.5), (2, 0.5, 1, 0.5)])
+    mirrored = df.rename(columns={"e_pre": "e_stim", "m_pre": "m_stim", "e_stim": "e_pre", "m_stim": "m_pre"})
+    (d1, p1), (d2, p2) = _swap(df, n=20000, seed=4), _swap(mirrored, n=20000, seed=4)
+    assert d1 == pytest.approx(-d2) and d1 != pytest.approx(0.0)
+    exact = _exact_swap_p(df)
+    assert exact == pytest.approx(_exact_swap_p(mirrored))
+    assert p1 == pytest.approx(exact, abs=0.02) and p2 == pytest.approx(exact, abs=0.02)
+
+
+def test_the_result_is_reproducible_from_the_seed_and_lies_on_the_permutation_grid():
+    df = _burst_trials(k=12, stim_events=1)
+    first = _swap(df, n=499, seed=5)
+    assert _swap(df, n=499, seed=5) == first
+    assert _swap(df, n=499) == _swap(df, n=499, seed=0)
+    assert (first[1] * 500) == pytest.approx(round(first[1] * 500)) and 1 / 500 <= first[1] <= 1.0
+
+
+def test_different_seeds_draw_different_swaps():
+    df = _windows([(2, 0.5, 1, 0.1), (0, 0.5, 2, 0.2), (1, 1.0, 0, 0.3), (3, 0.4, 1, 0.1), (1, 0.5, 1, 0.25),
+                   (0, 0.6, 0, 0.1), (2, 0.5, 3, 0.2), (1, 0.7, 0, 0.1), (4, 0.5, 1, 0.2)])
+    ps = {_swap(df, n=200, seed=s)[1] for s in range(8)}
+    assert len(ps) > 1
+
+
+def test_trials_missing_a_window_or_an_event_count_are_left_out():
+    clean = _windows([(2, 0.5, 1, 0.1), (0, 0.5, 2, 0.2), (1, 1.0, 0, 0.3), (3, 0.4, 1, 0.1), (1, 0.5, 1, 0.25)])
+    messy = pd.concat([clean, _windows([(np.nan, 0.5, 3, 0.1),       # no events counted before
+                                        (2, 0.5, np.nan, 0.1),       # no events counted during
+                                        (2, np.nan, 3, 0.1),         # no length before
+                                        (2, 0.5, 3, np.nan),         # no length during
+                                        (2, 0.0, 3, 0.1),            # an empty window before
+                                        (2, 0.5, 3, 0.0),            # an empty window during
+                                        (2, -0.5, 3, 0.1)])], ignore_index=True)
+    assert _swap(messy, n=400, seed=2) == _swap(clean, n=400, seed=2)
+    complete = pd.concat([clean, _windows([(2, 0.5, 3, 0.1)])], ignore_index=True)       # a whole trial does count
+    assert _swap(complete, n=400, seed=2)[0] != pytest.approx(_swap(clean, n=400, seed=2)[0])
+
+
+def test_without_a_qualifying_trial_there_is_no_result():
+    for df in (_windows([]), _windows([(np.nan, 0.5, 1, 0.1), (1, 0.5, np.nan, 0.1)]), _windows([(1, 0.0, 1, 0.1)])):
+        diff, p = _swap(df, n=99)
+        assert math.isnan(diff) and math.isnan(p)
+
+
+def test_a_single_trial_cannot_be_told_from_its_swap_so_p_is_one():
+    diff, p = _swap(_windows([(0, 0.5, 4, 0.1)]), n=199)
+    assert diff == pytest.approx(40.0) and p == 1.0
+
+
+def test_the_difference_does_not_depend_on_the_order_of_the_trials():
+    df = _windows([(2, 0.5, 1, 0.1), (0, 0.5, 2, 0.2), (1, 1.0, 0, 0.3), (3, 0.4, 1, 0.1)])
+    assert _swap(df.sample(frac=1.0, random_state=3), n=99)[0] == pytest.approx(_swap(df, n=99)[0])
+
+
+def test_the_columns_are_named_by_the_caller_and_other_columns_are_ignored():
+    df = _windows([(2, 0.5, 1, 0.1), (0, 0.5, 2, 0.2), (1, 1.0, 0, 0.3)])
+    renamed = df.rename(columns={"e_pre": "a", "m_pre": "b", "e_stim": "c", "m_stim": "d"}).assign(fly="x", junk=np.nan)
+    assert M.paired_window_permutation(renamed, events_pre="a", min_pre="b", events_stim="c", min_stim="d", n=300, seed=1) == \
+        _swap(df, n=300, seed=1)
+
+
+def test_the_input_table_is_left_alone():
+    df = _burst_trials(k=6)
+    before = df.copy()
+    _swap(df, n=50)
+    pd.testing.assert_frame_equal(df, before)
+
+
+def test_a_permutation_count_below_one_is_refused():
+    with pytest.raises(ValueError):
+        _swap(_burst_trials(k=3), n=0)
+
+
+def test_many_trials_are_handled_in_chunks_without_changing_the_answer_for_a_seed():
+    df = _burst_trials(k=3000, stim_events=0)             # 3000 x 4000 swaps do not fit in one block
+    first = _swap(df, n=4000, seed=7)
+    assert first == _swap(df, n=4000, seed=7)
+    assert first[0] < 0 and first[1] < 0.01
+
+
+def _split(df, **kw):
+    return _swap(df, scheme="split", **kw)
+
+
+def _exact_split_p(df):
+    """P(|d| >= |d_obs|) when every trial's events are re-assigned to its windows independently, each one to the stimulus
+    window with probability m_stim / (m_pre + m_stim) -- the definition, by enumerating every outcome."""
+    e0, m0, e1, m1 = (df[c].to_numpy(float) for c in ("e_pre", "m_pre", "e_stim", "m_stim"))
+    total, share = e0 + e1, m1 / (m0 + m1)
+    observed = e1.sum() / m1.sum() - e0.sum() / m0.sum()
+    hits = 0.0
+    for outcome in itertools.product(*[range(int(k) + 1) for k in total]):
+        weight = np.prod([stats.binom.pmf(s, int(k), q) for s, k, q in zip(outcome, total, share)])
+        stim = float(sum(outcome))
+        d = stim / m1.sum() - (total.sum() - stim) / m0.sum()
+        hits += weight * (abs(d) >= abs(observed) - 1e-12)
+    return float(hits)
+
+
+def _short_stimulus_trials(k=40, rate=2.0, boost=1.0, seed=0, pre=0.5, stim=1 / 15):
+    """Poisson counts with the SAME rate per minute before and during the stimulus (times ``boost`` during it), in windows
+    of 30 s and 4 s: what a stimulus that changes nothing looks like."""
+    rng = np.random.default_rng(seed)
+    return _windows([(rng.poisson(rate * pre), pre, rng.poisson(rate * boost * stim), stim) for _ in range(k)])
+
+
+def test_the_split_scheme_tests_the_same_pooled_difference_as_the_swap():
+    df = _windows([(2, 0.5, 1, 0.1), (0, 0.5, 3, 0.2), (1, 1.0, 0, 0.3)])
+    assert _split(df, n=99)[0] == _swap(df, n=99)[0] == pytest.approx(4 / 0.6 - 3 / 2.0)
+
+
+def test_a_strong_effect_of_the_stimulus_is_significant_under_the_split_scheme_and_a_lowered_rate_too():
+    diff, p = _split(_burst_trials(), n=999)
+    assert diff > 0 and p == pytest.approx(1 / 1000)
+    flipped = _burst_trials().rename(columns={"e_pre": "e_stim", "m_pre": "m_stim", "e_stim": "e_pre", "m_stim": "m_pre"})
+    diff, p = _split(flipped, n=999)
+    assert diff < 0 and p == pytest.approx(1 / 1000)
+
+
+def test_windows_that_differ_only_by_chance_are_not_significant_under_the_split_scheme():
+    df = _windows([(2, 0.5, 1, 0.5), (0, 0.5, 1, 0.5), (1, 0.5, 2, 0.5), (3, 0.5, 2, 0.5), (1, 0.5, 1, 0.5),
+                   (2, 0.5, 0, 0.5), (0, 0.5, 1, 0.5), (1, 0.5, 2, 0.5), (2, 0.5, 1, 0.5), (1, 0.5, 2, 0.5)])
+    diff, p = _split(df, n=4000, seed=1)
+    assert abs(diff) < 0.6 and p > 0.4
+
+
+def test_the_split_p_matches_the_exact_distribution_when_the_windows_differ_in_length():
+    df = _windows([(2, 0.5, 1, 0.1), (0, 0.5, 2, 0.2), (1, 1.0, 0, 0.3), (3, 0.4, 1, 0.1)])
+    exact = _exact_split_p(df)                                   # 5 * 5 * 3 * 5 outcomes
+    assert 0.05 < exact < 0.9                                    # a fixture that can tell a wrong null apart
+    diff, p = _split(df, n=40000, seed=2)
+    assert p == pytest.approx(exact, abs=0.015)
+
+
+def test_the_split_p_counts_both_tails():
+    df = _windows([(2, 0.5, 1, 0.5), (0, 0.5, 1, 0.5), (1, 0.5, 2, 0.5), (3, 0.5, 0, 0.5)])
+    mirrored = df.rename(columns={"e_pre": "e_stim", "m_pre": "m_stim", "e_stim": "e_pre", "m_stim": "m_pre"})
+    (d1, p1), (d2, p2) = _split(df, n=40000, seed=4), _split(mirrored, n=40000, seed=4)
+    assert d1 == pytest.approx(-d2) and d1 != pytest.approx(0.0)
+    exact = _exact_split_p(df)
+    assert exact == pytest.approx(_exact_split_p(mirrored))
+    assert 0.6 < exact < 0.9                                                  # one tail alone would give about half
+    assert p1 == pytest.approx(exact, abs=0.015) and p2 == pytest.approx(exact, abs=0.015)
+
+
+def test_a_stimulus_that_changes_nothing_is_not_called_significant_just_because_its_window_is_short():
+    """Same rate before and during, in 30 s and 4 s windows: the split scheme keeps the false-positive rate at its level
+    (the swap scheme calls about one in five of these significant at 0.05, because the short windows are far noisier)."""
+    reps, n = 300, 199
+    calls = {"swap": 0, "split": 0}
+    for rep in range(reps):
+        df = _short_stimulus_trials(seed=rep)
+        for scheme in calls:
+            calls[scheme] += _swap(df, n=n, seed=rep, scheme=scheme)[1] <= 0.05
+    assert calls["split"] / reps < 0.09                          # 0.05 expected, 3 standard errors of slack
+    assert calls["swap"] / reps > 0.12                           # ... and why "swap" is not what the figures use
+
+
+def test_a_real_stimulus_effect_is_still_found_in_short_windows_by_the_split_scheme():
+    found = sum(_split(_short_stimulus_trials(boost=3.0, seed=rep), n=199, seed=rep)[1] <= 0.05 for rep in range(100))
+    assert found >= 70
+
+
+def test_the_split_result_is_reproducible_lies_on_the_grid_and_differs_between_seeds():
+    df = _short_stimulus_trials(k=12, boost=2.0, seed=5)
+    first = _split(df, n=499, seed=5)
+    assert _split(df, n=499, seed=5) == first and _split(df, n=499) == _split(df, n=499, seed=0)
+    assert (first[1] * 500) == pytest.approx(round(first[1] * 500)) and 1 / 500 <= first[1] <= 1.0
+    assert len({_split(df, n=60, seed=s)[1] for s in range(8)}) > 1
+
+
+def test_the_split_scheme_leaves_out_the_same_trials_as_the_swap():
+    clean = _windows([(2, 0.5, 1, 0.1), (0, 0.5, 2, 0.2), (1, 1.0, 0, 0.3), (3, 0.4, 1, 0.1), (1, 0.5, 1, 0.25)])
+    messy = pd.concat([clean, _windows([(np.nan, 0.5, 3, 0.1), (2, 0.5, np.nan, 0.1), (2, np.nan, 3, 0.1),
+                                        (2, 0.5, 3, np.nan), (2, 0.0, 3, 0.1), (2, 0.5, 3, 0.0), (2, -0.5, 3, 0.1)])],
+                      ignore_index=True)
+    assert _split(messy, n=400, seed=2) == _split(clean, n=400, seed=2)
+    for df in (_windows([]), _windows([(np.nan, 0.5, 1, 0.1)])):
+        assert all(math.isnan(v) for v in _split(df, n=99))
+
+
+def test_one_trial_with_every_event_in_the_short_window_is_unlikely_under_the_split_scheme():
+    diff, p = _split(_windows([(0, 0.5, 4, 0.1)]), n=999, seed=1)      # all 4 events in 0.1 of the 0.6 minutes
+    assert diff == pytest.approx(40.0) and p < 0.01                    # (1/6)^4 = 0.0008: unlike the swap, which cannot tell
+
+
+def test_a_trial_without_events_does_not_change_the_split_p_but_its_minutes_still_count_in_the_rates():
+    df = _short_stimulus_trials(k=10, boost=2.0, seed=3)
+    quiet = pd.concat([df, _windows([(0, 0.5, 0, 0.0667)] * 5)], ignore_index=True)
+    assert _split(quiet, n=300, seed=1)[0] == pytest.approx(
+        quiet["e_stim"].sum() / quiet["m_stim"].sum() - quiet["e_pre"].sum() / quiet["m_pre"].sum())
+    assert _split(quiet, n=300, seed=1)[0] != pytest.approx(_split(df, n=300, seed=1)[0])
+
+
+def test_the_split_scheme_needs_whole_counts_of_events():
+    with pytest.raises(ValueError):
+        _split(_windows([(1.5, 0.5, 2, 0.1)]), n=9)
+    with pytest.raises(ValueError):
+        _split(_windows([(-1, 0.5, 2, 0.1), (1, 0.5, 2, 0.1)]), n=9)
+
+
+def test_an_unknown_scheme_is_refused_and_the_swap_is_the_default():
+    df = _burst_trials(k=6)
+    with pytest.raises(ValueError):
+        _swap(df, n=9, scheme="shuffle")
+    assert _swap(df, n=99, seed=3) == _swap(df, n=99, seed=3, scheme="swap")
+
+
+def test_many_trials_are_split_in_chunks_without_changing_the_answer_for_a_seed():
+    df = _burst_trials(k=3000, stim_events=0)
+    first = _split(df, n=2000, seed=7)
+    assert first == _split(df, n=2000, seed=7) and first[0] < 0 and first[1] < 0.01
+
+
+def test_trials_that_all_move_the_same_way_have_the_p_of_a_fair_coin_for_both_schemes():
+    """Four identical trials (one event before, none during, equal windows): the stimulus window ends up with 0 to 4 of
+    the events, binomially under either scheme, so only 0 and 4 are as extreme as what was seen: p = 2 / 2^4."""
+    df = _windows([(1, 0.5, 0, 0.5)] * 4)
+    for scheme in ("swap", "split"):
+        assert _swap(df, n=20000, seed=1, scheme=scheme)[1] == pytest.approx(2 / 16, abs=0.01), scheme
+
+
+def test_swaps_that_tie_the_observed_difference_count_despite_rounding():
+    """Two of the 8 swaps give, in exact arithmetic, the observed |difference|, but one falls 1 ulp short in floating point."""
+    df = _windows([(0.4, 0.5, 0.4, 0.5), (0.4, 0.5, 0.7, 0.5), (0.5, 0.5, 0.6, 0.5)])
+    exact = _exact_swap_p(df)
+    assert 0.2 < exact < 0.95
+    assert _swap(df, n=20000, seed=2)[1] == pytest.approx(exact, abs=0.02)
+
+
+def test_when_nothing_differs_every_draw_is_as_extreme_so_p_is_exactly_one_across_chunks_of_draws():
+    df = _windows([(2, 0.5, 2, 0.5)] * 3000)                                  # n = 2000 is not a multiple of the chunk size
+    for scheme in ("swap", "split"):
+        diff, p = _swap(df, n=2000, seed=3, scheme=scheme)
+        assert diff == pytest.approx(0.0, abs=1e-12) and p == 1.0, scheme
+
+
+def test_the_result_does_not_depend_on_how_the_draws_are_chunked(monkeypatch):
+    df = _short_stimulus_trials(k=50, boost=2.0, seed=2)
+    for scheme in ("swap", "split"):
+        whole = _swap(df, n=600, seed=5, scheme=scheme)
+        with monkeypatch.context() as small:
+            small.setattr(M, "_CHUNK_CELLS", 700)                               # 14 draws at a time instead of 600
+            assert _swap(df, n=600, seed=5, scheme=scheme) == whole, scheme
+
+
+# ---------------------------------------------------------------------------
 # Score table: duplicates and conflicts
 # ---------------------------------------------------------------------------
 
@@ -1117,6 +1448,10 @@ def test_the_metrics_survive_all_missing_inputs_without_a_numpy_or_scipy_warning
         assert all(math.isnan(v) for v in M.spearman(nan, nan))
         assert math.isnan(M.coupling_rho(nan, nan))
         assert math.isnan(M.stratified_permutation_p(nan, nan, ["a"] * 300, n=10))
+        for scheme in ("swap", "split"):
+            assert all(math.isnan(v) for v in M.paired_window_permutation(
+                pd.DataFrame({"a": nan, "b": nan, "c": nan, "d": nan}), events_pre="a", min_pre="b", events_stim="c",
+                min_stim="d", n=10, scheme=scheme))
 
 
 def test_the_module_imports_nothing_from_the_pipeline():

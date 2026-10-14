@@ -2,7 +2,7 @@
 """Mounting-posture and abdomen-movement tables for the new-glue flies.
 
     python scripts/analysis/mounting_posture.py --config config/config_new_abdomen.yaml \\
-        --predictions-csv .../model_predictions.csv [--csv-out-dir DIR] [--out-dir DIR]
+        --predictions-csv .../model_predictions.csv [--csv-out-dir DIR] [--out-dir DIR] [--abdomen-out-dir DIR]
 
 Walks the live batches of the abdomen overlay on or after its cut-off date and joins, per fly-trial, the abdomen
 geometry tables (``<abdomen out_base>/<dataset>/<batch>/geometry``) to the production track of the same fly
@@ -19,6 +19,8 @@ number. Writes to ``--csv-out-dir`` (default ``mounting.csv_out_dir``):
 
 Then, into ``--out-dir`` (default ``mounting.out_dir``), the six ``Mounting-Posture`` figures and ``report.md``
 (``mounting_posture_figures``): exclusions, rho / p of every per-fly scatter, every permutation p, all labelled uncorrected.
+Into ``--abdomen-out-dir`` (default ``mounting.abdomen_out_dir``) go the six ``Abdomen-Movement`` figures
+(``abdomen_movement_figures``); their "Abdomen movement" section is part of the same ``report.md``.
 
 Read-only on production, the secured mirror and the geometry tree. The definitions live in
 ``fbpipe.analysis.mounting``; the stimulus windows come from the geometry meta, never from
@@ -49,6 +51,7 @@ from fbpipe.geometry.steps import geometry_dir, iter_batch_jobs, pending_trials 
 from fbpipe.utils.rig_anchor import rig_token  # noqa: E402
 from fbpipe.utils.rig_gates import read_batch_host  # noqa: E402
 from fbpipe.utils.tables import read_schema_columns, read_table  # noqa: E402
+from scripts.analysis import abdomen_movement_figures as AM  # noqa: E402
 from scripts.analysis import mounting_posture_figures as FIG  # noqa: E402
 
 GEOMETRY = {"eye_x": C.EYE_X, "eye_y": C.EYE_Y, "abd_x": C.ABD_X, "abd_y": C.ABD_Y, "tip_x": C.TIP_X, "tip_y": C.TIP_Y,
@@ -528,6 +531,8 @@ def main(argv=None) -> int:
                    "reaction_prediction.output_csv)")
     p.add_argument("--out-dir", default=None, help="figure directory (default: mounting.out_dir): the six "
                    "Mounting-Posture figures and report.md are written here")
+    p.add_argument("--abdomen-out-dir", default=None, help="figure directory for the six Abdomen-Movement figures "
+                   "(default: mounting.abdomen_out_dir); their section of report.md is written to --out-dir")
     p.add_argument("--csv-out-dir", default=None, help="where the tables go (default: mounting.csv_out_dir)")
     a = p.parse_args(argv)
     path = resolve_config_path(a.config)
@@ -549,19 +554,27 @@ def main(argv=None) -> int:
     fly_trial.to_csv(out / "fly_trial_posture.csv", index=False)
     fly.to_csv(out / "fly_posture.csv", index=False)
     (out / "exclusions.json").write_text(json.dumps(exclusions, indent=2, default=str), encoding="utf-8")
-    fig_dir = a.out_dir or mcfg.out_dir
+    fig_dir, abdomen_dir = a.out_dir or mcfg.out_dir, a.abdomen_out_dir or mcfg.abdomen_out_dir
     if exclusions["predictions_missing"]:
         print(f"[MOUNTING] WARNING: no predictions file at {predictions!r}; the scores are left empty")
     print(f"[MOUNTING] {len(fly_trial)} fly-trial(s), {len(fly)} fly/flies -> {out}; excluded: "
           f"{exclusions['eye_mismatch']} eye mismatch, {len(exclusions['identity_drift'])} identity drift, "
           f"{exclusions['flagged_flies']} flagged fly/flies, {exclusions['no_production_table']} without a production table")
+    if not fig_dir and not abdomen_dir:
+        print("[MOUNTING] no figure directory (--out-dir / mounting.out_dir, --abdomen-out-dir / mounting.abdomen_out_dir): "
+              "figures and report.md skipped")
+        return 0
+    section, abdomen = AM.abdomen_outputs(fly_trial, fly, abdomen_dir, n_perm=mcfg.n_permutations,
+                                          min_tracked_frac=mcfg.abd_min_tracked_frac)
+    if abdomen is not None:
+        print(f"[MOUNTING] {len(abdomen)} abdomen figure(s) -> {abdomen_dir}")
     if not fig_dir:
-        print("[MOUNTING] no figure directory (--out-dir / mounting.out_dir): figures and report.md skipped")
+        print("[MOUNTING] no report directory (--out-dir / mounting.out_dir): report.md skipped")
         return 0
     fig_dir = Path(fig_dir).expanduser()
     stats = FIG.compute_stats(fly_trial, fly, n_perm=mcfg.n_permutations)
     figures = FIG.render_figures(fly_trial, fly, fig_dir, n_perm=mcfg.n_permutations, stats=stats)
-    report = FIG.write_report(fly_trial, fly, exclusions, stats, fig_dir, figures=figures)
+    report = FIG.write_report(fly_trial, fly, exclusions, stats, fig_dir, figures=figures, extra_sections=[section])
     print(f"[MOUNTING] {len(figures)} figure(s) and {report.name} -> {fig_dir}")
     return 0
 

@@ -18,7 +18,9 @@ Conventions
 * Rates, medians and fractions are pooled by the caller; nothing here averages an
   average. The permutation tests shuffle only within their stratum (or fly), so a
   stratum-level (fly-level) confound cannot produce a small p on its own; the
-  stratified risk difference is the effect size that goes with them.
+  stratified risk difference is the effect size that goes with them. The paired
+  window test re-draws only how a trial is split between its two windows, so what
+  makes a trial busy stays with it.
 """
 from __future__ import annotations
 
@@ -404,6 +406,63 @@ def stratified_risk_difference(df: pd.DataFrame, *, state: str, outcome: str, st
         return float("nan")
     weight = n1[both] * n0[both] / (n1[both] + n0[both])
     return float(np.sum(weight * (sum1[both] / n1[both] - sum0[both] / n0[both])) / weight.sum())
+
+
+def paired_window_permutation(df: pd.DataFrame, *, events_pre: str, min_pre: str, events_stim: str, min_stim: str,
+                              n: int, seed: int = 0, scheme: str = "swap") -> tuple[float, float]:
+    """``(diff, p)``: the pooled event rate during the stimulus minus before it, and its within-trial permutation p.
+
+    Every row is one trial with two windows: ``events_pre`` events in ``min_pre`` minutes before the stimulus and
+    ``events_stim`` in ``min_stim`` minutes during it. ``diff`` is ``sum(events_stim) / sum(min_stim) - sum(events_pre) /
+    sum(min_pre)`` in events per minute: pooled events over pooled minutes, never a mean of per-trial rates. The p keeps
+    every trial intact (what makes a trial busy, or a fly restless, stays with it) and re-draws only how it is split
+    between its two windows; it is ``(1 + #{|diff_perm| >= |diff|}) / (n + 1)`` over ``n`` draws of
+    ``default_rng(seed)``, two-sided. Trials missing a window (a NaN count or length, or a length that is not positive)
+    are left out first; ``(nan, nan)`` when no trial is left. *scheme* says how the split is re-drawn:
+
+    * ``"swap"`` (the default): the trial's two windows, events AND minutes, are exchanged with probability 1/2. That is
+      exact when the two windows are equally long. When they are not (30 s before an odor against the 4 s of the odor),
+      the short window is far noisier than the long one, a swap does not preserve that, and the p comes out too small:
+      about one in five stimuli that change nothing reads p < 0.05.
+    * ``"split"``: the trial's events (whole numbers) are re-assigned to its windows at random, each to the stimulus
+      window with probability ``min_stim / (min_pre + min_stim)``, the minutes staying with their windows. That is exact
+      for any lengths if the events of a trial come at a constant rate (the null "the stimulus changes nothing"), and
+      keeps the false-positive rate at its level where the swap does not.
+    """
+    if n < 1:
+        raise ValueError("n must be at least 1")
+    if scheme not in ("swap", "split"):
+        raise ValueError(f"scheme must be 'swap' or 'split', got {scheme!r}")
+    e0, m0, e1, m1 = (_f64(df[c]) for c in (events_pre, min_pre, events_stim, min_stim))
+    keep = np.isfinite(e0) & np.isfinite(e1) & np.isfinite(m0) & np.isfinite(m1) & (m0 > 0) & (m1 > 0)
+    e0, m0, e1, m1 = e0[keep], m0[keep], e1[keep], m1[keep]
+    if not e0.size:
+        return float("nan"), float("nan")
+    total_e, total_m = float(e0.sum() + e1.sum()), float(m0.sum() + m1.sum())
+    if scheme == "split":
+        events = e0 + e1
+        if (e0 < 0).any() or (e1 < 0).any() or not np.array_equal(events, np.round(events)):
+            raise ValueError("scheme='split' needs event counts that are whole numbers of at least 0")
+        events, share = events.astype(np.int64), m1 / (m0 + m1)
+    gain_e, gain_m = e0 - e1, m0 - m1                  # what the stimulus window takes up when a trial's windows are swapped
+
+    def pooled_diff(stim_e, stim_m):
+        return stim_e / stim_m - (total_e - stim_e) / (total_m - stim_m)
+
+    observed = float(pooled_diff(float(e1.sum()), float(m1.sum())))
+    slack = _PERM_TOL * max(1.0, float(np.max(np.abs(np.r_[e0 / m0, e1 / m1]))))       # ties, whichever way they round
+    rng = np.random.default_rng(seed)
+    step = max(1, min(n, _CHUNK_CELLS // e0.size))
+    hits = 0
+    for done in range(0, n, step):
+        draws = min(step, n - done)
+        if scheme == "swap":
+            swap = rng.random((draws, e0.size)) < 0.5
+            stim_e, stim_m = e1.sum() + swap @ gain_e, m1.sum() + swap @ gain_m
+        else:
+            stim_e, stim_m = rng.binomial(events, share, size=(draws, e0.size)).sum(axis=1), m1.sum()
+        hits += int(np.count_nonzero(np.abs(pooled_diff(stim_e, stim_m)) >= abs(observed) - slack))
+    return observed, (1 + hits) / (n + 1)
 
 
 # ---------------------------------------------------------------------------

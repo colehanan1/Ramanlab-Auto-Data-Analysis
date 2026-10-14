@@ -10,7 +10,10 @@ Rules pinned here, on a synthetic production + geometry + secured-mirror tree un
   the geometry meta, so nothing is ever written next to production;
 * gates -- an unknown rest, rig reference, pre-window or poorly tracked tip gives NaN, never a guess;
 * pooling -- fly rates divide pooled events by pooled window-minutes, proportions pool trials, and the
-  continuous abdomen measures are medians over the fly's pooled frames.
+  continuous abdomen measures are medians over the fly's pooled frames;
+* the command line -- the Mounting-Posture figures and ``report.md`` go to ``--out-dir``, the Abdomen-Movement figures
+  to ``--abdomen-out-dir`` (their "Abdomen movement" section stays in ``report.md``), the pictures of an earlier run are
+  removed, and a failure in one part never costs the others.
 """
 from __future__ import annotations
 
@@ -1543,3 +1546,126 @@ def test_main_without_a_figure_directory_writes_the_tables_but_no_figures_or_rep
     assert MP.main(["--config", str(overlay)]) == 0
     assert (tree.root / "csvs" / "fly_trial_posture.csv").is_file()
     assert list(tree.root.rglob("report.md")) == [] and list(tree.root.rglob("*.png")) == []
+
+
+# ---------------------------------------------------------------------------
+# The Abdomen-Movement figures and the "Abdomen movement" section (the figure code is in test_abdomen_movement_figures.py)
+# ---------------------------------------------------------------------------
+
+ABDOMEN_FIGURES = {"abdomen_rest_bend_per_fly", "mount_pitch_vs_abdomen_rest_bend", "abdomen_curl_events_by_window",
+                   "abdomen_vs_spontaneous_per", "per_abdomen_coupling", "mount_pitch_vs_abdomen_activity"}
+
+
+def untracked_tip(r):
+    r["tip_ok"] = np.zeros(N, bool)                 # the tip is never found: no frame has a bend
+
+
+def test_main_draws_the_six_abdomen_figures_into_the_abdomen_dir_and_keeps_the_report_beside_the_mounting_figures(cli):
+    t = cli.tree.root
+    assert run_main(cli, "--predictions-csv", str(cli.preds), "--abdomen-out-dir", str(t / "abd_out")) == 0
+    assert {p.stem for p in (t / "abd_out").glob("*.png")} == ABDOMEN_FIGURES
+    assert list((t / "abd_out").glob("*.md")) == []                                  # the report stays in --out-dir
+    assert {p.stem for p in (t / "figs_out").glob("*.png")} == FIGURES               # ... beside the mounting figures only
+    report = (t / "figs_out" / "report.md").read_text(encoding="utf-8")
+    assert report.index("## Exclusions") < report.index("## Mounting") < report.index("## Abdomen movement")
+    assert "Figures missing" not in report and "abdomen_curl_events_by_window.png" in report
+
+
+def test_the_abdomen_directory_defaults_to_the_mounting_block_of_the_config(tmp_path, monkeypatch):
+    monkeypatch.delenv("FLAGGED_FLIES_CSV", raising=False)
+    tree = variant(tmp_path)
+    overlay = write_configs(tree, write_predictions(tree.root / "p.csv"), abdomen_out_dir=str(tree.root / "afigs"))
+    assert MP.main(["--config", str(overlay)]) == 0
+    assert {p.stem for p in (tree.root / "afigs").glob("*.png")} == ABDOMEN_FIGURES
+    assert "## Abdomen movement" in (tree.root / "mfigs" / "report.md").read_text(encoding="utf-8")
+    other = tree.root / "elsewhere"
+    assert MP.main(["--config", str(overlay), "--abdomen-out-dir", str(other)]) == 0       # the flag wins over the block
+    assert {p.stem for p in other.glob("*.png")} == ABDOMEN_FIGURES
+
+
+def test_main_without_an_abdomen_directory_reports_the_abdomen_numbers_but_draws_nothing(cli):
+    assert run_main(cli, "--predictions-csv", str(cli.preds)) == 0
+    report = (cli.tree.root / "figs_out" / "report.md").read_text(encoding="utf-8")
+    assert "## Abdomen movement" in report and "Figures missing" not in report            # no claim about pictures
+    assert not [p for p in cli.tree.root.rglob("*.png") if p.stem in ABDOMEN_FIGURES]
+
+
+def test_main_draws_the_abdomen_figures_even_without_a_report_directory(tmp_path, monkeypatch):
+    monkeypatch.delenv("FLAGGED_FLIES_CSV", raising=False)
+    tree = variant(tmp_path)
+    overlay = write_configs(tree, write_predictions(tree.root / "p.csv"), out_dir="", abdomen_out_dir=str(tree.root / "afigs"))
+    assert MP.main(["--config", str(overlay)]) == 0
+    assert {p.stem for p in (tree.root / "afigs").glob("*.png")} == ABDOMEN_FIGURES
+    assert list(tree.root.rglob("report.md")) == []
+
+
+def test_the_abdomen_section_uses_the_permutation_count_and_the_tracking_gate_of_the_mounting_block(tmp_path, monkeypatch):
+    monkeypatch.delenv("FLAGGED_FLIES_CSV", raising=False)
+    tree = variant(tmp_path)
+    overlay = write_configs(tree, write_predictions(tree.root / "p.csv"), abd_min_tracked_frac=0.4, n_permutations=77)
+    assert MP.main(["--config", str(overlay)]) == 0
+    report = (tree.root / "mfigs" / "report.md").read_text(encoding="utf-8")
+    abdomen = report.split("## Abdomen movement")[1]
+    assert "77 permutations" in abdomen and "tracked in fewer than 40% of their frames" in abdomen
+
+
+def test_the_abdomen_section_counts_the_window_the_tracking_gate_dropped(cli):
+    assert run_main(cli, "--predictions-csv", str(cli.preds)) == 0
+    report = (cli.tree.root / "figs_out" / "report.md").read_text(encoding="utf-8")
+    assert "1 of 6 pre-stimulus windows dropped" in report         # fly 2's testing_1: the tip is found in 30 % of its frames
+
+
+def test_a_run_with_no_tip_tracked_window_draws_no_abdomen_figure_removes_the_old_ones_and_says_so(tmp_path, monkeypatch):
+    monkeypatch.delenv("FLAGGED_FLIES_CSV", raising=False)
+    tree = variant(tmp_path, all_edit=untracked_tip)
+    afigs = tree.root / "afigs"
+    afigs.mkdir()
+    (afigs / "per_abdomen_coupling.png").write_bytes(b"stale")                             # a picture of an earlier run
+    (afigs / "notes.png").write_bytes(b"mine")
+    overlay = write_configs(tree, write_predictions(tree.root / "p.csv"), abdomen_out_dir=str(afigs))
+    assert MP.main(["--config", str(overlay)]) == 0
+    assert [p.name for p in afigs.glob("*.png")] == ["notes.png"]
+    report = (tree.root / "mfigs" / "report.md").read_text(encoding="utf-8")
+    assert "No abdomen data in scope" in report and "abd_min_tracked_frac" in report
+    assert {p.stem for p in (tree.root / "mfigs").glob("*.png")} == FIGURES               # the mounting figures are unharmed
+
+
+def test_main_with_nothing_in_scope_removes_the_abdomen_pictures_of_an_earlier_run(tmp_path, monkeypatch):
+    monkeypatch.delenv("FLAGGED_FLIES_CSV", raising=False)
+    tree = variant(tmp_path)
+    preds = write_predictions(tree.root / "p.csv")
+    afigs = str(tree.root / "afigs")
+    assert MP.main(["--config", str(write_configs(tree, preds, abdomen_out_dir=afigs))]) == 0
+    assert {p.stem for p in (tree.root / "afigs").glob("*.png")} == ABDOMEN_FIGURES
+    assert MP.main(["--config", str(write_configs(tree, preds, cutoff=date(2030, 1, 1), abdomen_out_dir=afigs))]) == 0
+    assert list((tree.root / "afigs").glob("*.png")) == []
+    assert "No abdomen data in scope" in (tree.root / "mfigs" / "report.md").read_text(encoding="utf-8")
+
+
+def test_an_abdomen_figure_that_fails_in_main_leaves_no_stale_picture_and_the_report_names_it(cli, monkeypatch):
+    t = cli.tree.root
+    assert run_main(cli, "--predictions-csv", str(cli.preds), "--abdomen-out-dir", str(t / "abd_out")) == 0
+    assert (t / "abd_out" / "per_abdomen_coupling.png").is_file()
+
+    def broken(*args, **kwargs):
+        raise RuntimeError("synthetic failure")
+    monkeypatch.setitem(MP.AM.BUILDERS, "per_abdomen_coupling", broken)
+    assert run_main(cli, "--predictions-csv", str(cli.preds), "--abdomen-out-dir", str(t / "abd_out")) == 0
+    assert {p.stem for p in (t / "abd_out").glob("*.png")} == ABDOMEN_FIGURES - {"per_abdomen_coupling"}
+    report = (t / "figs_out" / "report.md").read_text(encoding="utf-8")
+    assert "Figures missing from this folder:** `per_abdomen_coupling.png`" in report
+
+
+def test_an_abdomen_analysis_that_fails_costs_neither_the_mounting_figures_nor_the_report(cli, monkeypatch):
+    t = cli.tree.root
+
+    def broken(*args, **kwargs):
+        raise RuntimeError("synthetic failure")
+    monkeypatch.setattr(MP.AM, "compute_abdomen_stats", broken)
+    assert run_main(cli, "--predictions-csv", str(cli.preds), "--abdomen-out-dir", str(t / "abd_out")) == 0
+    assert {p.stem for p in (t / "figs_out").glob("*.png")} == FIGURES
+    assert list((t / "abd_out").glob("*.png")) == []
+    report = (t / "figs_out" / "report.md").read_text(encoding="utf-8")
+    assert "## Mounting" in report and "could not be computed" in report and "RuntimeError: synthetic failure" in report
+    assert (t / "csv_out" / "fly_posture.csv").is_file()
+

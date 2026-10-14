@@ -33,7 +33,7 @@ import re
 import sys
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Callable, Dict, Iterator, List, Mapping, Optional, Sequence, Tuple
+from typing import Callable, Dict, Iterable, Iterator, List, Mapping, Optional, Sequence, Tuple
 
 import matplotlib
 
@@ -202,30 +202,33 @@ def num_text(v: float) -> str:
 # Statistics (the one place any number is computed)
 # ---------------------------------------------------------------------------
 
-def rig_summary(fly: pd.DataFrame) -> List[dict]:
-    frame = pd.DataFrame({"rig": fly["rig"].astype(str).to_numpy(), "pitch": float_column(fly, "mount_pitch_deg")}).dropna()
+def rig_summary(fly: pd.DataFrame, column: str = "mount_pitch_deg") -> List[dict]:
+    """Per rig: the number of flies with a value of *column* and its median and quartiles (degrees)."""
+    frame = pd.DataFrame({"rig": fly["rig"].astype(str).to_numpy(), "value": float_column(fly, column)}).dropna()
     out = []
     for rig, g in frame.groupby("rig", sort=True):
-        q1, med, q3 = np.percentile(g["pitch"].to_numpy(float), [25, 50, 75])
+        q1, med, q3 = np.percentile(g["value"].to_numpy(float), [25, 50, 75])
         out.append({"rig": str(rig), "n_flies": int(len(g)), "median_deg": float(med),
                     "q1_deg": float(q1), "q3_deg": float(q3)})
     return out
 
 
-def rig_answer(rigs: Sequence[dict]) -> str:
+def rig_answer(rigs: Sequence[dict], what: str = "mounting angle", span: str = "Rig medians span") -> str:
+    """The plain-language summary of a per-rig strip plot of *what* (degrees); *span* opens the several-rigs sentence."""
     if not rigs:
-        return "No fly has a mounting angle"
+        return f"No fly has a {what}"
     lo, hi = min(rigs, key=lambda r: r["median_deg"]), max(rigs, key=lambda r: r["median_deg"])
     if len(rigs) == 1:
-        return f"One rig: the median mounting angle is {lo['median_deg']:+.1f}° ({lo['rig']})"
-    return (f"Rig medians span {hi['median_deg'] - lo['median_deg']:.1f}° ({lo['rig']} {lo['median_deg']:+.1f}° to "
+        return f"One rig: the median {what} is {lo['median_deg']:+.1f}° ({lo['rig']})"
+    return (f"{span} {hi['median_deg'] - lo['median_deg']:.1f}° ({lo['rig']} {lo['median_deg']:+.1f}° to "
             f"{hi['rig']} {hi['median_deg']:+.1f}°)")
 
 
 def scatter_stats(fly: pd.DataFrame, column: str, *, n_perm: int, seed: int, up: str, down: str,
-                  none: str = "No clear link") -> dict:
-    """Per-fly rig-centred pitch vs *column*: Spearman rho / p, the dataset x rig stratified permutation p, n."""
-    x, y, strata = float_column(fly, "mount_pitch_centred_deg"), float_column(fly, column), dataset_rig_strata(fly)
+                  none: str = "No clear link", x: str = "mount_pitch_centred_deg") -> dict:
+    """Per-fly *x* (default: the rig-centred pitch) vs *column*: Spearman rho / p, the dataset x rig stratified permutation
+    p (x shuffled within each stratum), n."""
+    x, y, strata = float_column(fly, x), float_column(fly, column), dataset_rig_strata(fly)
     done = np.isfinite(x) & np.isfinite(y)
     rho, p = M.spearman(x, y)
     p_perm = M.stratified_permutation_p(x, y, strata, n=n_perm, seed=seed)
@@ -453,9 +456,10 @@ def headroom(rates_pct) -> float:
     return max(20.0, 1.2 * max(finite, default=0.0))
 
 
-def draw_bar(ax, x: float, height: float, width: float, *, held: bool):
+def draw_bar(ax, x: float, height: float, width: float, *, held: bool, hatch: Optional[str] = HATCH):
+    """A thin bar: blue, or (``held``) orange with the slash hatch (``hatch=None`` for plain orange)."""
     return ax.bar(x, height, width=width, facecolor=ORANGE if held else BLUE, edgecolor="white" if held else "none",
-                  hatch=HATCH if held else None, linewidth=0, zorder=3)[0]
+                  hatch=hatch if held else None, linewidth=0, zorder=3)[0]
 
 
 def tip_label(ax, x: float, height: float, text: str, top: float) -> None:
@@ -474,12 +478,34 @@ def bar_axes(fig: Figure, left: float, bottom: float, width: float, height: floa
     return ax, BAR_IN * (n_slots + 0.2) / width
 
 
-def _placeholder(name: str, stats: dict) -> Figure:
-    info = stats["placeholders"][name]
+def placeholder_figure(title: str, reason: str, n: str) -> Figure:
+    """A figure that cannot be drawn: the question, why not, and its ``n=`` label."""
     fig = new_figure(6.8, 4.4)
-    title_block(fig, TITLES[name], f"Not enough data — {info['reason']}", info["n"])
+    title_block(fig, title, f"Not enough data — {reason}", n)
     fig.text(0.5, 0.4, "No figure: not enough data", ha="center", va="center", fontsize=11, color=MUTED)
     return fig
+
+
+def _placeholder(name: str, stats: dict) -> Figure:
+    info = stats["placeholders"][name]
+    return placeholder_figure(TITLES[name], info["reason"], info["n"])
+
+
+def strip_groups(ax, groups: Sequence[Mapping], seed: int, *, fmt: Callable[[float], str] = lambda v: f"{v:+.1f}°") -> None:
+    """One strip per group, left to right: a dot per value (jittered), the median bar with its label and the interquartile
+    line. Each group is ``{"values", "median", "q1", "q3"}``; a group without values is left blank."""
+    rng = np.random.default_rng(seed)
+    for i, g in enumerate(groups):
+        if not np.isfinite(g["median"]):
+            continue
+        ax.vlines(i, g["q1"], g["q3"], color=BLUE, linewidth=2.0, alpha=0.30, zorder=2)
+        ax.hlines(g["median"], i - 0.28, i + 0.28, color=INK_SECONDARY, linewidth=1.6, zorder=4)
+        ax.scatter(i + rng.uniform(-0.16, 0.16, g["values"].size), g["values"], s=POINT_MARK["s"], facecolor=BLUE,
+                   edgecolor=SURFACE, linewidth=1.0, zorder=3)
+        ax.text(i + 0.33, g["median"], fmt(g["median"]), ha="left", va="center", fontsize=8.5, color=INK_SECONDARY)
+    ax.axhline(0, color=AXIS, linewidth=0.8, zorder=1)
+    ax.set_xlim(-0.6, len(groups) - 0.4)
+    ax.set_xticks(range(len(groups)))
 
 
 def _fig_pitch_per_fly(trials: pd.DataFrame, fly: pd.DataFrame, stats: dict) -> Figure:
@@ -490,36 +516,32 @@ def _fig_pitch_per_fly(trials: pd.DataFrame, fly: pd.DataFrame, stats: dict) -> 
                       f"Camera roll differs per rig, so angles are compared within a rig; "
                       f"{n_flies_label(sum(r['n_flies'] for r in rigs))}")
     ax = inch_axes(fig, 0.95, 0.8, width - 1.3, height - top - 0.8 - 0.1)
-    rng = np.random.default_rng(stats["seed"])
-    for i, r in enumerate(rigs):
-        v = float_column(fly[fly["rig"].astype(str) == r["rig"]], "mount_pitch_deg")
-        v = v[np.isfinite(v)]
-        ax.vlines(i, r["q1_deg"], r["q3_deg"], color=BLUE, linewidth=2.0, alpha=0.30, zorder=2)
-        ax.hlines(r["median_deg"], i - 0.28, i + 0.28, color=INK_SECONDARY, linewidth=1.6, zorder=4)
-        ax.scatter(i + rng.uniform(-0.16, 0.16, v.size), v, s=POINT_MARK["s"], facecolor=BLUE, edgecolor=SURFACE,
-                   linewidth=1.0, zorder=3)
-        ax.text(i + 0.33, r["median_deg"], f"{r['median_deg']:+.1f}°", ha="left", va="center", fontsize=8.5,
-                color=INK_SECONDARY)
-    ax.axhline(0, color=AXIS, linewidth=0.8, zorder=1)
-    ax.set_xlim(-0.6, len(rigs) - 0.4)
-    ax.set_xticks(range(len(rigs)))
+    values = [float_column(fly[fly["rig"].astype(str) == r["rig"]], "mount_pitch_deg") for r in rigs]
+    strip_groups(ax, [{"values": v[np.isfinite(v)], "median": r["median_deg"], "q1": r["q1_deg"], "q3": r["q3_deg"]}
+                      for r, v in zip(rigs, values)], stats["seed"])
     ax.set_xticklabels([f"{r['rig']}\n{n_flies_label(r['n_flies'])}" for r in rigs])
     ax.set_ylabel("Body pitch (°; + = head up)")
     ax.set_xlabel("dot = one fly    bar = median    light line = interquartile range", color=MUTED, fontsize=8.5)
     return fig
 
 
-def _scatter_axes(ax, x: np.ndarray, y: np.ndarray, ylabel: str) -> None:
-    top = headroom(y)
+def pitch_axis(ax, x: np.ndarray, label: str = "Mounting angle relative to the rig median (°)") -> None:
+    """The x axis of a plot against the rig-centred mounting angle: zero line, limits around *x*, label, head-down / up."""
     ax.axvline(0, color=AXIS, linewidth=0.8, zorder=1)
-    pad = 0.08 * (np.ptp(x) or 1.0)
-    ax.set_xlim(x.min() - pad, x.max() + pad)
-    pct_axis(ax, top)
-    ax.set_ylim(-0.04 * top, top)
-    ax.set_xlabel("Mounting angle relative to the rig median (°)")
+    if x.size:
+        pad = 0.08 * (np.ptp(x) or 1.0)
+        ax.set_xlim(x.min() - pad, x.max() + pad)
+    ax.set_xlabel(label)
     for x_axes, align, hint in ((0.0, "left", "← head-down"), (1.0, "right", "head-up →")):
         ax.annotate(hint, xy=(x_axes, 0), xycoords="axes fraction", xytext=(0, -19), textcoords="offset points",
                     ha=align, va="top", fontsize=8.5, color=MUTED, annotation_clip=False)
+
+
+def _scatter_axes(ax, x: np.ndarray, y: np.ndarray, ylabel: str) -> None:
+    top = headroom(y)
+    pitch_axis(ax, x)
+    pct_axis(ax, top)
+    ax.set_ylim(-0.04 * top, top)
     ax.set_ylabel(ylabel)
 
 
@@ -679,20 +701,30 @@ BUILDERS: Dict[str, Callable[[pd.DataFrame, pd.DataFrame, dict], Figure]] = {
     "baseline_state_vs_response": _fig_baseline, "pullins_held_vs_retracted": _fig_pullins}
 
 
-def iter_figures(fly_trial: pd.DataFrame, fly: pd.DataFrame, stats: dict) -> Iterator[Tuple[str, Figure]]:
-    """The figures one at a time, built under the lab style (which stays active while the caller holds the figure).
+def build_each(builders: Mapping[str, Callable], placeholder: Callable, trials: pd.DataFrame, fly: pd.DataFrame,
+               stats: dict, *, tag: str = "MOUNTING",
+               logger: Optional[logging.Logger] = None) -> Iterator[Tuple[str, Figure]]:
+    """The figures of *builders* one at a time, built under the lab style (which stays active while the caller holds
+    the figure).
 
-    A figure that raises is logged (with its traceback) and left out, so one bad figure never costs the rest nor the report.
+    ``stats["placeholders"]`` names the figures that get ``placeholder(name, stats)`` instead of
+    ``build(trials, fly, stats)``. A figure that raises is logged (with its traceback) and left out, so one bad figure
+    never costs the rest nor the report.
     """
-    trials = consistent_trials(fly_trial)
+    logger = logger or LOGGER
     with lab_style():
-        for name, build in BUILDERS.items():
+        for name, build in builders.items():
             try:
-                fig = _placeholder(name, stats) if name in stats["placeholders"] else build(trials, fly, stats)
+                fig = placeholder(name, stats) if name in stats["placeholders"] else build(trials, fly, stats)
             except Exception as err:                       # noqa: BLE001  (see the docstring)
-                LOGGER.warning("[MOUNTING] figure %s failed: %s: %s", name, type(err).__name__, err, exc_info=True)
+                logger.warning("[%s] figure %s failed: %s: %s", tag, name, type(err).__name__, err, exc_info=True)
                 continue
             yield name, fig
+
+
+def iter_figures(fly_trial: pd.DataFrame, fly: pd.DataFrame, stats: dict) -> Iterator[Tuple[str, Figure]]:
+    """The six figures one at a time (see :func:`build_each`)."""
+    return build_each(BUILDERS, _placeholder, consistent_trials(fly_trial), fly, stats)
 
 
 def build_figures(fly_trial: pd.DataFrame, fly: pd.DataFrame, stats: dict) -> Dict[str, Figure]:
@@ -700,10 +732,23 @@ def build_figures(fly_trial: pd.DataFrame, fly: pd.DataFrame, stats: dict) -> Di
     return dict(iter_figures(fly_trial, fly, stats))
 
 
-def remove_pictures(out: Path) -> None:
-    """Delete the six figures of an earlier run from *out* (those names only; nothing else, and nothing is created)."""
-    for name in NAMES:
+def remove_pictures(out: Path, names: Sequence[str] = NAMES) -> None:
+    """Delete the figures of an earlier run from *out* (those names only; nothing else, and nothing is created)."""
+    for name in names:
         (out / f"{name}.png").unlink(missing_ok=True)
+
+
+def write_pictures(figures: Iterable[Tuple[str, Figure]], out: Path, names: Sequence[str] = NAMES) -> Dict[str, Path]:
+    """Replace the pictures of an earlier run: create *out*, delete ``<name>.png`` for each of *names*, then save every
+    ``(name, figure)`` of *figures* at 300 dpi. After the call ``<name>.png`` exists exactly for the names returned."""
+    out.mkdir(parents=True, exist_ok=True)
+    remove_pictures(out, names)
+    written: Dict[str, Path] = {}
+    for name, fig in figures:
+        path = out / f"{name}.png"
+        fig.savefig(path, dpi=DPI, facecolor=SURFACE)
+        written[name] = path
+    return written
 
 
 def render_figures(fly_trial: pd.DataFrame, fly: pd.DataFrame, out_dir, *, n_perm: int, seed: int = 0,
@@ -721,14 +766,7 @@ def render_figures(fly_trial: pd.DataFrame, fly: pd.DataFrame, out_dir, *, n_per
         remove_pictures(out)
         return {}
     stats = stats if stats is not None else compute_stats(fly_trial, fly, n_perm=n_perm, seed=seed)
-    out.mkdir(parents=True, exist_ok=True)
-    remove_pictures(out)
-    written: Dict[str, Path] = {}
-    for name, fig in iter_figures(fly_trial, fly, stats):
-        path = out / f"{name}.png"
-        fig.savefig(path, dpi=DPI, facecolor=SURFACE)
-        written[name] = path
-    return written
+    return write_pictures(iter_figures(fly_trial, fly, stats), out)
 
 
 # ---------------------------------------------------------------------------
@@ -822,13 +860,18 @@ def _header(fly_trial: pd.DataFrame, stats: Mapping) -> str:
     return "\n".join(lines)
 
 
-def scatter_lines(name: str, question: str, s: Mapping, what: str) -> List[str]:
+def scatter_lines(name: str, question: str, s: Mapping, what: str, shuffled: str = "pitch") -> List[str]:
     return [f"### {question}", "",
             f"Figure `{name}.png`: {what}.", "",
-            f"- Answer: **{s['verdict']}**",
+            *scatter_bullets(s, shuffled)]
+
+
+def scatter_bullets(s: Mapping, shuffled: str = "pitch") -> List[str]:
+    """The answer, rho / p and the stratified permutation p of one per-fly scatter (*shuffled* names what was shuffled)."""
+    return [f"- Answer: **{s['verdict']}**",
             f"- {n_flies_label(s['n_flies'])}; Spearman {rho_text(s['rho'], 3)}, {p_text(s['p'], 4)} (uncorrected)",
-            f"- Stratified permutation {p_text(s['p_perm'], 4)} (uncorrected): pitch shuffled within dataset × rig strata, "
-            f"{count_noun(s['n_strata'], 'stratum', 'strata')} ({s['n_strata_shuffled']} with at least 2 flies)"]
+            f"- Stratified permutation {p_text(s['p_perm'], 4)} (uncorrected): {shuffled} shuffled within dataset × rig "
+            f"strata, {count_noun(s['n_strata'], 'stratum', 'strata')} ({s['n_strata_shuffled']} with at least 2 flies)"]
 
 
 def placeholder_line(stats: Mapping, name: str) -> List[str]:
