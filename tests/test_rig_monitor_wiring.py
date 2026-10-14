@@ -101,3 +101,25 @@ def test_main_hands_off_and_finishes(tree):
     assert 'RUN.finish(\'complete\')' in src or 'RUN.finish("complete")' in src
     assert "RUN.finish('failed'" in src or 'RUN.finish("failed"' in src
     assert "args.push_mode == 'hub'" in src or 'args.push_mode == "hub"' in src
+
+
+def test_hub_handoff_guarded_by_try_exception(tree):
+    for t in ast.walk(tree):
+        if isinstance(t, ast.Try) and any(
+                isinstance(c, ast.Call) and getattr(c.func, "id", None) == "hub_handoff"
+                for stmt in t.body for c in ast.walk(stmt)):
+            if any(getattr(h.type, "id", None) == "Exception" for h in t.handlers):
+                return
+    raise AssertionError("hub_handoff not inside try/except Exception")
+
+
+def test_start_notice_sent_from_thread(tree):
+    countdown = _find_function(tree, "_startup_countdown")
+    targets = [k.value.id for c in ast.walk(countdown)
+               if isinstance(c, ast.Call) and getattr(c.func, "attr", None) == "Thread"
+               for k in c.keywords if k.arg == "target" and isinstance(k.value, ast.Name)]
+    assert "ntfy_notify" in targets
+
+
+def test_reminder_stop_set_after_finish(tree):
+    assert len(_attr_calls(tree, "_run_reminder_stop", "set")) >= 2
