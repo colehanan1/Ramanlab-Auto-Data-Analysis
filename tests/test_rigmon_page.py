@@ -32,3 +32,14 @@ def test_page_corrects_both_clock_offsets():
 
 def test_page_has_dark_mode_tokens():
     assert "prefers-color-scheme: dark" in PAGE and ":root" in PAGE
+
+
+def test_page_has_no_inline_handlers_and_escapes_quotes():
+    assert "onclick=" not in PAGE
+    assert 'addEventListener("click"' in PAGE
+    assert "&#39;" in PAGE
+
+
+def test_page_ticks_without_rebuilding_and_guards_phase_lookup():
+    assert "setInterval(tick" in PAGE and "setInterval(render" not in PAGE
+    assert "hasOwnProperty" in PAGE

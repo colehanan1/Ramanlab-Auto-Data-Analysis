@@ -73,7 +73,7 @@ function fmt(sec) {
   return h ? h + ":" + mm : mm;
 }
 const hhmm = t => t ? new Date(t * 1000).toLocaleTimeString([], {hour: "2-digit", minute: "2-digit"}) : "--:--";
-const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;"}[c]));
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"}[c]));
 
 // A Pi's "now": browser now → hub clock (server_time) → Pi clock (status.server_time vs fetched_at)
 function piNow(rig) {
@@ -82,41 +82,52 @@ function piNow(rig) {
   return Date.now() / 1000 + hubSkew + piOffset;
 }
 
+function countText(rig) {
+  const st = rig.status || {}, now = piNow(rig);
+  if (!(rig.reachable && !rig.offline)) return "—";
+  if (st.phase === "COMPLETE") return "✓";
+  return st.phase === "STIMULUS" ? fmt(now - st.started_at) : fmt(st.ends_at - now);
+}
+function progOf(rig) {
+  const run = (rig.status || {}).run || {}, now = piNow(rig);
+  const total = Number(run.planned_total_s) || 0;
+  return run.state === "complete" ? 1
+    : (run.expected_end_at && total) ? Math.min(1, Math.max(0, 1 - (run.expected_end_at - now) / total)) : 0;
+}
+
 function card(name, rig) {
   const st = rig.status || {}, run = st.run || {};
-  const [phaseName, color] = PHASE[st.phase] || PHASE.IDLE;
-  const now = piNow(rig);
-  const counting = st.phase === "STIMULUS" ? fmt(now - st.started_at) : fmt(st.ends_at - now);
-  const total = run.planned_total_s || 0;
-  const prog = run.state === "complete" ? 1
-             : (run.expected_end_at && total) ? Math.min(1, Math.max(0, 1 - (run.expected_end_at - now) / total)) : 0;
+  const [phaseName, color] = Object.prototype.hasOwnProperty.call(PHASE, st.phase) ? PHASE[st.phase] : PHASE.IDLE;
+  const counting = countText(rig), prog = progOf(rig);
+  const tDone = Number(run.trials_done) || 0, tTotal = Number(run.trials_total) || 0;
   const online = rig.reachable && !rig.offline;
   const trials = run.trials || [];
   const rows = (S.trials || []).filter(t => t.rig === name && t.batch_dir === run.batch_dir);
   const stateOf = i => (rows.find(t => t.idx === i) || {}).state || "";
   let strip = "";
-  for (let i = 1; i <= Math.max(run.trials_total || 0, trials.length); i++) {
+  for (let i = 1; i <= Math.max(tTotal, trials.length); i++) {
     const s = stateOf(i);
     strip += `<span class="${s === "done" ? "done" : s === "failed" ? "failed" : (s ? "busy" : "")}" title="trial ${i} ${esc(s)}"></span>`;
   }
   return `<div class="card ${online ? "" : "offline"}">
     <h2><span>${esc(rig.label)}</span><span class="chip" style="background:var(${online ? color : "--idle"})">${online ? phaseName : "offline"}</span></h2>
     <div class="sub">${esc(st.trial_label || "")} ${esc(st.label || "")} ${esc(st.odor || "")}</div>
-    <div class="big">${online && st.phase !== "COMPLETE" ? counting : (online ? "✓" : "—")}</div>
-    <div class="bar"><i style="width:${(prog * 100).toFixed(1)}%"></i></div>
-    <div class="sub">${run.trials_done || 0}/${run.trials_total || 0} trials · done ≈ ${hhmm(run.expected_end_at)}
+    <div class="big" data-count="${esc(name)}">${counting}</div>
+    <div class="bar"><i data-bar="${esc(name)}" style="width:${(prog * 100).toFixed(1)}%"></i></div>
+    <div class="sub">${tDone}/${tTotal} trials · done ≈ ${hhmm(run.expected_end_at)}
       ${run.state === "failed" ? ` · <b style="color:var(--bad)">FAILED</b> ${esc(run.error)}` : ""}
       ${online ? "" : ` · last seen ${hhmm(rig.last_seen)}`}</div>
     <div class="strip">${strip}</div>
     <div class="row">
       <a class="btn" href="${esc(rig.live_url)}" target="_blank" rel="noopener">Live</a>
-      <button onclick="mute('${esc(name)}', ${!rig.muted})">${rig.muted ? "🔕 Muted" : "🔔 Mute"}</button>
+      <button data-mute="${esc(name)}" data-muted="${rig.muted ? 1 : 0}">${rig.muted ? "🔕 Muted" : "🔔 Mute"}</button>
       <span class="sub">${esc(run.batch_dir || "")}</span>
     </div></div>`;
 }
 
 function render() {
   if (!S) return;
+  try {
   document.getElementById("cards").innerHTML =
     Object.entries(S.rigs).map(([n, r]) => card(n, r)).join("");
   const label = n => (S.rigs[n] || {}).label || n;
@@ -124,9 +135,30 @@ function render() {
     <td>${hhmm(t.ended_at)}</td><td>${esc(label(t.rig))}</td><td>${esc(t.label || t.phase_tag)}</td>
     <td class="hide">${esc(t.odor)}</td>
     <td>${t.state === "done" ? "✔" : t.state === "failed" ? `✖ <span class="sub">${esc(t.error)}</span>` : esc(t.state)}</td>
-    <td>${t.state === "done" && t.mp4 ? `<button onclick="play('${esc(t.rig)}','${esc(t.batch_dir)}','${esc(t.mp4)}')">▶</button>` : ""}</td>
+    <td>${t.state === "done" && t.mp4 ? `<button data-play data-rig="${esc(t.rig)}" data-batch="${esc(t.batch_dir)}" data-mp4="${esc(t.mp4)}">▶</button>` : ""}</td>
   </tr>`).join("");
+  } catch (err) { console.error("render", err); }
 }
+
+function tick() {
+  if (!S) return;
+  try {
+    for (const [n, r] of Object.entries(S.rigs)) {
+      const c = document.querySelector(`[data-count="${CSS.escape(n)}"]`);
+      if (c) c.textContent = countText(r);
+      const b = document.querySelector(`[data-bar="${CSS.escape(n)}"]`);
+      if (b) b.style.width = (progOf(r) * 100).toFixed(1) + "%";
+    }
+  } catch (err) { console.error("tick", err); }
+}
+
+document.addEventListener("click", e => {
+  const b = e.target.closest("button[data-play],button[data-mute]");
+  if (!b) return;
+  const d = b.dataset;
+  if ("play" in d) play(d.rig, d.batch, d.mp4);
+  else mute(d.mute, d.muted !== "1");
+});
 
 function play(rig, batch, mp4) {
   document.getElementById("video").src = `/media/${encodeURIComponent(rig)}/${encodeURIComponent(batch)}/${encodeURIComponent(mp4)}`;
@@ -137,6 +169,7 @@ document.getElementById("player").addEventListener("close", () => document.getEl
 async function mute(rig, muted) {
   await fetch(`/api/mute/${encodeURIComponent(rig)}`, {method: "POST",
     headers: {"Content-Type": "application/json"}, body: JSON.stringify({muted})});
+  render();
 }
 
 function connect() {
@@ -151,7 +184,7 @@ function connect() {
   es.onerror = () => { conn.textContent = "reconnecting…"; };
 }
 connect();
-setInterval(render, 100);  // countdowns tick between pushes
+setInterval(tick, 100);  // countdowns tick between pushes
 </script>
 </body>
 </html>
