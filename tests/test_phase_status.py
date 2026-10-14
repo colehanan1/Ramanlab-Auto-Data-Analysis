@@ -231,3 +231,35 @@ def test_page_corrects_for_clock_skew():
     """Countdowns must come from server deadlines + skew offset, not the
     client clock alone."""
     assert "server_time" in ps.STATUS_PAGE_HTML
+
+
+# ── run-level state (rig monitor) ────────────────────────────────────────────
+
+def test_snapshot_has_idle_run_by_default():
+    state = ps.PhaseState(clock=_fixed_clock(100.0))
+    assert state.snapshot()["run"] == {"state": "idle"}
+
+
+def test_set_run_merges_and_survives_phase_changes():
+    state = ps.PhaseState(clock=_fixed_clock(100.0))
+    state.set_run(state="running", batch_dir="october_14_batch_3")
+    state.enter(ps.PHASE_GAP, ends_at=200.0)
+    state.set_run(trials_done=2)
+    assert state.snapshot()["run"] == {
+        "state": "running", "batch_dir": "october_14_batch_3", "trials_done": 2,
+    }
+
+
+def test_snapshot_run_is_a_deep_copy():
+    state = ps.PhaseState(clock=_fixed_clock(100.0))
+    state.set_run(trials=[{"index": 1}])
+    snap = state.snapshot()
+    snap["run"]["trials"].append({"index": 2})
+    snap["run"]["trials"][0]["index"] = 99
+    assert state.snapshot()["run"]["trials"] == [{"index": 1}]
+
+
+def test_to_json_includes_run():
+    state = ps.PhaseState(clock=_fixed_clock(100.0))
+    state.set_run(state="running")
+    assert json.loads(state.to_json())["run"]["state"] == "running"
