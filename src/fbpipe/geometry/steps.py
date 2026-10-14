@@ -391,7 +391,6 @@ def run_track(settings: Settings, gcfg: GeometrySettings, *, force: bool = False
             if only_trial and only_trial not in name:
                 continue
             out_dir = trial_out_dir(job.out_dir, gcfg, video)
-            t0 = time.time()
             try:
                 # The status is read inside the try like everything else about the video: a trial whose production folder
                 # cannot be read (a stale handle on the secured mirror) is one failed video, not an aborted shard.
