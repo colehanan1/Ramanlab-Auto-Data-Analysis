@@ -18,7 +18,7 @@ apply on nearly every task.
 | `src/fbpipe/utils/` | `rig_gates.py`, `rig_anchor.py`, `trial_metadata.py`, `light_stimulus.py` |
 | `scripts/pipeline/run_workflows.py` | the pipeline driver — every step is orchestrated here |
 | `scripts/analysis/` | figure scripts; **many are hand-run, not wired into the pipeline** |
-| `config/` | gitignored except `example.*` |
+| `config/` | gitignored except `example*` |
 | `PiCode/` | code pushed to the Pis; gitignored |
 | `tests/` | plain pytest, no pytest config |
 

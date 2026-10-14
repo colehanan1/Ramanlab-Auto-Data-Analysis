@@ -7,18 +7,19 @@
 #   (no flag)        PER first, then the abdomen stage
 #   --abdomen-only   the abdomen stage alone, no PER
 #   --abdomen-video  also write every trial's annotated abdomen video (one-time backfill; the nightly writes tables only)
-#   --figures-only   restyle from the existing tables, no tracking
+#   --figures-only   restyle figures from the existing tables: no YOLO, no abdomen tracking
 #
 # An overlay may add only `abdomen:` and `mounting:`; any other key is refused. Every PER stage is
 # handed config_new.yaml itself, never this file.
 extends: config_new.yaml             # relative to this file
 
 # Abdomen tracking: the 4-class YOLO model (abdomen, abdomenTip, eye, proboscis) over the same videos as
-# PER, once PER is done. Production (flys_New) and the secured mirror are only read; everything is
-# written under the directories below. Self-contained: nothing is inherited from config_new's own
-# `yolo:` block or model_path.
+# PER, once PER is done. Production (flys_New) and the secured mirror are only read; the outputs go to
+# the directories below (worker logs and the run lock live in the cache dir). Self-contained: nothing
+# is inherited from config_new's own `yolo:` block or model_path.
 abdomen:
-  enabled: true                      # false = skip tracking, figures and stats (mounting still reads the existing tables)
+  # false = no tracking, tables, figures or stats; the mounting block still reads the existing tables.
+  enabled: true
   # python: /path/to/python          # interpreter for the stage (default: the one running the driver)
   # `train`, not `train4`; the best.engine beside the model is preferred when present.
   model_path: /home/ramanlab/Documents/cole/Workflow&Code/runs/obb/train/weights/best.pt
@@ -42,33 +43,35 @@ abdomen:
 
 # Mounting posture + abdomen movement: joins the abdomen tables to the production PER tracks and scores,
 # per fly and per trial. Runs last in the abdomen stage and only reads what the stages above wrote. It
-# finds the abdomen tree through the abdomen block, so keep that block (abdomen.enabled: false stops the
-# tracking). Cut-off date: abdomen.batch_date_from (a later mounting.batch_date_from, if you add one,
-# wins). eu = eye units (pixels / the fly's eye size).
+# finds the abdomen tree through the abdomen block, so keep that block (abdomen.enabled: false switches
+# the abdomen steps off). Cut-off date: abdomen.batch_date_from (a later mounting.batch_date_from, if you
+# add one, wins). eu = eye units (pixels / the fly's eye size).
 mounting:
   enabled: true
   # Tables: fly_trial_posture.csv, fly_posture.csv, exclusions.json.
   csv_out_dir: /home/ramanlab/Documents/cole/Data/CSVs-New-Opto-Flys/Mounting-Posture
   # The six Mounting-Posture figures and report.md.
   out_dir: /home/ramanlab/Documents/cole/Results/New-Opto-Fly-Figures/Mounting-Posture
-  rest_quantile: 0.10                # a trial's rest = this quantile of its pre-stimulus proboscis distance
+  # A trial's rest = median proboscis distance over its lowest rest_quantile fraction of frames (the whole
+  # trial, not only the pre-stimulus window).
+  rest_quantile: 0.10
   retracted_ref_eu: null             # null = per rig: median over flies of their most-retracted trial rest
   held_margin_eu: 0.25               # held out: >= ref + 0.25 eye units (~12 px at a 48 px eye) ...
   held_frac_min: 0.8                 # ... for >= 80 % of pre-stimulus frames
   held_back_deg: -10.0               # sub-type by rest angle: < -10 deg held-back, > +10 deg held-forward, else held-down
   held_forward_deg: 10.0
-  event_rise_eu: 0.30                # spontaneous PER: >= +0.30 eu above the trial rest ...
-  event_drop_eu: 0.30                # pull-in: >= 0.30 eu below the trial rest ...
+  event_rise_eu: 0.30                # spontaneous PER (before the stimulus): > 0.30 eu above the trial rest ...
+  event_drop_eu: 0.30                # pull-in: > 0.30 eu below the trial rest ...
   event_min_s: 0.3                   # ... lasting >= 0.3 s
   identity_tol_px: 25                # per-fly stats skip a fly whose anchor moves more than this across trials
   eye_match_px: 25                   # geometry eye farther than this from the production anchor: fly-trial dropped
   binary_threshold: 2                # a trial scoring >= 2 counts as a PER
   n_permutations: 10000
-  # abdomen movement
+  # abdomen movement (rest = the fly's resting bend)
   # The six Abdomen-Movement figures.
   abdomen_out_dir: /home/ramanlab/Documents/cole/Results/New-Opto-Fly-Figures/Abdomen-Movement
-  curl_rise_deg: 10.0                # curl event: bend >= rest + 10 deg (ventral) / <= rest - 10 deg (straighten) ...
+  curl_rise_deg: 10.0                # curl: bend > rest + 10 deg (ventral); straightening: bend < rest - 10 deg ...
   curl_min_s: 0.3                    # ... lasting >= 0.3 s
   tip_move_eu_s: 0.5                 # "moving" = tip speed > 0.5 eye units / s
   speed_smooth_frames: 5             # rolling median before differencing (detection jitter)
-  abd_min_tracked_frac: 0.5          # abdomen metrics NaN when the tip is tracked in < 50 % of the window
+  abd_min_tracked_frac: 0.5          # abdomen metrics NaN when the bend angle is tracked in < 50 % of the window
