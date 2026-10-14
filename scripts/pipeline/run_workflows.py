@@ -61,7 +61,7 @@ from fbpipe.steps import predict_reactions
 from fbpipe.utils.data_secured_sync import sync_data_secured
 from fbpipe.utils.process_guard import die_with_parent_preexec
 from fbpipe.utils.run_lock import RunLockTimeout, run_lock
-from fbpipe.utils.run_locks import abdomen_lock, acquire_per_run_lock, per_run_active, release_run_lock
+from fbpipe.utils.stage_locks import abdomen_lock, acquire_per_run_lock, per_run_active, release_run_lock
 from fbpipe.utils.smb_copy import copy_to_smb
 
 from scripts.analysis.envelope_visuals import (
@@ -3285,7 +3285,7 @@ def main(argv: Sequence[str] | None = None) -> None:
 
     with run_lock(_cache_root(settings), label=" ".join(["run_workflows.py", *(argv or sys.argv[1:])])):
         # Everything the run does from here is PER work: hold the shared advisory PER
-        # lock (fbpipe.utils.run_locks, not the whole-run lock above) for it. An abdomen
+        # lock (fbpipe.utils.stage_locks, not the whole-run lock above) for it. An abdomen
         # backfill running at the same time asks before each video and stops at the
         # next one, resuming on a later run. The lock fails open and adds nothing to the
         # run but an empty file under <cache_dir>/locks; it is released before the

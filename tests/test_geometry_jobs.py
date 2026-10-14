@@ -34,7 +34,7 @@ from fbpipe.geometry import stats as ST
 from fbpipe.geometry.config import GeometrySettings
 from fbpipe.geometry.trial_meta import trial_name_from_video
 from fbpipe.utils.frozen_folders import FolderRule
-from fbpipe.utils.run_locks import per_run_lock
+from fbpipe.utils.stage_locks import per_run_lock
 from test_geometry_track import H, NAMES, W, fake_predict, video  # noqa: F401  (``video``: the synthetic 40-frame clip)
 
 DATASET = "IAA-X"

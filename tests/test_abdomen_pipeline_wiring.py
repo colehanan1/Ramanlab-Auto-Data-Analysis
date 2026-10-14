@@ -48,7 +48,7 @@ import yaml
 from fbpipe import geometry_pipeline
 from fbpipe.config import ReactionPredictionSettings, Settings
 from fbpipe.config_layers import ConfigLayers, LayeredConfigError
-from fbpipe.utils.run_locks import abdomen_lock, acquire_per_run_lock, per_run_active, per_run_lock, release_run_lock
+from fbpipe.utils.stage_locks import abdomen_lock, acquire_per_run_lock, per_run_active, per_run_lock, release_run_lock
 from scripts.pipeline import run_workflows as rw
 from test_eye_drift_qc_summary import _run_main_guard
 

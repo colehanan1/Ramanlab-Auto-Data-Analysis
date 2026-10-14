@@ -15,7 +15,8 @@ subprocesses never extend a lock, and :meth:`RunLock.release` unlocks before it 
 the lock was held cannot keep it alive.
 
 The lock is purely advisory and must never cost a PER run anything: acquiring it fails open, and probing it
-creates nothing.
+creates nothing. (This module is ``stage_locks``, not ``run_locks``: that was one letter from main's whole-run lock,
+``fbpipe.utils.run_lock``, which is a different lock with a different job.)
 """
 from __future__ import annotations
 

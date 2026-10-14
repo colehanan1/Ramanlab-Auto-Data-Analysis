@@ -350,7 +350,7 @@ _CODE_SKIP = {
     "curate_yolo_dataset.py", "compose_videos_rms.py", "check_light_stimulus.py", "move_videos.py",
     "notify.py", "smb_copy.py", "data_secured_sync.py", "pseudolabel.py", "augmentation.py",
     "parallel.py", "video_writer.py", "frozen_folders.py", "yolo_discovery.py",
-    "gpu_batch_optimizer.py", "run_lock.py", "run_locks.py", "process_guard.py", "light_stimulus.py",
+    "gpu_batch_optimizer.py", "run_lock.py", "stage_locks.py", "process_guard.py", "light_stimulus.py",
 }
 
 #: Settings fields the per-trial steps read.

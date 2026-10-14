@@ -33,7 +33,7 @@ import yaml
 
 from fbpipe import autofreeze
 from fbpipe.config import resolve_config_path
-from fbpipe.utils.run_locks import per_run_active
+from fbpipe.utils.stage_locks import per_run_active
 from scripts.analysis import envelope_combined, envelope_exports
 from scripts.pipeline import run_workflows as rw
 

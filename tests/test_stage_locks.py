@@ -1,4 +1,4 @@
-"""Run locks keep an abdomen backfill and the nightly PER run apart without either waiting on the other.
+"""Stage locks keep an abdomen backfill and the nightly PER run apart without either waiting on the other.
 
 Two flock files live under ``<cache_dir>/locks/``:
 
@@ -9,8 +9,10 @@ Two flock files live under ``<cache_dir>/locks/``:
 
 flock locks belong to the open file, not to a path or a pid, so a crashed process frees them and nothing is
 ever stale. Probing must not create anything, an unwritable cache dir must never stop a PER run, and a child
-process must not inherit the lock. Tests use tmp cache dirs only.
+process must not inherit the lock. Tests use tmp cache dirs only. The module is ``stage_locks``, not ``run_locks``: that
+was one letter from main's whole-run lock (``run_lock``), a different lock with a different job.
 """
+import importlib
 import multiprocessing
 import os
 import signal
@@ -22,8 +24,8 @@ from pathlib import Path
 
 import pytest
 
-from fbpipe.utils import run_locks as RL
-from fbpipe.utils.run_locks import (
+from fbpipe.utils import stage_locks as RL
+from fbpipe.utils.stage_locks import (
     abdomen_lock,
     acquire_per_run_lock,
     per_run_active,
@@ -53,11 +55,11 @@ def _a_blocking_lock_fails_the_test_instead_of_freezing_the_suite():
 
 
 def _child(code: str, cache: Path) -> subprocess.Popen:
-    """A python process that runs *code* (with ``CACHE`` and the run_locks names in scope) and prints ``held``."""
+    """A python process that runs *code* (with ``CACHE`` and the stage_locks names in scope) and prints ``held``."""
     script = textwrap.dedent(f"""
         import sys, time
         sys.path.insert(0, {str(SRC)!r})
-        from fbpipe.utils.run_locks import abdomen_lock, acquire_per_run_lock
+        from fbpipe.utils.stage_locks import abdomen_lock, acquire_per_run_lock
         CACHE = {str(cache)!r}
     """) + textwrap.dedent(code) + "\nprint('held', flush=True)\ntime.sleep(60)\n"
     return subprocess.Popen([sys.executable, "-c", script], stdout=subprocess.PIPE, text=True)
@@ -229,6 +231,13 @@ def test_release_frees_the_lock_even_while_a_forked_worker_still_has_the_descrip
         assert os.path.isfile(tmp_path / "locks" / "per.lock")
 
 
+def test_the_stage_lock_module_is_not_named_one_letter_from_the_whole_run_lock():
+    assert RL.__name__ == "fbpipe.utils.stage_locks"
+    with pytest.raises(ModuleNotFoundError):
+        importlib.import_module("fbpipe.utils.run_locks")
+    assert importlib.import_module("fbpipe.utils.run_lock").run_lock, "main's whole-run lock is untouched"
+
+
 def test_the_lock_modules_are_not_per_trial_code_for_the_auto_freeze_report():
     """Auto-freeze reports -- never acts on -- frozen datasets built under other per-trial code, by hashing
     ``src/fbpipe/utils/*.py`` minus the files that cannot change a row. This lock module is no per-trial code: left on
@@ -237,6 +246,6 @@ def test_the_lock_modules_are_not_per_trial_code_for_the_auto_freeze_report():
     from fbpipe import autofreeze
 
     hashed = {Path(rel).name for rel in autofreeze.code_provenance()}
-    assert "run_locks.py" not in hashed
+    assert "stage_locks.py" not in hashed
     assert "run_lock.py" not in hashed, "main's whole-run lock is skipped the same way"
     assert "threshold.py" in hashed and "reject_bad_proboscis.py" in hashed, "the list is not empty"

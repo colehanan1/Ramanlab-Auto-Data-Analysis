@@ -15,7 +15,7 @@ fly numbers, read from the trial's production tables (:func:`trial_seeds`). :fun
 decides what a run does with a trial -- both ``run_track`` and ``pending_trials`` ask it -- and :func:`_clear_trial_outputs`
 removes what a re-track replaces.
 
-Integrated tracking yields to PER: before each video it asks :func:`~fbpipe.utils.run_locks.per_run_active` and, while a
+Integrated tracking yields to PER: before each video it asks :func:`~fbpipe.utils.stage_locks.per_run_active` and, while a
 PER run holds the shared run lock, stops cleanly (the trials left have no meta, so the next run does them).
 """
 from __future__ import annotations
@@ -33,7 +33,7 @@ from typing import Dict, Iterator, List, Optional, Tuple
 from ..config import Settings, get_main_directories, infer_dataset_for_path
 from ..utils.frozen_folders import is_frozen_folder, iter_live_batch_dirs
 from ..utils.rig_gates import read_batch_date
-from ..utils.run_locks import per_run_active
+from ..utils.stage_locks import per_run_active
 from ..utils.yolo_discovery import superseded_videos
 from . import columns as C
 from .config import GeometrySettings
