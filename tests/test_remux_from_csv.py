@@ -198,8 +198,10 @@ class Rig:
             self.env["STUB_FFMPEG_REMOVE_ON_START"] = str(remove_on_start)
 
     # -- running ------------------------------------------------------------
-    def launch(self, folder: Path, tag: str, env: Optional[dict] = None, input_dir=None) -> Run:
-        cmd = [sys.executable, str(SCRIPT), "--input-dir", str(input_dir or folder), *CLI_ARGS]
+    def launch(self, folder: Path, tag: str, env: Optional[dict] = None, input_dir=None,
+               extra_args=()) -> Run:
+        cmd = [sys.executable, str(SCRIPT), "--input-dir", str(input_dir or folder), *CLI_ARGS,
+               *extra_args]
         out_path = self.root / f"{tag}.out"
         with out_path.open("wb") as fh:
             proc = subprocess.Popen(
@@ -675,3 +677,52 @@ def test_lock_is_held_while_an_orphaned_ffmpeg_is_still_encoding(rig, tmp_path):
         "run B started encoding while the orphaned ffmpeg was still writing:\n" + describe(encodes)
     )
     assert tree(folder) == ["output_1.csv", "output_1.mp4"]
+
+
+# --------------------------------------------------------------------------
+# --only (rig monitor: one trial at a time)
+# --------------------------------------------------------------------------
+
+def test_only_remuxes_just_the_named_file(rig, tmp_path):
+    folder = tmp_path / "batch"
+    make_session(folder, ["output_1", "output_2"])
+
+    rc, out = rig.launch(folder, "run", extra_args=["--only", "output_2.h264"]).wait()
+
+    assert rc == 0, out
+    assert (folder / "output_2.mp4").exists() and not (folder / "output_2.h264").exists()
+    assert (folder / "output_1.h264").exists() and not (folder / "output_1.mp4").exists()
+    assert [Path(e.input).name for e in rig.encodes()] == ["output_2.h264"]
+
+
+def test_only_missing_file_exits_nonzero(rig, tmp_path):
+    folder = tmp_path / "batch"
+    make_session(folder, ["output_1"])
+    rc, out = rig.launch(folder, "run", extra_args=["--only", "nope.h264"]).wait()
+    assert rc == 1, out
+
+
+def test_only_without_csv_exits_nonzero_and_keeps_source(rig, tmp_path):
+    folder = tmp_path / "batch"
+    folder.mkdir()
+    (folder / "orphan.h264").write_bytes(b"\x00\x00\x00\x01 x")
+    rc, out = rig.launch(folder, "run", extra_args=["--only", "orphan.h264"]).wait()
+    assert rc == 1 and (folder / "orphan.h264").exists()
+
+
+def test_only_rejects_paths(rig, tmp_path):
+    folder = tmp_path / "batch"
+    make_session(folder, ["output_1"])
+    rc, out = rig.launch(folder, "run", extra_args=["--only", "../output_1.h264"]).wait()
+    assert rc != 0 and (folder / "output_1.h264").exists()
+
+
+def test_only_uses_the_same_ffmpeg_args_as_a_folder_run(rig, tmp_path):
+    a, b = tmp_path / "a", tmp_path / "b"
+    make_session(a, ["output_1"])
+    make_session(b, ["output_1"])
+    rig.launch(a, "full").wait()
+    rig.launch(b, "only", extra_args=["--only", "output_1.h264"]).wait()
+    full, only = rig.encodes()
+    norm = lambda enc, d: [s.replace(str(d), "<DIR>") for s in enc.argv]  # noqa: E731
+    assert norm(full, a) == norm(only, b)

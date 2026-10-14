@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import csv, os, subprocess, argparse, fcntl, hashlib
+import csv, os, subprocess, argparse, fcntl, hashlib, sys
 from pathlib import Path
 
 # ── OFM → Odor name mapping ──────────────────────────────────────────────────
@@ -182,7 +182,13 @@ def main():
     ap.add_argument("--fps-cap", type=float, default=50.0)
     ap.add_argument("--delete-min-bytes", type=int, default=1024)
     ap.add_argument("--log-tail", type=int, default=20)
+    ap.add_argument("--only", default=None,
+                    help="Remux just this .h264 (a file name inside --input-dir); "
+                         "exit 1 unless its .mp4 was published. Used by the rig monitor.")
     args = ap.parse_args()
+    if args.only is not None and (
+            Path(args.only).name != args.only or not args.only.endswith(".h264")):
+        raise SystemExit(f"--only takes a .h264 file name inside --input-dir, got {args.only!r}")
 
     input_path = Path(args.input_dir).resolve()
     if not input_path.is_dir():
@@ -192,10 +198,12 @@ def main():
     # left behind, not what was there when it started.
     lock_fd = acquire_folder_lock(input_path)
 
-    h264_files = sorted(input_path.rglob("*.h264"))
+    h264_files = ([input_path / args.only] if args.only
+                  else sorted(input_path.rglob("*.h264")))
     if not h264_files:
         print(f"[INFO] No .h264 files in {input_path}")
         return
+    n_published = 0
 
     for h264 in h264_files:
         if not h264.exists():
@@ -227,6 +235,7 @@ def main():
         finally:
             tmp_file.unlink(missing_ok=True)  # no-op once published; else failed/too small/interrupted
         if published:
+            n_published += 1
             try:
                 h264.unlink()
                 print(f"✅ {mp4_file.name} (input FPS {fps_used:.6f}) — deleted source {h264.name}")
@@ -236,6 +245,9 @@ def main():
             print(f"❌ Failed: {h264.name} (input FPS {fps_used:.6f})")
             if log:
                 print("\n".join(log.splitlines()[-args.log_tail:]))
+
+    if args.only and n_published == 0:
+        sys.exit(1)
 
 if __name__ == "__main__":
     main()
