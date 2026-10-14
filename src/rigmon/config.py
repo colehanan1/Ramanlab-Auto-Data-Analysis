@@ -80,6 +80,8 @@ def load_config(path) -> HubConfig:
             kw[key] = tuple(str(v) for v in raw.pop(key))
     kw.update(raw)  # scalars; an unknown key is a TypeError from the dataclass
     cfg = HubConfig(rigs=rigs, **kw)
+    if {"0.0.0.0", "::"} & set(cfg.bind):
+        raise ValueError("bind must list specific addresses, never all interfaces")
     if "flys_New" in cfg.staging_root.parts:
         raise ValueError("staging_root must be outside flys_New (the nightly pipeline reads it)")
     return cfg

@@ -53,3 +53,26 @@ def test_interrupted_sessions_are_failed_on_start(tmp_path):
     assert [s2.get_session("pi2", f"b{i}")["state"] for i in range(5)] == \
         ["failed", "failed", "failed", "landed", "aborted"]
     assert s2.get_session("pi2", "b0")["error"] == "hub restarted during finalize"
+
+
+def test_set_session_keeps_dest_and_replaces_error(tmp_path):
+    s = Store(tmp_path / "db.sqlite")
+    s.set_session("pi2", "b", "landed", dest="/d/b")
+    s.set_session("pi2", "b", "failed", error="boom")
+    got = s.get_session("pi2", "b")
+    assert got["state"] == "failed" and got["dest"] == "/d/b" and got["error"] == "boom"
+    s.set_session("pi2", "b", "landed")
+    got = s.get_session("pi2", "b")
+    assert got["dest"] == "/d/b" and got["error"] == ""
+
+
+def test_interrupted_trials_are_failed_too(tmp_path):
+    s = Store(tmp_path / "db.sqlite")
+    for i, state in enumerate(["pulling", "remuxing", "done", "queued"], start=1):
+        s.upsert_trial("pi2", "b", {**T1, "index": i})
+        s.set_trial_state("pi2", "b", i, state)
+    s.set_session("pi2", "b", "pulling")
+    assert s.fail_interrupted_sessions() == 1
+    states = [s.get_trial("pi2", "b", i) for i in range(1, 5)]
+    assert [t["state"] for t in states] == ["failed", "failed", "done", "queued"]
+    assert states[0]["error"] == "hub restarted mid-transfer" and states[2]["error"] == ""

@@ -21,6 +21,7 @@ python-dotenv>=1.0.1
 # Rig monitor hub (src/rigmon)
 fastapi>=0.115
 uvicorn>=0.30
+httpx>=0.27
 
 # CV / DL
 opencv-python>=4.9

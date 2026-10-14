@@ -81,14 +81,20 @@ class Store:
 
     # sessions
     def set_session(self, rig, batch_dir, state, *, dest="", error="") -> None:
-        self._exec("INSERT OR REPLACE INTO sessions (rig, batch_dir, state, dest, error, updated_at)"
-                   " VALUES (?,?,?,?,?,?)", (rig, batch_dir, state, dest, error, self._clock()))
+        self._exec(
+            "INSERT INTO sessions (rig, batch_dir, state, dest, error, updated_at)"
+            " VALUES (?,?,?,?,?,?) ON CONFLICT(rig, batch_dir) DO UPDATE SET"
+            " state=excluded.state, dest=COALESCE(NULLIF(excluded.dest, ''), sessions.dest),"
+            " error=excluded.error, updated_at=excluded.updated_at",
+            (rig, batch_dir, state, dest, error, self._clock()))
 
     def get_session(self, rig, batch_dir) -> dict | None:
         rows = self._all("SELECT * FROM sessions WHERE rig=? AND batch_dir=?", (rig, batch_dir))
         return rows[0] if rows else None
 
     def fail_interrupted_sessions(self) -> int:
+        self._exec("UPDATE trials SET state='failed', error='hub restarted mid-transfer'"
+                   " WHERE state IN ('pulling','remuxing')")
         return self._exec(
             "UPDATE sessions SET state='failed', error='hub restarted during finalize', updated_at=?"
             f" WHERE state IN ({','.join('?' * len(IN_FLIGHT))})", (self._clock(), *IN_FLIGHT))

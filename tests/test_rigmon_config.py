@@ -65,3 +65,10 @@ def test_example_config_loads():
     cfg = load_config(repo / "config" / "example.rigmon.yaml")
     assert {r.ip for r in cfg.rigs} == {"100.121.64.36", "100.93.23.70", "100.97.155.65"}
     assert "0.0.0.0" not in cfg.bind
+
+
+@pytest.mark.parametrize("addr", ["0.0.0.0", "::"])
+def test_bind_all_interfaces_is_refused(tmp_path, addr):
+    text = YAML.replace("100.94.160.60", addr)
+    with pytest.raises(ValueError):
+        load_config(_write(tmp_path, text))
