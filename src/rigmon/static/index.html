@@ -1,1 +1,157 @@
-<!doctype html><title>Rig Monitor</title>
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Rig Monitor</title>
+<link rel="manifest" href="/static/manifest.webmanifest">
+<link rel="icon" href="/static/icon.svg">
+<meta name="theme-color" content="#101418">
+<style>
+  :root {
+    --bg: #f5f6f8; --card: #ffffff; --ink: #14181d; --muted: #5d6773; --line: #dde1e6;
+    --idle: #8a939e; --wait: #3d7fd6; --base: #c98a1b; --stim: #c2410c; --post: #7c4dbd;
+    --gap: #3d7fd6; --done: #23845b; --bad: #c62f2f; --bar: #23845b;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #101418; --card: #182027; --ink: #e8edf2; --muted: #9aa6b2; --line: #2a3540;
+      --idle: #7d8894; --wait: #6aa5f0; --base: #e2b04a; --stim: #f07a3e; --post: #a98ae0;
+      --gap: #6aa5f0; --done: #5cc495; --bad: #f06a6a; --bar: #5cc495;
+    }
+  }
+  * { box-sizing: border-box; margin: 0; }
+  body { background: var(--bg); color: var(--ink); font: 15px/1.4 system-ui, sans-serif; padding: 16px; }
+  h1 { font-size: 18px; margin-bottom: 12px; display: flex; gap: 8px; align-items: center; }
+  #conn { font-size: 12px; color: var(--muted); font-weight: normal; }
+  .cards { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 14px; }
+  .card h2 { font-size: 15px; display: flex; justify-content: space-between; }
+  .chip { display: inline-block; padding: 2px 8px; border-radius: 99px; color: #fff; font-size: 12px; font-weight: 600; }
+  .big { font-size: 34px; font-variant-numeric: tabular-nums; font-weight: 700; margin: 6px 0 2px; }
+  .sub { color: var(--muted); font-size: 13px; }
+  .bar { height: 8px; background: var(--line); border-radius: 99px; margin: 10px 0 6px; overflow: hidden; }
+  .bar > i { display: block; height: 100%; background: var(--bar); width: 0; }
+  .row { display: flex; gap: 8px; margin-top: 10px; flex-wrap: wrap; }
+  button, a.btn { font: inherit; font-size: 13px; padding: 6px 10px; border-radius: 8px; border: 1px solid var(--line);
+                  background: transparent; color: var(--ink); text-decoration: none; cursor: pointer; }
+  .strip { display: flex; gap: 3px; flex-wrap: wrap; margin-top: 8px; }
+  .strip span { width: 12px; height: 12px; border-radius: 3px; background: var(--line); }
+  .strip span.done { background: var(--done); } .strip span.failed { background: var(--bad); }
+  .strip span.busy { background: var(--wait); }
+  h3 { font-size: 14px; margin: 20px 0 8px; }
+  table { width: 100%; border-collapse: collapse; background: var(--card); border-radius: 12px; overflow: hidden; }
+  td { padding: 8px; border-top: 1px solid var(--line); font-size: 13px; }
+  .offline { opacity: .55; }
+  dialog { border: none; border-radius: 12px; padding: 0; background: #000; max-width: 96vw; }
+  dialog video { display: block; max-width: 96vw; max-height: 80vh; }
+  dialog form { position: absolute; top: 6px; right: 6px; }
+  @media (max-width: 520px) { td.hide { display: none; } .big { font-size: 28px; } }
+</style>
+</head>
+<body>
+<h1>Rig Monitor <span id="conn">connecting…</span></h1>
+<div class="cards" id="cards"></div>
+<h3>Recent trials</h3>
+<table><tbody id="trials"></tbody></table>
+<dialog id="player"><form method="dialog"><button>✕</button></form><video id="video" controls autoplay playsinline></video></dialog>
+<script>
+// Phases published by PiCode/phase_status.py
+const PHASE = {
+  IDLE: ["Idle", "--idle"], WAITING: ["Waiting", "--wait"], BASELINE: ["Baseline", "--base"],
+  STIMULUS: ["Stimulus", "--stim"], POST: ["Post", "--post"], GAP: ["Gap", "--gap"],
+  COMPLETE: ["Complete", "--done"],
+};
+let S = null, hubSkew = 0;   // hubSkew = hub clock - browser clock (s)
+
+function fmt(sec) {
+  if (sec == null || !isFinite(sec)) return "--:--";
+  sec = Math.max(0, sec);
+  if (sec < 60) return sec.toFixed(1) + " s";
+  const h = Math.floor(sec / 3600), m = Math.floor(sec % 3600 / 60), s = Math.floor(sec % 60);
+  const mm = String(m).padStart(2, "0") + ":" + String(s).padStart(2, "0");
+  return h ? h + ":" + mm : mm;
+}
+const hhmm = t => t ? new Date(t * 1000).toLocaleTimeString([], {hour: "2-digit", minute: "2-digit"}) : "--:--";
+const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;"}[c]));
+
+// A Pi's "now": browser now → hub clock (server_time) → Pi clock (status.server_time vs fetched_at)
+function piNow(rig) {
+  const st = rig.status;
+  const piOffset = (st && rig.fetched_at) ? st.server_time - rig.fetched_at : 0;
+  return Date.now() / 1000 + hubSkew + piOffset;
+}
+
+function card(name, rig) {
+  const st = rig.status || {}, run = st.run || {};
+  const [phaseName, color] = PHASE[st.phase] || PHASE.IDLE;
+  const now = piNow(rig);
+  const counting = st.phase === "STIMULUS" ? fmt(now - st.started_at) : fmt(st.ends_at - now);
+  const total = run.planned_total_s || 0;
+  const prog = run.state === "complete" ? 1
+             : (run.expected_end_at && total) ? Math.min(1, Math.max(0, 1 - (run.expected_end_at - now) / total)) : 0;
+  const online = rig.reachable && !rig.offline;
+  const trials = run.trials || [];
+  const rows = (S.trials || []).filter(t => t.rig === name && t.batch_dir === run.batch_dir);
+  const stateOf = i => (rows.find(t => t.idx === i) || {}).state || "";
+  let strip = "";
+  for (let i = 1; i <= Math.max(run.trials_total || 0, trials.length); i++) {
+    const s = stateOf(i);
+    strip += `<span class="${s === "done" ? "done" : s === "failed" ? "failed" : (s ? "busy" : "")}" title="trial ${i} ${esc(s)}"></span>`;
+  }
+  return `<div class="card ${online ? "" : "offline"}">
+    <h2><span>${esc(rig.label)}</span><span class="chip" style="background:var(${online ? color : "--idle"})">${online ? phaseName : "offline"}</span></h2>
+    <div class="sub">${esc(st.trial_label || "")} ${esc(st.label || "")} ${esc(st.odor || "")}</div>
+    <div class="big">${online && st.phase !== "COMPLETE" ? counting : (online ? "✓" : "—")}</div>
+    <div class="bar"><i style="width:${(prog * 100).toFixed(1)}%"></i></div>
+    <div class="sub">${run.trials_done || 0}/${run.trials_total || 0} trials · done ≈ ${hhmm(run.expected_end_at)}
+      ${run.state === "failed" ? ` · <b style="color:var(--bad)">FAILED</b> ${esc(run.error)}` : ""}
+      ${online ? "" : ` · last seen ${hhmm(rig.last_seen)}`}</div>
+    <div class="strip">${strip}</div>
+    <div class="row">
+      <a class="btn" href="${esc(rig.live_url)}" target="_blank" rel="noopener">Live</a>
+      <button onclick="mute('${esc(name)}', ${!rig.muted})">${rig.muted ? "🔕 Muted" : "🔔 Mute"}</button>
+      <span class="sub">${esc(run.batch_dir || "")}</span>
+    </div></div>`;
+}
+
+function render() {
+  if (!S) return;
+  document.getElementById("cards").innerHTML =
+    Object.entries(S.rigs).map(([n, r]) => card(n, r)).join("");
+  const label = n => (S.rigs[n] || {}).label || n;
+  document.getElementById("trials").innerHTML = (S.trials || []).slice(0, 60).map(t => `<tr>
+    <td>${hhmm(t.ended_at)}</td><td>${esc(label(t.rig))}</td><td>${esc(t.label || t.phase_tag)}</td>
+    <td class="hide">${esc(t.odor)}</td>
+    <td>${t.state === "done" ? "✔" : t.state === "failed" ? `✖ <span class="sub">${esc(t.error)}</span>` : esc(t.state)}</td>
+    <td>${t.state === "done" && t.mp4 ? `<button onclick="play('${esc(t.rig)}','${esc(t.batch_dir)}','${esc(t.mp4)}')">▶</button>` : ""}</td>
+  </tr>`).join("");
+}
+
+function play(rig, batch, mp4) {
+  document.getElementById("video").src = `/media/${encodeURIComponent(rig)}/${encodeURIComponent(batch)}/${encodeURIComponent(mp4)}`;
+  document.getElementById("player").showModal();
+}
+document.getElementById("player").addEventListener("close", () => document.getElementById("video").pause());
+
+async function mute(rig, muted) {
+  await fetch(`/api/mute/${encodeURIComponent(rig)}`, {method: "POST",
+    headers: {"Content-Type": "application/json"}, body: JSON.stringify({muted})});
+}
+
+function connect() {
+  const es = new EventSource("/api/stream");
+  const conn = document.getElementById("conn");
+  es.onmessage = e => {
+    S = JSON.parse(e.data);
+    hubSkew = S.server_time - Date.now() / 1000;
+    conn.textContent = "live";
+    render();
+  };
+  es.onerror = () => { conn.textContent = "reconnecting…"; };
+}
+connect();
+setInterval(render, 100);  // countdowns tick between pushes
+</script>
+</body>
+</html>
