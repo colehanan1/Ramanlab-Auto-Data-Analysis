@@ -10,6 +10,7 @@ import httpx
 import numpy as np
 
 SOI, EOI = b"\xff\xd8", b"\xff\xd9"
+MAX_BUFFER = 8 * 1024 * 1024   # a pending JPEG larger than this is garbage: drop it
 
 
 def iter_jpegs(chunks: Iterable[bytes]) -> Iterator[bytes]:
@@ -23,7 +24,7 @@ def iter_jpegs(chunks: Iterable[bytes]) -> Iterator[bytes]:
                 break
             e = buf.find(EOI, s + 2)
             if e < 0:
-                buf = buf[s:]
+                buf = buf[s:] if len(buf) - s <= MAX_BUFFER else b""
                 break
             yield buf[s:e + 2]
             buf = buf[e + 2:]
@@ -53,15 +54,30 @@ def sample_preview(url: str, seconds: float, fps: float, *, stop: Callable[[], b
         with httpx.Client(timeout=httpx.Timeout(timeout)) as client:
             with client.stream("GET", url) as resp:
                 resp.raise_for_status()
-                for jpg in iter_jpegs(resp.iter_bytes()):
+                for jpg in iter_jpegs(_watched(resp.iter_bytes(), clock, end, stop)):
                     now = clock()
-                    if now >= end:
-                        return frames, True
-                    if stop():
-                        return frames, False
                     if now >= next_t:
                         frames.append(jpg)
-                        next_t += 1.0 / fps
-    except httpx.HTTPError:
+                        next_t = now + 1.0 / fps
+        # the stream ended (or was cut off by the deadline/stop below)
+    except _Done as d:
+        return frames, d.completed and bool(frames)
+    except (httpx.HTTPError, httpx.InvalidURL, OSError):
         pass
     return frames, False
+
+
+class _Done(Exception):
+    def __init__(self, completed: bool):
+        self.completed = completed
+
+
+def _watched(chunks, clock, end, stop):
+    """Pass chunks through, but check the deadline and ``stop`` on every one so a
+    stream that trickles bytes without completing a JPEG still ends on time."""
+    for chunk in chunks:
+        if clock() >= end:
+            raise _Done(True)
+        if stop():
+            raise _Done(False)
+        yield chunk

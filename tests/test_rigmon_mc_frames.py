@@ -71,3 +71,66 @@ def test_sampler_returns_empty_on_silent_stream():
     finally:
         rig.stop()
     assert frames == [] and not complete
+
+
+def test_sampler_gives_up_on_a_stream_that_never_completes_a_jpeg():
+    import threading
+    import time
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    class H(BaseHTTPRequestHandler):
+        def log_message(self, *a):
+            pass
+
+        def do_GET(self):
+            self.send_response(200)
+            self.send_header("Content-Type", "multipart/x-mixed-replace; boundary=frame")
+            self.end_headers()
+            try:
+                self.wfile.write(b"\xff\xd8")
+                for _ in range(200):
+                    self.wfile.write(b"x")
+                    self.wfile.flush()
+                    time.sleep(0.1)
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), H)
+    srv.daemon_threads = True
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        t0 = time.monotonic()
+        frames, complete = sample_preview(f"http://127.0.0.1:{srv.server_address[1]}/preview", 1.5, 2.0,
+                                          timeout=2.0)
+        elapsed = time.monotonic() - t0
+    finally:
+        srv.shutdown()
+    assert (frames, complete) == ([], False)
+    assert elapsed < 1.5 + 3
+
+
+def test_iter_jpegs_buffer_is_capped_for_an_endless_unterminated_jpeg():
+    import tracemalloc
+
+    from rigmon.mountcheck import frames as fr
+
+    assert fr.MAX_BUFFER == 8 * 1024 * 1024
+
+    def chunks():
+        yield b"\xff\xd8"
+        for _ in range(60):                      # 60 MB with no EOI
+            yield b"\x00" * 1_000_000
+        yield jpeg(val=50)                       # the stream recovers afterwards
+
+    tracemalloc.start()
+    try:
+        out = list(fr.iter_jpegs(chunks()))
+        peak = tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+    assert len(out) == 1
+    assert peak < fr.MAX_BUFFER * 3          # an uncapped buffer would reach ~60 MB
+
+
+def test_sampler_catches_invalid_url():
+    assert sample_preview("http://[bad/preview", 1.0, 2.0) == ([], False)
