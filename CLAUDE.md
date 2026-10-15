@@ -16,7 +16,7 @@ apply on nearly every task.
 | `src/fbpipe/steps/` | pipeline stages: `yolo_infer`, `reject_bad_proboscis`, `distance_stats`, `distance_normalize`, `compose_videos_rms`, … |
 | `src/fbpipe/analysis/` | table/trace readers (`traces.read_wide_table`), stats |
 | `src/fbpipe/utils/` | `rig_gates.py`, `rig_anchor.py`, `trial_metadata.py`, `light_stimulus.py` |
-| `src/rigmon/` | rig monitor hub: polls Pis, dashboard :8765, pop-ups, per-trial pull+remux into Data/rigmon_staging, finalize into flys_New for `--push-mode hub` |
+| `src/rigmon/` | rig monitor hub: polls Pis, dashboard :8765, pop-ups, per-trial pull+remux into Data/rigmon_staging, finalize into flys_New for `--push-mode hub`; mount check (src/rigmon/mountcheck, shared analyser src/fbpipe/utils/mount_qc.py) samples /preview 30 min into the wait → Data/rigmon_qc/<rig>/<batch>/ |
 | `scripts/pipeline/run_workflows.py` | the pipeline driver — every step is orchestrated here |
 | `scripts/analysis/` | figure scripts; **many are hand-run, not wired into the pipeline** |
 | `config/` | gitignored except `example.*` |
