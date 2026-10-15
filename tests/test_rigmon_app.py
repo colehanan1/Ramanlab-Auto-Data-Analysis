@@ -147,3 +147,17 @@ def test_mount_check_disabled_is_distinct_409(ctx):
     assert hub.state()["mount_check_enabled"] is False
     hub.mountcheck = object()
     assert hub.state()["mount_check_enabled"] is True
+
+
+def test_trace_route(ctx):
+    hub, store, *_, client, tmp_path = ctx
+    from dataclasses import replace
+    hub.cfg = replace(hub.cfg, qc_root=tmp_path / "qc")
+    d = tmp_path / "qc" / "flybehavior2" / "b" / "traces"
+    d.mkdir(parents=True)
+    (d / "t1.png").write_bytes(b"png")
+    (d / "t1.csv").write_text("x")
+    assert client.get("/traces/flybehavior2/b/t1.png").content == b"png"
+    assert client.get("/traces/flybehavior2/b/t1.csv").status_code == 404
+    assert client.get("/traces/flybehavior2/..%2F..%2Fetc/x.png").status_code == 404
+    assert client.get("/traces/nope/b/t1.png").status_code == 404

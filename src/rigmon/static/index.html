@@ -65,6 +65,7 @@
 <h3>Recent trials</h3>
 <table><tbody id="trials"></tbody></table>
 <dialog id="player"><form method="dialog"><button>✕</button></form><video id="video" controls autoplay playsinline></video></dialog>
+<dialog id="tracebox"><form method="dialog"><button>✕</button></form><img id="traceimg" alt="trial trace" style="display:block;max-width:96vw;max-height:85vh;background:#fff"></dialog>
 <script>
 // Phases published by PiCode/phase_status.py
 const PHASE = {
@@ -232,7 +233,9 @@ function render() {
     <td>${hhmm(t.ended_at)}</td><td>${esc(label(t.rig))}</td><td>${esc(t.label || t.phase_tag)}</td>
     <td class="hide">${esc(t.odor)}</td>
     <td>${t.state === "done" ? "✔" : t.state === "failed" ? `✖ <span class="sub">${esc(t.error)}</span>` : esc(t.state)}</td>
-    <td>${t.state === "done" && t.mp4 ? `<button data-play data-rig="${esc(t.rig)}" data-batch="${esc(t.batch_dir)}" data-mp4="${esc(t.mp4)}">▶</button>` : ""}</td>
+    <td>${t.state === "done" && t.mp4 ? `<button data-play data-rig="${esc(t.rig)}" data-batch="${esc(t.batch_dir)}" data-mp4="${esc(t.mp4)}">▶</button>` : ""}
+        ${t.trace ? `<button data-trace data-rig="${esc(t.rig)}" data-batch="${esc(t.batch_dir)}" data-name="${esc(t.trace)}.png">trace</button>`
+                  : (t.trace_error ? `<span class="sub" title="${esc(t.trace_error)}">trace failed</span>` : "")}</td>
   </tr>`).join("");
   } catch (err) { console.error("render", err); }
 }
@@ -256,7 +259,7 @@ document.addEventListener("toggle", e => {
 }, true);
 
 document.addEventListener("click", e => {
-  const b = e.target.closest("button[data-play],button[data-mute],button[data-mount],img[data-zoom]");
+  const b = e.target.closest("button[data-play],button[data-trace],button[data-mute],button[data-mount],img[data-zoom]");
   if (!b) return;
   const d = b.dataset;
   if (d.mount !== undefined) {
@@ -264,6 +267,12 @@ document.addEventListener("click", e => {
     fetch(`/api/mountcheck/${encodeURIComponent(d.mount)}`, {method: "POST"})
       .then(r => r.ok ? null : r.json().then(j => { b.textContent = j.detail || "Could not start"; }))
       .catch(() => { b.disabled = false; b.textContent = "Could not start"; });
+    return;
+  }
+  if (d.trace !== undefined) {
+    document.getElementById("traceimg").src =
+      `/traces/${encodeURIComponent(d.rig)}/${encodeURIComponent(d.batch)}/${encodeURIComponent(d.name)}`;
+    document.getElementById("tracebox").showModal();
     return;
   }
   if (d.zoom !== undefined) { window.open(b.src, "_blank"); return; }

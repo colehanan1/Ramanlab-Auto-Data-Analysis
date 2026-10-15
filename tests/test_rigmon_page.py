@@ -90,3 +90,9 @@ def test_page_shows_mount_check_unavailable_and_uses_jpg_name():
     assert "jpg_name" in PAGE and "jpg_path" not in PAGE
     assert "Could not start" in PAGE and ".catch(" in PAGE
     assert "[data-card] > .card { height: 100%; }" in PAGE
+
+
+def test_page_has_trace_button_and_dialog():
+    for needle in ("data-trace", "/traces/", "tracebox", "trace failed"):
+        assert needle in PAGE
+    assert "onclick=" not in PAGE
