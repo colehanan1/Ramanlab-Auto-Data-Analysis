@@ -78,6 +78,14 @@ class Notifier:
         self._popup(title, body, "critical")
         self._ntfy(title, body)
 
+    def mount_check(self, label: str, state: str, messages: list) -> None:
+        """Setup problems are alarms: always shown, never muted."""
+        title = (f"{label} mount check: {len(messages)} issue(s)" if state == "issues"
+                 else f"{label} mount check failed")
+        body = "\n".join(messages[:6]) or state
+        self._popup(title, body, "critical")
+        self._ntfy(title, body)
+
     def _popup(self, title, body, urgency) -> None:
         def go():
             rc, out = self.runner(notify_send_argv(title, body, urgency), 10.0, None)
