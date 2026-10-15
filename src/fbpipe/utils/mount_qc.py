@@ -6,8 +6,8 @@ a set of frames from one rig. Output: per-fly-slot stats and plain-language
 flags. No I/O, no GPU.
 
 Slots are numbered top to bottom (fly 1 = top). A proboscis is paired with an
-eye using the production gate shape: the full ``gate_px`` left, right and down
-of the eye, but only ``gate_px / up_divisor`` upward.
+eye using the production gate shape: the production quarter-ellipse (``anisotropic_semi_axes``): semi-axis
+``gate_px`` left, right and down, ``gate_px / up_divisor`` upward.
 """
 
 from __future__ import annotations
@@ -17,6 +17,8 @@ from dataclasses import asdict, dataclass
 from typing import Optional, Sequence
 
 import numpy as np
+
+from .distance_sanity import anisotropic_semi_axes
 
 EYE, PROBOSCIS = "eye", "proboscis"
 SIDES = ("top", "bottom", "left", "right")
@@ -104,9 +106,8 @@ class MountReport:
 
 def in_gate(eye: Detection, prob: Detection, gate_px: float, up_divisor: float) -> bool:
     dx, dy = prob.x - eye.x, prob.y - eye.y
-    if math.hypot(dx, dy) > gate_px:
-        return False
-    return dy >= 0 or -dy <= gate_px / up_divisor
+    a, b = anisotropic_semi_axes(dx, dy, gate_px, up_divisor)
+    return (dx / float(a)) ** 2 + (dy / float(b)) ** 2 <= 1.0
 
 
 def find_slots(frames: Sequence[Sequence[Detection]], th: Thresholds) -> list[float]:
@@ -202,7 +203,8 @@ def analyze(frames, width: int, height: int, *, gate_px: float, up_divisor: floa
     for k in range(len(centers)):
         es, ps = eyes_by[k], pairs_by[k]
         ex, ey = float(np.median([e.x for e in es])), float(np.median([e.y for e in es]))
-        wob = 1.4826 * float(np.median([math.hypot(e.x - ex, e.y - ey) for e in es]))
+        # median of a 2-D Gaussian's radial distance is 1.1774 sigma (Rayleigh) -> per-axis sigma
+        wob = float(np.median([math.hypot(e.x - ex, e.y - ey) for e in es])) / 1.1774
         em = {s: _robust_min([_margins(e, width, height)[s] for e in es]) for s in SIDES}
         if ps:
             pm = {s: _robust_min([_margins(p, width, height)[s] for _, p in ps]) for s in SIDES}

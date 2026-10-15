@@ -152,3 +152,45 @@ def test_region_sharpness_prefers_texture():
 
 def test_report_to_dict_is_json_serialisable():
     json.dumps(analyze([good_frame()], 1080, 1080, gate_px=160.0).to_dict())
+
+
+def test_gate_corner_is_rejected_like_production_ellipse():
+    e = eye(700, 500)
+    g = 160.0
+    # inside the circle (hypot ~0.92g) and inside the up limit, but outside the ellipse
+    assert not in_gate(e, prob(700 + 0.9 * g, 500 - 0.2 * g), g, 4.0)
+    assert in_gate(e, prob(700 + 0.9 * g, 500 + 0.2 * g), g, 4.0)   # below the eye: circle-ish, in
+
+
+def test_analyze_proboscis_50px_above_eye_is_not_paired():
+    frame = []
+    for y in (150, 450, 750, 1050):          # >gate apart: no neighbour can pair
+        frame += [eye(700, y), prob(700, y - 50)]
+    rep = analyze([frame] * 3, 1080, 1080, gate_px=160.0, up_divisor=4.0)
+    assert all(s.proboscis_frac == 0 for s in rep.slots)
+
+
+def _jitter_frames(sigma, n=400, seed=7):
+    rng = np.random.default_rng(seed)
+    frames = []
+    for _ in range(n):
+        f = []
+        for y in (150, 400, 650, 850):
+            dx, dy = rng.normal(0, sigma, 2)
+            f += [eye(700 + dx, y + dy), prob(700 + dx, y + 90 + dy)]
+        frames.append(f)
+    return frames
+
+
+def test_wobble_uses_rayleigh_median_so_sigma_14_passes_and_16_flags():
+    ok = analyze(_jitter_frames(14.0), 1080, 1080, gate_px=160.0)
+    assert not [f for f in ok.flags if f.code == "wobble"]
+    bad = analyze(_jitter_frames(16.0), 1080, 1080, gate_px=160.0)
+    assert {f.slot for f in bad.flags if f.code == "wobble"} == {1, 2, 3, 4}
+
+
+def test_extent_quarter_turn_swaps_width_and_height():
+    import math
+    d = Detection("eye", 100, 100, 40, 20, math.pi / 2)
+    x0, y0, x1, y1 = d.extent()
+    assert (round(x1 - x0), round(y1 - y0)) == (20, 40)
