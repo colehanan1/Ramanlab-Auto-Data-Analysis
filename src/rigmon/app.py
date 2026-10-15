@@ -10,13 +10,26 @@ from pathlib import Path
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, model_validator
 
 STATIC = Path(__file__).parent / "static"
 
 
 class MuteBody(BaseModel):
     muted: bool
+
+
+class WaitBody(BaseModel):
+    action: str
+    seconds: int | None = None
+
+    @model_validator(mode="after")
+    def _check(self):
+        if self.action not in ("add", "pause", "resume"):
+            raise ValueError("action must be add, pause or resume")
+        if self.action == "add" and self.seconds not in (300, 900):
+            raise ValueError("seconds must be 300 or 900")
+        return self
 
 
 class CompleteBody(BaseModel):
@@ -76,6 +89,14 @@ def create_app(hub, start_polling: bool = True) -> FastAPI:
         rig_or_404(rig)
         hub.store.set_muted(rig, body.muted)
         return {"rig": rig, "muted": body.muted}
+
+    @app.post("/api/rig/{rig}/wait")
+    def wait_control(rig: str, body: WaitBody):
+        rig_or_404(rig)
+        code, payload = hub.wait_control(rig, body.action, body.seconds)
+        if code != 200:
+            raise HTTPException(code, payload.get("error", "failed"))
+        return payload
 
     @app.post("/api/sessions/{host}/{batch_dir}/complete", status_code=202)
     def complete(host: str, batch_dir: str, body: CompleteBody, request: Request):

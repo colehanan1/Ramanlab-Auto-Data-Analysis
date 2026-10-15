@@ -120,3 +120,12 @@ def test_traces_overrides_and_bad_cleanup_time(tmp_path):
     assert cfg.traces.frame_stride == 3 and cfg.cleanup_time == "01:30"
     with pytest.raises(ValueError):
         load_config(_write(tmp_path, YAML + "cleanup_time: '25:00'\n"))
+
+
+def test_control_key_and_pause_reminder_load(tmp_path):
+    text = YAML.replace("ip: 100.93.23.70, port: 8010}", "ip: 100.93.23.70, port: 8010, control_key: k1}") \
+        + "pause_reminder_s: 120\n"
+    cfg = load_config(_write(tmp_path, text))
+    assert cfg.rig("flybehavior2").control_key == "k1" and cfg.pause_reminder_s == 120
+    assert cfg.rig("behaviorlocust").control_key == "" and "k1" not in repr(cfg)
+    assert load_config(_write(tmp_path, YAML)).pause_reminder_s == 300.0

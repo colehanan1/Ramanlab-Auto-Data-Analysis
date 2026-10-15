@@ -46,6 +46,15 @@ def _public_mc(row: dict | None) -> dict | None:
     return out
 
 
+def _httpx_post(url, json, headers, timeout):
+    r = httpx.post(url, json=json, headers=headers, timeout=timeout)
+    try:
+        payload = r.json()
+    except ValueError:
+        payload = {"error": r.text[:200]}
+    return r.status_code, payload if isinstance(payload, dict) else {"error": "bad reply"}
+
+
 RECORDING_PHASES = {"BASELINE", "STIMULUS", "POST"}
 
 
@@ -60,6 +69,7 @@ class Hub:
         self.latest: dict[str, dict | None] = {r.name: None for r in cfg.rigs}
         self.reachable: dict[str, bool] = {r.name: False for r in cfg.rigs}
         self.fetched_at: dict[str, float | None] = {r.name: None for r in cfg.rigs}
+        self._pause_sent: dict[str, tuple[float, int]] = {}
         self._cleanup_day = None
         self._cleanup_spawn = lambda f: threading.Thread(target=f, daemon=True, name="rigmon-cleanup").start()
 
@@ -88,7 +98,62 @@ class Hub:
                 self._maybe_mount_check(rig, snap)
             except Exception:
                 log.exception("mount-check trigger for %s failed", rig_name)
+        if snap is not None:
+            try:
+                self._maybe_pause_reminder(rig, snap, now)
+            except Exception:
+                log.exception("pause reminder for %s failed", rig_name)
         return events
+
+    def wait_control(self, rig_name, action, seconds=None, post=None):
+        rig = self.cfg.rig(rig_name)
+        if not rig.control_key:
+            return 409, {"error": "controls not configured for this rig"}
+        body = {"action": action} | ({"seconds": seconds} if action == "add" else {})
+        url = f"http://{rig.host}:{rig.port}/control/wait"
+        try:
+            code, payload = (post or _httpx_post)(url, json=body,
+                                                  headers={"X-Rig-Key": rig.control_key}, timeout=5.0)
+        except httpx.HTTPError:
+            return 502, {"error": "rig unreachable"}
+        if code == 200:
+            try:
+                self._notify_wait(rig, action, seconds, payload)
+            except Exception:
+                log.exception("wait notification failed")
+        return code, payload
+
+    def _notify_wait(self, rig, action, seconds, payload):
+        from .notify import _hhmm
+        if action == "pause":
+            mins = int(self.cfg.pause_reminder_s // 60)
+            self.notifier.alert(f"{rig.label} wait paused", f"Reminders every {mins} min until resumed")
+            return
+        ends = payload.get("ends_at")
+        snap = self.latest.get(rig.name) or {}
+        wait = (snap.get("run") or {}).get("wait") or {}
+        old_ends = wait.get("ends_at") or snap.get("ends_at")
+        old_end = (snap.get("run") or {}).get("expected_end_at")
+        body = f"Training 1 at {_hhmm(ends)}" if ends else "Training 1 time unknown"
+        if ends and old_ends and old_end:
+            body += f", finish ~{_hhmm(old_end + (ends - old_ends))}"
+        title = f"{rig.label} +{int(seconds) // 60} min" if action == "add" else f"{rig.label} wait resumed"
+        self.notifier.alert(title, body)
+
+    def _maybe_pause_reminder(self, rig, snap, now):
+        wait = ((snap or {}).get("run") or {}).get("wait") or {}
+        if not wait.get("paused") or wait.get("paused_since") is None:
+            self._pause_sent.pop(rig.name, None)
+            return
+        since = float(wait["paused_since"])
+        k = int((now - since) // self.cfg.pause_reminder_s)
+        prev_since, prev_k = self._pause_sent.get(rig.name, (None, 0))
+        if prev_since != since:
+            prev_k = 0
+        if k >= 1 and k > prev_k:
+            self._pause_sent[rig.name] = (since, k)
+            mins = int((now - since) // 60)
+            self.notifier.alert(f"{rig.label} still paused", f"Startup wait paused for {mins} min")
 
     def is_recording(self, rig_name: str) -> bool:
         snap = self.latest.get(rig_name) or {}
@@ -184,6 +249,7 @@ class Hub:
                 "last_seen": tr.last_seen, "fetched_at": self.fetched_at[r.name],
                 "status": _public(self.latest[r.name]), "muted": mutes.get(r.name, False),
                 "mount_check": _public_mc(self.store.latest_mount_check(r.name)),
+                "control": bool(r.control_key),
             }
         return {"server_time": self.clock(), "rigs": rigs,
                 "mount_check_enabled": self.mountcheck is not None,

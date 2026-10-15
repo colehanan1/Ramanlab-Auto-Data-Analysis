@@ -21,6 +21,7 @@ class RigConfig:
     ip: str                # tailnet IP; "local" = test rig on this machine
     port: int = 8008
     ssh_user: str = "ramanlab"
+    control_key: str = field(default="", repr=False)
 
     @property
     def host(self) -> str:
@@ -83,6 +84,7 @@ class HubConfig:
     traces: TracesConfig = field(default_factory=TracesConfig)
     transfer_bwlimit_kbps: int = 40000
     cleanup_time: str = "00:05"
+    pause_reminder_s: float = 300.0
 
     def rig(self, name: str) -> RigConfig:
         for r in self.rigs:
