@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import subprocess
 import sys
@@ -23,6 +24,7 @@ def run_video_worker(model, video, out_json, *, timeout: float, stride: int = 2,
         "--model", str(model), "--video", str(video), "--out", str(out_json),
         "--stride", str(stride), "--conf", str(conf)]
     env = {**os.environ, "PYTHONPATH": os.pathsep.join(p for p in (str(SRC), os.environ.get("PYTHONPATH", "")) if p)}
+    Path(out_json).unlink(missing_ok=True)  # a stale file must never be returned
     try:
         p = subprocess.run(argv, capture_output=True, text=True, timeout=timeout, env=env,
                            preexec_fn=lambda: os.nice(10))
@@ -47,13 +49,19 @@ def main(argv=None) -> None:
     if not Path(a.model).exists():
         sys.exit(f"model not found: {a.model}")
     import cv2
-    from ultralytics import YOLO
 
     cap = cv2.VideoCapture(a.video)
     if not cap.isOpened():
         sys.exit(f"cannot open video: {a.video}")
     fps = float(cap.get(cv2.CAP_PROP_FPS) or 0.0)
     w, h = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)), int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    expected = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+    if not (fps > 0 and math.isfinite(fps)):
+        sys.exit(f"video reports no fps: {a.video}")
+    if w <= 0 or h <= 0:
+        sys.exit(f"video reports no frame size: {a.video}")
+    from ultralytics import YOLO
+
     model = YOLO(a.model, task="obb")
     frames, i = [], 0
     while True:
@@ -66,7 +74,9 @@ def main(argv=None) -> None:
                 r.names, r.obb.cls.tolist(), r.obb.xywhr.tolist(), r.obb.conf.tolist())})
         i += 1
     cap.release()
-    Path(a.out).write_text(json.dumps({"fps": fps, "frame_count": i, "width": w, "height": h,
+    if i == 0:
+        sys.exit(f"video decoded no frames: {a.video}")
+    Path(a.out).write_text(json.dumps({"fps": fps, "frame_count": i, "expected_frames": expected, "width": w, "height": h,
                                        "frames": frames}))
 
 
