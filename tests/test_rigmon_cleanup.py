@@ -67,3 +67,49 @@ def test_cleanup_unknown_batch_uses_mtime(tmp_path):
     os.utime(d, (YESTERDAY, YESTERDAY))
     run_cleanup(cfg, store, {}, NOW)
     assert not d.exists()
+
+
+def test_staging_kept_when_any_session_row_exists(tmp_path):
+    cfg, store = setup(tmp_path)
+    for b, st in (("old", "failed"), ("cur", "aborted"), ("new", "landed")):
+        store.set_session("pi2", b, st)
+    store.set_session("pi2", "pend", "pending")
+    (cfg.staging_root / "pi2" / "pend").mkdir()
+    os.utime(cfg.staging_root / "pi2" / "pend", (YESTERDAY, YESTERDAY))
+    (cfg.staging_root / "pi2" / "nosess").mkdir()
+    os.utime(cfg.staging_root / "pi2" / "nosess", (YESTERDAY, YESTERDAY))
+    run_cleanup(cfg, store, {}, NOW)
+    for b in ("old", "cur", "new", "pend", "landing"):
+        assert (cfg.staging_root / "pi2" / b).exists(), b
+    assert not (cfg.staging_root / "pi2" / "nosess").exists()
+
+
+def test_skip_rigs_keeps_everything(tmp_path):
+    cfg, store = setup(tmp_path)
+    run_cleanup(cfg, store, {}, NOW, skip_rigs=frozenset({"pi2"}))
+    assert (cfg.qc_root / "pi2" / "old" / "traces").exists()
+    assert (cfg.staging_root / "pi2" / "old").exists()
+
+
+def test_mtime_fallback_uses_newest_inside(tmp_path):
+    cfg, store = setup(tmp_path)
+    d = cfg.staging_root / "pi2" / "orphan"
+    d.mkdir()
+    f = d / "recent.mp4"
+    f.write_bytes(b"x")
+    os.utime(f, (TODAY, TODAY))
+    os.utime(d, (YESTERDAY, YESTERDAY))
+    run_cleanup(cfg, store, {}, NOW)
+    assert d.exists()
+
+
+def test_zero_ended_at_treated_as_unknown(tmp_path):
+    cfg, store = setup(tmp_path)
+    store.upsert_trial("pi2", "zero", {"index": 1, "video": "t.h264"})
+    d = cfg.staging_root / "pi2" / "zero"
+    d.mkdir()
+    (d / "f").write_bytes(b"x")
+    os.utime(d / "f", (TODAY, TODAY))
+    os.utime(d, (TODAY, TODAY))
+    run_cleanup(cfg, store, {}, NOW)
+    assert d.exists()

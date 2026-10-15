@@ -200,9 +200,11 @@ class Hub:
         self._cleanup_day = d.date()
         current = {r: ((s or {}).get("run") or {}).get("batch_dir") for r, s in self.latest.items()}
 
+        skip = frozenset(r for r, s in self.latest.items() if s is None)  # never heard from
+
         def go():
             try:
-                run_cleanup(self.cfg, self.store, current, now)
+                run_cleanup(self.cfg, self.store, current, now, skip_rigs=skip)
             except Exception:
                 log.exception("daily cleanup failed")
         self._cleanup_spawn(go)

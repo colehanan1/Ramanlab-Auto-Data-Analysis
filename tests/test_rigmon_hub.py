@@ -347,11 +347,11 @@ def test_daily_cleanup_runs_once_after_cleanup_time(tmp_path, monkeypatch):
     import rigmon.hub as hubmod
     hub, *_ = _hub(tmp_path)
     calls = []
-    monkeypatch.setattr(hubmod, "run_cleanup", lambda cfg, store, cur, now: calls.append(now) or {})
+    monkeypatch.setattr(hubmod, "run_cleanup", lambda cfg, store, cur, now, **kw: calls.append((now, kw)) or {})
     hub._cleanup_spawn = lambda f: f()
     before = datetime(2026, 10, 15, 0, 1).timestamp()
     after = datetime(2026, 10, 15, 0, 6).timestamp()
     hub._maybe_cleanup(before)
     hub._maybe_cleanup(after)
     hub._maybe_cleanup(after + 3600)
-    assert calls == [after]
+    assert calls == [(after, {"skip_rigs": frozenset({"pi2"})})]

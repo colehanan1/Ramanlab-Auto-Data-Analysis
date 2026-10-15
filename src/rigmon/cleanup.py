@@ -5,12 +5,12 @@ never anything outside qc_root / staging_root, never through a symlink."""
 from __future__ import annotations
 
 import logging
+import os
 import shutil
 from datetime import datetime
 from pathlib import Path
 
 log = logging.getLogger("rigmon.cleanup")
-LANDING = ("pending", "pulling", "remuxing")
 
 
 def _midnight(now: float) -> float:
@@ -37,18 +37,33 @@ def _batches(root: Path | None):
             yield rig_dir.name, batch_dir.name, batch_dir
 
 
+def _newest_mtime(path: Path) -> float:
+    """Newest mtime of the dir and anything inside it (lstat, symlinks not followed)."""
+    newest = path.lstat().st_mtime
+    for dirpath, dirnames, filenames in os.walk(path, followlinks=False):
+        for name in dirnames + filenames:
+            try:
+                newest = max(newest, os.lstat(os.path.join(dirpath, name)).st_mtime)
+            except OSError:
+                pass
+    return newest
+
+
 def _old(store, rig, batch, path: Path, cutoff: float) -> bool:
     ended = store.batch_last_ended(rig, batch)
-    if ended is None:
-        ended = path.stat().st_mtime
+    if ended is None or ended <= 0:
+        ended = _newest_mtime(path)
     return ended < cutoff
 
 
-def run_cleanup(cfg, store, current_batches: dict, now: float) -> dict:
+def run_cleanup(cfg, store, current_batches: dict, now: float,
+                skip_rigs=frozenset()) -> dict:
     cutoff = _midnight(now)
     done = {"traces": [], "staging": []}
     for rig, batch, bdir in list(_batches(cfg.qc_root)):
         traces = bdir / "traces"
+        if rig in skip_rigs:
+            continue
         try:
             if (current_batches.get(rig) == batch or traces.is_symlink() or not traces.is_dir()
                     or not _inside(traces, cfg.qc_root) or not _old(store, rig, batch, bdir, cutoff)):
@@ -59,9 +74,11 @@ def run_cleanup(cfg, store, current_batches: dict, now: float) -> dict:
         except OSError:
             log.exception("cleanup of %s failed", traces)
     for rig, batch, bdir in list(_batches(cfg.staging_root)):
+        if rig in skip_rigs:
+            continue
         try:
-            session = store.get_session(rig, batch) or {}
-            if (current_batches.get(rig) == batch or session.get("state") in LANDING
+            # any session row (failed/aborted/landed/pending...) keeps staging for inspection
+            if (current_batches.get(rig) == batch or store.get_session(rig, batch) is not None
                     or not _inside(bdir, cfg.staging_root) or not _old(store, rig, batch, bdir, cutoff)):
                 continue
             shutil.rmtree(bdir)
