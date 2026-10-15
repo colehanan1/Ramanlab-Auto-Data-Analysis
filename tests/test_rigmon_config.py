@@ -72,3 +72,34 @@ def test_bind_all_interfaces_is_refused(tmp_path, addr):
     text = YAML.replace("100.94.160.60", f'"{addr}"')
     with pytest.raises(ValueError):
         load_config(_write(tmp_path, text))
+
+
+from rigmon.config import MountCheckConfig
+
+
+def test_mount_check_defaults_and_qc_root(tmp_path):
+    cfg = load_config(_write(tmp_path, YAML))
+    assert cfg.qc_root == tmp_path / "Data" / "rigmon_qc"
+    assert cfg.pipeline_config.name == "config_new.yaml"
+    mc = cfg.mount_check
+    assert (mc.enabled, mc.delay_after_wait_start_s, mc.sample_s, mc.sample_fps) == (True, 1800.0, 300.0, 2.0)
+    assert (mc.min_remaining_s, mc.worker_timeout_s) == (1200.0, 600.0)
+    th = mc.th()
+    assert (th.expected_flies, th.edge_margin_px, th.bottom_room_px) == (4, 40.0, 120.0)
+
+
+def test_mount_check_overrides(tmp_path):
+    text = YAML + "mount_check:\n  sample_s: 120\n  thresholds: {bottom_room_px: 150}\nqc_root: {root}/qc\n"
+    cfg = load_config(_write(tmp_path, text))
+    assert cfg.mount_check.sample_s == 120 and cfg.mount_check.th().bottom_room_px == 150
+    assert cfg.qc_root == tmp_path / "qc"
+
+
+def test_unknown_threshold_key_is_an_error(tmp_path):
+    with pytest.raises((TypeError, ValueError)):
+        load_config(_write(tmp_path, YAML + "mount_check:\n  thresholds: {bogus: 1}\n"))
+
+
+def test_qc_root_inside_flys_new_is_refused(tmp_path):
+    with pytest.raises(ValueError):
+        load_config(_write(tmp_path, YAML + "qc_root: {root}/Data/flys_New/qc\n"))

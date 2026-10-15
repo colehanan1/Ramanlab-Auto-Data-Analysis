@@ -10,3 +10,12 @@ bind: [127.0.0.1, 100.94.160.60]   # localhost + tailnet only, never 0.0.0.0
 port: 8765
 transfer_enabled: true
 ntfy_topic: null                    # private topic for hub alerts — set in rigmon.yaml only
+pipeline_config: /home/ramanlab/Documents/cole/VSCode/Ramanlab-Auto-Data-Analysis/config/config_new.yaml
+# qc_root defaults to <data_root>/rigmon_qc
+mount_check:
+  enabled: true
+  delay_after_wait_start_s: 1800   # 30 min into the enclosure wait
+  sample_s: 300                    # watch 5 min of preview
+  sample_fps: 2
+  min_remaining_s: 1200            # skip if < 20 min before the first trial
+  thresholds: {}                   # e.g. {bottom_room_px: 150, edge_margin_px: 40}

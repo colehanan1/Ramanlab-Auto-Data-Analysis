@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 import yaml
+
+from fbpipe.utils.mount_qc import Thresholds
 
 REPO = Path(__file__).resolve().parents[2]
 DEFAULT_REMUX_ARGS = ("--crf", "22", "--preset", "slow", "--faststart",
@@ -34,6 +36,22 @@ class RigConfig:
 
 
 @dataclass(frozen=True)
+class MountCheckConfig:
+    enabled: bool = True
+    delay_after_wait_start_s: float = 1800.0
+    sample_s: float = 300.0
+    sample_fps: float = 2.0
+    min_remaining_s: float = 1200.0
+    worker_timeout_s: float = 600.0
+    conf: float = 0.25
+    sharpness_half_px: int = 48
+    thresholds: dict = field(default_factory=dict)  # overrides for mount_qc.Thresholds
+
+    def th(self) -> Thresholds:
+        return Thresholds(**self.thresholds)
+
+
+@dataclass(frozen=True)
 class HubConfig:
     rigs: tuple[RigConfig, ...]
     staging_root: Path
@@ -51,6 +69,9 @@ class HubConfig:
     remux_args: tuple[str, ...] = DEFAULT_REMUX_ARGS
     remux_path_env: str = "/usr/bin:/bin"
     ntfy_topic: str | None = None
+    pipeline_config: Path = REPO / "config" / "config_new.yaml"
+    qc_root: Path | None = None
+    mount_check: MountCheckConfig = field(default_factory=MountCheckConfig)
 
     def rig(self, name: str) -> RigConfig:
         for r in self.rigs:
@@ -59,7 +80,8 @@ class HubConfig:
         raise KeyError(name)
 
 
-_PATH_KEYS = ("staging_root", "data_root", "db_path", "ssh_key", "remux_script")
+_PATH_KEYS = ("staging_root", "data_root", "db_path", "ssh_key", "remux_script",
+              "pipeline_config", "qc_root")
 _TUPLE_KEYS = ("bind", "remux_args")
 
 
@@ -78,10 +100,18 @@ def load_config(path) -> HubConfig:
     for key in _TUPLE_KEYS:
         if key in raw:
             kw[key] = tuple(str(v) for v in raw.pop(key))
+    if "mount_check" in raw:
+        mc = MountCheckConfig(**(raw.pop("mount_check") or {}))
+        mc.th()  # unknown threshold keys fail here, at load time
+        kw["mount_check"] = mc
     kw.update(raw)  # scalars; an unknown key is a TypeError from the dataclass
     cfg = HubConfig(rigs=rigs, **kw)
+    if cfg.qc_root is None:
+        cfg = replace(cfg, qc_root=cfg.data_root / "rigmon_qc")
     if {"0.0.0.0", "::"} & set(cfg.bind):
         raise ValueError("bind must list specific addresses, never all interfaces")
     if "flys_New" in cfg.staging_root.parts:
         raise ValueError("staging_root must be outside flys_New (the nightly pipeline reads it)")
+    if "flys_New" in cfg.qc_root.parts:
+        raise ValueError("qc_root must be outside flys_New (the nightly pipeline reads it)")
     return cfg
