@@ -5,11 +5,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import threading
 import time
 from pathlib import Path
 
 import httpx
 
+from .cleanup import run_cleanup
 from .events import RigTracker
 
 log = logging.getLogger("rigmon.hub")
@@ -58,6 +60,8 @@ class Hub:
         self.latest: dict[str, dict | None] = {r.name: None for r in cfg.rigs}
         self.reachable: dict[str, bool] = {r.name: False for r in cfg.rigs}
         self.fetched_at: dict[str, float | None] = {r.name: None for r in cfg.rigs}
+        self._cleanup_day = None
+        self._cleanup_spawn = lambda f: threading.Thread(target=f, daemon=True, name="rigmon-cleanup").start()
 
     def ingest(self, rig_name: str, snap: dict | None, now: float | None = None):
         now = self.clock() if now is None else now
@@ -187,6 +191,22 @@ class Hub:
                 "trials": self.store.trials(limit=150),
                 "events": self.store.recent_events(limit=50)}
 
+    def _maybe_cleanup(self, now: float) -> None:
+        from datetime import datetime
+        d = datetime.fromtimestamp(now)
+        hh, mm = (int(x) for x in self.cfg.cleanup_time.split(":"))
+        if (d.hour, d.minute) < (hh, mm) or self._cleanup_day == d.date():
+            return
+        self._cleanup_day = d.date()
+        current = {r: ((s or {}).get("run") or {}).get("batch_dir") for r, s in self.latest.items()}
+
+        def go():
+            try:
+                run_cleanup(self.cfg, self.store, current, now)
+            except Exception:
+                log.exception("daily cleanup failed")
+        self._cleanup_spawn(go)
+
     async def poll_once(self, client: httpx.AsyncClient) -> None:
         snaps = await asyncio.gather(*(fetch_status(client, r) for r in self.cfg.rigs))
         now = self.clock()
@@ -195,6 +215,10 @@ class Hub:
                 self.ingest(r.name, snap, now)
             except Exception:
                 log.exception("ingest %s failed", r.name)
+        try:
+            self._maybe_cleanup(now)
+        except Exception:
+            log.exception("cleanup trigger failed")
 
     async def poll_forever(self) -> None:
         async with httpx.AsyncClient() as client:

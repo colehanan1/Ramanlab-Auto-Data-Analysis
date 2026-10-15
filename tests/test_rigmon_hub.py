@@ -340,3 +340,18 @@ def test_replay_requeues_missing_trace_only(tmp_path):
     workers.drain()
     assert hub.traces.runs == [("flybehavior2", "b", 1)]
     assert not [c for c in transfer.calls if c[0] == "process"]
+
+
+def test_daily_cleanup_runs_once_after_cleanup_time(tmp_path, monkeypatch):
+    from datetime import datetime
+    import rigmon.hub as hubmod
+    hub, *_ = _hub(tmp_path)
+    calls = []
+    monkeypatch.setattr(hubmod, "run_cleanup", lambda cfg, store, cur, now: calls.append(now) or {})
+    hub._cleanup_spawn = lambda f: f()
+    before = datetime(2026, 10, 15, 0, 1).timestamp()
+    after = datetime(2026, 10, 15, 0, 6).timestamp()
+    hub._maybe_cleanup(before)
+    hub._maybe_cleanup(after)
+    hub._maybe_cleanup(after + 3600)
+    assert calls == [after]
