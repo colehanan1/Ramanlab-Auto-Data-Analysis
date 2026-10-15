@@ -371,3 +371,19 @@ def test_handoff_abort_reply_landed_wins_over_timeout():
 def test_handoff_abort_reply_aborted_keeps_prior_result():
     hub = FakeHub(["pending"] * 20, abort_reply={"state": "aborted"})
     assert _handoff(hub, timeout_s=30.0) == "timeout"
+
+
+def test_shift_moves_eta_and_reminders(tmp_path):
+    clock = Clock(1000.0)
+    phase, tr = _tracker(tmp_path, clock)
+    training_at, end = tr.begin(600)
+    tr.shift(900)
+    assert tr.expected_end_at == end + 900
+    run = phase.snapshot()["run"]
+    assert run["expected_end_at"] == end + 900
+
+
+def test_shift_never_raises_before_begin(tmp_path):
+    phase, tr = _tracker(tmp_path, Clock())
+    tr.shift(300)  # expected_end_at is None: no-op, no exception
+    assert tr.expected_end_at is None
