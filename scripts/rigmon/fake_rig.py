@@ -17,8 +17,13 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 
 class FakeRig:
-    def __init__(self, status: dict, port: int = 0):
+    def __init__(self, status: dict, port: int = 0, preview_jpegs=None,
+                 preview_interval: float = 0.05, preview_silent: bool = False):
         self.status = status
+        self.preview_jpegs = preview_jpegs
+        self.preview_interval = preview_interval
+        self.preview_silent = preview_silent
+        self._stopped = False
         rig = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -26,6 +31,23 @@ class FakeRig:
                 pass
 
             def do_GET(self):
+                if self.path == "/preview" and (rig.preview_jpegs or rig.preview_silent):
+                    self.send_response(200)
+                    self.send_header("Content-Type", "multipart/x-mixed-replace; boundary=frame")
+                    self.end_headers()
+                    try:
+                        if rig.preview_silent:
+                            time.sleep(30)   # connected, never sends a frame
+                            return
+                        i = 0
+                        while not rig._stopped:
+                            jpg = rig.preview_jpegs[i % len(rig.preview_jpegs)]
+                            self.wfile.write(b"--frame\r\nContent-Type: image/jpeg\r\n\r\n" + jpg + b"\r\n")
+                            i += 1
+                            time.sleep(rig.preview_interval)
+                    except (BrokenPipeError, ConnectionResetError):
+                        pass
+                    return
                 if self.path != "/status.json":
                     self.send_response(404)
                     self.end_headers()
@@ -38,10 +60,12 @@ class FakeRig:
                 self.wfile.write(body)
 
         self._httpd = ThreadingHTTPServer(("127.0.0.1", port), Handler)
+        self._httpd.daemon_threads = True
         self.port = self._httpd.server_address[1]
         threading.Thread(target=self._httpd.serve_forever, daemon=True).start()
 
     def stop(self) -> None:
+        self._stopped = True
         self._httpd.shutdown()
         self._httpd.server_close()
 
