@@ -354,4 +354,4 @@ def test_daily_cleanup_runs_once_after_cleanup_time(tmp_path, monkeypatch):
     hub._maybe_cleanup(before)
     hub._maybe_cleanup(after)
     hub._maybe_cleanup(after + 3600)
-    assert calls == [(after, {"skip_rigs": frozenset({"pi2"})})]
+    assert calls == [(after, {"skip_rigs": frozenset({PI2.name})})]
