@@ -156,6 +156,11 @@ def _pair(frame, eyes: dict, gate_px: float, up_divisor: float) -> dict:
     return out
 
 
+# Public names for callers outside this module (rigmon trial traces).
+assign_eyes = _assign_eyes
+pair_proboscis = _pair
+
+
 def _margins(d: Detection, width: int, height: int) -> dict:
     x0, y0, x1, y1 = d.extent()
     return {"top": max(0.0, y0), "bottom": max(0.0, height - y1),

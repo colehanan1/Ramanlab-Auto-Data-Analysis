@@ -22,7 +22,7 @@ from .snapshot import render
 
 log = logging.getLogger("rigmon.mountcheck")
 MIN_FRAMES = 20          # fewer analysed frames than this is a partial sample, never a green tick
-_GPU = threading.Semaphore(1)   # one detector process at a time, hub-wide
+from ..gpu import GPU as _GPU  # one detector process at a time, hub-wide
 
 
 def _thread(fn) -> None:
