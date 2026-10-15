@@ -6,6 +6,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from pathlib import Path
 
 import httpx
 
@@ -34,12 +35,22 @@ def _public(snap: dict | None) -> dict | None:
     return out
 
 
+def _public_mc(row: dict | None) -> dict | None:
+    """Dashboard copy of a mount-check row: filenames only, no hub filesystem paths."""
+    if not isinstance(row, dict):
+        return row
+    out = {k: v for k, v in row.items() if k not in ("json_path", "jpg_path")}
+    out["jpg_name"] = Path(row["jpg_path"]).name if row.get("jpg_path") else ""
+    return out
+
+
 class Hub:
-    def __init__(self, cfg, store, notifier, transfer, finalizer, workers, clock=time.time, mountcheck=None):
+    def __init__(self, cfg, store, notifier, transfer, finalizer, workers, clock=time.time, mountcheck=None,
+                 mount_check_error=None):
         self.cfg, self.store, self.notifier = cfg, store, notifier
         self.transfer, self.finalizer, self.workers, self.clock = transfer, finalizer, workers, clock
         self.trackers = {r.name: RigTracker(r.name, cfg.offline_after_s) for r in cfg.rigs}
-        self.mountcheck = mountcheck
+        self.mountcheck, self.mount_check_error = mountcheck, mount_check_error
         self.latest: dict[str, dict | None] = {r.name: None for r in cfg.rigs}
         self.reachable: dict[str, bool] = {r.name: False for r in cfg.rigs}
         self.fetched_at: dict[str, float | None] = {r.name: None for r in cfg.rigs}
@@ -150,10 +161,11 @@ class Hub:
                 "reachable": self.reachable[r.name], "offline": tr.offline,
                 "last_seen": tr.last_seen, "fetched_at": self.fetched_at[r.name],
                 "status": _public(self.latest[r.name]), "muted": mutes.get(r.name, False),
-                "mount_check": self.store.latest_mount_check(r.name),
+                "mount_check": _public_mc(self.store.latest_mount_check(r.name)),
             }
         return {"server_time": self.clock(), "rigs": rigs,
                 "mount_check_enabled": self.mountcheck is not None,
+                "mount_check_error": self.mount_check_error,
                 "trials": self.store.trials(limit=150),
                 "events": self.store.recent_events(limit=50)}
 

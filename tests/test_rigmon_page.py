@@ -76,3 +76,17 @@ def test_mount_ui_survives_rerender():
     run = mb.index('m.state === "running"')
     assert "Mount check running" in mb[run:run + 200] and "return" in mb[run:run + 200]
     assert mb.index("const button") > run
+
+
+def test_page_partial_sample_is_amber_not_a_tick():
+    assert "partial sample" in PAGE and "re-run" in PAGE
+    mb = PAGE[PAGE.index("function mountBlock"):]
+    assert mb.index('m.state === "incomplete"') < mb.index("Mount ✓")
+    assert ".mc .partial" in PAGE and "var(--base)" in PAGE[PAGE.index(".mc .partial"):][:120]
+
+
+def test_page_shows_mount_check_unavailable_and_uses_jpg_name():
+    assert "Mount check unavailable" in PAGE and "S.mount_check_error" in PAGE
+    assert "jpg_name" in PAGE and "jpg_path" not in PAGE
+    assert "Could not start" in PAGE and ".catch(" in PAGE
+    assert "[data-card] > .card { height: 100%; }" in PAGE

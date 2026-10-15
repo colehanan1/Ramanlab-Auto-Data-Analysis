@@ -254,13 +254,37 @@ def test_state_includes_latest_mount_check(tmp_path):
 
 
 def test_build_mountcheck_disabled_and_missing_config(tmp_path):
-    import pytest
     from dataclasses import replace
     from rigmon.__main__ import build_mountcheck
     from rigmon.config import MountCheckConfig
     hub, store, notifier, *_ = _hub(tmp_path)
     off = replace(hub.cfg, mount_check=MountCheckConfig(enabled=False), pipeline_config=tmp_path / "nope.yaml")
-    assert build_mountcheck(off, store, notifier) is None
+    assert build_mountcheck(off, store, notifier) == (None, None)
     on = replace(hub.cfg, mount_check=MountCheckConfig(enabled=True), pipeline_config=tmp_path / "nope.yaml")
-    with pytest.raises(SystemExit, match="pipeline_config not found"):
-        build_mountcheck(on, store, notifier)
+    runner, reason = build_mountcheck(on, store, notifier)
+    assert runner is None and "pipeline_config not found" in reason
+
+
+def test_build_mountcheck_degrades_when_settings_fail_to_load(tmp_path):
+    from dataclasses import replace
+    from rigmon.__main__ import build_mountcheck
+    from rigmon.config import MountCheckConfig
+    hub, store, notifier, *_ = _hub(tmp_path)
+    bad = tmp_path / "bad.yaml"
+    bad.write_text("not: [valid")
+    on = replace(hub.cfg, mount_check=MountCheckConfig(enabled=True), pipeline_config=bad)
+    runner, reason = build_mountcheck(on, store, notifier)
+    assert runner is None and reason
+
+
+def test_state_reports_mount_check_error_and_hides_paths(tmp_path):
+    hub, store = _mc_hub(tmp_path)
+    hub.mountcheck = None
+    hub.mount_check_error = "pipeline_config not found: /x"
+    cid = store.add_mount_check("flybehavior2", "b2", "manual")
+    store.update_mount_check(cid, state="ok", json_path="/secret/dir/a.json", jpg_path="/secret/dir/a.jpg")
+    st = hub.state()
+    assert st["mount_check_error"] == "pipeline_config not found: /x" and st["mount_check_enabled"] is False
+    mc = st["rigs"]["flybehavior2"]["mount_check"]
+    assert "json_path" not in mc and "jpg_path" not in mc and mc["jpg_name"] == "a.jpg"
+    assert store.latest_mount_check("flybehavior2")["jpg_path"] == "/secret/dir/a.jpg"   # store copy untouched

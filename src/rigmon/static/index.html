@@ -52,6 +52,8 @@
   .mc summary { cursor: pointer; }
   .mc .bad { color: var(--bad); font-weight: 600; }
   .mc .good { color: var(--done); font-weight: 600; }
+  .mc .partial { color: var(--base); font-weight: 600; }
+  [data-card] > .card { height: 100%; }
   .mc table { margin-top: 6px; font-size: 12px; }
   .mc td { padding: 3px 6px; }
   .mc img { max-width: 100%; border-radius: 8px; margin-top: 6px; cursor: zoom-in; }
@@ -128,13 +130,15 @@ function mountBlock(name, rig) {
   const m = rig.mount_check;
   if (m && m.state === "running")
     return `<div class="mc">Mount check running… (started ${hhmm(m.at)})</div>`;
-  const button = rig.reachable && S.mount_check_enabled ? `<button data-mount="${esc(name)}">Check mount now</button>` : "";
-  if (!m) return `<div class="mc">Mount check: not run yet ${button}</div>`;
+  const button = rig.reachable && S.mount_check_enabled && !S.mount_check_error ? `<button data-mount="${esc(name)}">Check mount now</button>` : "";
+  const unavailable = S.mount_check_error ? `<div class="mc">Mount check unavailable: ${esc(S.mount_check_error)}</div>` : "";
+  if (!m) return unavailable || `<div class="mc">Mount check: not run yet ${button}</div>`;
   const when = hhmm(m.at), flags = m.flags || [];
   let head;
   if (m.state === "error") head = `<span class="bad">Mount check failed</span> · ${esc(m.error)}`;
   else if (flags.length) head = `<span class="bad">Mount: ${flags.length} issue${flags.length > 1 ? "s" : ""}</span> · ${when}`;
-  else head = `<span class="good">Mount ✓</span> · ${when}${m.state === "incomplete" ? " (short sample)" : ""}`;
+  else if (m.state === "incomplete") head = `<span class="partial">Mount: partial sample (${Number(m.frames) || 0} frames) — re-run</span> · ${when}`;
+  else head = `<span class="good">Mount ✓</span> · ${when}`;
   const rows = (m.slots || []).map(s => {
     const em = s.eye_margins || {}, pm = s.proboscis_margins || {};
     return `<tr><td>fly ${Number(s.slot) || 0}</td><td>eye ${Math.round((Number(s.eye_frac) || 0) * 100)}%</td>
@@ -142,10 +146,10 @@ function mountBlock(name, rig) {
       <td>↓ ${Math.round(Number(pm.bottom ?? em.bottom) || 0)} px</td>
       <td>${s.eye_proboscis_px == null ? "—" : Math.round(Number(s.eye_proboscis_px)) + " px"}</td></tr>`;
   }).join("");
-  const img = m.jpg_path ? `<img data-zoom src="/qc/${encodeURIComponent(name)}/${encodeURIComponent(m.batch_dir)}/${encodeURIComponent(String(m.jpg_path).split("/").pop())}" alt="mount snapshot">` : "";
+  const img = m.jpg_name ? `<img data-zoom src="/qc/${encodeURIComponent(name)}/${encodeURIComponent(m.batch_dir)}/${encodeURIComponent(String(m.jpg_name))}" alt="mount snapshot">` : "";
   const list = flags.map(f => `<li>${esc(f.message)}</li>`).join("");
   return `<details class="mc" data-rig="${esc(name)}" ${flags.length || mcOpen.has(name) ? "open" : ""}><summary>${head}</summary>
-    ${list ? `<ul>${list}</ul>` : ""}${rows ? `<table>${rows}</table>` : ""}${img}<div class="row">${button}</div></details>`;
+    ${list ? `<ul>${list}</ul>` : ""}${rows ? `<table>${rows}</table>` : ""}${img}${unavailable}<div class="row">${button}</div></details>`;
 }
 
 function card(name, rig) {
@@ -258,7 +262,8 @@ document.addEventListener("click", e => {
   if (d.mount !== undefined) {
     b.disabled = true; b.textContent = "Starting…";
     fetch(`/api/mountcheck/${encodeURIComponent(d.mount)}`, {method: "POST"})
-      .then(r => r.ok ? null : r.json().then(j => { b.textContent = j.detail || "Could not start"; }));
+      .then(r => r.ok ? null : r.json().then(j => { b.textContent = j.detail || "Could not start"; }))
+      .catch(() => { b.disabled = false; b.textContent = "Could not start"; });
     return;
   }
   if (d.zoom !== undefined) { window.open(b.src, "_blank"); return; }

@@ -77,3 +77,19 @@ def test_describe_tolerates_bad_expected_end():
     t, b, _ = describe(Event("session_started", "pi2", 1.0,
                              {"batch_dir": "b", "expected_end_at": "garbage"}), "Pi 2")
     assert t == "Pi 2 · session started" and b == "b"
+
+
+def test_mount_check_issues_is_critical_ntfy_and_ignores_mute(tmp_path):
+    n, store, popups, pushes = _notifier(tmp_path)
+    store.set_muted("pi2", True)
+    n.mount_check("Pi 2", "issues", [f"m{i}" for i in range(9)])
+    assert popups[0][4] == "critical" and popups[0][5] == "Pi 2 mount check: 9 issue(s)"
+    assert popups[0][6].split("\n") == [f"m{i}" for i in range(6)]      # truncated to 6
+    assert pushes == [("t", "Pi 2 mount check: 9 issue(s)")]
+
+
+def test_mount_check_error_title(tmp_path):
+    n, _, popups, pushes = _notifier(tmp_path)
+    n.mount_check("Pi 2", "error", ["detector timed out"])
+    assert popups[0][5] == "Pi 2 mount check failed" and popups[0][6] == "detector timed out"
+    assert popups[0][4] == "critical" and pushes == [("t", "Pi 2 mount check failed")]
