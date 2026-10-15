@@ -18,16 +18,20 @@ from rigmon.mountcheck.detect import WorkerError, dets_from_arrays
 SRC = Path(__file__).resolve().parents[2]
 
 
+def _default_argv() -> list:
+    # niced via the nice(1) binary: preexec_fn is not thread-safe
+    return ["nice", "-n", "10", sys.executable, "-m", "rigmon.traces.detect_video"]
+
+
 def run_video_worker(model, video, out_json, *, timeout: float, stride: int = 2, conf: float = 0.25,
                      python_argv: list | None = None) -> dict:
-    argv = (python_argv or [sys.executable, "-m", "rigmon.traces.detect_video"]) + [
+    argv = (python_argv or _default_argv()) + [
         "--model", str(model), "--video", str(video), "--out", str(out_json),
         "--stride", str(stride), "--conf", str(conf)]
     env = {**os.environ, "PYTHONPATH": os.pathsep.join(p for p in (str(SRC), os.environ.get("PYTHONPATH", "")) if p)}
     Path(out_json).unlink(missing_ok=True)  # a stale file must never be returned
     try:
-        p = subprocess.run(argv, capture_output=True, text=True, timeout=timeout, env=env,
-                           preexec_fn=lambda: os.nice(10))
+        p = subprocess.run(argv, capture_output=True, text=True, timeout=timeout, env=env)
     except subprocess.TimeoutExpired:
         raise WorkerError(f"trace detector timed out after {timeout:.0f} s")
     if p.returncode != 0:

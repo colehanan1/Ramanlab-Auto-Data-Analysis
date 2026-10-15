@@ -26,14 +26,18 @@ def dets_from_arrays(names: dict, cls: list, xywhr: list, conf: list) -> list[di
             for c, b, cf in zip(cls, xywhr, conf)]
 
 
+def _default_argv() -> list:
+    # niced via the nice(1) binary: preexec_fn is not thread-safe
+    return ["nice", "-n", "10", sys.executable, "-m", "rigmon.mountcheck.detect"]
+
+
 def run_worker(model, frames_dir, out_json, *, timeout: float, conf: float = 0.25,
                python_argv: list | None = None) -> dict:
-    argv = (python_argv or [sys.executable, "-m", "rigmon.mountcheck.detect"]) + [
+    argv = (python_argv or _default_argv()) + [
         "--model", str(model), "--frames", str(frames_dir), "--out", str(out_json), "--conf", str(conf)]
     env = {**os.environ, "PYTHONPATH": os.pathsep.join(p for p in (str(SRC), os.environ.get("PYTHONPATH", "")) if p)}
     try:
-        p = subprocess.run(argv, capture_output=True, text=True, timeout=timeout, env=env,
-                           preexec_fn=lambda: os.nice(10))
+        p = subprocess.run(argv, capture_output=True, text=True, timeout=timeout, env=env)
     except subprocess.TimeoutExpired:
         raise WorkerError(f"detector timed out after {timeout:.0f} s")
     if p.returncode != 0:

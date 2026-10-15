@@ -75,3 +75,18 @@ def test_stale_output_is_never_returned(tmp_path):
     with pytest.raises(WorkerError):
         run_video_worker(tmp_path / "m", tmp_path / "v.mp4", out, timeout=60,
                          python_argv=[sys.executable, str(noop)])
+
+
+def test_default_argv_is_niced_and_no_preexec(tmp_path, monkeypatch):
+    import subprocess
+    assert detect_video._default_argv()[:4] == ["nice", "-n", "10", sys.executable]
+    assert detect_video._default_argv()[-2:] == ["-m", "rigmon.traces.detect_video"]
+    seen = {}
+
+    def fake_run(argv, **kw):
+        seen["argv"], seen["kw"] = argv, kw
+        (tmp_path / "o.json").write_text("{}")
+        return subprocess.CompletedProcess(argv, 0, "", "")
+    monkeypatch.setattr(detect_video.subprocess, "run", fake_run)
+    run_video_worker("m", tmp_path / "v.mp4", tmp_path / "o.json", timeout=5)
+    assert seen["argv"][:3] == ["nice", "-n", "10"] and "preexec_fn" not in seen["kw"]

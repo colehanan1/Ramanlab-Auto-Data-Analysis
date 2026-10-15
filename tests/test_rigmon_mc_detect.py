@@ -52,17 +52,19 @@ def test_worker_runs_at_low_priority(tmp_path, monkeypatch):
     seen = {}
 
     def fake_run(argv, **kw):
-        seen.update(kw)
+        seen["argv"], seen["kw"] = argv, kw
         (tmp_path / "o.json").write_text("{}")
         return subprocess.CompletedProcess(argv, 0, "", "")
     monkeypatch.setattr(detect.subprocess, "run", fake_run)
     run_worker("m", tmp_path, tmp_path / "o.json", timeout=5)
-    assert callable(seen["preexec_fn"])
-    import os
-    got = []
-    monkeypatch.setattr(os, "nice", lambda n: got.append(n))
-    seen["preexec_fn"]()
-    assert got == [10]
+    assert seen["argv"][:3] == ["nice", "-n", "10"]
+    assert "preexec_fn" not in seen["kw"]
+
+
+def test_default_argv_is_niced():
+    from rigmon.mountcheck import detect
+    assert detect._default_argv()[:4] == ["nice", "-n", "10", sys.executable]
+    assert detect._default_argv()[-2:] == ["-m", "rigmon.mountcheck.detect"]
 
 
 def test_worker_skips_an_undecodable_frame(tmp_path, monkeypatch):
