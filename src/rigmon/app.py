@@ -139,7 +139,7 @@ def create_app(hub, start_polling: bool = True) -> FastAPI:
         path = hub.cfg.qc_root / rig / batch_dir / name
         if not path.is_file():
             raise HTTPException(404)
-        return FileResponse(path, media_type="image/jpeg")
+        return FileResponse(path, media_type="image/jpeg", headers={"Cache-Control": "no-cache"})
 
     @app.get("/traces/{rig}/{batch_dir}/{name}")
     def trace_image(rig: str, batch_dir: str, name: str):
@@ -149,7 +149,7 @@ def create_app(hub, start_polling: bool = True) -> FastAPI:
         path = hub.cfg.qc_root / rig / batch_dir / "traces" / name
         if not path.is_file():
             raise HTTPException(404)
-        return FileResponse(path, media_type="image/png")
+        return FileResponse(path, media_type="image/png", headers={"Cache-Control": "no-cache"})
 
     app.mount("/static", StaticFiles(directory=STATIC), name="static")
     return app

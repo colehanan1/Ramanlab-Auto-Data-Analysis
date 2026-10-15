@@ -157,7 +157,8 @@ def test_trace_route(ctx):
     d.mkdir(parents=True)
     (d / "t1.png").write_bytes(b"png")
     (d / "t1.csv").write_text("x")
-    assert client.get("/traces/flybehavior2/b/t1.png").content == b"png"
+    r = client.get("/traces/flybehavior2/b/t1.png")
+    assert r.content == b"png" and r.headers["cache-control"] == "no-cache"
     assert client.get("/traces/flybehavior2/b/t1.csv").status_code == 404
     assert client.get("/traces/flybehavior2/..%2F..%2Fetc/x.png").status_code == 404
     assert client.get("/traces/nope/b/t1.png").status_code == 404

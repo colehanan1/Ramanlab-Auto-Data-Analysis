@@ -229,7 +229,7 @@ function render() {
     }
   }
   const label = n => (S.rigs[n] || {}).label || n;
-  document.getElementById("trials").innerHTML = (S.trials || []).slice(0, 60).map(t => `<tr>
+  const trialsHtml = (S.trials || []).slice(0, 60).map(t => `<tr>
     <td>${hhmm(t.ended_at)}</td><td>${esc(label(t.rig))}</td><td>${esc(t.label || t.phase_tag)}</td>
     <td class="hide">${esc(t.odor)}</td>
     <td>${t.state === "done" ? "✔" : t.state === "failed" ? `✖ <span class="sub">${esc(t.error)}</span>` : esc(t.state)}</td>
@@ -237,6 +237,7 @@ function render() {
         ${t.trace ? `<button data-trace data-rig="${esc(t.rig)}" data-batch="${esc(t.batch_dir)}" data-name="${esc(t.trace)}.png">trace</button>`
                   : (t.trace_error ? `<span class="sub" title="${esc(t.trace_error)}">trace failed</span>` : "")}</td>
   </tr>`).join("");
+  if (trialsHtml !== lastTrials) { lastTrials = trialsHtml; document.getElementById("trials").innerHTML = trialsHtml; }
   } catch (err) { console.error("render", err); }
 }
 
@@ -258,6 +259,7 @@ document.addEventListener("toggle", e => {
   if (d.open) mcOpen.add(d.dataset.rig); else mcOpen.delete(d.dataset.rig);
 }, true);
 
+let lastTrials = "";
 document.addEventListener("click", e => {
   const b = e.target.closest("button[data-play],button[data-trace],button[data-mute],button[data-mount],img[data-zoom]");
   if (!b) return;
@@ -284,6 +286,7 @@ function play(rig, batch, mp4) {
   document.getElementById("video").src = `/media/${encodeURIComponent(rig)}/${encodeURIComponent(batch)}/${encodeURIComponent(mp4)}`;
   document.getElementById("player").showModal();
 }
+document.getElementById("tracebox").addEventListener("close", () => document.getElementById("traceimg").removeAttribute("src"));
 document.getElementById("player").addEventListener("close", () => document.getElementById("video").pause());
 
 async function mute(rig, muted) {

@@ -1,6 +1,5 @@
 """Copy (local rig, real rsync, recording gate) → staged mp4 → trace job (fake worker) → PNG + row."""
 
-import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -36,6 +35,7 @@ def test_trial_copy_then_trace(tmp_path):
                     db_path=tmp_path / "db.sqlite", qc_root=tmp_path / "qc")
     store = Store(cfg.db_path)
     recording = iter([True, False] + [False] * 50)
+    sleeps = []
 
     def remux_runner(argv, timeout, env=None, abort=None):
         if argv[0] == "rsync":
@@ -45,13 +45,16 @@ def test_trial_copy_then_trace(tmp_path):
         h264.with_suffix(".mp4").write_bytes(b"mp4" * 100)
         h264.unlink()
         return 0, "ok"
-    transfer = TrialTransfer(cfg, store, runner=remux_runner, sleep=lambda s: None,
+    transfer = TrialTransfer(cfg, store, runner=remux_runner, sleep=sleeps.append,
                              is_recording=lambda n: next(recording))
     trial = {"index": 1, "label": "Testing 1/7", "video": "t1.h264", "frames_csv": "t1.csv",
              "video_bytes": 64, "csv_bytes": (pi / "t1.csv").stat().st_size, "ended_at": 1.0, "closed": True}
     assert transfer.process(LOCAL, "b1", str(pi), trial) == "done"
     stem = TraceRunner(cfg, store, SETTINGS, transfer, worker=worker).run(LOCAL, "b1", trial)
+    assert sleeps == [2.0], "recording gate must wait exactly once (poll_s) before the first pull"
+    assert next(recording) is False
     assert stem == "t1"
     out = cfg.qc_root / "fakepi" / "b1" / "traces"
     assert (out / "t1.png").is_file() and (out / "t1.csv").read_text().count("\n") == 21
     assert store.get_trial("fakepi", "b1", 1)["trace"] == "t1"
+    assert store.get_trial("fakepi", "b1", 1)["trace_error"] == ""

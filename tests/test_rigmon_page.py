@@ -96,3 +96,9 @@ def test_page_has_trace_button_and_dialog():
     for needle in ("data-trace", "/traces/", "tracebox", "trace failed"):
         assert needle in PAGE
     assert "onclick=" not in PAGE
+
+
+def test_page_trial_rows_not_rebuilt_unchanged_and_trace_closes():
+    assert "lastTrials" in PAGE
+    assert 'getElementById("tracebox").addEventListener("close"' in PAGE
+    assert 'removeAttribute("src")' in PAGE
