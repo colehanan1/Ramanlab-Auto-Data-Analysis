@@ -18,18 +18,48 @@ from typing import Callable
 log = logging.getLogger("rigmon.transfer")
 
 
-def subprocess_runner(argv: list[str], timeout: float, env: dict | None = None) -> tuple[int, str]:
+ABORTED_RC = -15
+
+
+def subprocess_runner(argv: list[str], timeout: float, env: dict | None = None,
+                      abort=None) -> tuple[int, str]:
+    if abort is None:
+        try:
+            p = subprocess.run(argv, capture_output=True, text=True, timeout=timeout, env=env)
+            return p.returncode, (p.stdout or "") + (p.stderr or "")
+        except subprocess.TimeoutExpired:
+            return 124, f"timed out after {timeout:.0f}s"
+        except OSError as e:
+            return 127, str(e)
     try:
-        p = subprocess.run(argv, capture_output=True, text=True, timeout=timeout, env=env)
-        return p.returncode, (p.stdout or "") + (p.stderr or "")
-    except subprocess.TimeoutExpired:
-        return 124, f"timed out after {timeout:.0f}s"
+        p = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, env=env)
     except OSError as e:
         return 127, str(e)
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            out, _ = p.communicate(timeout=1.0)
+            return p.returncode, out or ""
+        except subprocess.TimeoutExpired:
+            if abort():
+                p.terminate()
+                try:
+                    p.communicate(timeout=5)
+                except subprocess.TimeoutExpired:
+                    p.kill()
+                    p.communicate()
+                return ABORTED_RC, "aborted: rig started recording"
+            if time.monotonic() > deadline:
+                p.kill()
+                p.communicate()
+                return 124, f"timed out after {timeout:.0f}s"
 
 
-def rsync_pull_argv(rig, ssh_key: Path, remote_path: str, dest_dir: Path) -> list[str]:
+def rsync_pull_argv(rig, ssh_key: Path, remote_path: str, dest_dir: Path,
+                    bwlimit_kbps: int | None = None) -> list[str]:
     argv = ["rsync", "-a", "--partial", "--no-links"]
+    if bwlimit_kbps:
+        argv.append(f"--bwlimit={int(bwlimit_kbps)}")
     if rig.ip == "local":
         src = remote_path
     else:
@@ -54,8 +84,11 @@ def _is_plain(name) -> bool:
 
 class TrialTransfer:
     def __init__(self, cfg, store, runner=subprocess_runner, sleep=time.sleep,
-                 backoff=(5.0, 15.0, 45.0)):
+                 backoff=(5.0, 15.0, 45.0), is_recording=lambda rig_name: False,
+                 max_wait_s=1800.0, poll_s=2.0, clock=time.monotonic):
         self.cfg, self.store, self.runner = cfg, store, runner
+        self.is_recording, self.max_wait_s, self.poll_s = is_recording, max_wait_s, poll_s
+        self.clock = clock
         self.sleep, self.backoff = sleep, tuple(backoff)
 
     def staging_dir(self, rig_name: str, batch_dir: str) -> Path:
@@ -67,9 +100,20 @@ class TrialTransfer:
         dest_dir = (staging / rel_path).parent
         dest_dir.mkdir(parents=True, exist_ok=True)
         remote = f"{str(output_dir).rstrip('/')}/{rel_path}"
-        rc, out = self.runner(rsync_pull_argv(rig, self.cfg.ssh_key, remote, dest_dir), 900.0, None)
-        if rc != 0:
-            raise TransferError(f"rsync {rel_path} failed ({rc}): {out[-300:]}")
+        argv = rsync_pull_argv(rig, self.cfg.ssh_key, remote, dest_dir,
+                               bwlimit_kbps=getattr(self.cfg, "transfer_bwlimit_kbps", None))
+        start = self.clock()
+        while True:
+            while self.is_recording(rig.name):           # never read from a recording rig
+                if self.clock() - start > self.max_wait_s:
+                    raise TransferError(f"rig kept recording for {self.max_wait_s:.0f} s; {rel_path} not copied")
+                self.sleep(self.poll_s)
+            rc, out = self.runner(argv, 900.0, None, abort=lambda: self.is_recording(rig.name))
+            if rc == ABORTED_RC:                          # recording started mid-copy: resume later
+                continue
+            if rc != 0:
+                raise TransferError(f"rsync {rel_path} failed ({rc}): {out[-300:]}")
+            return
 
     def remux(self, h264: Path) -> Path:
         env = {**os.environ, "PATH": self.cfg.remux_path_env}

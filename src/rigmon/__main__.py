@@ -71,6 +71,7 @@ def main(argv=None) -> None:
     mountcheck, mc_error = build_mountcheck(cfg, store, notifier)
     hub = Hub(cfg, store, notifier, transfer, finalizer, TransferWorkers(), mountcheck=mountcheck,
                mount_check_error=mc_error)
+    transfer.is_recording = hub.is_recording   # never read a Pi while it is recording
     server = uvicorn.Server(uvicorn.Config(create_app(hub), log_level="warning"))
     server.run(sockets=[bind_socket(h, cfg.port) for h in cfg.bind])
 

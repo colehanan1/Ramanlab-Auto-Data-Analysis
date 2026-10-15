@@ -288,3 +288,14 @@ def test_state_reports_mount_check_error_and_hides_paths(tmp_path):
     mc = st["rigs"]["flybehavior2"]["mount_check"]
     assert "json_path" not in mc and "jpg_path" not in mc and mc["jpg_name"] == "a.jpg"
     assert store.latest_mount_check("flybehavior2")["jpg_path"] == "/secret/dir/a.jpg"   # store copy untouched
+
+
+def test_is_recording_by_phase(tmp_path):
+    hub, *_ = _hub(tmp_path)
+    for phase, rec in (("BASELINE", True), ("STIMULUS", True), ("POST", True), ("GAP", False),
+                       ("WAITING", False), ("COMPLETE", False)):
+        hub.ingest("flybehavior2", {**snap(), "phase": phase}, 100.0)
+        assert hub.is_recording("flybehavior2") is rec
+    hub.ingest("flybehavior2", {**snap(), "phase": "STIMULUS"}, 150.0)
+    hub.ingest("flybehavior2", None, 200.0)
+    assert hub.is_recording("flybehavior2") is True   # last known recording state is kept when the rig drops off

@@ -23,7 +23,7 @@ class FakeRunner:
         self.pi_dir, self.remux_ok, self.rsync_fail = pi_dir, remux_ok, rsync_fail
         self.calls = []
 
-    def __call__(self, argv, timeout, env=None):
+    def __call__(self, argv, timeout, env=None, abort=None):
         self.calls.append(argv)
         if argv[0] == "rsync":
             if self.rsync_fail:
@@ -179,3 +179,61 @@ def test_staging_dir_rejects_non_plain_names(tmp_path):
     for rig, batch in (("fake", "a/b"), ("fake", ".."), ("../x", "b"), ("", "b")):
         with pytest.raises(ValueError):
             tt.staging_dir(rig, batch)
+
+
+from rigmon.transfer import ABORTED_RC, subprocess_runner
+
+
+def test_rsync_argv_adds_bwlimit_after_the_safe_prefix(tmp_path):
+    argv = rsync_pull_argv(PI, Path("/k"), "/pi/b/t1.h264", tmp_path, bwlimit_kbps=40000)
+    assert argv[:5] == ["rsync", "-a", "--partial", "--no-links", "--bwlimit=40000"]
+    assert not any("delete" in a for a in argv)
+
+
+def test_subprocess_runner_abort_terminates_quickly():
+    import sys, time
+    t0 = time.monotonic()
+    rc, out = subprocess_runner([sys.executable, "-c", "import time; time.sleep(30)"], 60.0, None,
+                                abort=lambda: time.monotonic() - t0 > 0.5)
+    assert rc == ABORTED_RC and "aborted" in out and time.monotonic() - t0 < 5
+
+
+def test_pull_waits_while_recording(tmp_path):
+    cfg, pi_dir = _cfg(tmp_path), tmp_path / "pi" / "b"
+    store, trial = Store(cfg.db_path), _pi_trial(pi_dir)
+    states = iter([True, True, False] + [False] * 50)
+    sleeps = []
+    tt = TrialTransfer(cfg, store, runner=FakeRunner(pi_dir), sleep=sleeps.append,
+                       is_recording=lambda name: next(states), poll_s=2.0)
+    assert tt.process(LOCAL, "b", str(pi_dir), trial) == "done"
+    assert sleeps[:2] == [2.0, 2.0]
+
+
+def test_pull_aborts_when_recording_starts_and_resumes(tmp_path):
+    cfg, pi_dir = _cfg(tmp_path), tmp_path / "pi" / "b"
+    store, trial = Store(cfg.db_path), _pi_trial(pi_dir)
+    inner = FakeRunner(pi_dir)
+    calls = {"n": 0}
+
+    def runner(argv, timeout, env=None, abort=None):
+        if argv[0] == "rsync":
+            calls["n"] += 1
+            if calls["n"] == 1:            # recording starts during the first pull
+                return ABORTED_RC, "aborted: rig started recording"
+        return inner(argv, timeout, env)
+    tt = TrialTransfer(cfg, store, runner=runner, sleep=lambda s: None, is_recording=lambda n: False)
+    assert tt.process(LOCAL, "b", str(pi_dir), trial) == "done"
+    assert calls["n"] == 3   # aborted csv pull, resumed csv pull, video pull
+
+
+def test_pull_gives_up_after_max_wait(tmp_path):
+    cfg, pi_dir = _cfg(tmp_path), tmp_path / "pi" / "b"
+    store, trial = Store(cfg.db_path), _pi_trial(pi_dir)
+    clock = {"t": 0.0}
+
+    def sleep(s):
+        clock["t"] += s
+    tt = TrialTransfer(cfg, store, runner=FakeRunner(pi_dir), sleep=sleep, backoff=(),
+                       is_recording=lambda n: True, max_wait_s=10.0, poll_s=2.0, clock=lambda: clock["t"])
+    assert tt.process(LOCAL, "b", str(pi_dir), trial) == "failed"
+    assert "kept recording" in store.get_trial("fake", "b", 1)["error"]

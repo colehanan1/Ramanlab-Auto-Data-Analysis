@@ -44,6 +44,9 @@ def _public_mc(row: dict | None) -> dict | None:
     return out
 
 
+RECORDING_PHASES = {"BASELINE", "STIMULUS", "POST"}
+
+
 class Hub:
     def __init__(self, cfg, store, notifier, transfer, finalizer, workers, clock=time.time, mountcheck=None,
                  mount_check_error=None):
@@ -81,6 +84,10 @@ class Hub:
             except Exception:
                 log.exception("mount-check trigger for %s failed", rig_name)
         return events
+
+    def is_recording(self, rig_name: str) -> bool:
+        snap = self.latest.get(rig_name) or {}
+        return snap.get("phase") in RECORDING_PHASES
 
     def _already_landed(self, rig_name: str, batch: str) -> bool:
         s = self.store.get_session(rig_name, batch)
