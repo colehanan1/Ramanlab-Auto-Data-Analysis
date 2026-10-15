@@ -48,6 +48,13 @@
   dialog video { display: block; max-width: 96vw; max-height: 80vh; }
   dialog form { position: absolute; top: 6px; right: 6px; }
   @media (max-width: 520px) { td.hide { display: none; } .big { font-size: 28px; } }
+  .mc { margin-top: 10px; border-top: 1px solid var(--line); padding-top: 8px; font-size: 13px; }
+  .mc summary { cursor: pointer; }
+  .mc .bad { color: var(--bad); font-weight: 600; }
+  .mc .good { color: var(--done); font-weight: 600; }
+  .mc table { margin-top: 6px; font-size: 12px; }
+  .mc td { padding: 3px 6px; }
+  .mc img { max-width: 100%; border-radius: 8px; margin-top: 6px; cursor: zoom-in; }
 </style>
 </head>
 <body>
@@ -116,6 +123,29 @@ function progOf(rig) {
     : (run.expected_end_at && total) ? Math.min(1, Math.max(0, 1 - (run.expected_end_at - now) / total)) : 0;
 }
 
+function mountBlock(name, rig) {
+  const m = rig.mount_check;
+  const button = rig.reachable ? `<button data-mount="${esc(name)}">Check mount now</button>` : "";
+  if (!m) return `<div class="mc">Mount check: not run yet ${button}</div>`;
+  const when = hhmm(m.at), flags = m.flags || [];
+  let head;
+  if (m.state === "running") head = `Mount check running… (started ${when})`;
+  else if (m.state === "error") head = `<span class="bad">Mount check failed</span> · ${esc(m.error)}`;
+  else if (flags.length) head = `<span class="bad">Mount: ${flags.length} issue${flags.length > 1 ? "s" : ""}</span> · ${when}`;
+  else head = `<span class="good">Mount ✓</span> · ${when}${m.state === "incomplete" ? " (short sample)" : ""}`;
+  const rows = (m.slots || []).map(s => {
+    const em = s.eye_margins || {}, pm = s.proboscis_margins || {};
+    return `<tr><td>fly ${Number(s.slot) || 0}</td><td>eye ${Math.round((Number(s.eye_frac) || 0) * 100)}%</td>
+      <td>prob ${Math.round((Number(s.proboscis_frac) || 0) * 100)}%</td>
+      <td>↓ ${Math.round(Number(pm.bottom ?? em.bottom) || 0)} px</td>
+      <td>${s.eye_proboscis_px == null ? "—" : Math.round(Number(s.eye_proboscis_px)) + " px"}</td></tr>`;
+  }).join("");
+  const img = m.jpg_path ? `<img data-zoom src="/qc/${encodeURIComponent(name)}/${encodeURIComponent(m.batch_dir)}/${encodeURIComponent(String(m.jpg_path).split("/").pop())}" alt="mount snapshot">` : "";
+  const list = flags.map(f => `<li>${esc(f.message)}</li>`).join("");
+  return `<details class="mc" ${flags.length ? "open" : ""}><summary>${head}</summary>
+    ${list ? `<ul>${list}</ul>` : ""}${rows ? `<table>${rows}</table>` : ""}${img}<div class="row">${button}</div></details>`;
+}
+
 function card(name, rig) {
   const st = rig.status || {}, run = st.run || {};
   const [phaseName, color] = Object.prototype.hasOwnProperty.call(PHASE, st.phase) ? PHASE[st.phase] : PHASE.IDLE;
@@ -132,6 +162,7 @@ function card(name, rig) {
     <h2><span>${esc(rig.label)}</span><span class="chip" style="background:var(${chipColor})">${chipName}</span></h2>
     <div class="big idle-msg" data-count="${esc(name)}">${countText(rig)}</div>
     <div class="sub">${why}</div>
+    ${mountBlock(name, rig)}
     <div class="row">
       <button data-mute="${esc(name)}" data-muted="${rig.muted ? 1 : 0}">${rig.muted ? "🔕 Muted" : "🔔 Mute"}</button>
     </div></div>`;
@@ -153,6 +184,7 @@ function card(name, rig) {
       ${run.state === "failed" ? ` · <b style="color:var(--bad)">FAILED</b> ${esc(run.error)}` : ""}
       </div>
     <div class="strip">${strip}</div>
+    ${mountBlock(name, rig)}
     <div class="row">
       <a class="btn" href="${esc(rig.live_url)}" target="_blank" rel="noopener">Live</a>
       <button data-mute="${esc(name)}" data-muted="${rig.muted ? 1 : 0}">${rig.muted ? "🔕 Muted" : "🔔 Mute"}</button>
@@ -188,9 +220,16 @@ function tick() {
 }
 
 document.addEventListener("click", e => {
-  const b = e.target.closest("button[data-play],button[data-mute]");
+  const b = e.target.closest("button[data-play],button[data-mute],button[data-mount],img[data-zoom]");
   if (!b) return;
   const d = b.dataset;
+  if (d.mount !== undefined) {
+    b.disabled = true; b.textContent = "Starting…";
+    fetch(`/api/mountcheck/${encodeURIComponent(d.mount)}`, {method: "POST"})
+      .then(r => r.ok ? null : r.json().then(j => { b.textContent = j.detail || "Could not start"; }));
+    return;
+  }
+  if (d.zoom !== undefined) { window.open(b.src, "_blank"); return; }
   if ("play" in d) play(d.rig, d.batch, d.mp4);
   else mute(d.mute, d.muted !== "1");
 });

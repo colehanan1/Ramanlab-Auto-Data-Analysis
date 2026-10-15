@@ -56,3 +56,10 @@ def test_page_says_plainly_when_nothing_is_running():
 
 def test_page_reconnects_after_the_stream_closes():
     assert "EventSource.CLOSED" in PAGE and "setTimeout(connect" in PAGE
+
+
+def test_page_has_mount_check_ui():
+    for needle in ("Check mount now", "data-mount=", "/api/mountcheck/", "/qc/", "mount_check",
+                   "Mount ✓", "issue"):
+        assert needle in PAGE
+    assert "onclick=" not in PAGE
