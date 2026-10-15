@@ -82,3 +82,32 @@ def test_trace_job_holds_the_gpu_semaphore(tmp_path):
     runner.gpu = sem
     runner.run(PI2, "b2", TRIAL)
     assert seen["locked"] is True
+
+
+def test_mountcheck_runner_uses_the_shared_gpu_lock():
+    import rigmon.gpu
+    import rigmon.mountcheck.runner as mcr
+    assert mcr._GPU is rigmon.gpu.GPU
+
+
+def test_series_uses_mount_check_thresholds(tmp_path):
+    from dataclasses import replace
+
+    from rigmon.config import MountCheckConfig
+    runner, store, cfg = setup(tmp_path)
+    runner.cfg = replace(cfg, mount_check=MountCheckConfig(thresholds={"expected_flies": 2}))
+    assert runner.run(PI2, "b2", TRIAL) == "t3"
+    out = cfg.qc_root / "Flybehavior2" / "b2" / "traces"
+    header = next(csv.reader((out / "t3.csv").open()))
+    assert header == ["t_s", "odor", "fly1_px", "fly2_px"]
+
+
+def test_no_flies_detected_is_a_trace_error(tmp_path):
+    def worker(*a, **k):
+        return {"fps": 40.0, "frame_count": 20, "frames": [{"i": i, "dets": []} for i in range(0, 20, 2)]}
+    runner, store, cfg = setup(tmp_path, worker)
+    assert runner.run(PI2, "b2", TRIAL) is None
+    row = store.get_trial("Flybehavior2", "b2", 3)
+    assert row["trace"] == "" and "no flies detected" in row["trace_error"]
+    out = cfg.qc_root / "Flybehavior2" / "b2" / "traces"
+    assert not (out / "t3.png").exists() and not (out / "t3.csv").exists()

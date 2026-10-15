@@ -46,7 +46,10 @@ class TraceRunner:
                                       timeout=tc.worker_timeout_s, stride=tc.frame_stride, conf=tc.conf)
             gate = gate_for_host(self.settings, rig.name, self.today())
             up = float(getattr(self.settings.proboscis_filter, "up_divisor", 4.0))
-            series = build_series(res["frames"], float(res.get("fps") or 0.0), gate_px=gate, up_divisor=up)
+            series = build_series(res["frames"], float(res.get("fps") or 0.0), gate_px=gate, up_divisor=up,
+                                  th=self.cfg.mount_check.th())
+            if series.n_slots == 0:
+                raise ValueError("no flies detected")
             segments = odor_segments(staging / frames_csv)
             out = self.cfg.qc_root / rig.name / batch_dir / "traces"
             out.mkdir(parents=True, exist_ok=True)
