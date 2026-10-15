@@ -299,3 +299,44 @@ def test_is_recording_by_phase(tmp_path):
     hub.ingest("flybehavior2", {**snap(), "phase": "STIMULUS"}, 150.0)
     hub.ingest("flybehavior2", None, 200.0)
     assert hub.is_recording("flybehavior2") is True   # last known recording state is kept when the rig drops off
+
+
+class FakeTraces:
+    def __init__(self):
+        self.runs = []
+
+    def run(self, rig, batch_dir, trial):
+        self.runs.append((rig.name, batch_dir, int(trial["index"])))
+        return "x"
+
+
+def test_trace_job_runs_after_a_successful_copy(tmp_path):
+    hub, store, notifier, transfer, finalizer, workers = _hub(tmp_path)
+    hub.traces = FakeTraces()
+    hub.ingest("flybehavior2", snap(), 100.0)
+    workers.drain()
+    assert hub.traces.runs == [("flybehavior2", "b", 1)]
+
+
+def test_no_trace_job_after_a_failed_copy(tmp_path):
+    hub, store, notifier, transfer, finalizer, workers = _hub(tmp_path)
+    hub.traces = FakeTraces()
+    transfer.process = lambda *a: "failed"
+    hub.ingest("flybehavior2", snap(), 100.0)
+    workers.drain()
+    assert hub.traces.runs == []
+
+
+def test_replay_requeues_missing_trace_only(tmp_path):
+    hub, store, notifier, transfer, finalizer, workers = _hub(tmp_path)
+    hub.traces = FakeTraces()
+    store.upsert_trial("flybehavior2", "b", {"index": 1, "video": "t1.h264", "frames_csv": "t1.csv", "ended_at": 1.0})
+    store.set_trial_state("flybehavior2", "b", 1, "done", mp4="t1.mp4")
+    st = tmp_path / "s" / "flybehavior2" / "b"
+    st.mkdir(parents=True)
+    (st / "t1.mp4").write_bytes(b"x")
+    transfer.staging_dir = lambda rig, batch: tmp_path / "s" / rig / batch
+    hub.ingest("flybehavior2", snap(), 100.0)
+    workers.drain()
+    assert hub.traces.runs == [("flybehavior2", "b", 1)]
+    assert not [c for c in transfer.calls if c[0] == "process"]

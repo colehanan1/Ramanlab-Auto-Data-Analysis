@@ -49,7 +49,8 @@ RECORDING_PHASES = {"BASELINE", "STIMULUS", "POST"}
 
 class Hub:
     def __init__(self, cfg, store, notifier, transfer, finalizer, workers, clock=time.time, mountcheck=None,
-                 mount_check_error=None):
+                 mount_check_error=None, traces=None):
+        self.traces = traces
         self.cfg, self.store, self.notifier = cfg, store, notifier
         self.transfer, self.finalizer, self.workers, self.clock = transfer, finalizer, workers, clock
         self.trackers = {r.name: RigTracker(r.name, cfg.offline_after_s) for r in cfg.rigs}
@@ -95,17 +96,27 @@ class Hub:
 
     def _queue_trial(self, rig, d: dict) -> None:
         t, batch = d["trial"], d["batch_dir"]
-        row = self.store.get_trial(rig.name, batch, int(t["index"]))
+        idx = int(t["index"])
+        row = self.store.get_trial(rig.name, batch, idx)
         if row and row.get("state") == "done":
-            return  # replayed after a hub restart; staging was already moved
+            # replayed after a hub restart: copy is done; only a missing trace is re-queued
+            if self.traces is not None and not row.get("trace") and not row.get("trace_error"):
+                mp4 = Path(str(self.transfer.staging_dir(rig.name, batch))) / f"{Path(str(t.get('video', ''))).stem}.mp4"
+                if mp4.is_file():
+                    self.workers.submit(rig.name, ("trace", rig.name, batch, idx),
+                                        lambda: self.traces.run(rig, batch, t))
+            return
 
         def job():
-            if self.transfer.process(rig, batch, d["output_dir"], t) == "failed":
-                row = self.store.get_trial(rig.name, batch, int(t["index"])) or {}
+            state = self.transfer.process(rig, batch, d["output_dir"], t)
+            if state == "failed":
+                row = self.store.get_trial(rig.name, batch, idx) or {}
                 self.notifier.alert(f"{rig.label} transfer failed",
                                     f"{t.get('label') or t.get('phase_tag')}: {row.get('error', '')}")
+            elif state == "done" and self.traces is not None:
+                self.traces.run(rig, batch, t)
 
-        self.workers.submit(rig.name, ("trial", rig.name, batch, int(t["index"])), job)
+        self.workers.submit(rig.name, ("trial", rig.name, batch, idx), job)
 
     def request_finalize(self, rig, batch_dir, output_dir, push_to, manifest) -> None:
         cur = self.store.get_session(rig.name, batch_dir)

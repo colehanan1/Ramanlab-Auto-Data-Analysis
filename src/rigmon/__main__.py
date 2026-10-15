@@ -27,27 +27,44 @@ def bind_socket(host: str, port: int) -> socket.socket:
     return s
 
 
-def build_mountcheck(cfg, store, notifier):
-    """(runner, None) when ready, (None, None) when disabled, (None, reason) when it
-    cannot start: the hub must still come up without the mount check."""
+def _load_settings(cfg):
+    """(settings, None) or (None, reason): the pipeline config the detector jobs need."""
     log = logging.getLogger("rigmon")
-    if not cfg.mount_check.enabled:
-        return None, None
     if not cfg.pipeline_config.exists():
-        reason = (f"pipeline_config not found: {cfg.pipeline_config} "
-                  "(set pipeline_config in rigmon.yaml or disable mount_check)")
-        log.error("mount check disabled: %s", reason)
-        return None, reason
+        return None, (f"pipeline_config not found: {cfg.pipeline_config} "
+                      "(set pipeline_config in rigmon.yaml or disable the feature)")
     try:
         from fbpipe.config import load_settings
 
-        from .mountcheck.runner import MountCheckRunner
-
-        return MountCheckRunner(cfg, store, notifier, load_settings(cfg.pipeline_config)), None
+        return load_settings(cfg.pipeline_config), None
     except Exception as e:
-        reason = f"could not load {cfg.pipeline_config}: {e}"[:300]
-        log.exception("mount check disabled")
+        log.exception("could not load %s", cfg.pipeline_config)
+        return None, f"could not load {cfg.pipeline_config}: {e}"[:300]
+
+
+def build_mountcheck(cfg, store, notifier):
+    """(runner, None) when ready, (None, None) when disabled, (None, reason) when it
+    cannot start: the hub must still come up without the mount check."""
+    if not cfg.mount_check.enabled:
+        return None, None
+    settings, reason = _load_settings(cfg)
+    if settings is None:
+        logging.getLogger("rigmon").error("mount check disabled: %s", reason)
         return None, reason
+    from .mountcheck.runner import MountCheckRunner
+
+    return MountCheckRunner(cfg, store, notifier, settings), None
+
+
+def build_traces(cfg, store, transfer):
+    if not (cfg.traces.enabled and cfg.transfer_enabled):
+        return None, None
+    settings, reason = _load_settings(cfg)
+    if settings is None:
+        return None, reason
+    from .traces.runner import TraceRunner
+
+    return TraceRunner(cfg, store, settings, transfer), None
 
 
 def main(argv=None) -> None:
@@ -69,8 +86,11 @@ def main(argv=None) -> None:
     transfer = TrialTransfer(cfg, store)
     finalizer = Finalizer(cfg, store, transfer, alert=notifier.alert)
     mountcheck, mc_error = build_mountcheck(cfg, store, notifier)
+    traces, traces_error = build_traces(cfg, store, transfer)
+    if traces_error:
+        logging.getLogger("rigmon").warning("live traces disabled: %s", traces_error)
     hub = Hub(cfg, store, notifier, transfer, finalizer, TransferWorkers(), mountcheck=mountcheck,
-               mount_check_error=mc_error)
+               mount_check_error=mc_error, traces=traces)
     transfer.is_recording = hub.is_recording   # never read a Pi while it is recording
     server = uvicorn.Server(uvicorn.Config(create_app(hub), log_level="warning"))
     server.run(sockets=[bind_socket(h, cfg.port) for h in cfg.bind])
