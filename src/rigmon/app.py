@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import socket
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -50,7 +51,7 @@ def _plain(name: str) -> bool:
     return bool(name) and "/" not in name and name not in (".", "..")
 
 
-def create_app(hub, start_polling: bool = True) -> FastAPI:
+def create_app(hub, start_polling: bool = True, extra_hosts: tuple[str, ...] = ()) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app):
         task = asyncio.create_task(hub.poll_forever()) if start_polling else None
@@ -86,10 +87,17 @@ def create_app(hub, start_polling: bool = True) -> FastAPI:
                                  media_type="text/event-stream",
                                  headers={"Cache-Control": "no-cache"})
 
+    own_hosts = {"localhost", "127.0.0.1", "::1", socket.gethostname().lower(),
+                 *(b.lower() for b in hub.cfg.bind), *(h.lower() for h in extra_hosts)}
+
     def same_origin(request: Request):
-        """Browser-reachable POSTs: refuse a foreign Origin (CSRF). No Origin = not a browser."""
+        """Browser-reachable POSTs: the Host must be one of this hub's own names
+        (blocks DNS rebinding) and any Origin must match it (blocks CSRF)."""
+        host = request.headers.get("host", "")
+        if (urlsplit(f"//{host}").hostname or "") not in own_hosts:
+            raise HTTPException(403, "unknown host")
         origin = request.headers.get("origin")
-        if origin is not None and urlsplit(origin).netloc != request.headers.get("host", ""):
+        if origin is not None and urlsplit(origin).netloc != host:
             raise HTTPException(403, "cross-site request refused")
 
     @app.post("/api/mute/{rig}", dependencies=[Depends(same_origin)])

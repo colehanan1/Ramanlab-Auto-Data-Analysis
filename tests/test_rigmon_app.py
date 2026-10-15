@@ -13,7 +13,7 @@ def ctx(tmp_path):
     hub, store, notifier, transfer, finalizer, workers = _hub(tmp_path)
     transfer.staging_dir = lambda rig, batch: tmp_path / "s" / rig / batch
     finalizer.abort = lambda rig, batch: "aborted"
-    client = TestClient(create_app(hub, start_polling=False))
+    client = TestClient(create_app(hub, start_polling=False), base_url="http://localhost")
     return hub, store, workers, finalizer, client, tmp_path
 
 

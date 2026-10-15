@@ -124,7 +124,7 @@ def test_state_exposes_control_flag_not_key(hub):
 
 @pytest.fixture
 def client(hub):
-    return TestClient(create_app(hub, start_polling=False))
+    return TestClient(create_app(hub, start_polling=False), base_url="http://localhost")
 
 
 def test_api_validation(client):
@@ -155,7 +155,7 @@ def test_pause_reminder_uses_pi_server_time(hub, notifier):
 
 def test_cross_site_origin_rejected(hub):
     hub.wait_control = lambda *a, **k: (200, {})
-    c = TestClient(create_app(hub, start_polling=False))
+    c = TestClient(create_app(hub, start_polling=False, extra_hosts=("testserver",)))
     body = {"action": "pause"}
     for path, js in (("/api/rig/RigA/wait", body), ("/api/mute/RigA", {"muted": True}),
                      ("/api/mountcheck/RigA", None)):
@@ -163,3 +163,12 @@ def test_cross_site_origin_rejected(hub):
         assert r.status_code == 403, path
         assert c.post(path, json=js, headers={"Origin": "http://testserver"}).status_code != 403
         assert c.post(path, json=js).status_code != 403
+
+
+def test_dns_rebinding_host_rejected(hub):
+    hub.wait_control = lambda *a, **k: (200, {})
+    c = TestClient(create_app(hub, start_polling=False, extra_hosts=("testserver",)))
+    evil = {"Host": "evil.example:8765", "Origin": "http://evil.example:8765"}
+    assert c.post("/api/rig/RigA/wait", json={"action": "pause"}, headers=evil).status_code == 403
+    ok = {"Host": "127.0.0.1:8765", "Origin": "http://127.0.0.1:8765"}
+    assert c.post("/api/rig/RigA/wait", json={"action": "pause"}, headers=ok).status_code == 200
