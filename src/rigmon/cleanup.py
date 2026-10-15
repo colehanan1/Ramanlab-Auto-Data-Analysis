@@ -49,6 +49,23 @@ def _newest_mtime(path: Path) -> float:
     return newest
 
 
+def _landed(cfg, batch: str) -> bool:
+    """A copy of this batch exists under <data_root>/flys_New/<cohort>/<batch> (real dirs only)."""
+    base = Path(cfg.data_root) / "flys_New"
+    try:
+        if base.is_symlink() or not base.is_dir():
+            return False
+        for cohort in base.iterdir():
+            if cohort.is_symlink() or not cohort.is_dir():
+                continue
+            cand = cohort / batch
+            if cand.is_dir() and not cand.is_symlink():
+                return True
+    except OSError:
+        log.exception("landed-copy check for %s failed", batch)
+    return False
+
+
 def _old(store, rig, batch, path: Path, cutoff: float) -> bool:
     ended = store.batch_last_ended(rig, batch)
     if ended is None or ended <= 0:
@@ -80,6 +97,9 @@ def run_cleanup(cfg, store, current_batches: dict, now: float,
             # any session row (failed/aborted/landed/pending...) keeps staging for inspection
             if (current_batches.get(rig) == batch or store.get_session(rig, batch) is not None
                     or not _inside(bdir, cfg.staging_root) or not _old(store, rig, batch, bdir, cutoff)):
+                continue
+            if not _landed(cfg, batch):
+                log.info("kept staging %s: no landed copy under flys_New", bdir)
                 continue
             shutil.rmtree(bdir)
             done["staging"].append(str(bdir))

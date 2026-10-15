@@ -29,8 +29,15 @@ def setup(tmp_path):
     return cfg, store
 
 
+def land(cfg, batch, cohort="Cohort-A"):
+    d = cfg.data_root / "flys_New" / cohort / batch
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
 def test_cleanup_deletes_old_and_keeps_today(tmp_path):
     cfg, store = setup(tmp_path)
+    land(cfg, "old")
     run_cleanup(cfg, store, {"pi2": "cur"}, NOW)
     assert not (cfg.qc_root / "pi2" / "old" / "traces").exists()
     assert (cfg.qc_root / "pi2" / "old" / "mount_check_1.json").exists()
@@ -64,6 +71,7 @@ def test_cleanup_unknown_batch_uses_mtime(tmp_path):
     cfg, store = setup(tmp_path)
     d = cfg.staging_root / "pi2" / "orphan"
     d.mkdir()
+    land(cfg, "orphan")
     os.utime(d, (YESTERDAY, YESTERDAY))
     run_cleanup(cfg, store, {}, NOW)
     assert not d.exists()
@@ -77,6 +85,7 @@ def test_staging_kept_when_any_session_row_exists(tmp_path):
     (cfg.staging_root / "pi2" / "pend").mkdir()
     os.utime(cfg.staging_root / "pi2" / "pend", (YESTERDAY, YESTERDAY))
     (cfg.staging_root / "pi2" / "nosess").mkdir()
+    land(cfg, "nosess")
     os.utime(cfg.staging_root / "pi2" / "nosess", (YESTERDAY, YESTERDAY))
     run_cleanup(cfg, store, {}, NOW)
     for b in ("old", "cur", "new", "pend", "landing"):
@@ -111,5 +120,40 @@ def test_zero_ended_at_treated_as_unknown(tmp_path):
     (d / "f").write_bytes(b"x")
     os.utime(d / "f", (TODAY, TODAY))
     os.utime(d, (TODAY, TODAY))
+    run_cleanup(cfg, store, {}, NOW)
+    assert d.exists()
+
+
+def test_staging_kept_without_a_landed_copy(tmp_path, caplog):
+    import logging
+    cfg, store = setup(tmp_path)
+    d = cfg.staging_root / "pi2" / "shadow"
+    d.mkdir()
+    os.utime(d, (YESTERDAY, YESTERDAY))
+    with caplog.at_level(logging.INFO, logger="rigmon.cleanup"):
+        run_cleanup(cfg, store, {}, NOW)
+    assert d.exists()
+    assert any("landed copy" in r.getMessage() for r in caplog.records)
+
+
+def test_staging_deleted_with_a_landed_copy(tmp_path):
+    cfg, store = setup(tmp_path)
+    d = cfg.staging_root / "pi2" / "shadow"
+    d.mkdir()
+    os.utime(d, (YESTERDAY, YESTERDAY))
+    land(cfg, "shadow", "Some-Cohort")
+    run_cleanup(cfg, store, {}, NOW)
+    assert not d.exists()
+
+
+def test_symlinked_landed_copy_does_not_count(tmp_path):
+    cfg, store = setup(tmp_path)
+    d = cfg.staging_root / "pi2" / "shadow"
+    d.mkdir()
+    os.utime(d, (YESTERDAY, YESTERDAY))
+    real = tmp_path / "elsewhere"
+    real.mkdir()
+    (cfg.data_root / "flys_New" / "C").mkdir(parents=True)
+    os.symlink(real, cfg.data_root / "flys_New" / "C" / "shadow")
     run_cleanup(cfg, store, {}, NOW)
     assert d.exists()
