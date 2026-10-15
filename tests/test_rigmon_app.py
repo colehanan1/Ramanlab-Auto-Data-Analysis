@@ -105,3 +105,34 @@ def test_complete_refuses_unconfirmed_batch_or_output_dir(ctx):
     assert store.get_session("flybehavior2", "b") is None
     assert store.get_session("flybehavior2", "zzz") is None
     assert client.post(url, json=body).status_code == 202
+
+
+def test_mount_check_button_endpoint(ctx):
+    hub, store, workers, finalizer, client, tmp_path = ctx
+
+    class MC:
+        def __init__(self):
+            self.n = 0
+
+        def start(self, rig, batch_dir, trigger, stop=lambda: False):
+            self.n += 1
+            return None if self.n > 1 else 7
+    hub.mountcheck = MC()
+    assert client.post("/api/mountcheck/flybehavior2").status_code == 409   # not reachable yet
+    hub.ingest("flybehavior2", snap(), 100.0)
+    r = client.post("/api/mountcheck/flybehavior2")
+    assert r.status_code == 202 and r.json() == {"id": 7}
+    assert client.post("/api/mountcheck/flybehavior2").status_code == 409   # already running
+    assert client.post("/api/mountcheck/nope").status_code == 404
+
+
+def test_qc_image_route(ctx):
+    hub, store, *_, client, tmp_path = ctx
+    from dataclasses import replace
+    hub.cfg = replace(hub.cfg, qc_root=tmp_path / "qc")
+    d = tmp_path / "qc" / "flybehavior2" / "b2"
+    d.mkdir(parents=True)
+    (d / "mount_check_1.jpg").write_bytes(b"jpgdata")
+    assert client.get("/qc/flybehavior2/b2/mount_check_1.jpg").content == b"jpgdata"
+    assert client.get("/qc/flybehavior2/b2/mount_check_1.json").status_code == 404
+    assert client.get("/qc/flybehavior2/..%2F..%2Fetc/x.jpg").status_code == 404

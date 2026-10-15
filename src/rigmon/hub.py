@@ -35,10 +35,11 @@ def _public(snap: dict | None) -> dict | None:
 
 
 class Hub:
-    def __init__(self, cfg, store, notifier, transfer, finalizer, workers, clock=time.time):
+    def __init__(self, cfg, store, notifier, transfer, finalizer, workers, clock=time.time, mountcheck=None):
         self.cfg, self.store, self.notifier = cfg, store, notifier
         self.transfer, self.finalizer, self.workers, self.clock = transfer, finalizer, workers, clock
         self.trackers = {r.name: RigTracker(r.name, cfg.offline_after_s) for r in cfg.rigs}
+        self.mountcheck = mountcheck
         self.latest: dict[str, dict | None] = {r.name: None for r in cfg.rigs}
         self.reachable: dict[str, bool] = {r.name: False for r in cfg.rigs}
         self.fetched_at: dict[str, float | None] = {r.name: None for r in cfg.rigs}
@@ -63,6 +64,11 @@ class Hub:
                 self.notifier.handle(ev, rig.label)
             except Exception:
                 log.exception("event %s for %s failed", ev.kind, rig_name)
+        if snap is not None and self.mountcheck is not None:
+            try:
+                self._maybe_mount_check(rig, snap)
+            except Exception:
+                log.exception("mount-check trigger for %s failed", rig_name)
         return events
 
     def _already_landed(self, rig_name: str, batch: str) -> bool:
@@ -108,6 +114,32 @@ class Hub:
                 return r
         return None
 
+    def _maybe_mount_check(self, rig, snap: dict) -> None:
+        mc = self.cfg.mount_check
+        run = snap.get("run") or {}
+        if (not mc.enabled or snap.get("phase") != "WAITING" or run.get("state") != "running"
+                or int(run.get("trials_done") or 0) > 0):
+            return
+        started, ends, pi_now = snap.get("started_at"), snap.get("ends_at"), snap.get("server_time")
+        if started is None or ends is None or pi_now is None:
+            return
+        if pi_now - started < mc.delay_after_wait_start_s or ends - pi_now < mc.min_remaining_s:
+            return
+        batch = run.get("batch_dir") or ""
+        if not batch or self.store.mount_check_done(rig.name, batch, "auto"):
+            return
+        self.mountcheck.start(rig, batch, "auto", stop=lambda: self._trials_started(rig.name))
+
+    def _trials_started(self, rig_name: str) -> bool:
+        snap = self.latest.get(rig_name) or {}
+        run = snap.get("run") or {}
+        return snap.get("phase") != "WAITING" or int(run.get("trials_done") or 0) > 0
+
+    def start_mount_check(self, rig_name: str) -> int | None:
+        rig = self.cfg.rig(rig_name)
+        batch = ((self.latest.get(rig_name) or {}).get("run") or {}).get("batch_dir") or "no-batch"
+        return self.mountcheck.start(rig, batch, "manual")
+
     def state(self) -> dict:
         mutes = self.store.mutes()
         rigs = {}
@@ -118,6 +150,7 @@ class Hub:
                 "reachable": self.reachable[r.name], "offline": tr.offline,
                 "last_seen": tr.last_seen, "fetched_at": self.fetched_at[r.name],
                 "status": _public(self.latest[r.name]), "muted": mutes.get(r.name, False),
+                "mount_check": self.store.latest_mount_check(r.name),
             }
         return {"server_time": self.clock(), "rigs": rigs,
                 "trials": self.store.trials(limit=150),

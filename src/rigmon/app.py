@@ -114,5 +114,30 @@ def create_app(hub, start_polling: bool = True) -> FastAPI:
             raise HTTPException(404)
         return FileResponse(path, media_type="video/mp4")
 
+    @app.post("/api/mountcheck/{rig}", status_code=202)
+    def mount_check(rig: str):
+        rig_or_404(rig)
+        if hub.mountcheck is None or not hub.reachable.get(rig):
+            raise HTTPException(409, "rig not reachable (is its script running?)")
+        check_id = hub.start_mount_check(rig)
+        if check_id is None:
+            raise HTTPException(409, "a mount check is already running on this rig")
+        return {"id": check_id}
+
+    @app.get("/api/mountcheck/{rig}/latest")
+    def mount_check_latest(rig: str):
+        rig_or_404(rig)
+        return hub.store.latest_mount_check(rig) or {}
+
+    @app.get("/qc/{rig}/{batch_dir}/{name}")
+    def qc_image(rig: str, batch_dir: str, name: str):
+        rig_or_404(rig)
+        if not (_plain(batch_dir) and _plain(name) and name.endswith(".jpg")):
+            raise HTTPException(404)
+        path = hub.cfg.qc_root / rig / batch_dir / name
+        if not path.is_file():
+            raise HTTPException(404)
+        return FileResponse(path, media_type="image/jpeg")
+
     app.mount("/static", StaticFiles(directory=STATIC), name="static")
     return app

@@ -39,10 +39,19 @@ def main(argv=None) -> None:
     n = store.fail_interrupted_sessions()
     if n:
         logging.getLogger("rigmon").warning("marked %d interrupted finalize(s) failed", n)
+    m = store.fail_interrupted_mount_checks()
+    if m:
+        logging.getLogger("rigmon").warning("marked %d interrupted mount check(s) failed", m)
     notifier = Notifier(cfg, store)
     transfer = TrialTransfer(cfg, store)
     finalizer = Finalizer(cfg, store, transfer, alert=notifier.alert)
-    hub = Hub(cfg, store, notifier, transfer, finalizer, TransferWorkers())
+    from fbpipe.config import load_settings
+
+    from .mountcheck.runner import MountCheckRunner
+
+    settings = load_settings(cfg.pipeline_config)
+    mountcheck = MountCheckRunner(cfg, store, notifier, settings) if cfg.mount_check.enabled else None
+    hub = Hub(cfg, store, notifier, transfer, finalizer, TransferWorkers(), mountcheck=mountcheck)
     server = uvicorn.Server(uvicorn.Config(create_app(hub), log_level="warning"))
     server.run(sockets=[bind_socket(h, cfg.port) for h in cfg.bind])
 

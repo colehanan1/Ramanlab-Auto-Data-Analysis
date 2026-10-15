@@ -176,3 +176,78 @@ def test_state_hides_push_to_and_output_dir_without_mutating(tmp_path):
     assert run["batch_dir"] == "b" and run["trials"][0]["index"] == 1
     assert hub.latest["flybehavior2"]["run"]["push_to"] == "u@h:/secret/"
     assert hub.latest["flybehavior2"]["run"]["output_dir"] == "/pi/b"
+
+
+class FakeMC:
+    def __init__(self):
+        self.started = []
+
+    def start(self, rig, batch_dir, trigger, stop=lambda: False):
+        self.started.append((rig.name, batch_dir, trigger))
+        return len(self.started)
+
+
+def wait_snap(started_at, server_time, ends_at, batch="b2", trials_done=0, phase="WAITING", state="running"):
+    return {"phase": phase, "trial_label": "", "label": "Training 1 starts in", "server_time": server_time,
+            "started_at": started_at, "ends_at": ends_at,
+            "run": {"state": state, "batch_dir": batch, "output_dir": "/pi/" + batch, "trials": [],
+                    "trials_done": trials_done}}
+
+
+def _mc_hub(tmp_path):
+    hub, store, *_ = _hub(tmp_path)
+    hub.mountcheck = FakeMC()
+    return hub, store
+
+
+def test_auto_mount_check_fires_once_after_30_min(tmp_path):
+    hub, store = _mc_hub(tmp_path)
+    t0 = 1_000_000.0
+    hub.ingest("flybehavior2", wait_snap(t0, t0 + 1799, t0 + 5400), 50.0)
+    assert hub.mountcheck.started == []
+    hub.ingest("flybehavior2", wait_snap(t0, t0 + 1800, t0 + 5400), 51.0)
+    assert hub.mountcheck.started == [("flybehavior2", "b2", "auto")]
+    store.add_mount_check("flybehavior2", "b2", "auto")   # what the real runner records
+    hub.ingest("flybehavior2", wait_snap(t0, t0 + 1900, t0 + 5400), 52.0)
+    assert len(hub.mountcheck.started) == 1
+
+
+def test_trigger_uses_pi_clock(tmp_path):
+    hub, _ = _mc_hub(tmp_path)
+    t0 = 1_000_000.0          # Pi clock; the hub clock (100.0) is wildly different
+    hub.ingest("flybehavior2", wait_snap(t0, t0 + 2000, t0 + 5400), 100.0)
+    assert hub.mountcheck.started
+
+
+def test_no_check_too_close_to_first_trial_or_mid_run(tmp_path):
+    hub, _ = _mc_hub(tmp_path)
+    t0 = 1_000_000.0
+    hub.ingest("flybehavior2", wait_snap(t0, t0 + 4300, t0 + 5400), 1.0)          # 1100 s left < 1200
+    hub.ingest("flybehavior2", wait_snap(t0, t0 + 2000, t0 + 5400, trials_done=3), 2.0)
+    hub.ingest("flybehavior2", wait_snap(t0, t0 + 2000, t0 + 5400, phase="BASELINE"), 3.0)
+    assert hub.mountcheck.started == []
+
+
+def test_new_batch_gets_its_own_check(tmp_path):
+    hub, store = _mc_hub(tmp_path)
+    t0 = 1_000_000.0
+    store.add_mount_check("flybehavior2", "b1", "auto")
+    hub.ingest("flybehavior2", wait_snap(t0, t0 + 2000, t0 + 5400, batch="b2"), 1.0)
+    assert hub.mountcheck.started == [("flybehavior2", "b2", "auto")]
+
+
+def test_disabled_mount_check_never_fires(tmp_path):
+    from dataclasses import replace
+    from rigmon.config import MountCheckConfig
+    hub, _ = _mc_hub(tmp_path)
+    hub.cfg = replace(hub.cfg, mount_check=MountCheckConfig(enabled=False))
+    t0 = 1_000_000.0
+    hub.ingest("flybehavior2", wait_snap(t0, t0 + 2000, t0 + 5400), 1.0)
+    assert hub.mountcheck.started == []
+
+
+def test_state_includes_latest_mount_check(tmp_path):
+    hub, store = _mc_hub(tmp_path)
+    cid = store.add_mount_check("flybehavior2", "b2", "manual")
+    store.update_mount_check(cid, state="ok")
+    assert hub.state()["rigs"]["flybehavior2"]["mount_check"]["state"] == "ok"
