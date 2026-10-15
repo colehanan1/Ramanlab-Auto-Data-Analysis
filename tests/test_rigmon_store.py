@@ -76,3 +76,34 @@ def test_interrupted_trials_are_failed_too(tmp_path):
     states = [s.get_trial("pi2", "b", i) for i in range(1, 5)]
     assert [t["state"] for t in states] == ["failed", "failed", "done", "queued"]
     assert states[0]["error"] == "hub restarted mid-transfer" and states[2]["error"] == ""
+
+
+def test_mount_check_lifecycle(tmp_path):
+    s = Store(tmp_path / "db.sqlite")
+    cid = s.add_mount_check("pi2", "b1", "auto")
+    assert s.mount_check_running("pi2") and s.mount_check_done("pi2", "b1", "auto")
+    assert not s.mount_check_done("pi2", "b2", "auto") and not s.mount_check_done("pi2", "b1", "manual")
+    s.update_mount_check(cid, state="issues", flags=[{"code": "wobble"}], slots=[{"slot": 1}],
+                         sharpness=42.0, frames=600, json_path="/q/a.json", jpg_path="/q/a.jpg")
+    row = s.latest_mount_check("pi2")
+    assert row["state"] == "issues" and row["flags"] == [{"code": "wobble"}] and row["frames"] == 600
+    assert not s.mount_check_running("pi2")
+    assert s.latest_mount_check("pi3") is None
+
+
+def test_sharpness_reference_uses_ok_checks_only(tmp_path):
+    s = Store(tmp_path / "db.sqlite")
+    assert s.sharpness_reference("pi2") is None
+    for val, state in ((40.0, "ok"), (60.0, "ok"), (5.0, "issues"), (50.0, "ok")):
+        s.update_mount_check(s.add_mount_check("pi2", "b", "manual"), state=state, sharpness=val)
+    assert s.sharpness_reference("pi2") == 50.0
+
+
+def test_running_checks_fail_on_restart(tmp_path):
+    s = Store(tmp_path / "db.sqlite")
+    s.add_mount_check("pi2", "b1", "auto")
+    s2 = Store(tmp_path / "db.sqlite")
+    assert s2.fail_interrupted_mount_checks() == 1
+    row = s2.latest_mount_check("pi2")
+    assert row["state"] == "error" and row["error"] == "hub restarted during the check"
+    assert not s2.mount_check_running("pi2")

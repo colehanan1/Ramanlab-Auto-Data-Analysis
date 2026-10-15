@@ -20,6 +20,11 @@ CREATE TABLE IF NOT EXISTS sessions (
   rig TEXT, batch_dir TEXT, state TEXT, dest TEXT DEFAULT '', error TEXT DEFAULT '',
   updated_at REAL, PRIMARY KEY (rig, batch_dir));
 CREATE TABLE IF NOT EXISTS mutes (rig TEXT PRIMARY KEY, muted INTEGER);
+CREATE TABLE IF NOT EXISTS mount_checks (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, rig TEXT, batch_dir TEXT, at REAL, trigger TEXT,
+  state TEXT, flags TEXT DEFAULT '[]', slots TEXT DEFAULT '[]', sharpness REAL,
+  frames INTEGER DEFAULT 0, json_path TEXT DEFAULT '', jpg_path TEXT DEFAULT '',
+  error TEXT DEFAULT '');
 """
 IN_FLIGHT = ("pending", "pulling", "remuxing")
 
@@ -135,3 +140,56 @@ class Store:
 
     def mutes(self) -> dict[str, bool]:
         return {r["rig"]: bool(r["muted"]) for r in self._all("SELECT rig, muted FROM mutes")}
+
+    # mount checks
+    def add_mount_check(self, rig: str, batch_dir: str, trigger: str) -> int:
+        with self._lock:
+            cur = self._db.execute(
+                "INSERT INTO mount_checks (rig, batch_dir, at, trigger, state) VALUES (?,?,?,?,?)",
+                (rig, batch_dir, self._clock(), trigger, "running"))
+            self._db.commit()
+            return int(cur.lastrowid)
+
+    def update_mount_check(self, check_id: int, *, state: str, flags=None, slots=None,
+                           sharpness=None, frames=None, json_path=None, jpg_path=None,
+                           error=None) -> None:
+        sets, args = ["state=?"], [state]
+        for col, val in (("flags", flags), ("slots", slots)):
+            if val is not None:
+                sets.append(f"{col}=?")
+                args.append(json.dumps(val, default=str))
+        for col, val in (("sharpness", sharpness), ("frames", frames), ("json_path", json_path),
+                         ("jpg_path", jpg_path), ("error", error)):
+            if val is not None:
+                sets.append(f"{col}=?")
+                args.append(val)
+        self._exec(f"UPDATE mount_checks SET {', '.join(sets)} WHERE id=?", (*args, int(check_id)))
+
+    def latest_mount_check(self, rig: str) -> dict | None:
+        rows = self._all("SELECT * FROM mount_checks WHERE rig=? ORDER BY id DESC LIMIT 1", (rig,))
+        if not rows:
+            return None
+        row = rows[0]
+        row["flags"] = json.loads(row["flags"] or "[]")
+        row["slots"] = json.loads(row["slots"] or "[]")
+        return row
+
+    def mount_check_done(self, rig: str, batch_dir: str, trigger: str) -> bool:
+        return bool(self._all("SELECT 1 FROM mount_checks WHERE rig=? AND batch_dir=? AND trigger=? LIMIT 1",
+                              (rig, batch_dir, trigger)))
+
+    def mount_check_running(self, rig: str) -> bool:
+        return bool(self._all("SELECT 1 FROM mount_checks WHERE rig=? AND state='running' LIMIT 1", (rig,)))
+
+    def sharpness_reference(self, rig: str) -> float | None:
+        rows = self._all("SELECT sharpness FROM mount_checks WHERE rig=? AND state='ok' "
+                         "AND sharpness IS NOT NULL ORDER BY id DESC LIMIT 20", (rig,))
+        vals = sorted(r["sharpness"] for r in rows)
+        if not vals:
+            return None
+        mid = len(vals) // 2
+        return float(vals[mid]) if len(vals) % 2 else float((vals[mid - 1] + vals[mid]) / 2)
+
+    def fail_interrupted_mount_checks(self) -> int:
+        return self._exec("UPDATE mount_checks SET state='error', error='hub restarted during the check' "
+                          "WHERE state='running'")
