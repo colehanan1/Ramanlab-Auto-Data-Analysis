@@ -9,6 +9,7 @@ from __future__ import annotations
 import logging
 import os
 import queue
+import signal
 import subprocess
 import threading
 import time
@@ -18,7 +19,7 @@ from typing import Callable
 log = logging.getLogger("rigmon.transfer")
 
 
-ABORTED_RC = -15
+ABORTED_RC = -1015   # not a real signal rc, so an externally killed rsync (-15) is never mistaken for it
 
 
 def subprocess_runner(argv: list[str], timeout: float, env: dict | None = None,
@@ -32,26 +33,37 @@ def subprocess_runner(argv: list[str], timeout: float, env: dict | None = None,
         except OSError as e:
             return 127, str(e)
     try:
-        p = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, env=env)
+        p = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                             env=env, start_new_session=True)
     except OSError as e:
         return 127, str(e)
+
+    def _kill() -> None:
+        # kill the whole process group (rsync's ssh child too) and never wait unboundedly
+        try:
+            os.killpg(p.pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            p.kill()
+        try:
+            p.communicate(timeout=5)
+        except subprocess.TimeoutExpired:
+            try:
+                p.stdout.close()
+                p.wait(timeout=5)
+            except Exception:
+                pass
+
     deadline = time.monotonic() + timeout
     while True:
         try:
-            out, _ = p.communicate(timeout=1.0)
+            out, _ = p.communicate(timeout=0.25)
             return p.returncode, out or ""
         except subprocess.TimeoutExpired:
             if abort():
-                p.terminate()
-                try:
-                    p.communicate(timeout=5)
-                except subprocess.TimeoutExpired:
-                    p.kill()
-                    p.communicate()
+                _kill()
                 return ABORTED_RC, "aborted: rig started recording"
             if time.monotonic() > deadline:
-                p.kill()
-                p.communicate()
+                _kill()
                 return 124, f"timed out after {timeout:.0f}s"
 
 
@@ -102,14 +114,15 @@ class TrialTransfer:
         remote = f"{str(output_dir).rstrip('/')}/{rel_path}"
         argv = rsync_pull_argv(rig, self.cfg.ssh_key, remote, dest_dir,
                                bwlimit_kbps=getattr(self.cfg, "transfer_bwlimit_kbps", None))
-        start = self.clock()
         while True:
+            start = self.clock()                          # wait budget is per wait episode, not copy time
             while self.is_recording(rig.name):           # never read from a recording rig
                 if self.clock() - start > self.max_wait_s:
                     raise TransferError(f"rig kept recording for {self.max_wait_s:.0f} s; {rel_path} not copied")
                 self.sleep(self.poll_s)
             rc, out = self.runner(argv, 900.0, None, abort=lambda: self.is_recording(rig.name))
             if rc == ABORTED_RC:                          # recording started mid-copy: resume later
+                self.sleep(self.poll_s)
                 continue
             if rc != 0:
                 raise TransferError(f"rsync {rel_path} failed ({rc}): {out[-300:]}")

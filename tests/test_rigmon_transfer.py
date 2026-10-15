@@ -237,3 +237,44 @@ def test_pull_gives_up_after_max_wait(tmp_path):
                        is_recording=lambda n: True, max_wait_s=10.0, poll_s=2.0, clock=lambda: clock["t"])
     assert tt.process(LOCAL, "b", str(pi_dir), trial) == "failed"
     assert "kept recording" in store.get_trial("fake", "b", 1)["error"]
+
+
+def test_abort_returns_even_if_a_grandchild_holds_the_pipe():
+    import sys, time
+    code = ("import subprocess,sys,time; "
+            "subprocess.Popen([sys.executable,'-c','import time; time.sleep(60)']); time.sleep(60)")
+    t0 = time.monotonic()
+    rc, out = subprocess_runner([sys.executable, "-c", code], 120.0, None, abort=lambda: True)
+    assert rc == ABORTED_RC and time.monotonic() - t0 < 10
+
+
+def test_external_signal_is_not_reported_as_abort():
+    import signal, sys
+    rc, out = subprocess_runner(
+        [sys.executable, "-c", "import os,signal; os.kill(os.getpid(), signal.SIGTERM)"],
+        30.0, None, abort=lambda: False)
+    assert rc != ABORTED_RC and rc != 0
+
+
+def test_wait_budget_excludes_copy_time(tmp_path):
+    cfg, pi_dir = _cfg(tmp_path), tmp_path / "pi" / "b"
+    store, trial = Store(cfg.db_path), _pi_trial(pi_dir)
+    inner, clock, calls = FakeRunner(pi_dir), {"t": 0.0}, {"n": 0}
+    rec = {"v": False}
+
+    def runner(argv, timeout, env=None, abort=None):
+        if argv[0] == "rsync":
+            calls["n"] += 1
+            if calls["n"] == 1:
+                clock["t"] += 2000.0          # a long copy, then recording starts
+                rec["v"] = True
+                return ABORTED_RC, "aborted"
+        return inner(argv, timeout, env)
+
+    def sleep(s):
+        clock["t"] += s
+        rec["v"] = False                       # recording stops promptly
+    tt = TrialTransfer(cfg, store, runner=runner, sleep=sleep, backoff=(),
+                       is_recording=lambda n: rec["v"], max_wait_s=10.0, poll_s=2.0,
+                       clock=lambda: clock["t"])
+    assert tt.process(LOCAL, "b", str(pi_dir), trial) == "done"
