@@ -270,3 +270,38 @@ def test_distance_stats_uses_per_batch_class2_max(tmp_path):
     # With the 270 override the 250 px point is inside [class2_min, class2_max]
     # and must set the fly max; under the old 160 cap it was masked out.
     assert stats["global_max"] == 250.0
+
+
+# ── gate_for_host (live mount check) ─────────────────────────────────────────
+from datetime import date as _date
+from types import SimpleNamespace
+
+from fbpipe.config import RigGateOverride
+from fbpipe.utils.rig_gates import gate_for_host, matching_override
+
+
+def _cfg():
+    # The two gate keys get DIFFERENT values so reading the wrong one fails (CLAUDE.md).
+    return SimpleNamespace(
+        proboscis_filter=SimpleNamespace(max_eye_prob_distance_px=160.0),
+        three_fly_max_eye_prob_distance_px=175.0,
+        rig_gate_overrides=(RigGateOverride(host="Flybehavior2", after=_date(2026, 7, 25),
+                                            max_eye_prob_distance_px=280.0),),
+    )
+
+
+def test_gate_for_host_base_gate_for_other_rigs():
+    assert gate_for_host(_cfg(), "Flybehavior3", _date(2026, 10, 14)) == 160.0
+
+
+def test_gate_for_host_override_is_case_insensitive_and_strictly_after():
+    cfg = _cfg()
+    assert gate_for_host(cfg, "flybehavior2", _date(2026, 10, 14)) == 280.0
+    assert gate_for_host(cfg, "Flybehavior2", _date(2026, 7, 25)) == 160.0   # ON the cutoff keeps base
+    assert matching_override(cfg, "Flybehavior2", _date(2026, 7, 24)) is None
+
+
+def test_gate_for_host_override_without_gate_keeps_base():
+    cfg = _cfg()
+    cfg.rig_gate_overrides = (RigGateOverride(host="Flybehavior2", after=_date(2026, 7, 25), class2_max=280.0),)
+    assert gate_for_host(cfg, "Flybehavior2", _date(2026, 10, 14)) == 160.0

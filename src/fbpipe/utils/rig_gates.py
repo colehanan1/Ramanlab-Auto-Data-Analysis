@@ -32,6 +32,8 @@ from ..config import RigGateOverride, Settings
 __all__ = [
     "RigGateOverride",
     "apply_rig_gate_overrides",
+    "gate_for_host",
+    "matching_override",
     "read_batch_born_date",
     "read_batch_date",
     "read_batch_host",
@@ -121,6 +123,24 @@ def read_batch_date(batch_dir: Path) -> Optional[date]:
     return None
 
 
+def matching_override(cfg, host: str, day: date) -> Optional[RigGateOverride]:
+    """The first ``rig_gate_overrides`` entry for ``host`` (case-insensitive)
+    whose cutoff is strictly before ``day``; None if none matches."""
+    for ov in getattr(cfg, "rig_gate_overrides", ()) or ():
+        if ov.host.lower() == host.lower() and day > ov.after:
+            return ov
+    return None
+
+
+def gate_for_host(cfg, host: str, day: date) -> float:
+    """The spatial eye→proboscis gate production uses for ``host`` on ``day``:
+    ``proboscis_filter.max_eye_prob_distance_px`` unless an override sets it."""
+    ov = matching_override(cfg, host, day)
+    if ov is not None and ov.max_eye_prob_distance_px is not None:
+        return float(ov.max_eye_prob_distance_px)
+    return float(cfg.proboscis_filter.max_eye_prob_distance_px)
+
+
 def apply_rig_gate_overrides(cfg: Settings, batch_dir: Path) -> Settings:
     """Effective Settings for one batch dir: a modified copy when a
     ``rig_gate_overrides`` entry matches, otherwise ``cfg`` itself."""
@@ -135,27 +155,26 @@ def apply_rig_gate_overrides(cfg: Settings, batch_dir: Path) -> Settings:
     if batch_date is None:
         return cfg
 
-    for ov in overrides:
-        if ov.host.lower() != host.lower() or batch_date <= ov.after:
-            continue
-        eff = cfg
-        if ov.max_eye_prob_distance_px is not None:
-            eff = replace(
-                eff,
-                proboscis_filter=replace(
-                    eff.proboscis_filter,
-                    max_eye_prob_distance_px=ov.max_eye_prob_distance_px,
-                ),
-            )
-        scalar_updates = {
-            key: value
-            for key, value in (
-                ("class2_max", ov.class2_max),
-                ("three_fly_max_eye_prob_distance_px", ov.three_fly_max_eye_prob_distance_px),
-            )
-            if value is not None
-        }
-        if scalar_updates:
-            eff = replace(eff, **scalar_updates)
-        return eff
-    return cfg
+    ov = matching_override(cfg, host, batch_date)
+    if ov is None:
+        return cfg
+    eff = cfg
+    if ov.max_eye_prob_distance_px is not None:
+        eff = replace(
+            eff,
+            proboscis_filter=replace(
+                eff.proboscis_filter,
+                max_eye_prob_distance_px=ov.max_eye_prob_distance_px,
+            ),
+        )
+    scalar_updates = {
+        key: value
+        for key, value in (
+            ("class2_max", ov.class2_max),
+            ("three_fly_max_eye_prob_distance_px", ov.three_fly_max_eye_prob_distance_px),
+        )
+        if value is not None
+    }
+    if scalar_updates:
+        eff = replace(eff, **scalar_updates)
+    return eff
