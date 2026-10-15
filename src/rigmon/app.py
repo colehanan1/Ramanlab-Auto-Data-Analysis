@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import hmac
 import json
 import socket
 from contextlib import asynccontextmanager
@@ -11,7 +13,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 from fastapi import Depends, FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, model_validator
 
@@ -47,6 +49,23 @@ async def sse_frames(get_state, is_disconnected, sleep=asyncio.sleep, interval=1
         await sleep(interval)
 
 
+def basic_auth_ok(header: str | None, user: str, password: str) -> bool:
+    """HTTP basic credentials match (constant-time); any malformed header is a no."""
+    if not header or not header.startswith("Basic "):
+        return False
+    try:
+        raw = base64.b64decode(header[6:], validate=True).decode("utf-8")
+    except (ValueError, UnicodeDecodeError):
+        return False
+    u, sep, p = raw.partition(":")
+    ok_u = hmac.compare_digest(u.encode(), user.encode())
+    ok_p = hmac.compare_digest(p.encode(), password.encode())
+    return bool(sep) and ok_u and ok_p
+
+
+ADMIN_CHALLENGE = {"WWW-Authenticate": 'Basic realm="Rig Monitor admin", charset="UTF-8"'}
+
+
 def _plain(name: str) -> bool:
     return bool(name) and "/" not in name and name not in (".", "..")
 
@@ -60,6 +79,27 @@ def create_app(hub, start_polling: bool = True, extra_hosts: tuple[str, ...] = (
             task.cancel()
 
     app = FastAPI(title="Rig Monitor", lifespan=lifespan)
+    pub = hub.cfg.public
+
+    def is_public(request: Request) -> bool:
+        """Arrived on the internet entrance (Funnel -> 127.0.0.1:public.port)."""
+        server = request.scope.get("server") or (None, None)
+        return pub is not None and server[1] == pub.port
+
+    def can_edit(request: Request) -> bool:
+        return not is_public(request) or basic_auth_ok(
+            request.headers.get("authorization"), pub.user, pub.password)
+
+    @app.middleware("http")
+    async def public_gate(request: Request, call_next):
+        # Internet entrance: anyone may look; only the admin login may change
+        # anything; the Pi hand-off API does not exist there at all.
+        if is_public(request):
+            if request.url.path.startswith("/api/sessions/"):
+                return JSONResponse({"detail": "Not Found"}, status_code=404)
+            if request.method not in ("GET", "HEAD") and not can_edit(request):
+                return Response("admin login required", status_code=401, headers=ADMIN_CHALLENGE)
+        return await call_next(request)
 
     def rig_or_404(name: str):
         try:
@@ -77,6 +117,17 @@ def create_app(hub, start_polling: bool = True, extra_hosts: tuple[str, ...] = (
     def index():
         return FileResponse(STATIC / "index.html")
 
+    @app.get("/api/whoami")
+    def whoami(request: Request):
+        return {"public": is_public(request), "can_edit": can_edit(request)}
+
+    @app.get("/login")
+    def login(request: Request):
+        # The browser keeps the credentials for this site after the prompt.
+        if not can_edit(request):
+            return Response("admin login required", status_code=401, headers=ADMIN_CHALLENGE)
+        return RedirectResponse("/", status_code=303)
+
     @app.get("/api/state")
     def state():
         return hub.state()
@@ -88,7 +139,8 @@ def create_app(hub, start_polling: bool = True, extra_hosts: tuple[str, ...] = (
                                  headers={"Cache-Control": "no-cache"})
 
     own_hosts = {"localhost", "127.0.0.1", "::1", socket.gethostname().lower(),
-                 *(b.lower() for b in hub.cfg.bind), *(h.lower() for h in extra_hosts)}
+                 *(b.lower() for b in hub.cfg.bind), *(h.lower() for h in extra_hosts),
+                 *(pub.hosts if pub else ())}
 
     def same_origin(request: Request):
         """Browser-reachable POSTs: the Host must be one of this hub's own names

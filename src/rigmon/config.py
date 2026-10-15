@@ -61,6 +61,16 @@ class TracesConfig:
 
 
 @dataclass(frozen=True)
+class PublicConfig:
+    """Internet entrance (Tailscale Funnel -> 127.0.0.1:port): view-only for
+    everyone; buttons need the admin login. Lives only in gitignored rigmon.yaml."""
+    port: int
+    user: str
+    password: str = field(repr=False)
+    hosts: tuple[str, ...] = ()    # public hostnames, e.g. <machine>.<tailnet>.ts.net
+
+
+@dataclass(frozen=True)
 class HubConfig:
     rigs: tuple[RigConfig, ...]
     staging_root: Path
@@ -85,6 +95,7 @@ class HubConfig:
     transfer_bwlimit_kbps: int = 40000
     cleanup_time: str = "00:05"
     pause_reminder_s: float = 300.0
+    public: PublicConfig | None = None
 
     def rig(self, name: str) -> RigConfig:
         for r in self.rigs:
@@ -117,6 +128,15 @@ def load_config(path) -> HubConfig:
         mc = MountCheckConfig(**(raw.pop("mount_check") or {}))
         mc.th()  # unknown threshold keys fail here, at load time
         kw["mount_check"] = mc
+    if raw.get("public"):
+        pub = dict(raw.pop("public"))
+        pub["hosts"] = tuple(str(h).lower() for h in pub.get("hosts") or ())
+        pc = PublicConfig(**pub)
+        if not pc.user or not pc.password:
+            raise ValueError("public needs a user and a password")
+        kw["public"] = pc
+    else:
+        raw.pop("public", None)
     if "traces" in raw:
         kw["traces"] = TracesConfig(**(raw.pop("traces") or {}))
     kw.update(raw)  # scalars; an unknown key is a TypeError from the dataclass
@@ -124,6 +144,8 @@ def load_config(path) -> HubConfig:
     hh, _, mm = str(cfg.cleanup_time).partition(":")
     if not (hh.isdigit() and mm.isdigit() and 0 <= int(hh) < 24 and 0 <= int(mm) < 60):
         raise ValueError(f"cleanup_time must be HH:MM, got {cfg.cleanup_time!r}")
+    if cfg.public is not None and cfg.public.port == cfg.port:
+        raise ValueError("public.port must differ from port (the tailnet entrance)")
     if cfg.pause_reminder_s <= 0:
         raise ValueError(f"pause_reminder_s must be > 0, got {cfg.pause_reminder_s!r}")
     if cfg.qc_root is None:

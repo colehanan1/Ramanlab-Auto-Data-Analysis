@@ -116,3 +116,11 @@ def test_wait_buttons_gated_on_startup_wait():
     seg = PAGE[i:i + 1500]
     for cond in ("rig.control", '"WAITING"', "trials_done", '"running"'):
         assert cond in seg
+
+
+def test_page_is_view_only_until_admin_login():
+    assert 'fetch("/api/whoami")' in PAGE and '"viewonly"' in PAGE
+    assert 'href="/login"' in PAGE
+    for sel in ("body.viewonly button[data-mute]", "body.viewonly button[data-mount]",
+                "body.viewonly .wait-ctl"):
+        assert sel in PAGE

@@ -27,6 +27,15 @@ def bind_socket(host: str, port: int) -> socket.socket:
     return s
 
 
+def listen_sockets(cfg) -> list[socket.socket]:
+    """Tailnet entrance on every bind address; the internet entrance (public)
+    only on loopback, where Tailscale Funnel delivers to it."""
+    socks = [bind_socket(h, cfg.port) for h in cfg.bind]
+    if cfg.public is not None:
+        socks.append(bind_socket("127.0.0.1", cfg.public.port))
+    return socks
+
+
 def _load_settings(cfg):
     """(settings, None) or (None, reason): the pipeline config the detector jobs need."""
     log = logging.getLogger("rigmon")
@@ -93,7 +102,7 @@ def main(argv=None) -> None:
                mount_check_error=mc_error, traces=traces)
     transfer.is_recording = hub.is_recording   # never read a Pi while it is recording
     server = uvicorn.Server(uvicorn.Config(create_app(hub), log_level="warning"))
-    server.run(sockets=[bind_socket(h, cfg.port) for h in cfg.bind])
+    server.run(sockets=listen_sockets(cfg))
 
 
 if __name__ == "__main__":

@@ -57,10 +57,14 @@
   .mc table { margin-top: 6px; font-size: 12px; }
   .mc td { padding: 3px 6px; }
   .mc img { max-width: 100%; border-radius: 8px; margin-top: 6px; cursor: zoom-in; }
+/* View-only visitors (internet link, not logged in): no control buttons. */
+body.viewonly button[data-mute], body.viewonly button[data-mount], body.viewonly .wait-ctl { display: none; }
+#login { display: none; font-size: .6em; margin-left: .6em; }
+body.viewonly #login { display: inline; }
 </style>
 </head>
 <body>
-<h1>Rig Monitor <span id="conn">connecting…</span></h1>
+<h1>Rig Monitor <span id="conn">connecting…</span><a id="login" href="/login">Admin login</a></h1>
 <div class="cards" id="cards"></div>
 <h3>Recent trials</h3>
 <table><tbody id="trials"></tbody></table>
@@ -342,6 +346,11 @@ function connect() {
     if (es.readyState === EventSource.CLOSED) setTimeout(connect, 3000);
   };
 }
+// Internet visitors see the dashboard read-only until they log in as admin
+// (the hub refuses their button presses either way).
+fetch("/api/whoami").then(r => r.json())
+  .then(w => document.body.classList.toggle("viewonly", !w.can_edit))
+  .catch(() => {});
 connect();
 setInterval(tick, 100);  // countdowns tick between pushes
 </script>
