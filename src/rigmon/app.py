@@ -7,7 +7,9 @@ import json
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, Request
+from urllib.parse import urlsplit
+
+from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, model_validator
@@ -84,13 +86,19 @@ def create_app(hub, start_polling: bool = True) -> FastAPI:
                                  media_type="text/event-stream",
                                  headers={"Cache-Control": "no-cache"})
 
-    @app.post("/api/mute/{rig}")
+    def same_origin(request: Request):
+        """Browser-reachable POSTs: refuse a foreign Origin (CSRF). No Origin = not a browser."""
+        origin = request.headers.get("origin")
+        if origin is not None and urlsplit(origin).netloc != request.headers.get("host", ""):
+            raise HTTPException(403, "cross-site request refused")
+
+    @app.post("/api/mute/{rig}", dependencies=[Depends(same_origin)])
     def mute(rig: str, body: MuteBody):
         rig_or_404(rig)
         hub.store.set_muted(rig, body.muted)
         return {"rig": rig, "muted": body.muted}
 
-    @app.post("/api/rig/{rig}/wait")
+    @app.post("/api/rig/{rig}/wait", dependencies=[Depends(same_origin)])
     def wait_control(rig: str, body: WaitBody):
         rig_or_404(rig)
         code, payload = hub.wait_control(rig, body.action, body.seconds)
@@ -135,7 +143,7 @@ def create_app(hub, start_polling: bool = True) -> FastAPI:
             raise HTTPException(404)
         return FileResponse(path, media_type="video/mp4")
 
-    @app.post("/api/mountcheck/{rig}", status_code=202)
+    @app.post("/api/mountcheck/{rig}", status_code=202, dependencies=[Depends(same_origin)])
     def mount_check(rig: str):
         rig_or_404(rig)
         if hub.mountcheck is None:

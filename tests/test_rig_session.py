@@ -387,3 +387,18 @@ def test_shift_never_raises_before_begin(tmp_path):
     phase, tr = _tracker(tmp_path, Clock())
     tr.shift(300)  # expected_end_at is None: no-op, no exception
     assert tr.expected_end_at is None
+
+
+def test_hold_suppresses_reminders_and_keeps_them_for_after(tmp_path):
+    clock = Clock(1000.0)
+    phase, run = _tracker(tmp_path, clock)
+    run.begin(2 * 3600)                       # end ~2h away: both reminders pending
+    run.hold(True)
+    clock.t += 3600                           # ETA stale: "1h left" would look due
+    assert run.due_messages() == []
+    clock.t -= 3600
+    run.shift(1800)                           # resume shifts the ETA out again
+    run.hold(False)
+    assert run.due_messages() == []           # nothing consumed, nothing due yet
+    clock.t += 5900                           # now inside the 90 min threshold
+    assert len(run.due_messages()) == 1

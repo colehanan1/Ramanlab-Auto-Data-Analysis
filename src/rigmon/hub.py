@@ -146,6 +146,8 @@ class Hub:
             self._pause_sent.pop(rig.name, None)
             return
         since = float(wait["paused_since"])
+        if snap.get("server_time") is not None:   # Pi clock, same domain as paused_since
+            now = float(snap["server_time"])
         k = int((now - since) // self.cfg.pause_reminder_s)
         prev_since, prev_k = self._pause_sent.get(rig.name, (None, 0))
         if prev_since != since:

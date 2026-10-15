@@ -47,3 +47,19 @@ def test_metadata_records_wait(script):
     for key in ("startup_wait_planned_s", "startup_wait_actual_s", "startup_wait_log"):
         assert key in src
     assert "load_control_key" in src and ".rigmon_key" in src
+
+
+@pytest.mark.parametrize("script", SCRIPTS)
+def test_countdown_holds_reminders_and_label_follows_paused(script):
+    src = _src(script)
+    seg = ast.get_source_segment(src, _func(ast.parse(src), "_startup_countdown"))
+    assert "RUN.hold(True)" in seg and "RUN.hold(False)" in seg
+    assert 'snap["paused"]' in seg
+    assert 'e["action"] == "pause":\n                        PHASE.enter' not in seg
+
+
+@pytest.mark.parametrize("script", SCRIPTS)
+def test_do_post_sets_socket_timeout(script):
+    src = _src(script)
+    seg = ast.get_source_segment(src, _func(ast.parse(src), "_MJPEGHandler"))
+    assert seg.index("settimeout(5)") < seg.index("rfile.read")

@@ -129,3 +129,9 @@ def test_control_key_and_pause_reminder_load(tmp_path):
     assert cfg.rig("flybehavior2").control_key == "k1" and cfg.pause_reminder_s == 120
     assert cfg.rig("behaviorlocust").control_key == "" and "k1" not in repr(cfg)
     assert load_config(_write(tmp_path, YAML)).pause_reminder_s == 300.0
+
+
+@pytest.mark.parametrize("v", ["0", "-5"])
+def test_pause_reminder_must_be_positive(tmp_path, v):
+    with pytest.raises(ValueError):
+        load_config(_write(tmp_path, YAML + f"pause_reminder_s: {v}\n"))

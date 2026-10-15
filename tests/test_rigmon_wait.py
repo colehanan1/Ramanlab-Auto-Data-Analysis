@@ -141,3 +141,25 @@ def test_api_relays_status_and_payload(hub, client):
     hub.wait_control = lambda *a, **k: (200, {"paused": True})
     r = client.post("/api/rig/RigA/wait", json={"action": "add", "seconds": 300})
     assert r.status_code == 200 and r.json() == {"paused": True}
+
+
+def test_pause_reminder_uses_pi_server_time(hub, notifier):
+    snap = {"phase": "WAITING", "server_time": 1100.0,
+            "run": {"wait": {"paused": True, "paused_since": 1000.0}}}
+    hub._maybe_pause_reminder(A, snap, 99999.0)      # hub clock wildly different
+    assert notifier.alerts == []
+    snap["server_time"] = 1300.0
+    hub._maybe_pause_reminder(A, snap, 5.0)
+    assert len(notifier.alerts) == 1
+
+
+def test_cross_site_origin_rejected(hub):
+    hub.wait_control = lambda *a, **k: (200, {})
+    c = TestClient(create_app(hub, start_polling=False))
+    body = {"action": "pause"}
+    for path, js in (("/api/rig/RigA/wait", body), ("/api/mute/RigA", {"muted": True}),
+                     ("/api/mountcheck/RigA", None)):
+        r = c.post(path, json=js, headers={"Origin": "http://evil.example"})
+        assert r.status_code == 403, path
+        assert c.post(path, json=js, headers={"Origin": "http://testserver"}).status_code != 403
+        assert c.post(path, json=js).status_code != 403

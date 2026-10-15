@@ -157,7 +157,7 @@ const waitErr = {};   // last wait-control error per rig; the card re-renders ev
 function waitControls(name, rig) {
   const st = rig.status || {}, run = st.run || {};
   if (!rig.control || !rig.reachable || st.phase !== "WAITING" || run.state !== "running"
-      || Number(run.trials_done || 0) > 0) return "";
+      || Number(run.trials_done || 0) > 0 || !run.wait) return "";
   const w = run.wait || {}, n = esc(name);
   const toggle = w.paused
     ? `<button data-wait-resume="${n}">Resume</button>`

@@ -124,6 +124,8 @@ def load_config(path) -> HubConfig:
     hh, _, mm = str(cfg.cleanup_time).partition(":")
     if not (hh.isdigit() and mm.isdigit() and 0 <= int(hh) < 24 and 0 <= int(mm) < 60):
         raise ValueError(f"cleanup_time must be HH:MM, got {cfg.cleanup_time!r}")
+    if cfg.pause_reminder_s <= 0:
+        raise ValueError(f"pause_reminder_s must be > 0, got {cfg.pause_reminder_s!r}")
     if cfg.qc_root is None:
         cfg = replace(cfg, qc_root=cfg.data_root / "rigmon_qc")
     if {"0.0.0.0", "::"} & set(cfg.bind):

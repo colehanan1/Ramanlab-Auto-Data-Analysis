@@ -139,3 +139,15 @@ def test_load_control_key(tmp_path):
     assert ps.load_control_key(p) is None
     p.write_text("  \n"); assert ps.load_control_key(p) is None
     p.write_text("abc123\n"); assert ps.load_control_key(p) == "abc123"
+
+
+def test_non_ascii_key_is_403_not_typeerror():
+    wc, _, _ = make()
+    assert call(wc, {"action": "pause"}, key="kéy")[0] == 403
+    assert call(wc, {"action": "pause"}, key="k", expected="ké")[0] == 403
+
+
+def test_load_control_key_bad_utf8(tmp_path):
+    p = tmp_path / "key"
+    p.write_bytes(b"\xff\xfe\x80")
+    assert ps.load_control_key(p) is None
