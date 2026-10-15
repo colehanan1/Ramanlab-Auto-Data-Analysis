@@ -1,5 +1,6 @@
-"""Fake rig serves the golden preview frame; the real runner (fake worker unless
-CUDA + engine are available) produces the golden flags and files."""
+"""Fake rig serves the golden preview frame over HTTP; the real sampler and runner
+(with a stubbed detector worker returning the golden detections) produce the golden
+flags and files."""
 
 import importlib.util
 import json

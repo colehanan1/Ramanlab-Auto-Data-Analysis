@@ -32,7 +32,8 @@ def run_worker(model, frames_dir, out_json, *, timeout: float, conf: float = 0.2
         "--model", str(model), "--frames", str(frames_dir), "--out", str(out_json), "--conf", str(conf)]
     env = {**os.environ, "PYTHONPATH": os.pathsep.join(p for p in (str(SRC), os.environ.get("PYTHONPATH", "")) if p)}
     try:
-        p = subprocess.run(argv, capture_output=True, text=True, timeout=timeout, env=env)
+        p = subprocess.run(argv, capture_output=True, text=True, timeout=timeout, env=env,
+                           preexec_fn=lambda: os.nice(10))
     except subprocess.TimeoutExpired:
         raise WorkerError(f"detector timed out after {timeout:.0f} s")
     if p.returncode != 0:
@@ -56,7 +57,10 @@ def main(argv=None) -> None:
     model = YOLO(a.model, task="obb")
     frames, size = [], (0, 0)
     for f in sorted(Path(a.frames).glob("*.jpg")):
-        img = decode(f.read_bytes())
+        try:
+            img = decode(f.read_bytes())
+        except Exception:
+            continue  # one bad frame must not abort the batch
         size = (img.shape[1], img.shape[0])
         r = model.predict(img, conf=a.conf, verbose=False)[0]
         frames.append({"name": f.name, "dets": dets_from_arrays(

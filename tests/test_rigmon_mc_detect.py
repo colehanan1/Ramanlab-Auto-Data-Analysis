@@ -43,3 +43,59 @@ def test_real_engine_finds_four_eyes_on_the_golden_frame(tmp_path):
     dets = res["frames"][0]["dets"]
     assert (res["width"], res["height"]) == (1080, 1080)
     assert sum(d["cls"] == "eye" for d in dets) == 4
+
+
+def test_worker_runs_at_low_priority(tmp_path, monkeypatch):
+    import subprocess
+
+    from rigmon.mountcheck import detect
+    seen = {}
+
+    def fake_run(argv, **kw):
+        seen.update(kw)
+        (tmp_path / "o.json").write_text("{}")
+        return subprocess.CompletedProcess(argv, 0, "", "")
+    monkeypatch.setattr(detect.subprocess, "run", fake_run)
+    run_worker("m", tmp_path, tmp_path / "o.json", timeout=5)
+    assert callable(seen["preexec_fn"])
+    import os
+    got = []
+    monkeypatch.setattr(os, "nice", lambda n: got.append(n))
+    seen["preexec_fn"]()
+    assert got == [10]
+
+
+def test_worker_skips_an_undecodable_frame(tmp_path, monkeypatch):
+    import types
+
+    from rigmon.mountcheck import detect
+    fdir = tmp_path / "f"
+    fdir.mkdir()
+    (fdir / "00000.jpg").write_bytes(b"corrupt")
+    (fdir / "00001.jpg").write_bytes((GOLDEN / "mount_qc_pi2_20261014.jpg").read_bytes())
+
+    class Arr:
+        def __init__(self, v):
+            self.v = v
+
+        def tolist(self):
+            return self.v
+
+    class Res:
+        names = {0: "eye"}
+        obb = types.SimpleNamespace(cls=Arr([]), xywhr=Arr([]), conf=Arr([]))
+
+    class FakeYOLO:
+        names = {0: "eye"}
+
+        def __init__(self, *a, **k):
+            pass
+
+        def predict(self, img, **k):
+            return [Res()]
+    monkeypatch.setitem(sys.modules, "ultralytics", types.SimpleNamespace(YOLO=FakeYOLO))
+    model = tmp_path / "m.engine"
+    model.write_text("x")
+    detect.main(["--model", str(model), "--frames", str(fdir), "--out", str(tmp_path / "o.json")])
+    out = json.loads((tmp_path / "o.json").read_text())
+    assert [f["name"] for f in out["frames"]] == ["00001.jpg"]

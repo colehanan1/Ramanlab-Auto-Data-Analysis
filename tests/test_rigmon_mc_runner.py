@@ -88,8 +88,9 @@ def test_clean_check_is_ok_and_silent(tmp_path):
     clean = [d for d in GDETS["detections"] if 300 < d["y"] < 800]   # flies 2 and 3: well placed
 
     def worker(model, frames_dir, out_json, *, timeout, conf=0.25):
-        return {"width": 1080, "height": 1080, "frames": [{"name": "0.jpg", "dets": clean}]}
-    runner, store, notifier, _ = make(tmp_path, lambda *a, **k: ([GJPG], True), worker)
+        names = sorted(p.name for p in Path(frames_dir).glob("*.jpg"))
+        return {"width": 1080, "height": 1080, "frames": [{"name": n, "dets": clean} for n in names]}
+    runner, store, notifier, _ = make(tmp_path, lambda *a, **k: ([GJPG] * 20, True), worker)
     runner.start(PI2, "b", "manual")
     row = store.latest_mount_check("Flybehavior2")
     # only 2 flies in this synthetic frame → flies_visible; prove the "ok" path with expected_flies=2
@@ -117,3 +118,118 @@ def test_second_start_while_running_is_refused(tmp_path):
     runner.spawn = lambda f: None          # leave the first one "running"
     assert runner.start(PI2, "b", "manual") is not None
     assert runner.start(PI2, "b", "manual") is None
+
+
+def clean_worker(model, frames_dir, out_json, *, timeout, conf=0.25):
+    clean = [d for d in GDETS["detections"] if 300 < d["y"] < 800]
+    names = sorted(p.name for p in Path(frames_dir).glob("*.jpg"))
+    return {"width": 1080, "height": 1080, "frames": [{"name": n, "dets": clean} for n in names]}
+
+
+def two_fly(runner, cfg):
+    runner.cfg = replace(cfg, mount_check=MountCheckConfig(thresholds={"expected_flies": 2}))
+
+
+def test_few_clean_frames_are_incomplete_even_when_sampling_completed(tmp_path):
+    runner, store, notifier, cfg = make(tmp_path, lambda *a, **k: ([GJPG] * 3, True), clean_worker)
+    two_fly(runner, cfg)
+    runner.start(PI2, "b", "manual")
+    row = store.latest_mount_check("Flybehavior2")
+    assert row["state"] == "incomplete" and row["frames"] == 3 and not notifier.calls
+
+
+def test_flags_beat_incomplete(tmp_path):
+    runner, store, _, _ = make(tmp_path, lambda *a, **k: ([GJPG] * 3, True))
+    runner.start(PI2, "b", "manual")
+    assert store.latest_mount_check("Flybehavior2")["state"] == "issues"
+
+
+def test_one_corrupt_jpeg_is_dropped_and_counted(tmp_path):
+    runner, store, _, _ = make(tmp_path, lambda *a, **k: ([GJPG, b"not a jpeg", GJPG, GJPG], True))
+    runner.start(PI2, "b", "manual")
+    row = store.latest_mount_check("Flybehavior2")
+    assert row["state"] == "issues" and row["frames"] == 3
+    assert [f["code"] for f in row["flags"]] == ["edge_margin", "bottom_room"]
+    assert json.loads(Path(row["json_path"]).read_text())["dropped_frames"] == 1
+
+
+def test_detections_map_back_by_name_not_position(tmp_path):
+    """The worker may skip a frame and reorder; the report counts what it returned."""
+    def worker(model, frames_dir, out_json, *, timeout, conf=0.25):
+        names = sorted(p.name for p in Path(frames_dir).glob("*.jpg"))
+        assert names == ["00000.jpg", "00001.jpg"]          # only the good frames were written
+        return {"width": 1080, "height": 1080,
+                "frames": [{"name": "00001.jpg", "dets": GDETS["detections"]}]}
+    runner, store, _, _ = make(tmp_path, lambda *a, **k: ([b"bad", GJPG, GJPG], True), worker)
+    runner.start(PI2, "b", "manual")
+    row = store.latest_mount_check("Flybehavior2")
+    assert row["frames"] == 1 and row["state"] == "issues" and Path(row["jpg_path"]).is_file()
+
+
+def test_all_corrupt_is_a_camera_flag(tmp_path):
+    def worker(*a, **k):
+        raise AssertionError("worker must not run")
+    runner, store, _, _ = make(tmp_path, lambda *a, **k: ([b"junk", b"junk2"], True), worker)
+    runner.start(PI2, "b", "manual")
+    row = store.latest_mount_check("Flybehavior2")
+    assert row["state"] == "issues" and row["flags"][0]["code"] == "camera"
+
+
+def test_only_one_detector_runs_hub_wide(tmp_path):
+    import threading
+    import time
+    live = {"now": 0, "max": 0}
+    lock = threading.Lock()
+
+    def worker(model, frames_dir, out_json, *, timeout, conf=0.25):
+        with lock:
+            live["now"] += 1
+            live["max"] = max(live["max"], live["now"])
+        time.sleep(0.15)
+        with lock:
+            live["now"] -= 1
+        return fake_worker(model, frames_dir, out_json, timeout=timeout)
+    rigs = []
+    for i in range(3):
+        r, store, _, _ = make(tmp_path / str(i), lambda *a, **k: ([GJPG], True), worker)
+        rigs.append((r, store))
+    ts = []
+    for r, store in rigs:
+        cid = store.add_mount_check("Flybehavior2", "b", "manual")
+        ts.append(threading.Thread(target=r.run, args=(PI2, "b", "manual", cid)))
+    [t.start() for t in ts]
+    [t.join() for t in ts]
+    assert live["max"] == 1
+
+
+def test_spawn_failure_marks_the_row_error(tmp_path):
+    runner, store, _, _ = make(tmp_path, lambda *a, **k: ([GJPG], True))
+
+    def boom(f):
+        raise RuntimeError("can't start new thread")
+    runner.spawn = boom
+    assert runner.start(PI2, "b", "manual") is None
+    row = store.latest_mount_check("Flybehavior2")
+    assert row["state"] == "error" and "can't start" in row["error"]
+
+
+def test_notifier_failure_never_changes_the_stored_state(tmp_path):
+    runner, store, notifier, _ = make(tmp_path, lambda *a, **k: ([GJPG] * 3, True))
+
+    def boom(*a):
+        raise OSError("notify-send missing")
+    notifier.mount_check = boom
+    runner.start(PI2, "b", "manual")
+    assert store.latest_mount_check("Flybehavior2")["state"] == "issues"
+
+
+def test_error_row_survives_a_failing_notifier(tmp_path):
+    def worker(*a, **k):
+        raise WorkerError("x")
+    runner, store, notifier, _ = make(tmp_path, lambda *a, **k: ([GJPG], True), worker)
+
+    def boom(*a):
+        raise OSError("down")
+    notifier.mount_check = boom
+    runner.start(PI2, "b", "manual")
+    assert store.latest_mount_check("Flybehavior2")["state"] == "error"
