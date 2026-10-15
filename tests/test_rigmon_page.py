@@ -102,3 +102,17 @@ def test_page_trial_rows_not_rebuilt_unchanged_and_trace_closes():
     assert "lastTrials" in PAGE
     assert 'getElementById("tracebox").addEventListener("close"' in PAGE
     assert 'removeAttribute("src")' in PAGE
+
+
+def test_wait_buttons_present():
+    for marker in ('data-wait-add="300"', 'data-wait-add="900"', "data-wait-pause", "data-wait-resume",
+                   "/api/rig/", "/wait"):
+        assert marker in PAGE
+    assert "onclick=" not in PAGE.lower()
+
+
+def test_wait_buttons_gated_on_startup_wait():
+    i = PAGE.index("function waitControls")
+    seg = PAGE[i:i + 1500]
+    for cond in ("rig.control", '"WAITING"', "trials_done", '"running"'):
+        assert cond in seg

@@ -153,6 +153,22 @@ function mountBlock(name, rig) {
     ${list ? `<ul>${list}</ul>` : ""}${rows ? `<table>${rows}</table>` : ""}${img}${unavailable}<div class="row">${button}</div></details>`;
 }
 
+const waitErr = {};   // last wait-control error per rig; the card re-renders every SSE tick
+function waitControls(name, rig) {
+  const st = rig.status || {}, run = st.run || {};
+  if (!rig.control || !rig.reachable || st.phase !== "WAITING" || run.state !== "running"
+      || Number(run.trials_done || 0) > 0) return "";
+  const w = run.wait || {}, n = esc(name);
+  const toggle = w.paused
+    ? `<button data-wait-resume="${n}">Resume</button>`
+    : `<button data-wait-pause="${n}">Pause</button>`;
+  const badge = w.paused && w.paused_since
+    ? ` <span class="sub">Paused ${Math.max(0, Math.floor((piNow(rig) - w.paused_since) / 60))} min</span>` : "";
+  return `<div class="row wait-ctl"><button data-wait-add="300" data-rig="${n}">+5 min</button>`
+       + `<button data-wait-add="900" data-rig="${n}">+15 min</button>${toggle}${badge}`
+       + `<span class="sub wait-err" data-wait-err="${n}" style="color:var(--bad)">${esc(waitErr[name] || "")}</span></div>`;
+}
+
 function card(name, rig) {
   const st = rig.status || {}, run = st.run || {};
   const [phaseName, color] = Object.prototype.hasOwnProperty.call(PHASE, st.phase) ? PHASE[st.phase] : PHASE.IDLE;
@@ -191,6 +207,7 @@ function card(name, rig) {
       ${run.state === "failed" ? ` · <b style="color:var(--bad)">FAILED</b> ${esc(run.error)}` : ""}
       </div>
     <div class="strip">${strip}</div>
+    ${waitControls(name, rig)}
     <div data-mcslot="${esc(name)}"></div>
     <div class="row">
       <a class="btn" href="${esc(rig.live_url)}" target="_blank" rel="noopener">Live</a>
@@ -261,9 +278,23 @@ document.addEventListener("toggle", e => {
 
 let lastTrials = "";
 document.addEventListener("click", e => {
-  const b = e.target.closest("button[data-play],button[data-trace],button[data-mute],button[data-mount],img[data-zoom]");
+  const b = e.target.closest("button[data-play],button[data-trace],button[data-mute],button[data-mount],button[data-wait-add],button[data-wait-pause],button[data-wait-resume],img[data-zoom]");
   if (!b) return;
   const d = b.dataset;
+  const waitReq = d.waitAdd ? [d.rig, {action: "add", seconds: Number(d.waitAdd)}]
+    : d.waitPause ? [d.waitPause, {action: "pause"}]
+    : d.waitResume ? [d.waitResume, {action: "resume"}] : null;
+  if (waitReq) {
+    const [rigName, body] = waitReq;
+    fetch(`/api/rig/${encodeURIComponent(rigName)}/wait`, {method: "POST",
+          headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)})
+      .then(async r => {
+        waitErr[rigName] = r.ok ? "" : ((await r.json().catch(() => ({}))).detail || `error ${r.status}`);
+        render();
+      })
+      .catch(() => { waitErr[rigName] = "Hub unreachable"; render(); });
+    return;
+  }
   if (d.mount !== undefined) {
     b.disabled = true; b.textContent = "Starting…";
     fetch(`/api/mountcheck/${encodeURIComponent(d.mount)}`, {method: "POST"})
