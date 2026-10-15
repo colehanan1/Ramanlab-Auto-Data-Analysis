@@ -136,3 +136,14 @@ def test_qc_image_route(ctx):
     assert client.get("/qc/flybehavior2/b2/mount_check_1.jpg").content == b"jpgdata"
     assert client.get("/qc/flybehavior2/b2/mount_check_1.json").status_code == 404
     assert client.get("/qc/flybehavior2/..%2F..%2Fetc/x.jpg").status_code == 404
+
+
+def test_mount_check_disabled_is_distinct_409(ctx):
+    hub, store, workers, finalizer, client, tmp_path = ctx
+    hub.mountcheck = None
+    hub.ingest("flybehavior2", snap(), 100.0)
+    r = client.post("/api/mountcheck/flybehavior2")
+    assert r.status_code == 409 and r.json()["detail"] == "mount check is disabled in rigmon.yaml"
+    assert hub.state()["mount_check_enabled"] is False
+    hub.mountcheck = object()
+    assert hub.state()["mount_check_enabled"] is True

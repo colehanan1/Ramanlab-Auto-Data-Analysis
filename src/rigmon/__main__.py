@@ -27,6 +27,19 @@ def bind_socket(host: str, port: int) -> socket.socket:
     return s
 
 
+def build_mountcheck(cfg, store, notifier):
+    if not cfg.mount_check.enabled:
+        return None
+    if not cfg.pipeline_config.exists():
+        raise SystemExit(f"pipeline_config not found: {cfg.pipeline_config} "
+                         "(set pipeline_config in rigmon.yaml or disable mount_check)")
+    from fbpipe.config import load_settings
+
+    from .mountcheck.runner import MountCheckRunner
+
+    return MountCheckRunner(cfg, store, notifier, load_settings(cfg.pipeline_config))
+
+
 def main(argv=None) -> None:
     ap = argparse.ArgumentParser(prog="rigmon")
     ap.add_argument("--config", type=Path, default=REPO / "config" / "rigmon.yaml")
@@ -45,12 +58,7 @@ def main(argv=None) -> None:
     notifier = Notifier(cfg, store)
     transfer = TrialTransfer(cfg, store)
     finalizer = Finalizer(cfg, store, transfer, alert=notifier.alert)
-    from fbpipe.config import load_settings
-
-    from .mountcheck.runner import MountCheckRunner
-
-    settings = load_settings(cfg.pipeline_config)
-    mountcheck = MountCheckRunner(cfg, store, notifier, settings) if cfg.mount_check.enabled else None
+    mountcheck = build_mountcheck(cfg, store, notifier)
     hub = Hub(cfg, store, notifier, transfer, finalizer, TransferWorkers(), mountcheck=mountcheck)
     server = uvicorn.Server(uvicorn.Config(create_app(hub), log_level="warning"))
     server.run(sockets=[bind_socket(h, cfg.port) for h in cfg.bind])

@@ -153,6 +153,7 @@ class Hub:
                 "mount_check": self.store.latest_mount_check(r.name),
             }
         return {"server_time": self.clock(), "rigs": rigs,
+                "mount_check_enabled": self.mountcheck is not None,
                 "trials": self.store.trials(limit=150),
                 "events": self.store.recent_events(limit=50)}
 

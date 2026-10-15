@@ -117,7 +117,9 @@ def create_app(hub, start_polling: bool = True) -> FastAPI:
     @app.post("/api/mountcheck/{rig}", status_code=202)
     def mount_check(rig: str):
         rig_or_404(rig)
-        if hub.mountcheck is None or not hub.reachable.get(rig):
+        if hub.mountcheck is None:
+            raise HTTPException(409, "mount check is disabled in rigmon.yaml")
+        if not hub.reachable.get(rig):
             raise HTTPException(409, "rig not reachable (is its script running?)")
         check_id = hub.start_mount_check(rig)
         if check_id is None:

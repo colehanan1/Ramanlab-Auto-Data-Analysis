@@ -251,3 +251,16 @@ def test_state_includes_latest_mount_check(tmp_path):
     cid = store.add_mount_check("flybehavior2", "b2", "manual")
     store.update_mount_check(cid, state="ok")
     assert hub.state()["rigs"]["flybehavior2"]["mount_check"]["state"] == "ok"
+
+
+def test_build_mountcheck_disabled_and_missing_config(tmp_path):
+    import pytest
+    from dataclasses import replace
+    from rigmon.__main__ import build_mountcheck
+    from rigmon.config import MountCheckConfig
+    hub, store, notifier, *_ = _hub(tmp_path)
+    off = replace(hub.cfg, mount_check=MountCheckConfig(enabled=False), pipeline_config=tmp_path / "nope.yaml")
+    assert build_mountcheck(off, store, notifier) is None
+    on = replace(hub.cfg, mount_check=MountCheckConfig(enabled=True), pipeline_config=tmp_path / "nope.yaml")
+    with pytest.raises(SystemExit, match="pipeline_config not found"):
+        build_mountcheck(on, store, notifier)

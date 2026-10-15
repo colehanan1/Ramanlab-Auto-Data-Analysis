@@ -63,3 +63,16 @@ def test_page_has_mount_check_ui():
                    "Mount ✓", "issue"):
         assert needle in PAGE
     assert "onclick=" not in PAGE
+
+
+def test_mount_ui_survives_rerender():
+    assert "const mcOpen = new Set()" in PAGE and "mcOpen.has(name)" in PAGE
+    t = PAGE.index('addEventListener("toggle"')
+    assert "}, true);" in PAGE[t:t + 400]
+    assert "data-card=" in PAGE and "lastCard" in PAGE
+    assert "S.mount_check_enabled" in PAGE
+    # running branch returns before any button is built
+    mb = PAGE[PAGE.index("function mountBlock"):]
+    run = mb.index('m.state === "running"')
+    assert "Mount check running" in mb[run:run + 200] and "return" in mb[run:run + 200]
+    assert mb.index("const button") > run
