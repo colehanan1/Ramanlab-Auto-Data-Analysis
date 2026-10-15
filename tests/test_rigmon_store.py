@@ -107,3 +107,23 @@ def test_running_checks_fail_on_restart(tmp_path):
     row = s2.latest_mount_check("pi2")
     assert row["state"] == "error" and row["error"] == "hub restarted during the check"
     assert not s2.mount_check_running("pi2")
+
+
+def test_trial_trace_columns_and_migration(tmp_path):
+    import sqlite3
+    db = tmp_path / "db.sqlite"
+    con = sqlite3.connect(db)   # an old database without the new columns
+    con.executescript("CREATE TABLE trials (rig TEXT, batch_dir TEXT, idx INTEGER, phase_tag TEXT, label TEXT,"
+                      " odor TEXT, video TEXT, frames_csv TEXT, video_bytes INTEGER, csv_bytes INTEGER,"
+                      " ended_at REAL, state TEXT DEFAULT 'queued', error TEXT DEFAULT '', mp4 TEXT DEFAULT '',"
+                      " PRIMARY KEY (rig, batch_dir, idx));")
+    con.commit(); con.close()
+    s = Store(db)
+    s.upsert_trial("pi2", "b", T1)
+    s.set_trial_trace("pi2", "b", 1, trace="a")
+    row = s.get_trial("pi2", "b", 1)
+    assert row["trace"] == "a" and row["trace_error"] == ""
+    s.set_trial_trace("pi2", "b", 1, error="boom")
+    assert s.get_trial("pi2", "b", 1)["trace_error"] == "boom"
+    assert s.clear_traces("pi2", "b") == 1 and s.get_trial("pi2", "b", 1)["trace"] == ""
+    assert s.batch_last_ended("pi2", "b") == 50.0 and s.batch_last_ended("pi2", "zz") is None

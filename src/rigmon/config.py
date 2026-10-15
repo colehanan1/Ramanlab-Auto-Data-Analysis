@@ -52,6 +52,14 @@ class MountCheckConfig:
 
 
 @dataclass(frozen=True)
+class TracesConfig:
+    enabled: bool = True
+    frame_stride: int = 2
+    conf: float = 0.25
+    worker_timeout_s: float = 600.0
+
+
+@dataclass(frozen=True)
 class HubConfig:
     rigs: tuple[RigConfig, ...]
     staging_root: Path
@@ -72,6 +80,9 @@ class HubConfig:
     pipeline_config: Path = REPO / "config" / "config_new.yaml"
     qc_root: Path | None = None
     mount_check: MountCheckConfig = field(default_factory=MountCheckConfig)
+    traces: TracesConfig = field(default_factory=TracesConfig)
+    transfer_bwlimit_kbps: int = 40000
+    cleanup_time: str = "00:05"
 
     def rig(self, name: str) -> RigConfig:
         for r in self.rigs:
@@ -104,8 +115,13 @@ def load_config(path) -> HubConfig:
         mc = MountCheckConfig(**(raw.pop("mount_check") or {}))
         mc.th()  # unknown threshold keys fail here, at load time
         kw["mount_check"] = mc
+    if "traces" in raw:
+        kw["traces"] = TracesConfig(**(raw.pop("traces") or {}))
     kw.update(raw)  # scalars; an unknown key is a TypeError from the dataclass
     cfg = HubConfig(rigs=rigs, **kw)
+    hh, _, mm = str(cfg.cleanup_time).partition(":")
+    if not (hh.isdigit() and mm.isdigit() and 0 <= int(hh) < 24 and 0 <= int(mm) < 60):
+        raise ValueError(f"cleanup_time must be HH:MM, got {cfg.cleanup_time!r}")
     if cfg.qc_root is None:
         cfg = replace(cfg, qc_root=cfg.data_root / "rigmon_qc")
     if {"0.0.0.0", "::"} & set(cfg.bind):

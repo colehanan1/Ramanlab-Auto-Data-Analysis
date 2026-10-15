@@ -103,3 +103,20 @@ def test_unknown_threshold_key_is_an_error(tmp_path):
 def test_qc_root_inside_flys_new_is_refused(tmp_path):
     with pytest.raises(ValueError):
         load_config(_write(tmp_path, YAML + "qc_root: {root}/Data/flys_New/qc\n"))
+
+
+from rigmon.config import TracesConfig
+
+
+def test_traces_defaults(tmp_path):
+    cfg = load_config(_write(tmp_path, YAML))
+    assert cfg.traces == TracesConfig()
+    assert (cfg.traces.enabled, cfg.traces.frame_stride, cfg.traces.conf) == (True, 2, 0.25)
+    assert cfg.transfer_bwlimit_kbps == 40000 and cfg.cleanup_time == "00:05"
+
+
+def test_traces_overrides_and_bad_cleanup_time(tmp_path):
+    cfg = load_config(_write(tmp_path, YAML + "traces: {frame_stride: 3}\ncleanup_time: '01:30'\n"))
+    assert cfg.traces.frame_stride == 3 and cfg.cleanup_time == "01:30"
+    with pytest.raises(ValueError):
+        load_config(_write(tmp_path, YAML + "cleanup_time: '25:00'\n"))

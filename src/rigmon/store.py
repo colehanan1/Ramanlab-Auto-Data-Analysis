@@ -15,6 +15,7 @@ CREATE TABLE IF NOT EXISTS trials (
   rig TEXT, batch_dir TEXT, idx INTEGER, phase_tag TEXT, label TEXT, odor TEXT,
   video TEXT, frames_csv TEXT, video_bytes INTEGER, csv_bytes INTEGER, ended_at REAL,
   state TEXT DEFAULT 'queued', error TEXT DEFAULT '', mp4 TEXT DEFAULT '',
+  trace TEXT DEFAULT '', trace_error TEXT DEFAULT '',
   PRIMARY KEY (rig, batch_dir, idx));
 CREATE TABLE IF NOT EXISTS sessions (
   rig TEXT, batch_dir TEXT, state TEXT, dest TEXT DEFAULT '', error TEXT DEFAULT '',
@@ -38,6 +39,10 @@ class Store:
         self._clock = clock
         with self._lock:
             self._db.executescript(SCHEMA)
+            cols = {r[1] for r in self._db.execute("PRAGMA table_info(trials)")}
+            for col in ("trace", "trace_error"):
+                if col not in cols:
+                    self._db.execute(f"ALTER TABLE trials ADD COLUMN {col} TEXT DEFAULT ''")
             self._db.commit()
 
     def _exec(self, sql: str, args=()) -> int:
@@ -75,6 +80,18 @@ class Store:
         self._exec("UPDATE trials SET state=?, error=?, mp4=COALESCE(NULLIF(?, ''), mp4)"
                    " WHERE rig=? AND batch_dir=? AND idx=?",
                    (state, error, mp4, rig, batch_dir, int(idx)))
+
+    def set_trial_trace(self, rig, batch_dir, idx, *, trace: str = "", error: str = "") -> None:
+        self._exec("UPDATE trials SET trace=?, trace_error=? WHERE rig=? AND batch_dir=? AND idx=?",
+                   (trace, error, rig, batch_dir, int(idx)))
+
+    def clear_traces(self, rig: str, batch_dir: str) -> int:
+        return self._exec("UPDATE trials SET trace='', trace_error='' WHERE rig=? AND batch_dir=? AND (trace<>'' OR trace_error<>'')",
+                          (rig, batch_dir))
+
+    def batch_last_ended(self, rig: str, batch_dir: str) -> float | None:
+        rows = self._all("SELECT MAX(ended_at) AS m FROM trials WHERE rig=? AND batch_dir=?", (rig, batch_dir))
+        return float(rows[0]["m"]) if rows and rows[0]["m"] is not None else None
 
     def get_trial(self, rig, batch_dir, idx) -> dict | None:
         rows = self._all("SELECT * FROM trials WHERE rig=? AND batch_dir=? AND idx=?",

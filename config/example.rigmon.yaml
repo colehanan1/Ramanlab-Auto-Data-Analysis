@@ -19,3 +19,8 @@ mount_check:
   sample_fps: 2
   min_remaining_s: 1200            # skip if < 20 min before the first trial
   thresholds: {}                   # e.g. {bottom_room_px: 150, edge_margin_px: 40}
+traces:                      # per-trial px plots (needs transfer_enabled: true)
+  enabled: true
+  frame_stride: 2
+transfer_bwlimit_kbps: 40000 # gentle on the Pi's SD card
+cleanup_time: "00:05"        # delete yesterday's traces + shadow copies
