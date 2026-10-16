@@ -114,7 +114,7 @@ def test_mount_check_button_endpoint(ctx):
         def __init__(self):
             self.n = 0
 
-        def start(self, rig, batch_dir, trigger, stop=lambda: False):
+        def start(self, rig, batch_dir, trigger, stop=lambda: False, expected_flies=None):
             self.n += 1
             return None if self.n > 1 else 7
     hub.mountcheck = MC()

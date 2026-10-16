@@ -166,7 +166,7 @@ class Hub:
         return bool(s and s.get("state") == "landed")
 
     def _queue_trial(self, rig, d: dict) -> None:
-        t, batch = d["trial"], d["batch_dir"]
+        t, batch = {**d["trial"], "n_flies": self.expected_flies(rig.name)}, d["batch_dir"]
         idx = int(t["index"])
         row = self.store.get_trial(rig.name, batch, idx)
         if row and row.get("state") == "done":
@@ -228,7 +228,15 @@ class Hub:
         batch = run.get("batch_dir") or ""
         if not batch or self.store.mount_check_done(rig.name, batch, "auto"):
             return
-        self.mountcheck.start(rig, batch, "auto", stop=lambda: self._trials_started(rig.name))
+        self.mountcheck.start(rig, batch, "auto", stop=lambda: self._trials_started(rig.name),
+                              expected_flies=self.expected_flies(rig.name))
+
+    def expected_flies(self, rig_name: str) -> int:
+        """Flies mounted on this run (--n-flies on the Pi); the configured
+        expected_flies (default 4) when the rig does not say."""
+        n = ((self.latest.get(rig_name) or {}).get("session") or {}).get("n_flies")
+        ok = isinstance(n, int) and not isinstance(n, bool) and 1 <= n <= 4
+        return n if ok else self.cfg.mount_check.th().expected_flies
 
     def _trials_started(self, rig_name: str) -> bool:
         snap = self.latest.get(rig_name) or {}
@@ -238,7 +246,7 @@ class Hub:
     def start_mount_check(self, rig_name: str) -> int | None:
         rig = self.cfg.rig(rig_name)
         batch = ((self.latest.get(rig_name) or {}).get("run") or {}).get("batch_dir") or "no-batch"
-        return self.mountcheck.start(rig, batch, "manual")
+        return self.mountcheck.start(rig, batch, "manual", expected_flies=self.expected_flies(rig_name))
 
     def state(self) -> dict:
         mutes = self.store.mutes()

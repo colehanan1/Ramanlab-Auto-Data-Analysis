@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 import logging
 import tempfile
 import threading
@@ -40,14 +41,15 @@ class MountCheckRunner:
         self.sampler, self.worker, self.today, self.spawn = sampler, worker, today, spawn
         self._lock = threading.Lock()
 
-    def start(self, rig, batch_dir: str, trigger: str, stop=lambda: False) -> int | None:
+    def start(self, rig, batch_dir: str, trigger: str, stop=lambda: False,
+              expected_flies: int | None = None) -> int | None:
         batch_dir = batch_dir if _plain(batch_dir) else "no-batch"
         with self._lock:
             if self.store.mount_check_running(rig.name):
                 return None
             check_id = self.store.add_mount_check(rig.name, batch_dir, trigger)
         try:
-            self.spawn(lambda: self.run(rig, batch_dir, trigger, check_id, stop))
+            self.spawn(lambda: self.run(rig, batch_dir, trigger, check_id, stop, expected_flies))
         except Exception as e:  # e.g. cannot start a thread: never leave the row "running"
             log.warning("mount check %s/%s could not start: %r", rig.name, batch_dir, e)
             self._fail(rig, check_id, e)
@@ -64,8 +66,9 @@ class MountCheckRunner:
         except Exception:
             log.exception("mount-check error notification for %s failed", rig.name)
 
-    def run(self, rig, batch_dir, trigger, check_id, stop=lambda: False) -> dict:
+    def run(self, rig, batch_dir, trigger, check_id, stop=lambda: False, expected_flies=None) -> dict:
         mc = self.cfg.mount_check
+        th = mc.th() if expected_flies is None else replace(mc.th(), expected_flies=int(expected_flies))
         try:
             jpgs, complete = self.sampler(rig.live_url + "preview", mc.sample_s, mc.sample_fps, stop=stop)
             gate = gate_for_host(self.settings, rig.name, self.today())
@@ -78,7 +81,7 @@ class MountCheckRunner:
                     pass
             dropped = len(jpgs) - len(good)
             if not good:
-                report, imgs, dets = analyze([], 0, 0, gate_px=gate, up_divisor=up, th=mc.th()), [], []
+                report, imgs, dets = analyze([], 0, 0, gate_px=gate, up_divisor=up, th=th), [], []
             else:
                 with tempfile.TemporaryDirectory(prefix="rigmon-mc-") as tmp:
                     for i, (j, _) in enumerate(good):
@@ -98,13 +101,13 @@ class MountCheckRunner:
                 dets = [by_idx[i] for i in idxs]
                 all_imgs = [good[i][1] for i in idxs]
                 w, h = int(res["width"]), int(res["height"])
-                first = analyze(dets, w, h, gate_px=gate, up_divisor=up, th=mc.th())
+                first = analyze(dets, w, h, gate_px=gate, up_divisor=up, th=th)
                 imgs = all_imgs
                 pick = np.linspace(0, len(imgs) - 1, min(20, len(imgs))).astype(int) if imgs else []
                 grays = [cv2.cvtColor(imgs[i], cv2.COLOR_BGR2GRAY) for i in pick]
                 sharp = {s.slot: float(np.median([region_sharpness(g, *s.eye_xy, half=mc.sharpness_half_px)
                                                   for g in grays])) for s in first.slots} if grays else {}
-                report = analyze(dets, w, h, gate_px=gate, up_divisor=up, th=mc.th(), sharpness=sharp,
+                report = analyze(dets, w, h, gate_px=gate, up_divisor=up, th=th, sharpness=sharp,
                                  sharpness_reference=self.store.sharpness_reference(rig.name))
             if report.flags:
                 state = "issues"
@@ -112,7 +115,7 @@ class MountCheckRunner:
                 state = "incomplete"
             else:
                 state = "ok"
-            json_path, jpg_path = self._write(rig, batch_dir, trigger, report, imgs, dets, dropped)
+            json_path, jpg_path = self._write(rig, batch_dir, trigger, report, imgs, dets, dropped, th)
             sharpness = (float(np.median([s.sharpness for s in report.slots if s.sharpness is not None]))
                          if any(s.sharpness is not None for s in report.slots) else None)
             self.store.update_mount_check(
@@ -130,14 +133,14 @@ class MountCheckRunner:
                     log.exception("mount-check notification for %s failed", rig.name)
         return self.store.latest_mount_check(rig.name)
 
-    def _write(self, rig, batch_dir, trigger, report, imgs, dets, dropped=0):
+    def _write(self, rig, batch_dir, trigger, report, imgs, dets, dropped=0, th=None):
         out = self.cfg.qc_root / rig.name / batch_dir
         out.mkdir(parents=True, exist_ok=True)
         stem = "mount_check_" + time.strftime("%Y%m%d_%H%M%S")
         json_path = out / f"{stem}.json"
         payload = {"rig": rig.name, "label": rig.label, "batch_dir": batch_dir, "trigger": trigger,
                    "written_at": time.time(), "model": str(self.settings.model_path),
-                   "thresholds": self.cfg.mount_check.th().__dict__, "dropped_frames": dropped,
+                   "thresholds": (th or self.cfg.mount_check.th()).__dict__, "dropped_frames": dropped,
                    **report.to_dict()}
         json_path.write_text(json.dumps(payload, indent=1, default=str))
         if not imgs:

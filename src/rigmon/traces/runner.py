@@ -6,6 +6,7 @@ import csv
 import logging
 import math
 import tempfile
+from dataclasses import replace
 from datetime import date
 from pathlib import Path
 
@@ -40,6 +41,7 @@ class TraceRunner:
             if not mp4.is_file():
                 raise FileNotFoundError(f"no mp4 for {stem} in staging")
             tc = self.cfg.traces
+            n_flies = int(trial.get("n_flies") or self.cfg.mount_check.th().expected_flies)
             with tempfile.TemporaryDirectory(prefix="rigmon-trace-") as tmp:
                 with self.gpu:   # one detector process hub-wide
                     res = self.worker(self.settings.model_path, mp4, Path(tmp) / "dets.json",
@@ -47,7 +49,7 @@ class TraceRunner:
             gate = gate_for_host(self.settings, rig.name, self.today())
             up = float(getattr(self.settings.proboscis_filter, "up_divisor", 4.0))
             series = build_series(res["frames"], float(res.get("fps") or 0.0), gate_px=gate, up_divisor=up,
-                                  th=self.cfg.mount_check.th())
+                                  th=replace(self.cfg.mount_check.th(), expected_flies=n_flies))
             if series.n_slots == 0:
                 raise ValueError("no flies detected")
             segments = odor_segments(staging / frames_csv)
@@ -55,7 +57,7 @@ class TraceRunner:
             out.mkdir(parents=True, exist_ok=True)
             self._write_csv(out / f"{stem}.csv", series, segments)
             title = f"{rig.label} · {batch_dir} · {trial.get('label') or trial.get('phase_tag') or stem}"
-            render_trace(series, segments, out / f"{stem}.png", title=title)
+            render_trace(series, segments, out / f"{stem}.png", title=title, expected=n_flies)
             self.store.set_trial_trace(rig.name, batch_dir, idx, trace=stem)
             return stem
         except Exception as e:  # a trace must never disturb the copy queue

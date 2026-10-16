@@ -182,7 +182,7 @@ class FakeMC:
     def __init__(self):
         self.started = []
 
-    def start(self, rig, batch_dir, trigger, stop=lambda: False):
+    def start(self, rig, batch_dir, trigger, stop=lambda: False, expected_flies=None):
         self.started.append((rig.name, batch_dir, trigger))
         return len(self.started)
 

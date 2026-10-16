@@ -233,3 +233,21 @@ def test_error_row_survives_a_failing_notifier(tmp_path):
     notifier.mount_check = boom
     runner.start(PI2, "b", "manual")
     assert store.latest_mount_check("Flybehavior2")["state"] == "error"
+
+
+def test_expected_flies_comes_from_the_run(tmp_path):
+    clean = [d for d in GDETS["detections"] if 300 < d["y"] < 800]   # 2 well-placed flies
+
+    def worker(model, frames_dir, out_json, *, timeout, conf=0.25):
+        names = sorted(p.name for p in Path(frames_dir).glob("*.jpg"))
+        return {"width": 1080, "height": 1080, "frames": [{"name": n, "dets": clean} for n in names]}
+    runner, store, notifier, _ = make(tmp_path, lambda *a, **k: ([GJPG] * 20, True), worker)
+    runner.start(PI2, "b", "manual", expected_flies=2)
+    row = store.latest_mount_check("Flybehavior2")
+    assert row["state"] == "ok"
+    saved = json.loads(Path(row["json_path"]).read_text())
+    assert saved["thresholds"]["expected_flies"] == 2
+    runner.start(PI2, "b", "manual", expected_flies=3)
+    row = store.latest_mount_check("Flybehavior2")
+    assert row["state"] == "issues"
+    assert any("expected 3" in f["message"] for f in row["flags"])
