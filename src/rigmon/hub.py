@@ -206,11 +206,17 @@ class Hub:
         return self.finalizer.abort(rig.name, batch_dir)
 
     def resolve_rig(self, host: str, client_ip: str):
+        """The rig making a hand-off call, identified by the address it calls
+        from. The name in the URL alone is never enough: anything else on the
+        tailnet (or a web page in a desktop browser) could otherwise finalize
+        or abort a rig's session."""
+        if not client_ip:
+            return None
         for r in self.cfg.rigs:
-            if r.name == host:
+            if r.name == host and r.host == client_ip:
                 return r
         for r in self.cfg.rigs:
-            if client_ip and r.host == client_ip:
+            if r.host == client_ip:
                 return r
         return None
 

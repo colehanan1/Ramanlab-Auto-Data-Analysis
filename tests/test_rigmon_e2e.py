@@ -72,7 +72,8 @@ def test_session_lands_end_to_end(tmp_path, monkeypatch):
         workers.drain()
         assert [t["state"] for t in store.trials()] == ["done", "done"]
 
-        client = TestClient(create_app(hub, start_polling=False), base_url="http://localhost")
+        client = TestClient(create_app(hub, start_polling=False), base_url="http://localhost",
+                        client=("127.0.0.1", 50000))
         url = f"/api/sessions/fakepi/{batch}"
         r = client.post(f"{url}/complete", json={
             "output_dir": str(pi), "manifest": rig_session.build_manifest(pi),

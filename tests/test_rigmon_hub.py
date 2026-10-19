@@ -82,7 +82,10 @@ def test_request_finalize_sets_pending_and_runs_after_trials(tmp_path):
 
 def test_resolve_rig_by_name_or_ip(tmp_path):
     hub, *_ = _hub(tmp_path)
-    assert hub.resolve_rig("flybehavior2", "") is PI2
+    assert hub.resolve_rig("flybehavior2", "100.93.23.70") is PI2
+    # the name alone is not enough: only the rig's own address may act for it
+    assert hub.resolve_rig("flybehavior2", "") is None
+    assert hub.resolve_rig("flybehavior2", "100.94.160.60") is None
     assert hub.resolve_rig("raspberrypi", "100.93.23.70") is PI2
     assert hub.resolve_rig("nope", "1.1.1.1") is None
 

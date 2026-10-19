@@ -13,7 +13,8 @@ def ctx(tmp_path):
     hub, store, notifier, transfer, finalizer, workers = _hub(tmp_path)
     transfer.staging_dir = lambda rig, batch: tmp_path / "s" / rig / batch
     finalizer.abort = lambda rig, batch: "aborted"
-    client = TestClient(create_app(hub, start_polling=False), base_url="http://localhost")
+    client = TestClient(create_app(hub, start_polling=False), base_url="http://localhost",
+                        client=("100.93.23.70", 50000))
     return hub, store, workers, finalizer, client, tmp_path
 
 
@@ -42,7 +43,8 @@ def test_complete_status_abort(ctx):
     assert client.get(f"{url}/status").json()["state"] == "pending"
     assert client.post(f"{url}/abort").json() == {"state": "aborted"}
     assert client.get("/api/sessions/flybehavior2/zzz/status").json()["state"] == "unknown"
-    assert client.post("/api/sessions/nope/b/complete", json={
+    stranger = TestClient(client.app, base_url="http://localhost", client=("100.1.2.3", 5000))
+    assert stranger.post("/api/sessions/nope/b/complete", json={
         "output_dir": "", "push_to": "", "manifest": []}).status_code == 404
 
 
@@ -162,3 +164,11 @@ def test_trace_route(ctx):
     assert client.get("/traces/flybehavior2/b/t1.csv").status_code == 404
     assert client.get("/traces/flybehavior2/..%2F..%2Fetc/x.png").status_code == 404
     assert client.get("/traces/nope/b/t1.png").status_code == 404
+
+
+def test_session_routes_only_answer_the_rig_itself(ctx):
+    hub, store, workers, finalizer, _, tmp_path = ctx
+    other = TestClient(create_app(hub, start_polling=False), base_url="http://localhost",
+                       client=("100.94.160.60", 5000))
+    assert other.post("/api/sessions/flybehavior2/b/abort").status_code == 404
+    assert other.get("/api/sessions/flybehavior2/b/status").status_code == 404
