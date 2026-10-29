@@ -1,7 +1,8 @@
-"""AST wiring checks for the opt-in --remote stream/telemetry hooks in the Pi 3 script.
+"""AST wiring checks for the opt-in --remote stream/telemetry hooks in the Pi 3 and Pi 1 scripts.
 
-Parses the script instead of importing it (it claims camera/GPIO at import).
-Set PI3_SCRIPT=<path> to validate a draft copy; default is PiCode/combinedv2_1_pi3.py.
+Parses each script instead of importing it (it claims camera/GPIO at import).
+Set PI3_SCRIPT=<path> / PI1_SCRIPT=<path> to validate a draft copy; defaults are
+PiCode/combinedv2_1_pi3.py and PiCode/combinedv2_1_pi1.py.
 The checks pin the experiment-timing rules: lores only when --remote, the trial
 encoder (not all encoders) is stopped, and no telemetry in the capture loop or
 the light pulse loop.
@@ -13,13 +14,16 @@ from pathlib import Path
 
 import pytest
 
-DEFAULT = Path(__file__).resolve().parent.parent / "PiCode" / "combinedv2_1_pi3.py"
-SCRIPT = Path(os.environ.get("PI3_SCRIPT", DEFAULT))
+PICODE = Path(__file__).resolve().parent.parent / "PiCode"
+SCRIPTS = {
+    "pi3": Path(os.environ.get("PI3_SCRIPT", PICODE / "combinedv2_1_pi3.py")),
+    "pi1": Path(os.environ.get("PI1_SCRIPT", PICODE / "combinedv2_1_pi1.py")),
+}
 
 
-@pytest.fixture(scope="module")
-def tree() -> ast.Module:
-    return ast.parse(SCRIPT.read_text(encoding="utf-8"))
+@pytest.fixture(scope="module", params=sorted(SCRIPTS))
+def tree(request) -> ast.Module:
+    return ast.parse(SCRIPTS[request.param].read_text(encoding="utf-8"))
 
 
 def _find(tree, name, cls=(ast.FunctionDef, ast.AsyncFunctionDef)):
@@ -105,8 +109,10 @@ def test_no_remote_calls_in_capture_or_pulse_loops(tree):
     assert loops
     for loop in loops:
         assert not ({"TELEMETRY", "STREAMER", "_telemetry_light"} & _names(loop))
-    run = _find(tree, "_run")
-    assert not ({"TELEMETRY", "STREAMER", "_telemetry_light"} & _names(run))
+    # The LightController pulse loop; Pi 1 (TTL, digital only) has none.
+    for run in [n for n in ast.walk(tree)
+                if isinstance(n, ast.FunctionDef) and n.name == "_run"]:
+        assert not ({"TELEMETRY", "STREAMER", "_telemetry_light"} & _names(run))
 
 
 @pytest.mark.parametrize("event", ["session_start", "trial_start", "odor_on", "odor_off",
