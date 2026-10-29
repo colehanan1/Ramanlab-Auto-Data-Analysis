@@ -10,16 +10,27 @@ OFM_Event label).  From them we compute
 * frame intervals (SensorNs diffs): mean / p99 / max, and the number of gaps longer
   than 1.5 frame intervals (37.5 ms at 40 fps);
 * event offsets: MonoNs of every non-BME event row minus the trial's RECORDING_START
-  row, keyed by (trial index, event label, occurrence number).
+  row, keyed by (trial index, event label, occurrence number) - informational only,
+  because RECORDING_START is logged by the camera thread and so includes the camera
+  start offset;
+* camera start offset: first odor-on event (``OFM_*_ON``; else the first non-BME,
+  non-RECORDING_START event) minus RECORDING_START.  Recorded and reported per trial,
+  never judged (accepted 2026-10-29);
+* stimulus intervals that do not depend on the camera: odor duration per channel
+  (OFM_x_OFF - OFM_x_ON), light duration (LIGHT_OFF - first light-on event) and the
+  light-on minus odor-on lag, paired by occurrence.
 
 Verdict (the hard-stop criteria of the bench protocol):
 
-* an event FAILs when |ON - mean(OFF)| > OFF noise floor + tolerance, where the
-  floor is the spread of that event across the OFF runs (|OFF1 - OFF2|);
+* a stimulus interval FAILs when |ON - mean(OFF)| > OFF noise floor + tolerance, where
+  the floor is the largest |OFF_i - OFF_j| of that interval; an interval the OFF runs
+  have but a run lacks is a FAIL with a reason;
 * a trial's frames FAIL when an ON run has more gaps than the worst OFF run, fewer
-  frames than the shortest OFF run, or a longer worst gap than every OFF run by more
+  than (shortest OFF run - 1) frames, or a longer worst gap than every OFF run by more
   than one frame interval (a single 200 ms stall must not hide behind an OFF run
-  that also had one 40 ms gap);
+  that also had one 40 ms gap).  Exactly one frame short of the shortest OFF run with
+  no gap > 1.5 frame intervals in the run is window-boundary quantization (also seen
+  in OFF runs): noted, not failed;
 * missing or mismatched trials / event keys are always reported as FAIL.
 
 CPU CSVs from PiCode/cpu_sampler.py are summarised but never decide the verdict.
@@ -44,6 +55,10 @@ from pathlib import Path
 EPS = 1e-9
 GROUPS = ("OFF", "ON")
 START_LABEL = "RECORDING_START"
+ODOR_ON_RE = re.compile(r"^OFM_(.+)_ON$")
+ODOR_OFF_RE = re.compile(r"^OFM_(.+)_OFF$")
+LIGHT_ON_LABELS = ("LIGHT_SOLID_ON", "LIGHT_ON", "LIGHT_PULSE_ON", "LIGHT_RAMP_START")
+LIGHT_OFF_LABEL = "LIGHT_OFF"
 TS_RE = re.compile(r"(\d{8})_(\d{6})")
 TAG_RE = re.compile(r"_batch_([^_]+)_(.*)_(\d{8})_(\d{6})$")
 
@@ -62,6 +77,8 @@ class Trial:
     frames: int
     intervals_ms: list[float]
     events: dict[tuple[str, int], float]   # (label, occurrence) -> offset ms
+    camera_offset_ms: float | None = None  # first odor-on minus RECORDING_START
+    camera_event: str | None = None
     problems: list[str] = field(default_factory=list)
 
     def gap_count(self, thresh_ms: float) -> int:
@@ -119,8 +136,10 @@ def read_frame_intervals_ms(path: Path) -> tuple[int, list[float]]:
 
 
 def read_event_offsets_ms(path: Path, ignore: re.Pattern | None
-                          ) -> tuple[dict[tuple[str, int], float], list[str]]:
-    """Event offsets from RECORDING_START (ms) of one sensors CSV, plus problems."""
+                          ) -> tuple[dict[tuple[str, int], float],
+                                     tuple[float | None, str | None], list[str]]:
+    """Event offsets from RECORDING_START (ms) of one sensors CSV, the camera start
+    offset ``(ms, event label)`` and problems."""
     rows: list[tuple[float, str]] = []
     try:
         with open(path, newline="", encoding="utf-8") as fh:
@@ -137,7 +156,13 @@ def read_event_offsets_ms(path: Path, ignore: re.Pattern | None
         raise DataError(f"{path}: {exc}") from exc
     start = next((t for t, label in rows if label == START_LABEL), None)
     if start is None:
-        return {}, [f"{path.name}: no {START_LABEL} row, event offsets unavailable"]
+        return {}, (None, None), [
+            f"{path.name}: no {START_LABEL} row, event offsets unavailable"]
+    stim = [(t, label) for t, label in rows
+            if label != START_LABEL and not label.startswith("BME")]
+    cam = next(((t, label) for t, label in stim if ODOR_ON_RE.match(label)),
+               stim[0] if stim else None)
+    cam_off = ((cam[0] - start) / 1e6, cam[1]) if cam else (None, None)
     seen: dict[str, int] = {}
     out: dict[tuple[str, int], float] = {}
     for t, label in rows:
@@ -147,7 +172,7 @@ def read_event_offsets_ms(path: Path, ignore: re.Pattern | None
             continue
         seen[label] = seen.get(label, 0) + 1
         out[(label, seen[label])] = (t - start) / 1e6
-    return out, []
+    return out, cam_off, []
 
 
 def load_run(name: str, group: str, path: Path, ignore: re.Pattern | None = None) -> Run:
@@ -165,8 +190,9 @@ def load_run(name: str, group: str, path: Path, ignore: re.Pattern | None = None
     paired = sorted(frames.keys() & sensors.keys(), key=lambda s: (_stamp(s), s))
     for i, stem in enumerate(paired, 1):
         n, intervals = read_frame_intervals_ms(frames[stem])
-        events, probs = read_event_offsets_ms(sensors[stem], ignore)
-        run.trials.append(Trial(i, stem, _tag_of(stem), n, intervals, events, probs))
+        events, (cam_ms, cam_label), probs = read_event_offsets_ms(sensors[stem], ignore)
+        run.trials.append(Trial(i, stem, _tag_of(stem), n, intervals, events,
+                                cam_ms, cam_label, probs))
     if not run.trials:
         raise DataError(f"{name}: no frames/sensors CSV pairs under {path}")
     return run
@@ -236,6 +262,35 @@ def parse_cpu_csv(path: Path) -> dict:
     }
 
 
+def stimulus_intervals(events: dict[tuple[str, int], float]) -> dict[str, float]:
+    """Camera-independent intervals (ms) of one trial, keyed by a readable name:
+    ``odor X duration #k``, ``light duration #k`` and ``light-odor lag #k``
+    (light-on k minus the first odor channel's odor-on k)."""
+    def times(label: str) -> list[float]:
+        return [events[(label, n)] for n in range(1, 1000) if (label, n) in events]
+
+    out: dict[str, float] = {}
+    channels = sorted({m.group(1) for lab, _ in events if (m := ODOR_ON_RE.match(lab))})
+    odor_on: dict[str, list[float]] = {}
+    for ch in channels:
+        ons, offs = times(f"OFM_{ch}_ON"), times(f"OFM_{ch}_OFF")
+        odor_on[ch] = ons
+        for k, t_on in enumerate(ons, 1):
+            if k <= len(offs):
+                out[f"odor {ch} duration #{k}"] = offs[k - 1] - t_on
+    light_label = next((lab for lab in LIGHT_ON_LABELS if times(lab)), None)
+    if light_label:
+        l_on = times(light_label)
+        l_off = times(LIGHT_OFF_LABEL)
+        for k in range(1, min(len(l_on), len(l_off)) + 1):
+            out[f"light duration #{k}"] = l_off[k - 1] - l_on[k - 1]
+        first_ch = next((ch for ch in channels if odor_on.get(ch)), None)
+        if first_ch:
+            for k in range(1, min(len(l_on), len(odor_on[first_ch])) + 1):
+                out[f"light-odor lag #{k}"] = l_on[k - 1] - odor_on[first_ch][k - 1]
+    return out
+
+
 # ── comparison ───────────────────────────────────────────────────────────────
 
 @dataclass
@@ -252,10 +307,24 @@ class EventResult:
 
 
 @dataclass
+class IntervalResult:
+    run: str
+    trial: int
+    name: str
+    off_mean: float
+    on_value: float
+    shift: float
+    floor: float
+    ok: bool
+
+
+@dataclass
 class Verdict:
     reasons: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
-    events: list[EventResult] = field(default_factory=list)
+    notes: list[str] = field(default_factory=list)
+    events: list[EventResult] = field(default_factory=list)      # informational
+    intervals: list[IntervalResult] = field(default_factory=list)  # judged
 
     @property
     def passed(self) -> bool:
@@ -271,7 +340,7 @@ def compare(runs: list[Run], fps: float, tolerance_ms: float) -> Verdict:
     if len(offs) < 2:
         v.warnings.append(
             f"only {len(offs)} OFF run(s): there is no OFF-vs-OFF noise floor, "
-            "so every event shift is judged against the tolerance alone")
+            "so every stimulus interval is judged against the tolerance alone")
 
     for r in runs:
         for p in r.problems:
@@ -313,10 +382,20 @@ def compare(runs: list[Run], fps: float, tolerance_ms: float) -> Verdict:
                 v.reasons.append(
                     f"{r.name} trial {i + 1}: worst gap {t.max_interval():.1f} ms vs "
                     f"{max_off_gap_ms:.1f} ms in the worst OFF run (> 1 frame longer)")
-            if t.frames < min_off_frames:
+            if t.frames < min_off_frames - 1:
                 v.reasons.append(
                     f"{r.name} trial {i + 1}: {t.frames} frames, shortest OFF run "
-                    f"has {min_off_frames}")
+                    f"has {min_off_frames} (more than 1 frame short)")
+            elif t.frames == min_off_frames - 1:
+                if any(x.gap_count(thresh) for x in r.trials):
+                    v.reasons.append(
+                        f"{r.name} trial {i + 1}: {t.frames} frames, one short of "
+                        f"the shortest OFF run ({min_off_frames}), and the run has "
+                        f"gap(s) > {thresh:.1f} ms")
+                else:
+                    v.notes.append(
+                        f"{r.name} trial {i + 1}: {t.frames} vs {min_off_frames} "
+                        "frames: 1-frame boundary difference, no gaps")
 
     # events
     missing: list[str] = []
@@ -339,12 +418,41 @@ def compare(runs: list[Run], fps: float, tolerance_ms: float) -> Verdict:
                 ok = shift <= floor + tolerance_ms + EPS
                 v.events.append(EventResult(r.name, i + 1, key[0], key[1],
                                             off_mean, on_val, shift, floor, ok))
+    v.reasons.extend(missing)
+
+    # stimulus intervals (judged)
+    for i in range(common):
+        per_run = {r.name: stimulus_intervals(r.trials[i].events) for r in runs}
+        off_names = [r.name for r in offs]
+        names: set[str] = set()
+        for n in off_names:
+            names |= per_run[n].keys()
+        for r in runs:
+            for n in sorted(names - per_run[r.name].keys()):
+                v.reasons.append(
+                    f"{r.name} trial {i + 1}: stimulus interval '{n}' missing "
+                    "(present in the OFF runs)")
+            if r.group == "ON":
+                for n in sorted(per_run[r.name].keys() - names):
+                    v.reasons.append(
+                        f"{r.name} trial {i + 1}: stimulus interval '{n}' present "
+                        "in ON but in no OFF run")
+        for n in sorted(names):
+            off_vals = [per_run[o][n] for o in off_names if n in per_run[o]]
+            floor = max(off_vals) - min(off_vals)
+            off_mean = statistics.fmean(off_vals)
+            for r in ons:
+                if n not in per_run[r.name]:
+                    continue
+                on_val = per_run[r.name][n]
+                shift = abs(on_val - off_mean)
+                ok = shift <= floor + tolerance_ms + EPS
+                v.intervals.append(IntervalResult(r.name, i + 1, n, off_mean, on_val,
+                                                  shift, floor, ok))
                 if not ok:
                     v.reasons.append(
-                        f"{r.name} trial {i + 1} event {key[0]} #{key[1]}: shift "
-                        f"{shift:.3f} ms > OFF floor {floor:.3f} ms + tolerance "
-                        f"{tolerance_ms:g} ms")
-    v.reasons.extend(missing)
+                        f"{r.name} trial {i + 1} {n}: shift {shift:.3f} ms > OFF "
+                        f"floor {floor:.3f} ms + tolerance {tolerance_ms:g} ms")
     return v
 
 
@@ -363,7 +471,10 @@ def render_report(runs: list[Run], verdict: Verdict, fps: float,
     L.append("# Bench comparison: OFF vs ON")
     L.append("")
     L.append(f"fps {fps:g}, gap threshold {thresh:.1f} ms (1.5 frame intervals), "
-             f"event tolerance {tolerance_ms:g} ms beyond the OFF-vs-OFF floor.")
+             f"stimulus tolerance {tolerance_ms:g} ms beyond the OFF-vs-OFF floor.")
+    L.append("")
+    L.append("Camera-start offset is recorded per trial and not judged (accepted "
+             "2026-10-29); stimulus timing is judged on event-to-event intervals.")
     L.append("")
     L.append("## Per-run summary")
     L.append("")
@@ -415,31 +526,85 @@ def render_report(runs: list[Run], verdict: Verdict, fps: float,
             L.append(f"- {r.name}: {cores or 'no per-core columns'}")
         L.append("")
 
-    L.append("## Event shifts (worst 20)")
+    L.append("## Camera start offset (recorded, not judged)")
+    L.append("")
+    L.append("First odor-on event minus RECORDING_START, ms (the event used is the "
+             "first `OFM_*_ON`, else the first non-BME event). Cell: value (deviation "
+             "from the OFF mean of that trial).")
+    L.append("")
+    L.append("| trial | " + " | ".join(r.name for r in runs) + " |")
+    L.append("|---|" + "---|" * len(runs))
+    for i in range(n_trials):
+        offv = [r.trials[i].camera_offset_ms for r in runs
+                if r.group == "OFF" and i < len(r.trials)
+                and r.trials[i].camera_offset_ms is not None]
+        mean = statistics.fmean(offv) if offv else None
+        cells = []
+        for r in runs:
+            c = r.trials[i].camera_offset_ms if i < len(r.trials) else None
+            if c is None:
+                cells.append("n/a")
+            elif mean is None:
+                cells.append(f"{c:.3f}")
+            else:
+                cells.append(f"{c:.3f} ({c - mean:+.1f})")
+        L.append(f"| {i + 1} | " + " | ".join(cells) + " |")
+    L.append("")
+
+    L.append("## Stimulus timing (judged)")
+    L.append("")
+    L.append("Odor duration, light duration and light-on minus odor-on lag; floor = "
+             "largest |OFF_i - OFF_j|; worst 20 by shift minus floor.")
+    L.append("")
+    worst_i = sorted(verdict.intervals, key=lambda e: e.shift - e.floor, reverse=True)[:20]
+    if worst_i:
+        L.append("| ON run | trial | interval | OFF mean ms | ON ms | shift ms | "
+                 "floor ms | verdict |")
+        L.append("|---|---|---|---|---|---|---|---|")
+        for e in worst_i:
+            L.append(f"| {e.run} | {e.trial} | {e.name} | {e.off_mean:.3f} | "
+                     f"{e.on_value:.3f} | {e.shift:.3f} | {e.floor:.3f} | "
+                     f"{'ok' if e.ok else 'FAIL'} |")
+        n_bad = sum(1 for e in verdict.intervals if not e.ok)
+        L.append("")
+        L.append(f"{len(verdict.intervals)} interval comparison(s), {n_bad} over the limit.")
+    else:
+        L.append("No comparable stimulus intervals.")
+    L.append("")
+
+    L.append("## Event shifts relative to camera start (informational, worst 20)")
+    L.append("")
+    L.append("Relative to camera start - includes the recorded camera-start offset; "
+             "informational, never a FAIL reason.")
     L.append("")
     worst = sorted(verdict.events, key=lambda e: e.shift - e.floor, reverse=True)[:20]
     if worst:
         L.append("| ON run | trial | event | # | OFF mean ms | ON ms | shift ms | "
-                 "floor ms | verdict |")
+                 "floor ms | within floor+tol |")
         L.append("|---|---|---|---|---|---|---|---|---|")
         for e in worst:
             L.append(f"| {e.run} | {e.trial} | {e.label} | {e.occ} | {e.off_mean:.3f} | "
                      f"{e.on_value:.3f} | {e.shift:.3f} | {e.floor:.3f} | "
-                     f"{'ok' if e.ok else 'FAIL'} |")
+                     f"{'yes' if e.ok else 'no'} |")
         n_bad = sum(1 for e in verdict.events if not e.ok)
         L.append("")
-        L.append(f"{len(verdict.events)} event comparison(s), {n_bad} over the limit.")
+        L.append(f"{len(verdict.events)} event comparison(s), {n_bad} beyond floor + "
+                 "tolerance (informational).")
     else:
         L.append("No comparable events.")
     L.append("")
 
+    for note in verdict.notes:
+        L.append(f"NOTE: {note}")
+    if verdict.notes:
+        L.append("")
     for w in verdict.warnings:
         L.append(f"WARNING: {w}")
     if verdict.warnings:
         L.append("")
     if verdict.passed:
         L.append("**RESULT: PASS** - ON adds no frame gap beyond the OFF runs and no "
-                 "event shifts beyond the OFF-vs-OFF spread plus tolerance.")
+                 "stimulus-interval shifts beyond the OFF-vs-OFF spread plus tolerance.")
     else:
         L.append(f"**RESULT: FAIL** - {len(verdict.reasons)} reason(s):")
         L.append("")
