@@ -387,7 +387,7 @@ def test_worker_configures_the_encoder():
     assert cc.pix_fmt == "yuv420p"
     assert cc.bit_rate == 1_500_000
     assert cc.gop_size == 40
-    assert cc.profile == "main"
+    assert cc.profile == "Main"
     assert cc.time_base == Fraction(1, 1_000_000)
     assert len(av.muxed) == 3
     assert shm.closed
@@ -401,6 +401,48 @@ def test_worker_frames_are_i420_with_zero_based_microsecond_pts():
     assert all(f.format == "yuv420p" for f in frames)
     assert frames[0].arr.shape == (48 * 3 // 2, 64)
     assert frames[0].time_base == Fraction(1, 1_000_000)
+
+
+# -- server contract (MediaMTX relay: 540x540 @40, H.264 Main, no B-frames,
+# GOP 40, SPS/PPS in-band at keyframes, real monotonic timestamps) ------------
+
+def test_contract_encoder_options():
+    av = FakeAV()
+    run_worker(2, av)
+    cont = av.containers[0]
+    codec, rate, o = cont.add_stream_args
+    assert (codec, rate) == ("libx264", 40)
+    assert o["bframes"] == "0"                      # B-frames off
+    assert o["profile"] == "main"
+    # ultrafast alone has no CABAC, so x264 would signal Constrained Baseline;
+    # coder=1 (CABAC) is what makes the stream really Main.
+    assert o["coder"] == "1"
+    # RTSP muxers set AV_CODEC_FLAG_GLOBAL_HEADER, which suppresses in-band
+    # SPS/PPS; the relay needs them repeated at every keyframe.
+    assert "repeat-headers=1" in o["x264-params"].split(":")
+    cc = cont.stream.codec_context
+    assert cc.gop_size == 40 and o["keyint_min"] == "40"
+    assert (cc.width, cc.height, cc.pix_fmt) == (540, 540, "yuv420p")
+
+
+def test_contract_pts_strictly_increasing_even_with_duplicate_timestamps():
+    av = FakeAV()
+    # Same sensor timestamp twice must not produce a repeated pts (the relay's
+    # fps filter and the RTSP muxer need strictly increasing values).
+    run_worker(4, av, width=64, height=48, ts_step=0)
+    pts = [f.pts for f in av.streams[0].frames]
+    assert all(b > a for a, b in zip(pts, pts[1:]))
+
+
+def test_contract_rtsp_url_default_path_per_rig():
+    import remote_config as rc
+    for host, rig in (("behaviorlocust", "rig1"), ("flybehavior2", "rig2"),
+                      ("flybehavior3", "rig3")):
+        cfg = rc.RemoteConfig.from_env(
+            {"SERVER_TAILNET_IP": "100.104.46.34", "RIG_PASS": "pw"}, host)
+        assert cfg.rtsp_url() == f"rtsp://rigpub:pw@100.104.46.34:8554/{rig}"
+        assert cfg.profile == "main" and (cfg.width, cfg.height) == (540, 540)
+        assert (cfg.fps, cfg.gop) == (40, 40)
 
 
 def test_worker_reads_frame_bytes_from_the_right_slot():
