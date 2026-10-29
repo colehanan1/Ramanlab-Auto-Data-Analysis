@@ -451,6 +451,29 @@ def test_worker_reconnects_after_mux_error():
     assert len(av.muxed) > 3
 
 
+def test_worker_sets_a_short_rtsp_socket_timeout():
+    """A firewalled server drops SYNs; without an I/O timeout the first mux
+    blocks for the OS TCP timeout (~2 min) instead of following the backoff."""
+    av = FakeAV()
+    run_worker(2, av)
+    (_, _, _, opts), = av.open_calls
+    assert opts["timeout"] == "5000000"     # microseconds
+
+
+def test_worker_logs_connected_only_after_the_server_accepts_a_frame(caplog):
+    """av.open() on an RTSP output does not touch the network; the handshake
+    happens at the first mux. Bench 2026-10-29 logged "connected" to a closed
+    port. "connected" must mean a frame was actually accepted."""
+    av = FakeAV(fail_mux_at={1})            # first connection dies on frame 1
+    with caplog.at_level(logging.INFO, logger="stream_worker"):
+        run_worker(30, av)
+    msgs = [r.getMessage() for r in caplog.records]
+    connected = [i for i, m in enumerate(msgs) if "connected to" in m]
+    failed = [i for i, m in enumerate(msgs) if "connect failed" in m]
+    assert len(connected) == 1
+    assert failed and failed[0] < connected[0]
+
+
 def test_worker_error_text_never_logged_with_password(caplog):
     av = FakeAV(fail_opens=1, fail_mux_at={2})
     with caplog.at_level(logging.DEBUG):
