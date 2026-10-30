@@ -138,3 +138,13 @@ def test_config_is_frozen():
 def test_default_env_path_sits_beside_module():
     p = rc.default_env_path()
     assert p.name == ".env" and p.parent == Path(rc.__file__).parent
+
+
+def test_stream_profile_from_env():
+    import remote_config as rc
+    base = {"SERVER_TAILNET_IP": "100.104.46.34"}
+    assert rc.RemoteConfig.from_env(base, "flybehavior3").profile == "main"
+    for raw, want in (("baseline", "baseline"), (" Baseline ", "baseline"),
+                      ("MAIN", "main"), ("high", "main"), ("", "main")):
+        cfg = rc.RemoteConfig.from_env(dict(base, STREAM_PROFILE=raw), "flybehavior3")
+        assert cfg.profile == want, raw

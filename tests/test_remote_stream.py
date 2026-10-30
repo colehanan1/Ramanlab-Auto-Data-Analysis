@@ -352,7 +352,7 @@ class Clock:
 
 def run_worker(n_frames, av, *, width=540, height=540, step=0.5,
                parent_pid=1234, getppid=lambda: 1234, stop_event=None,
-               frame_q=None, ts_step=25_000_000):
+               frame_q=None, ts_step=25_000_000, profile="main"):
     stop = stop_event or threading.Event()
     fq = frame_q if frame_q is not None else DrainQueue(stop)
     free_q = queue.Queue()
@@ -362,7 +362,7 @@ def run_worker(n_frames, av, *, width=540, height=540, step=0.5,
         fq.put((slot, 1_000_000_000 + i * ts_step))
     clock = Clock(step)
     av.clock = clock
-    sw.run(URL, width, height, 40, 1_500_000, 40, "main", shm, fq, free_q,
+    sw.run(URL, width, height, 40, 1_500_000, 40, profile, shm, fq, free_q,
            stop, parent_pid, av_module=av, sleep=lambda s: None, now=clock,
            getppid=getppid)
     return shm, free_q, stop
@@ -423,6 +423,17 @@ def test_contract_encoder_options():
     cc = cont.stream.codec_context
     assert cc.gop_size == 40 and o["keyint_min"] == "40"
     assert (cc.width, cc.height, cc.pix_fmt) == (540, 540, "yuv420p")
+
+
+def test_baseline_profile_turns_cabac_off():
+    """STREAM_PROFILE=baseline is the cheaper CAVLC encode (bench option); the
+    default stays Main with CABAC forced on."""
+    av = FakeAV()
+    run_worker(2, av, profile="baseline")
+    _, _, o = av.containers[0].add_stream_args
+    assert o["profile"] == "baseline" and o["coder"] == "0"
+    assert av.containers[0].stream.codec_context.profile == "Baseline"
+    assert o["bframes"] == "0" and "repeat-headers=1" in o["x264-params"]
 
 
 def test_contract_pts_strictly_increasing_even_with_duplicate_timestamps():
