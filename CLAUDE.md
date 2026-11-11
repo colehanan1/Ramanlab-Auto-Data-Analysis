@@ -31,6 +31,9 @@ python3 scripts/pipeline/run_workflows.py --config config/config_new.yaml
 # restyle figures from existing CSVs (see the freeze caveat below)
 python3 scripts/pipeline/run_workflows.py --config config/config_new.yaml --figures-only
 
+# any long daytime run: detached systemd user service (a run started from a VS Code terminal dies with the editor)
+scripts/dev/run_pipeline_detached.sh [--figures-only | --thaw X ...]   # or: make run-detached ARGS="--figures-only"
+
 # tests
 python3 -m pytest tests/ -q
 ```
@@ -104,6 +107,10 @@ the user's desktop — not a Pi.
   rule** — it forces `skip_combined`, so the `frozen` column keeps its old values
   and the figures silently retain folders you just retired. Change a freeze or
   cohort key → full run.
+- **Figure reuse**: `Sensitiviy-Results(11-15)` cohorts and the per-fly `Pre-vs-Post-PER-Traces`
+  are redrawn only when their rows, the code they import or launch, the config or the
+  scorer model change (`fbpipe.utils.figure_cache`). Delete `_build_cache.json` /
+  `_figure_cache.json` in that folder to force a redraw.
 - Retirement globs must be **date-bounded** (`{match: "*_rig_3", before: …}`) and
   identical across both arms of a trained/control pair. rig_3 is good again from
   2026-08-11; an unbounded glob silently swallows every later batch.
@@ -141,7 +148,7 @@ the user's desktop — not a Pi.
 
 - Fly enclosure: ESP32 + BME680 sensors, LED light cycle, fan, heater. ESPHome
   config `esphomeflynursery2.yaml`.
-- Home Assistant `10.229.137.171:8123`; InfluxDB `10.229.137.171:8086`, database
+- Home Assistant `10.229.158.244:8123` (moved 2026-11-10; also on Turtledove Wi-Fi, no outbound off its /23); InfluxDB `10.229.158.244:8086`, database
   `homeassistant`, user `homeassistant`. Credentials in `.env` — never commit
   secrets.
 - Entities: `flynursery2_{temperature,humidity,pressure}_{fly_2,room}`,

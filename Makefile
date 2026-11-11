@@ -1,4 +1,4 @@
-.PHONY: help setup run run-manual all yolo backup figures clean
+.PHONY: help setup run run-detached run-manual all yolo backup figures clean
 
 PYTHON ?= python3
 PIP ?= $(PYTHON) -m pip
@@ -10,6 +10,9 @@ help:
 	@echo "  run       - run full pipeline (includes automatic backups)"
 	@echo "              use FOLDER=<name> to process a single dataset folder"
 	@echo "              e.g.: make run FOLDER=Hex-Training-24"
+	@echo "  run-detached - run the pipeline as its own systemd user service (survives VS Code)"
+	@echo "              FOLDER= as for run; other run_workflows.py args via ARGS, e.g.: make run-detached ARGS=\"--figures-only\""
+	@echo "              (config_new.yaml, no backup step, shell variables not passed on)"
 	@echo "  all       - same as run"
 	@echo "  figures   - regenerate ALL figures/plots from existing data (no YOLO/pipeline)"
 	@echo "              use CONFIG=<path> to choose a config file"
@@ -34,6 +37,9 @@ run:
 	export MPLBACKEND=Agg && export ORT_LOGGING_LEVEL=3 && export PYTHONNOUSERSITE=1 && \
 	$(PYTHON) scripts/pipeline/run_workflows.py --config $(CONFIG) $(if $(FOLDER),--folder '$(FOLDER)')
 	$(MAKE) backup
+
+run-detached:
+	scripts/dev/run_pipeline_detached.sh $(if $(FOLDER),--folder '$(FOLDER)') $(ARGS)
 
 run-manual:
 	export MPLBACKEND=Agg && export ORT_LOGGING_LEVEL=3 && export PYTHONNOUSERSITE=1 && $(PYTHON) scripts/pipeline/run_workflows.py --config config/config_manual.yaml

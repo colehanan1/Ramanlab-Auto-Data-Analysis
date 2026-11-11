@@ -28,8 +28,17 @@ ota:
     password: "e2f0a88ea12c225bc66f9c180239a5ac"
 
 wifi:
-  ssid: !secret wifi_ssid
-  password: !secret wifi_password
+  # Turtledove (lab router, same LAN as Home Assistant's wlp1s0) is primary.
+  # wustl-guest-2.0 (open campus guest) is the fallback: HA cannot reach the
+  # guest range, but the ESP keeps SNTP time and stays OTA-reachable from
+  # behavior4080's guest Wi-Fi. Build in HA's ESPHome Builder so !secret
+  # resolves to the real Turtledove credentials.
+  networks:
+    - ssid: !secret wifi_ssid
+      password: !secret wifi_password
+      priority: 10
+    - ssid: "wustl-guest-2.0"
+      priority: 0
   on_disconnect:
     - lambda: |-
         ESP_LOGW("wifi", "WiFi disconnected");
@@ -53,6 +62,10 @@ time:
                        t.year, t.month, t.day_of_month,
                        t.hour, t.minute, t.second);
             }
+            if (!id(sun_set_after_sync)) {
+              id(sun_set_after_sync) = true;
+              id(set_sun_from_time).execute();
+            }
     on_time:
       - at: "07:00:00"
         then:
@@ -60,6 +73,24 @@ time:
       - at: "19:00:00"
         then:
           - script.execute: sunset_20min
+  # Backup clock: keeps the light schedule running while Home Assistant is
+  # down. Both clocks set the same ESP32 system time, so sntp_time.now() and
+  # its on_time triggers work from whichever source syncs first.
+  - platform: sntp
+    id: sntp_backup
+    timezone: "America/Chicago"
+    servers:
+      - 0.pool.ntp.org
+      - 1.pool.ntp.org
+      - time.google.com
+    on_time_sync:
+      then:
+        - lambda: |-
+            ESP_LOGI("time", "SNTP time synced");
+            if (!id(sun_set_after_sync)) {
+              id(sun_set_after_sync) = true;
+              id(set_sun_from_time).execute();
+            }
 
 web_server:
   port: 80
@@ -164,6 +195,12 @@ globals:
     type: float
     restore_value: false
     initial_value: '0.0'
+  # The boot sun set turns the light off when the clock isn't valid yet; the
+  # first time sync re-runs it once so the light matches the schedule.
+  - id: sun_set_after_sync
+    type: bool
+    restore_value: false
+    initial_value: 'false'
 
 light:
   - platform: monochromatic
