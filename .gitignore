@@ -126,3 +126,7 @@ debug_yolo_july17/
 # The folder's scripts stay tracked -- only the heavy artefacts are ignored.
 test_analysis/*
 !test_analysis/*.py
+
+# Local-only: figure outputs and Claude Code session state
+Results/
+.claude/
