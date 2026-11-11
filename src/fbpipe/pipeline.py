@@ -17,12 +17,15 @@ if USE_GPU:
     print("[PIPELINE] ⚡ Using BATCH processing (12-15x speedup)")
     from .steps import (
         calculate_acceleration_gpu as calculate_acceleration,
+        check_light_leak,
         check_light_stimulus,
         curate_yolo_dataset,
         detect_dropped_frames,
         distance_normalize_ultra as distance_normalize,  # ULTRA: Batch processing
         distance_stats,
         eye_drift_qc,
+        eye_live_measure,
+        trial_timing_qc,
         move_videos,
         reject_bad_proboscis,
         rms_copy_filter,
@@ -33,12 +36,15 @@ else:
     print("[PIPELINE] ⚠️  GPU acceleration DISABLED (CUDA not available, using CPU)")
     from .steps import (
         calculate_acceleration,
+        check_light_leak,
         check_light_stimulus,
         curate_yolo_dataset,
         detect_dropped_frames,
         distance_normalize,
         distance_stats,
         eye_drift_qc,
+        eye_live_measure,
+        trial_timing_qc,
         move_videos,
         reject_bad_proboscis,
         rms_copy_filter,
@@ -63,7 +69,10 @@ ORDERED_STEPS: tuple[Step, ...] = (
     Step("yolo", yolo_infer.main, "Run Ultralytics YOLO inference and export merged CSVs"),
     Step("check_light_stimulus", check_light_stimulus.main, "Confirm the LED light stimulus physically appeared on screen for its sensor-commanded window"),
     Step("eye_drift_qc", eye_drift_qc.main, "Flag flies whose eye drifts off its frozen anchor (loose fly / shifted mount); report-only"),
+    Step("trial_timing_qc", trial_timing_qc.main, "Flag camera stalls and odor windows the pipeline misreads from the rig log; report-only, ntfy on new flags"),
+    Step("check_light_leak", check_light_leak.main, "Confirm the LED light was NOT visible where the sensors log commanded none (no-light trials, outside light windows); report-only, ntfy on new flags"),
     Step("curate_yolo_dataset", curate_yolo_dataset.main, "Identify problematic tracking and extract frames for labeling"),
+    Step("eye_live_measure", eye_live_measure.main, "Measure from the per-frame eye, held while the light is on (eye_measure.datasets only)"),
     Step("reject_bad_proboscis", reject_bad_proboscis.main, "Blank impossible proboscis detections (geometry + velocity gates)"),
     Step("distance_stats", distance_stats.main, "Derive global class-2 distance bounds per fly"),
     Step("distance_normalize", distance_normalize.main, "Convert distances into percentage scores"),

@@ -399,6 +399,252 @@ def check_trial_light_stimulus(
 
 
 # ---------------------------------------------------------------------------
+# Light-leak check: light visible where the sensors log commanded none
+# ---------------------------------------------------------------------------
+
+LEAK_CACHE_FILENAME = "_light_leak_check.json"
+# Bump when the detector or its defaults change, so cached verdicts recompute.
+LEAK_DETECTOR_VERSION = 2
+
+# Defaults, from real videos (2026-11-10): the light moves redness +7.6
+# (Pi 1), about +8 (Pi 2) and -35..-54 (Pi 3); no-light trials stay within
+# about +/-2 of their own median.
+LEAK_MIN_DEV = 4.0          # |redness - baseline| that counts as light
+LEAK_SMOOTH_S = 0.5         # rolling-median width; kills single-frame glitches
+LEAK_MIN_DURATION_S = 0.5   # a leak must persist this long
+LEAK_PRE_PAD_S = 0.5        # allowed slack before a commanded light-on
+LEAK_POST_PAD_S = 5.0       # ... and after the off: Pi 2 auto-exposure undershoots ~4 s (May 2026)
+LEAK_SKIP_START_S = 1.0     # camera warm-up at the start of every video
+
+
+def detect_unexpected_light(
+    samples: list[FrameSample],
+    allowed_windows: list[tuple[float, Optional[float]]] = (),
+    *,
+    min_dev: float = LEAK_MIN_DEV,
+    smooth_s: float = LEAK_SMOOTH_S,
+    min_duration_s: float = LEAK_MIN_DURATION_S,
+    pre_pad_s: float = LEAK_PRE_PAD_S,
+    post_pad_s: float = LEAK_POST_PAD_S,
+    skip_start_s: float = LEAK_SKIP_START_S,
+) -> dict:
+    """Find sustained light-like redness changes outside ``allowed_windows``.
+
+    The baseline is the median redness over the checked (not-allowed) part of
+    the video, and a leak is any run of at least ``min_duration_s`` whose
+    rolling-median redness sits more than ``min_dev`` away from it, in either
+    direction (on Pi 3 the light darkens the frame). An allowed window with an
+    end of ``None`` runs to the end of the video.
+
+    A light stuck on for a whole trial has no step to find here; see
+    :func:`flag_baseline_shifts`.
+    """
+    import pandas as pd
+
+    empty = {"baseline": float("nan"), "threshold": float(min_dev), "max_abs_dev": 0.0,
+             "leak_intervals": [], "leaked": False, "checked_s": 0.0}
+    if not samples:
+        return empty
+
+    times = np.array([s.t for s in samples], dtype=float)
+    vals = np.array([s.redness for s in samples], dtype=float)
+    dt = float(np.median(np.diff(times))) if times.size > 1 else 1.0
+
+    allowed = times < skip_start_s
+    for on, off in allowed_windows:
+        hi = np.inf if off is None else off + post_pad_s
+        allowed |= (times >= on - pre_pad_s) & (times <= hi)
+    checked = ~allowed
+    if not checked.any():
+        return empty
+
+    # Stalled/duplicated timestamps can give a zero median spacing.
+    k = max(1, int(round(smooth_s / dt))) if dt > 0 else 1
+    smooth = pd.Series(vals).rolling(k, center=True, min_periods=1).median().to_numpy()
+    baseline = float(np.median(vals[checked]))
+    dev = smooth - baseline
+    over = checked & (np.abs(dev) > min_dev)
+
+    intervals: list[tuple[float, float, float]] = []
+    i, n = 0, len(over)
+    while i < n:
+        if not over[i]:
+            i += 1
+            continue
+        j = i
+        while j + 1 < n and over[j + 1]:
+            j += 1
+        if times[j] - times[i] + dt >= min_duration_s:
+            seg = dev[i:j + 1]
+            intervals.append((float(times[i]), float(times[j]), float(seg[np.argmax(np.abs(seg))])))
+        i = j + 1
+
+    return {
+        "baseline": baseline,
+        "threshold": float(min_dev),
+        "max_abs_dev": float(np.abs(dev[checked]).max()),
+        "leak_intervals": intervals,
+        "leaked": bool(intervals),
+        "checked_s": float(checked.sum() * dt),
+    }
+
+
+def flag_baseline_shifts(rows: list[dict], min_dev: float = LEAK_MIN_DEV, min_trials: int = 3) -> list[dict]:
+    """Batch-level check for a light stuck on for an entire trial.
+
+    Such a trial has no on/off step for :func:`detect_unexpected_light` to
+    find; its whole baseline simply sits at the lit level. Compare every
+    checked trial's baseline with the batch median and mark a trial as
+    leaked when it is more than ``min_dev`` away. Mutates and returns ``rows``.
+    """
+    checked = [r for r in rows if r.get("status") == "checked"
+               and r.get("baseline_redness") is not None
+               and np.isfinite(r["baseline_redness"])]
+    if len(checked) < min_trials:
+        return rows
+    batch_median = float(np.median([r["baseline_redness"] for r in checked]))
+    for r in checked:
+        shift = float(r["baseline_redness"] - batch_median)
+        r["baseline_shift"] = shift
+        if abs(shift) > min_dev:
+            r["leaked"] = True
+            r["passed"] = False
+            reasons = [x for x in str(r.get("leak_reason") or "").split(";") if x]
+            if "baseline_shift" not in reasons:
+                reasons.append("baseline_shift")
+            r["leak_reason"] = ";".join(reasons)
+    return rows
+
+
+def plot_leak_timeseries(samples: list[FrameSample], result: dict,
+                         allowed_windows: list[tuple[float, Optional[float]]], out_path: Path) -> None:
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    _apply_style()
+
+    times = [s.t for s in samples]
+    fig, ax = plt.subplots(figsize=(12, 4))
+    ax.plot(times, [s.redness for s in samples], color="firebrick", lw=0.8, label="redness (R - (G+B)/2)")
+    base, thr = result["baseline"], result["threshold"]
+    ax.axhline(base, color="gray", lw=0.8, label="baseline")
+    ax.axhspan(base - thr, base + thr, color="gray", alpha=0.12, label=f"no-light band (±{thr:g})")
+    for k, (on, off) in enumerate(allowed_windows):
+        ax.axvspan(on, off if off is not None else max(times), color="#ffd24d", alpha=0.30,
+                   label="commanded light" if k == 0 else None)
+    for k, (start, end, _) in enumerate(result["leak_intervals"]):
+        ax.axvspan(start, end, color="black", alpha=0.15, label="unexpected light" if k == 0 else None)
+    ax.set_xlabel("time (s)")
+    ax.set_ylabel("redness")
+    ax.legend(loc="upper right", fontsize=8)
+    ax.set_title(f"Light-leak check: {len(result['leak_intervals'])} unexpected light interval(s)")
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=150)
+    plt.close(fig)
+
+
+def check_trial_light_leak(
+    trial_dir: Path,
+    allowed_windows: list[tuple[float, Optional[float]]],
+    *,
+    stride: int = 2,
+    min_dev: float = LEAK_MIN_DEV,
+    force: bool = False,
+    plots_dir: Optional[Path] = None,
+    extra_columns: Optional[dict] = None,
+) -> dict:
+    """Run (or load cached) light-leak check for one trial.
+
+    ``allowed_windows`` are the sensors-commanded light spans (empty for a
+    trial whose sensors log has no light event). Returns a flat CSV row;
+    ``passed`` is ``not leaked`` so the row fits :func:`update_light_check_csv`.
+    """
+    trial_dir = Path(trial_dir)
+    allowed_windows = [(float(a), None if b is None else float(b)) for a, b in allowed_windows]
+    candidates = find_trial_video_candidates(trial_dir)
+    base_row = {
+        **(extra_columns or {}),
+        "trial_dir": str(trial_dir),
+        "light_commanded": bool(allowed_windows),
+        "allowed_windows": json.dumps(allowed_windows),
+    }
+    if not candidates:
+        return {**base_row, "status": "no_video", "video_path": None, "passed": None,
+                "leaked": None, "from_cache": False}
+
+    def _key(path: Path) -> dict:
+        return {
+            "video_path": str(path),
+            "video_mtime": path.stat().st_mtime,
+            "allowed_windows": [list(w) for w in allowed_windows],
+            "stride": stride,
+            "min_dev": min_dev,
+            "version": LEAK_DETECTOR_VERSION,
+        }
+
+    cache_path = trial_dir / LEAK_CACHE_FILENAME
+    if not force and cache_path.exists():
+        try:
+            cached = json.loads(cache_path.read_text(encoding="utf-8"))
+            if any(cached.get("_cache_key") == _key(c) for c in candidates):
+                return {**cached["row"], **(extra_columns or {}), "from_cache": True}
+        except (json.JSONDecodeError, OSError, KeyError):
+            pass
+
+    samples, video_path = None, None
+    for candidate in candidates:
+        try:
+            decoded = sample_video(candidate, stride=stride)
+        except (FileNotFoundError, ValueError):
+            continue
+        if decoded:
+            samples, video_path = decoded, candidate
+            break
+    if samples is None:
+        LOGGER.warning("No decodable video among %d candidate(s) for %s", len(candidates), trial_dir)
+        return {**base_row, "status": "unreadable_video", "video_path": str(candidates[0]),
+                "passed": None, "leaked": None, "from_cache": False}
+
+    result = detect_unexpected_light(samples, allowed_windows, min_dev=min_dev)
+    intervals = result["leak_intervals"]
+    row = {
+        **base_row,
+        "status": "checked",
+        "video_path": str(video_path),
+        "fps_stride": stride,
+        "baseline_redness": result["baseline"],
+        "threshold": result["threshold"],
+        "max_abs_dev": result["max_abs_dev"],
+        "checked_s": result["checked_s"],
+        "n_leak_intervals": len(intervals),
+        "first_leak_s": intervals[0][0] if intervals else None,
+        "leak_total_s": float(sum(e - s for s, e, _ in intervals)),
+        "leak_peak_dev": max((p for _, _, p in intervals), key=abs) if intervals else None,
+        "leak_intervals": json.dumps([[round(s, 2), round(e, 2), round(p, 1)] for s, e, p in intervals]),
+        "leak_reason": "step" if intervals else "",
+        "leaked": result["leaked"],
+        "passed": not result["leaked"],
+        "from_cache": False,
+    }
+
+    if result["leaked"] and plots_dir is not None:
+        try:
+            plots_dir.mkdir(parents=True, exist_ok=True)
+            plot_leak_timeseries(samples, result, allowed_windows,
+                                 plots_dir / f"{trial_dir.name}_leak_timeseries.png")
+            row["diagnostic_plots_dir"] = str(plots_dir)
+        except Exception as exc:  # pragma: no cover - plotting is best-effort
+            LOGGER.warning("Failed to write leak plot for %s: %s", trial_dir, exc)
+
+    try:
+        cache_path.write_text(json.dumps({"_cache_key": _key(video_path), "row": row}, indent=2),
+                              encoding="utf-8")
+    except OSError as exc:
+        LOGGER.debug("Failed to write light-leak cache for %s: %s", trial_dir, exc)
+    return row
+
+
+# ---------------------------------------------------------------------------
 # Aggregated CSV of all checked trials (upserted by trial_dir)
 # ---------------------------------------------------------------------------
 
@@ -454,4 +700,8 @@ __all__ = [
     "find_trial_video_candidates",
     "check_trial_light_stimulus",
     "update_light_check_csv",
+    "detect_unexpected_light",
+    "flag_baseline_shifts",
+    "plot_leak_timeseries",
+    "check_trial_light_leak",
 ]

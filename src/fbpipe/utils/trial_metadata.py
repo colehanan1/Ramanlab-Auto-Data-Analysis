@@ -48,8 +48,12 @@ CACHE_FILENAME = "_trial_meta.json"
 
 # Bump whenever a field is added to TrialMetadata so caches written by an
 # older version are treated as stale and re-derived (rather than silently
-# filling the new field with a default/None forever).
-_CACHE_SCHEMA_VERSION = 2
+# filling the new field with a default/None forever). 3: paraffin odor windows
+# bridge the master-valve clicks (v2 cached them as 2 frames long). 4:
+# ``light_last_s`` (end of a whole pulse train), and a sensors log without a
+# RECORDING_START row is timed from the frame log's first frame (v3 put those
+# light windows ~30 s early).
+_CACHE_SCHEMA_VERSION = 4
 
 
 @dataclass(frozen=True)
@@ -75,11 +79,15 @@ class TrialMetadata:
     sidecar_txt: Optional[Path]
     sidecar_csv: Optional[Path]
     source: str                # "sidecar" | "fallback" | "cache"
-    # First optogenetic-LED on/off times (seconds from recording start), read
-    # from the sibling ``sensors_output_*.csv`` ``OFM_Event`` column. ``None``
-    # when no sensors log / no light-on(/off) event exists for the trial.
+    # Optogenetic-LED times (seconds from recording start, i.e. video time),
+    # read from the sibling ``sensors_output_*.csv`` ``OFM_Event`` column:
+    # the first light-on, the first light-off after it (the end of the FIRST
+    # pulse of a pulse train), and ``light_last_s``, the end of the whole light
+    # span (the last light event after the first on; == ``light_off_s`` for a
+    # single on/off). ``None`` when no sensors log / no such event exists.
     light_on_s: Optional[float] = None
     light_off_s: Optional[float] = None
+    light_last_s: Optional[float] = None
 
     @property
     def odor_on_s(self) -> Optional[float]:
@@ -152,6 +160,11 @@ def _coerce_float(value: object) -> Optional[float]:
         return None
 
 
+# Off-runs this short inside an odor window are valve clicks, not odor-off
+# (0.25 s at 40 fps; the paraffin clicks are 50 ms apart).
+_CLICK_GAP_FRAMES = 10
+
+
 def parse_active_ofm(csv_path: Path) -> tuple[Optional[int], Optional[int], Optional[str]]:
     """Read ``FrameNumber`` + ``ActiveOFM`` and return ``(on_frame, off_frame, channel)``.
 
@@ -177,14 +190,33 @@ def parse_active_ofm(csv_path: Path) -> tuple[Optional[int], Optional[int], Opti
     on_frame = int(df[frame_col].iloc[on_idx])
     channel = states.iloc[on_idx] or None
 
-    # First off after on_frame
-    tail = ~is_on.iloc[on_idx + 1:]
-    off_frame: Optional[int]
-    if tail.any():
-        off_local = int(tail.idxmax())
-        off_frame = int(df[frame_col].loc[off_local])
-    else:
-        off_frame = None
+    # Paraffin (OFM_P) is the master valve alone, and master OFF IS the paraffin
+    # line, so its log only shows the valve clicks that bracket the window:
+    # since 2026-11-10 one 50 ms click at onset and one 30 s later at offset
+    # (two ~2-frame blips); before that ON/OFF/ON ... OFF/ON/OFF with the master
+    # held ON in between. Either way the window is first click -> end of the
+    # last click (the same span trial_timing_qc reads as the valve window).
+    if str(channel).upper() == "OFM_P":
+        last_p = int((states.str.upper() == "OFM_P").to_numpy().nonzero()[0][-1])
+        if last_p + 1 >= len(df):
+            return on_frame, None, channel
+        return on_frame, int(df[frame_col].iloc[last_p + 1]), channel
+
+    # First off after on_frame that lasts longer than a valve click.
+    flags = is_on.to_numpy()
+    off_frame: Optional[int] = None
+    i = on_idx + 1
+    while i < len(flags):
+        if flags[i]:
+            i += 1
+            continue
+        j = i
+        while j < len(flags) and not flags[j]:
+            j += 1
+        if j == len(flags) or j - i > _CLICK_GAP_FRAMES:
+            off_frame = int(df[frame_col].iloc[i])
+            break
+        i = j
     return on_frame, off_frame, channel
 
 
@@ -196,8 +228,54 @@ _LIGHT_ON_RE = re.compile(r"^LIGHT_.*(?:_ON|_START|_TRIGGER)$", re.IGNORECASE)
 _LIGHT_OFF_RE = re.compile(r"^LIGHT_(?:PULSE_)?OFF$", re.IGNORECASE)
 
 
+# How far the sensors log's first row may sit outside the frames its frame log
+# stamps before that frame log is taken to be on another clock (or cut short).
+_FRAME_LOG_SLACK_NS = 2e9
+
+
+def _frame_log_start_ns(sensors_csv: Path, first_event_ns: float) -> Optional[float]:
+    """First valid ``SensorNs`` of the trial's frame log -- the video's t = 0 -- or None.
+
+    The frame log is the sensors log's namesake in the same folder
+    (``sensors_output_X.csv`` -> ``output_X.csv``); ``SensorNs`` stamps every
+    video frame on the same monotonic clock as ``MonoNs``. It is trusted only
+    when the sensors log's first row (``first_event_ns``) falls inside the
+    frames it stamps, give or take 2 s. None for a missing, empty or unreadable
+    frame log, one without a valid ``SensorNs``, or one that does not cover
+    the sensors log.
+    """
+    name = sensors_csv.name
+    if not name.lower().startswith("sensors_"):
+        return None
+    frame_log = sensors_csv.with_name(name[len("sensors_"):])
+    try:
+        df = pd.read_csv(frame_log, usecols=lambda c: c.strip().lower() == "sensorns")
+    except (ValueError, OSError, pd.errors.EmptyDataError, pd.errors.ParserError) as exc:
+        LOGGER.debug("Frame-log read failed for %s: %s", frame_log, exc)
+        return None
+    if df.shape[1] != 1:
+        return None
+    ns = pd.to_numeric(df.iloc[:, 0], errors="coerce")
+    ns = ns[ns > 0]
+    if ns.empty:
+        return None
+    start_ns = float(ns.iloc[0])
+    if not (start_ns - _FRAME_LOG_SLACK_NS <= first_event_ns <= float(ns.max()) + _FRAME_LOG_SLACK_NS):
+        LOGGER.debug("Frame log %s does not cover sensors log %s; not timing by it", frame_log, sensors_csv)
+        return None
+    return start_ns
+
+
 def _read_sensors_events(sensors_csv: Path) -> Optional[tuple["pd.Series", "pd.Series", float]]:
-    """Return ``(mono_ns, events, start_ns)`` from a sensors CSV, or None."""
+    """Return ``(mono_ns, events, start_ns)`` from a sensors CSV, or None.
+
+    ``start_ns`` is the recording start: the ``RECORDING_START`` row when the
+    log has one. Older rig code wrote no such row and started the log at its
+    first event -- the odor or the light, 5-30 s into the video -- so there the
+    trial's frame log gives the start (its first frame,
+    :func:`_frame_log_start_ns`), and only without a usable frame log is it
+    the earliest valid ``MonoNs`` in the file.
+    """
     try:
         df = pd.read_csv(
             sensors_csv,
@@ -215,8 +293,6 @@ def _read_sensors_events(sensors_csv: Path) -> Optional[tuple["pd.Series", "pd.S
     mono = pd.to_numeric(df[mono_col], errors="coerce")
     events = df[event_col].astype(str).str.strip()
 
-    # Recording-start reference: the explicit marker if present, else the
-    # earliest valid MonoNs in the file.
     start_mask = events.str.upper() == "RECORDING_START"
     start_vals = mono[start_mask & mono.notna()]
     if not start_vals.empty:
@@ -225,7 +301,9 @@ def _read_sensors_events(sensors_csv: Path) -> Optional[tuple["pd.Series", "pd.S
         valid = mono[mono.notna()]
         if valid.empty:
             return None
-        start_ns = float(valid.min())
+        earliest_ns = float(valid.min())
+        frame_start_ns = _frame_log_start_ns(Path(sensors_csv), earliest_ns)
+        start_ns = earliest_ns if frame_start_ns is None else frame_start_ns
     return mono, events, start_ns
 
 
@@ -237,9 +315,9 @@ def parse_light_on_seconds(sensors_csv: Path) -> Optional[float]:
     pulses on/off many times within a trial, so we return the time of the
     *first* on-event (``LIGHT_SOLID_ON`` / ``LIGHT_PULSE_ON`` /
     ``LIGHT_PULSE_MANUAL_START`` / ``LIGHT_PULSE_NET_TRIGGER``) relative to the
-    first ``RECORDING_START`` row (or the earliest row if that marker is
-    absent). Returns ``None`` when the file, columns, or any on-event is
-    missing.
+    first ``RECORDING_START`` row (or, if that marker is absent, the frame
+    log's first frame, else the earliest row; see :func:`_read_sensors_events`).
+    Returns ``None`` when the file, columns, or any on-event is missing.
     """
     parsed = _read_sensors_events(sensors_csv)
     if parsed is None:
@@ -258,8 +336,10 @@ def parse_light_window_seconds(sensors_csv: Path) -> tuple[Optional[float], Opti
     """Return ``(light_on_s, light_off_s)`` from a sensors CSV.
 
     ``light_off_s`` is the first ``LIGHT_OFF``/``LIGHT_PULSE_OFF`` event that
-    follows the first on-event; ``None`` if no such event is logged (e.g. the
-    trial was cut short before the rig logged the off transition).
+    follows the first on-event -- for a pulse train, the end of its FIRST
+    pulse (:func:`parse_light_span_seconds` gives the end of the whole train);
+    ``None`` if no such event is logged (e.g. the trial was cut short before
+    the rig logged the off transition).
     """
     parsed = _read_sensors_events(sensors_csv)
     if parsed is None:
@@ -277,6 +357,33 @@ def parse_light_window_seconds(sensors_csv: Path) -> tuple[Optional[float], Opti
     off_vals = mono[off_mask]
     off_s = (float(off_vals.iloc[0]) - start_ns) / 1e9 if not off_vals.empty else None
     return on_s, off_s
+
+
+def parse_light_span_seconds(sensors_csv: Path) -> tuple[Optional[float], Optional[float]]:
+    """Return ``(first_light_on_s, last_light_event_s)`` from a sensors CSV.
+
+    Unlike :func:`parse_light_window_seconds` (first on -> first off), this
+    spans a whole pulse train, which toggles ``LIGHT_PULSE_ON``/``_OFF`` many
+    times: the light is *allowed* from the first on-event to the last light
+    event of any kind. ``(None, None)`` when no light event is logged;
+    ``(on, None)`` when the light was switched on but never logged off. The
+    second value is cached as ``TrialMetadata.light_last_s``.
+    """
+    parsed = _read_sensors_events(sensors_csv)
+    if parsed is None:
+        return None, None
+    mono, events, start_ns = parsed
+
+    valid = mono.notna()
+    on_vals = mono[events.str.match(_LIGHT_ON_RE) & valid]
+    if on_vals.empty:
+        return None, None
+    on_ns = float(on_vals.iloc[0])
+    off_vals = mono[events.str.match(_LIGHT_OFF_RE) & valid & (mono > on_ns)]
+    if off_vals.empty:
+        return (on_ns - start_ns) / 1e9, None
+    last_ns = max(float(off_vals.max()), float(on_vals.max()))
+    return (on_ns - start_ns) / 1e9, (last_ns - start_ns) / 1e9
 
 
 def find_sensors_csv(
@@ -466,6 +573,7 @@ def _meta_from_cache(data: dict) -> TrialMetadata:
         source="cache",
         light_on_s=(float(data["light_on_s"]) if data.get("light_on_s") is not None else None),
         light_off_s=(float(data["light_off_s"]) if data.get("light_off_s") is not None else None),
+        light_last_s=(float(data["light_last_s"]) if data.get("light_last_s") is not None else None),
     )
 
 
@@ -644,7 +752,7 @@ def load_trial_metadata(
     if not trial_type:
         trial_type = "testing"  # safest default; matches historical pipeline behaviour
 
-    # --- Optogenetic light-on time from the sensors log ---
+    # --- Optogenetic light times from the sensors log ---
     # Uses the *raw* (filename) trial type, since the sensors filename mirrors
     # the rig cycle name, not any dataset trial_type override.
     sensors_csv = find_sensors_csv(
@@ -653,9 +761,10 @@ def load_trial_metadata(
         trial_type=raw_trial_type,
         trial_index=trial_index,
     )
-    light_on_s, light_off_s = (
-        parse_light_window_seconds(sensors_csv) if sensors_csv is not None else (None, None)
-    )
+    light_on_s = light_off_s = light_last_s = None
+    if sensors_csv is not None:
+        light_on_s, light_off_s = parse_light_window_seconds(sensors_csv)
+        light_last_s = parse_light_span_seconds(sensors_csv)[1]
 
     meta = TrialMetadata(
         dataset=dataset,
@@ -675,6 +784,7 @@ def load_trial_metadata(
         source=source,
         light_on_s=light_on_s,
         light_off_s=light_off_s,
+        light_last_s=light_last_s,
     )
 
     if use_cache:

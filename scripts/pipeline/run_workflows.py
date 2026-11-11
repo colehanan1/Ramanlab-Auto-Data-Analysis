@@ -3940,6 +3940,28 @@ def _main_locked(args: argparse.Namespace, config_path: Path, data: dict, settin
             scores_csv,
         )
 
+    # -- per-fly pre-test vs post-training trace overlays; wide tables only --
+    pvtt_expected = _pretest_vs_test_traces_expected(
+        analysis_cfg, settings, config_path=config_path
+    )
+    if pvtt_expected["command"]:
+        if _should_skip(
+            settings, "pretest_vs_test_traces", "analysis", pvtt_expected,
+            force_flag=getattr(settings.force, "pretest_vs_test_traces", False),
+        ):
+            print(
+                "[analysis] pretest_vs_test_traces cached → skipping. "
+                "Set force.pretest_vs_test_traces=true to recompute."
+            )
+        # A failed run is not recorded as done, so the next run tries again.
+        elif _run_pretest_vs_test_traces(analysis_cfg, settings, config_path=config_path):
+            payload = dict(pvtt_expected, version=STATE_VERSION)
+            _write_state(settings, "pretest_vs_test_traces", "analysis", payload)
+
+    # -- window-rescored scores: +N s pre-vs-post set, odor-vs-after comparison --
+    if scores_csv.exists():
+        _run_window_rescore_steps(analysis_cfg, settings, config_path=config_path)
+
     # -- per-cohort PER rasters + training-AUC; needs the same predictions --
     if scores_csv.exists():
         cf_expected = _cohort_figures_expected(
@@ -3963,6 +3985,12 @@ def _main_locked(args: argparse.Namespace, config_path: Path, data: dict, settin
             "[analysis] cohort_figures skipped; no predictions CSV at %s",
             scores_csv,
         )
+
+    # -- start-window results folder for the sensitivity cohorts; reads the
+    #    per-fly figures above, so it runs after them. Runs every time; a cohort
+    #    whose rows, the analysis code and the config are unchanged keeps its figures --
+    if scores_csv.exists():
+        _run_sensitivity_window_results(analysis_cfg, settings)
 
     # Data and figures are done: record every dataset rebuilt tonight as frozen
     # (with the inputs seen when the run started). A run that died before this
@@ -4827,6 +4855,379 @@ def _run_pretest_vs_test(
         )
     else:
         LOGGER.info("[analysis] pretest_vs_test complete.")
+
+
+def _sensitivity_window_command(
+    analysis_cfg: Mapping[str, Any] | None,
+    settings: Any,
+    *,
+    python_exec: str,
+) -> list[str] | None:
+    """The ``sensitivity_window_results.py`` command, or None when unconfigured.
+
+    One results folder for the sensitivity cohorts whose flies started inside a
+    clock window (Results/Sensitiviy-Results(11-15)), rebuilt every run so it
+    tracks the data instead of drifting like a hand-run set.
+    """
+    cfg = (analysis_cfg or {}).get("sensitivity_window_results") or {}
+    if not cfg or not bool(cfg.get("enabled", True)):
+        return None
+    out_dir = str(cfg.get("out_dir") or "")
+    datasets = [str(d) for d in (cfg.get("datasets") or []) if str(d).strip()]
+    if not out_dir or not datasets:
+        print("[analysis] sensitivity_window_results skipped; out_dir and datasets "
+              "are required.")
+        return None
+    predictions = str(
+        getattr(getattr(settings, "reaction_prediction", None), "output_csv", "") or ""
+    )
+    csv_dir = str(cfg.get("csv_dir") or (Path(predictions).parent if predictions else ""))
+
+    script = REPO_ROOT / "scripts" / "analysis" / "sensitivity_window_results.py"
+    cmd = [
+        str(Path(python_exec).expanduser()), str(script),
+        "--out-dir", out_dir,
+        "--start", str(cfg.get("start", "10:50")),
+        "--end", str(cfg.get("end", "15:10")),
+    ]
+    for ds in datasets:
+        cmd.extend(["--dataset", ds])
+    if cfg.get("bin_hours") is not None:
+        cmd.extend(["--bin-hours", str(cfg["bin_hours"])])
+    if cfg.get("split_date"):
+        cmd.extend(["--split-date", str(cfg["split_date"])])
+        for ds in cfg.get("split_cohorts") or []:
+            cmd.extend(["--split-cohort", str(ds)])
+    for ds in cfg.get("trial_series_cohorts") or []:
+        cmd.extend(["--trial-series-cohort", str(ds)])
+    if csv_dir:
+        cmd.extend(["--csv-dir", csv_dir])
+    flagged = str(cfg.get("flagged_flies_csv")
+                  or getattr(settings, "flagged_flies_csv", "") or "")
+    if flagged:
+        cmd.extend(["--flagged-flies-csv", flagged])
+    for key, flag in (("data_root", "--data-root"), ("figures_root", "--figures-root"),
+                      ("config", "--config")):
+        if cfg.get(key):
+            cmd.extend([flag, str(cfg[key])])
+    return cmd
+
+
+def _run_sensitivity_window_results(analysis_cfg: Mapping[str, Any] | None,
+                                    settings: Any) -> bool:
+    """Run the step; never aborts the pipeline. Returns True on success."""
+    python_exec = getattr(
+        getattr(settings, "reaction_prediction", None), "python", ""
+    ) or sys.executable
+    cmd = _sensitivity_window_command(analysis_cfg, settings, python_exec=python_exec)
+    if cmd is None:
+        LOGGER.info("[analysis] sensitivity_window_results not configured; skipping.")
+        return False
+    env = os.environ.copy()
+    env["MPLBACKEND"] = "Agg"
+    env["PYTHONPATH"] = os.pathsep.join(
+        filter(None, [str(REPO_ROOT / "src"), env.get("PYTHONPATH")])
+    )
+    LOGGER.info("[analysis] sensitivity_window_results → %s", " ".join(cmd))
+    result = subprocess.run(cmd, env=env, capture_output=False)
+    if result.returncode != 0:
+        LOGGER.warning(
+            "[analysis] sensitivity_window_results exited with code %d", result.returncode
+        )
+        return False
+    LOGGER.info("[analysis] sensitivity_window_results complete.")
+    return True
+
+
+def _pretest_vs_test_traces_command(
+    analysis_cfg: Mapping[str, Any] | None,
+    settings: Any,
+    *,
+    python_exec: str,
+    config_path: Path | None = None,
+) -> list[str] | None:
+    """The ``pretest_vs_test_traces.py`` command, or None when unconfigured.
+
+    Per-fly PER traces with the naive pre-test (orange) and the post-training
+    test (blue) overlaid per odor, each with its model score. Pure.
+    """
+    cfg = (analysis_cfg or {}).get("pretest_vs_test_traces") or {}
+    if not cfg or not bool(cfg.get("enabled", True)):
+        return None
+    paths = {
+        key: str(cfg.get(key, "") or "")
+        for key in ("out_dir", "pretest_wide_csv", "testing_wide_csv")
+    }
+    missing = [key for key, value in paths.items() if not value]
+    if missing:
+        print(f"[analysis] pretest_vs_test_traces skipped; {', '.join(missing)} required.")
+        return None
+
+    script = REPO_ROOT / "scripts" / "analysis" / "pretest_vs_test_traces.py"
+    cmd = [
+        str(Path(python_exec).expanduser()),
+        str(script),
+        "--pretest-wide-csv", paths["pretest_wide_csv"],
+        "--testing-wide-csv", paths["testing_wide_csv"],
+        "--out-dir", paths["out_dir"],
+    ]
+    # Fallbacks only; the x-axis is each recording's own length.
+    for key in ("fps_default", "odor_on_s", "odor_off_s"):
+        if cfg.get(key) is not None:
+            cmd.extend([f"--{key.replace('_', '-')}", str(float(cfg[key]))])
+    predictions_csv = str(
+        cfg.get("predictions_csv")
+        or getattr(getattr(settings, "reaction_prediction", None), "output_csv", "")
+        or ""
+    )
+    if predictions_csv:
+        cmd.extend(["--predictions-csv", predictions_csv])
+    # The script is a subprocess: it needs the config to see odor_remap.
+    if config_path is not None:
+        cmd.extend(["--config", str(config_path)])
+    cohorts = [str(name) for name in (cfg.get("cohorts") or []) if str(name).strip()]
+    if cohorts:
+        cmd.append("--cohorts")
+        cmd.extend(cohorts)
+    return cmd
+
+
+def _pretest_vs_test_traces_expected(
+    analysis_cfg: Mapping[str, Any] | None,
+    settings: Any,
+    *,
+    config_path: Path | None = None,
+) -> dict[str, Any]:
+    """Cache key: both wide tables' and the predictions' mtimes, the command, and
+    digests of the figure code and the config (a code or config change reruns it)."""
+    from fbpipe.utils import figure_cache
+
+    cmd = _pretest_vs_test_traces_command(
+        analysis_cfg, settings, python_exec=sys.executable, config_path=config_path
+    )
+
+    def _mtime(flag: str):
+        if not cmd or flag not in cmd:
+            return None
+        return _file_mtime_key(_resolve_path(cmd[cmd.index(flag) + 1]))
+
+    return {
+        "pretest_mtime": _mtime("--pretest-wide-csv"),
+        "testing_mtime": _mtime("--testing-wide-csv"),
+        "predictions_mtime": _mtime("--predictions-csv"),
+        "command": " ".join(cmd) if cmd else "",
+        "code_digest": figure_cache.code_digest(
+            [REPO_ROOT / "scripts" / "analysis" / "pretest_vs_test_traces.py"]
+        ),
+        "config_digest": figure_cache.file_digest(config_path) if config_path else "",
+    }
+
+
+def _run_pretest_vs_test_traces(
+    analysis_cfg: Mapping[str, Any] | None,
+    settings: Any,
+    *,
+    config_path: Path | None = None,
+) -> bool:
+    """Per-fly pre-test vs post-training PER trace overlays; True when the script succeeded."""
+    cmd = _pretest_vs_test_traces_command(
+        analysis_cfg, settings, python_exec=sys.executable, config_path=config_path
+    )
+    if cmd is None:
+        LOGGER.info("[analysis] pretest_vs_test_traces not configured; skipping.")
+        return False
+    env = os.environ.copy()
+    env["MPLBACKEND"] = "Agg"
+    env["PYTHONPATH"] = os.pathsep.join(
+        filter(None, [str(REPO_ROOT / "src"), env.get("PYTHONPATH")])
+    )
+    LOGGER.info("[analysis] pretest_vs_test_traces → %s", " ".join(cmd))
+    result = subprocess.run(cmd, env=env, capture_output=False)
+    if result.returncode != 0:
+        # Figures only; never abort the run over them.
+        LOGGER.warning(
+            "[analysis] pretest_vs_test_traces exited with code %d", result.returncode
+        )
+        return False
+    LOGGER.info("[analysis] pretest_vs_test_traces complete.")
+    return True
+
+
+def _window_block_paths(
+    block: Mapping[str, Any], name: str, keys: Sequence[str]
+) -> dict[str, str] | None:
+    paths = {key: str(block.get(key, "") or "") for key in keys}
+    missing = [key for key, value in paths.items() if not value]
+    if missing:
+        print(f"[analysis] {name} skipped; {', '.join(missing)} required.")
+        return None
+    return paths
+
+
+def _reaction_inputs(settings: Any) -> tuple[str, str, int]:
+    rp = getattr(settings, "reaction_prediction", None)
+    return (
+        str(getattr(rp, "output_csv", "") or ""),
+        str(getattr(rp, "model_path", "") or ""),
+        int(getattr(rp, "binary_threshold", 2) or 2),
+    )
+
+
+def _pretest_vs_test_plus_after_commands(
+    analysis_cfg: Mapping[str, Any] | None,
+    settings: Any,
+    *,
+    python_exec: str,
+    config_path: Path | None,
+) -> list[list[str]] | None:
+    """Rescore pre/post trials on odor + N s, then render the pre-vs-post set.
+
+    Two commands, run in order: ``window_rescore.py`` writes a predictions CSV
+    scored on the extended window; ``pretest_vs_test_comparison.py`` renders
+    the standard figure set from it into its own folder, every title noting
+    the window. The AUC rule comes from the config file, so no config path
+    means no command.
+    """
+    name = "pretest_vs_test_plus_after"
+    block = (analysis_cfg or {}).get(name) or {}
+    if not block or not bool(block.get("enabled", True)):
+        return None
+    paths = _window_block_paths(
+        block, name, ("out_dir", "rescored_csv", "pretest_wide_csv", "testing_wide_csv")
+    )
+    predictions, model, threshold = _reaction_inputs(settings)
+    if paths is None or not predictions or not model or config_path is None:
+        return None
+    after_s = float(block.get("after_s", 5.0))
+    exe = str(Path(python_exec).expanduser())
+    scripts = REPO_ROOT / "scripts" / "analysis"
+    rescore = [
+        exe, str(scripts / "window_rescore.py"),
+        "--predictions-csv", predictions,
+        "--wide-csv", paths["pretest_wide_csv"], paths["testing_wide_csv"],
+        "--model-path", model,
+        "--config", str(config_path),
+        "--window", "odor_plus_after",
+        "--after-s", str(after_s),
+        "--binary-threshold", str(threshold),
+        "--paired-only",
+        "--output-csv", paths["rescored_csv"],
+    ]
+    render = [
+        exe, str(scripts / "pretest_vs_test_comparison.py"),
+        "--predictions-csv", paths["rescored_csv"],
+        "--out-root", paths["out_dir"],
+        "--binary-threshold", str(threshold),
+        "--window-note", f"scored on odor + {after_s:g} s after",
+    ]
+    flagged = str(block.get("flagged_flies_csv") or getattr(settings, "flagged_flies_csv", "") or "")
+    if flagged:
+        render.extend(["--flagged-flies-csv", flagged])
+    return [rescore, render]
+
+
+def _score_window_comparison_command(
+    analysis_cfg: Mapping[str, Any] | None,
+    settings: Any,
+    *,
+    python_exec: str,
+    config_path: Path | None,
+) -> list[str] | None:
+    """Pre vs post scored on the odor, the N s after it, and both."""
+    name = "score_window_comparison"
+    block = (analysis_cfg or {}).get(name) or {}
+    if not block or not bool(block.get("enabled", True)):
+        return None
+    paths = _window_block_paths(
+        block, name, ("out_dir", "pretest_wide_csv", "testing_wide_csv")
+    )
+    cohorts = [str(c) for c in (block.get("cohorts") or []) if str(c).strip()]
+    predictions, model, threshold = _reaction_inputs(settings)
+    if paths is None or not cohorts or not predictions or not model or config_path is None:
+        if paths is not None and not cohorts:
+            print(f"[analysis] {name} skipped; cohorts required.")
+        return None
+    return [
+        str(Path(python_exec).expanduser()),
+        str(REPO_ROOT / "scripts" / "analysis" / "score_window_comparison.py"),
+        "--predictions-csv", predictions,
+        "--wide-csv", paths["pretest_wide_csv"], paths["testing_wide_csv"],
+        "--model-path", model,
+        "--config", str(config_path),
+        "--after-s", str(float(block.get("after_s", 5.0))),
+        "--binary-threshold", str(threshold),
+        "--out-dir", paths["out_dir"],
+        "--cohorts", *cohorts,
+    ]
+
+
+def _window_steps_expected(
+    commands: Sequence[str],
+    settings: Any,
+    wide_paths: Sequence[str],
+    config_path: Path | None,
+) -> dict[str, Any]:
+    """Cache key for a window-rescoring step: every input's mtime + the commands."""
+    predictions, model, _ = _reaction_inputs(settings)
+
+    def mtime(path: str | Path | None):
+        return _file_mtime_key(_resolve_path(str(path))) if path else None
+
+    return {
+        "predictions_mtime": mtime(predictions),
+        "model_mtime": mtime(model),
+        "config_mtime": mtime(config_path),
+        "wide_mtimes": [mtime(p) for p in wide_paths],
+        "command": " && ".join(commands),
+    }
+
+
+def _run_window_rescore_steps(
+    analysis_cfg: Mapping[str, Any] | None,
+    settings: Any,
+    *,
+    config_path: Path | None,
+) -> None:
+    """The +N s pre-vs-post set and the score-window comparison, cached."""
+    python_exec = getattr(
+        getattr(settings, "reaction_prediction", None), "python", ""
+    ) or sys.executable
+    env = os.environ.copy()
+    env["MPLBACKEND"] = "Agg"
+    env["PYTHONPATH"] = os.pathsep.join(
+        filter(None, [str(REPO_ROOT / "src"), env.get("PYTHONPATH")])
+    )
+    steps = (
+        ("pretest_vs_test_plus_after", _pretest_vs_test_plus_after_commands(
+            analysis_cfg, settings, python_exec=python_exec, config_path=config_path)),
+        ("score_window_comparison", (lambda c: [c] if c else None)(
+            _score_window_comparison_command(
+                analysis_cfg, settings, python_exec=python_exec, config_path=config_path))),
+    )
+    for name, cmds in steps:
+        if not cmds:
+            LOGGER.info("[analysis] %s not configured; skipping.", name)
+            continue
+        block = (analysis_cfg or {}).get(name) or {}
+        wide = [str(block.get("pretest_wide_csv", "")), str(block.get("testing_wide_csv", ""))]
+        expected = _window_steps_expected(
+            [" ".join(c) for c in cmds], settings, wide, config_path
+        )
+        if _should_skip(settings, name, "analysis", expected,
+                        force_flag=getattr(settings.force, name, False)):
+            print(f"[analysis] {name} cached → skipping. Set force.{name}=true to recompute.")
+            continue
+        ok = True
+        for cmd in cmds:
+            LOGGER.info("[analysis] %s → %s", name, " ".join(cmd))
+            result = subprocess.run(cmd, env=env, capture_output=False)
+            if result.returncode != 0:
+                # Figures only; never abort the run over them.
+                LOGGER.warning("[analysis] %s exited with code %d", name, result.returncode)
+                ok = False
+                break
+        if ok:
+            _write_state(settings, name, "analysis", dict(expected, version=STATE_VERSION))
 
 
 def _naive_vs_trained_expected(

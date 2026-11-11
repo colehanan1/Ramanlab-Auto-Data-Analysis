@@ -684,6 +684,26 @@ class EyeQCSettings:
 
 
 @dataclass
+class EyeMeasureSettings:
+    """Which eye position every proboscis distance is measured from.
+
+    ``frozen`` (default): yolo_infer's anchor, fixed for the whole trial.
+    ``live_light_hold``: the eye detected in each frame (``eye_live_x/y``),
+    except while the stimulus light is on -- YOLO misplaces the eye under it
+    (median 2 / 1 / 8 px on rigs 1 / 2 / 3) while the head stays put -- when it
+    stays where it sat over the ``pre_hold_s`` before. Applied by the
+    ``eye_live_measure`` step to the datasets in ``datasets`` only; a dataset
+    taken off the list is put back on the frozen anchor.
+    """
+
+    mode: str = "frozen"
+    datasets: Tuple[str, ...] = ()
+    hold_before_s: float = 0.5   # logged light-on can trail the video by ~0.14 s
+    hold_after_s: float = 1.0    # the eye point is back within 0.5 s of light-off
+    pre_hold_s: float = 1.0
+
+
+@dataclass
 class EyeTemplateSettings:
     """Batch-level eye anchor template (which fly slots a batch's trials get).
 
@@ -914,6 +934,19 @@ class Settings:
     # per-rig/date gate widening, applied per batch dir by
     # fbpipe.utils.rig_gates.apply_rig_gate_overrides
     rig_gate_overrides: Tuple[RigGateOverride, ...] = ()
+    # Leave stimulus-light frames (light-on - before_s .. light-off + after_s)
+    # out of each fly's global min/max (distance_stats); distance_normalize then
+    # caps the in-gate frames outside that range at 0/100 % instead of blanking
+    # them. Off = production behaviour.
+    minmax_exclude_light: bool = False
+    minmax_light_before_s: float = 0.5
+    minmax_light_after_s: float = 1.0
+    # "min_and_max" or "min": with "min" the light-evoked PER still sets the
+    # fly's 100 % (it is the fly's real ceiling); only the 0 % ignores the light,
+    # where washed-out frames give junk detections close to the eye.
+    minmax_light_scope: str = "min_and_max"
+    # datasets the light exclusion applies to; empty = every dataset
+    minmax_light_datasets: Tuple[str, ...] = ()
 
     # reaction prediction
     reaction_prediction: ReactionPredictionSettings = field(default_factory=ReactionPredictionSettings)
@@ -934,6 +967,7 @@ class Settings:
     # Per-frame eye-position QC (report-only; the frozen anchor never moves)
     eye_qc: EyeQCSettings = field(default_factory=EyeQCSettings)
     eye_template: EyeTemplateSettings = field(default_factory=EyeTemplateSettings)
+    eye_measure: EyeMeasureSettings = field(default_factory=EyeMeasureSettings)
 
     # Pseudolabel mining + export
     pseudolabel: PseudolabelSettings = field(default_factory=PseudolabelSettings)
@@ -984,6 +1018,24 @@ def _parse_env_paths(raw_value: str) -> str | list[str]:
     if os.pathsep in value:
         return [p.strip() for p in value.split(os.pathsep) if p.strip()]
     return value
+
+
+def _eye_measure_settings(block: Any) -> EyeMeasureSettings:
+    """``eye_measure:`` block; anything unusable means the frozen eye."""
+    d = EyeMeasureSettings()
+    if not isinstance(block, dict):
+        return d
+    mode = str(block.get("mode", d.mode))
+    if mode not in ("frozen", "live_light_hold"):
+        print(f"[CONFIG] eye_measure.mode={mode!r} is not frozen/live_light_hold; using frozen.")
+        mode = "frozen"
+    return EyeMeasureSettings(
+        mode=mode,
+        datasets=tuple(str(x) for x in (block.get("datasets") or ())),
+        hold_before_s=_as_float(block.get("hold_before_s"), d.hold_before_s, "eye_measure.hold_before_s"),
+        hold_after_s=_as_float(block.get("hold_after_s"), d.hold_after_s, "eye_measure.hold_after_s"),
+        pre_hold_s=_as_float(block.get("pre_hold_s"), d.pre_hold_s, "eye_measure.pre_hold_s"),
+    )
 
 
 def load_settings(config_path: str | Path) -> Settings:
@@ -1617,6 +1669,11 @@ def load_settings(config_path: str | Path) -> Settings:
             )
         ),
         rig_gate_overrides=tuple(rig_gate_overrides),
+        minmax_exclude_light=bool(dist_limits.get("exclude_light_frames_from_minmax", False)),
+        minmax_light_before_s=float(dist_limits.get("light_margin_before_s", 0.5)),
+        minmax_light_after_s=float(dist_limits.get("light_margin_after_s", 1.0)),
+        minmax_light_scope=str(dist_limits.get("light_frames_left_out_of", "min_and_max")),
+        minmax_light_datasets=tuple(str(d) for d in (dist_limits.get("light_exclusion_datasets") or ())),
         reaction_prediction=reaction_prediction,
         force=force,
         parallel=parallel,
@@ -1625,6 +1682,7 @@ def load_settings(config_path: str | Path) -> Settings:
         proboscis_filter=proboscis_filter,
         eye_qc=eye_qc,
         eye_template=eye_template,
+        eye_measure=_eye_measure_settings(data.get("eye_measure")),
         pseudolabel=pseudolabel,
         protocol=str(_get(data, "protocol", "legacy")),
         datasets=datasets_tuple,

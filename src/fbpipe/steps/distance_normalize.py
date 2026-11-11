@@ -24,8 +24,31 @@ from ..utils.distance_sanity import (
 )
 from ..utils.fly_files import iter_fly_distance_csvs
 from ..utils.parallel import parallel_map
+from ..utils.light_frames import light_exclusion_applies
 from ..utils.rig_gates import apply_rig_gate_overrides
 from ..utils.tables import read_table, read_schema_columns, write_table
+
+
+def cap_outside_range(d, perc, *, gmin: float, effective_max: float, class2_min: float,
+                      class2_max: float, gmax=None) -> np.ndarray:
+    """``perc`` with in-gate frames outside [gmin, gmax] capped instead of blank.
+
+    Only used when light frames are left out of the min/max: those frames can
+    then lie past the fly's range. Above it -> the usual % up to 100; below it
+    -> 0. Frames outside the class2 gate stay NaN, as always.
+    """
+    d = np.asarray(d, dtype=float)
+    out = np.array(perc, dtype=float, copy=True)
+    hi = effective_max if gmax is None else gmax
+    in_gate = (d >= class2_min) & (d <= class2_max)
+    over = in_gate & (d > hi)
+    under = in_gate & (d < gmin)
+    if effective_max != gmin:
+        out[over] = np.minimum(100.0, 100.0 * (d[over] - gmin) / (effective_max - gmin))
+    else:
+        out[over] = 100.0
+    out[under] = 0.0
+    return out
 
 
 def _is_already_normalized(
@@ -188,6 +211,9 @@ def _process_fly_dir(fly_dir: Path, cfg: Settings) -> None:
             perc[inr] = 100.0 * (d[inr] - gmin) / (effective_max - gmin)
         else:
             perc[inr] = 0.0
+        if light_exclusion_applies(cfg, fly_dir):
+            perc = cap_outside_range(d, perc, gmin=gmin, effective_max=effective_max,
+                                     class2_min=cfg.class2_min, class2_max=cfg.class2_max, gmax=gmax)
 
         df[dist_col] = d
         df[PROBOSCIS_DISTANCE_COL] = d

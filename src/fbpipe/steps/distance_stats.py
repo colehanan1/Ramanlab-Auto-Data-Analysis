@@ -5,6 +5,7 @@ from functools import partial
 from pathlib import Path
 from typing import Dict, Tuple
 
+import numpy as np
 import pandas as pd
 
 from ..config import Settings, get_main_directories
@@ -14,6 +15,7 @@ from ..utils.distance_sanity import (
     csv_requires_three_fly_distance_sanitization,
     sanitize_three_fly_distance_dataframe,
 )
+from ..utils.light_frames import light_exclusion_applies, light_frame_mask, trial_meta_for_table
 from ..utils.fly_files import iter_fly_distance_csvs
 from ..utils.parallel import parallel_map
 from ..utils.rig_gates import apply_rig_gate_overrides
@@ -108,6 +110,15 @@ def _process_fly_dir(fly_dir: Path, cfg: Settings) -> None:
             continue
 
         distances = pd.to_numeric(df[dist_col], errors="coerce")
+        all_distances = distances
+        light_on = light_exclusion_applies(cfg, fly_dir)
+        if light_on:
+            meta = trial_meta_for_table(csv_path, fly_dir)
+            frames = df["frame"].to_numpy() if "frame" in df.columns else np.arange(len(df))
+            lit = light_frame_mask(frames, meta, cfg.minmax_light_before_s, cfg.minmax_light_after_s)
+            if lit.any():
+                distances = distances.where(~lit)
+                print(f"[DIST] {csv_path.name}: {int(lit.sum())} light-on frames left out of the min/max")
         mask = distances.between(cfg.class2_min, cfg.class2_max, inclusive="both")
         vals = distances[mask]
         if vals.empty:
@@ -119,6 +130,10 @@ def _process_fly_dir(fly_dir: Path, cfg: Settings) -> None:
 
         local_min = float(vals.min())
         local_max = float(vals.max())
+        if light_on and getattr(cfg, "minmax_light_scope", "") == "min":
+            # light frames are left out of the 0 % only: the light-evoked PER still sets 100 %
+            in_gate = all_distances[all_distances.between(cfg.class2_min, cfg.class2_max, inclusive="both")]
+            local_max = float(in_gate.max())
         print(
             f"[DIST] Slot {token}: local min={local_min:.3f}, max={local_max:.3f}"
         )

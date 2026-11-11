@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Optional, Dict, List, Tuple
 
 import numpy as np
 import pandas as pd
@@ -40,6 +40,8 @@ from ..utils.distance_sanity import (
 from ..utils.fly_files import iter_fly_distance_csvs
 from ..utils.gpu_batch_optimizer import BatchFileProcessor, estimate_optimal_batch_size
 from ..utils.rig_gates import apply_rig_gate_overrides
+from .distance_normalize import cap_outside_range
+from ..utils.light_frames import light_exclusion_applies
 from ..utils.tables import read_table, read_schema_columns, write_table
 
 
@@ -195,6 +197,8 @@ def main(cfg: Settings) -> None:
                 batch_dist_cols,
                 processor,
                 fly_cfg.three_fly_max_eye_prob_distance_px,
+                cap_gate=((fly_cfg.class2_min, fly_cfg.class2_max)
+                          if light_exclusion_applies(fly_cfg, fly_dir) else None),
             )
 
             total_files += processed
@@ -208,6 +212,7 @@ def _process_fly_batch(
     dist_cols: Dict[Path, str],
     processor: BatchFileProcessor,
     max_distance_px: float,
+    cap_gate: Optional[Tuple[float, float]] = None,
 ) -> int:
     """
     Process all CSV files for a single fly using batch GPU operations.
@@ -271,6 +276,10 @@ def _process_fly_batch(
             df = batch_dfs[idx]
             perc = batch_results[idx]
             d = batch_data[idx]
+            if cap_gate is not None:
+                # light frames were left out of the min/max: cap, don't blank
+                perc = cap_outside_range(d, perc, gmin=gmin, effective_max=effective_max,
+                                         class2_min=cap_gate[0], class2_max=cap_gate[1], gmax=gmax)
 
             # Update dataframe (same column mapping as original)
             df[dist_col] = d

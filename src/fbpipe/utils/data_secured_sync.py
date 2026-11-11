@@ -77,6 +77,8 @@ def collect_relative_file_sample(source: Path | str, limit: int) -> list[str]:
     for path in source_path.rglob("*"):
         if not path.is_file():
             continue
+        if path.name.startswith(".") and path.name.endswith(".partial"):
+            continue        # a killed secure copy's leftover, never data
         relative = path.relative_to(source_path).as_posix()
         if any(part.startswith(".") for part in Path(relative).parts):
             fallback.append(relative)
@@ -91,6 +93,10 @@ def collect_relative_file_sample(source: Path | str, limit: int) -> list[str]:
     return sample
 
 
+#: Temporary names secure_copy_and_cleanup copies under before renaming.
+PARTIAL_EXCLUDE = ".*.partial"
+
+
 def build_file_server_sync_command(
     source: Path | str,
     destination: Path | str,
@@ -99,6 +105,8 @@ def build_file_server_sync_command(
     files_from: Path | str | None = None,
 ) -> list[str]:
     cmd = ["rsync", "-a", "--update", "--human-readable", "--itemize-changes"]
+    # A leftover from a killed secure copy is never pushed on.
+    cmd.extend(["--exclude", PARTIAL_EXCLUDE])
     if dry_run:
         cmd.append("--dry-run")
     if files_from is not None:
@@ -117,6 +125,10 @@ def build_box_sync_command(
 ) -> list[str]:
     target = f"{remote}:{folder}" if folder else f"{remote}:"
     cmd = ["rclone", "copy"]
+    # rclone refuses any filter flag next to --files-from; a sample list never names a
+    # partial (collect_relative_file_sample leaves them out).
+    if files_from is None:
+        cmd.extend(["--exclude", PARTIAL_EXCLUDE])
     if dry_run:
         cmd.append("--dry-run")
     if files_from is not None:
