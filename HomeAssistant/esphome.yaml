@@ -50,6 +50,11 @@ time:
 
 web_server:
   port: 80
+  # Login required: the device can join the open wustl-guest network.
+  # Add web_username / web_password to the secrets.yaml used to build.
+  auth:
+    username: !secret web_username
+    password: !secret web_password
 
 mqtt:
   broker: "192.168.1.6"
