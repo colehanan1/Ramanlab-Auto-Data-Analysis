@@ -68,6 +68,24 @@ def test_phase_mode_labels_the_arms_by_phase():
     assert tvc.phase_arm_labels() == ("Post-training", "Pre-test")
 
 
+def test_a_sensitivity_cohort_names_its_arms_for_sensitization():
+    """Nothing is paired with the odor in a *-Sensitivity-* cohort, so its two
+    panels are pre/post-exposure, not the conditioning words."""
+    assert tvc.phase_arm_labels("IAA-Sensitivity-1-1") == (
+        "Post-exposure", "Pre-exposure"
+    )
+    assert tvc.phase_arm_labels("IAA-Sensitivity5s-1-1") == (
+        "Post-exposure", "Pre-exposure"
+    )
+
+
+def test_a_conditioned_cohort_with_a_pretest_keeps_the_training_labels():
+    """Hex-HexTest-Training-* also runs a pre-test, but it IS light-conditioned."""
+    assert tvc.phase_arm_labels("Hex-HexTest-Training-32-1") == (
+        "Post-training", "Pre-test"
+    )
+
+
 def test_phase_mode_has_its_own_filename_tag():
     """It must not overwrite the training_vs_control figures in the same tree."""
     assert tvc.PHASE_TAG == "post_vs_pretest"
@@ -135,6 +153,15 @@ def test_the_default_title_follows_the_arm_labels():
     )
 
 
+def test_a_sensitivity_cohorts_title_names_its_sensitization_panels():
+    from scripts.analysis.dataset_means_specific_flies import default_arm_title
+
+    labels = tvc.phase_arm_labels("IAA-Sensitivity-1-1")
+    assert default_arm_title("Hexanol", *labels) == (
+        "Hexanol - Post-exposure vs Pre-exposure"
+    )
+
+
 def test_the_trained_vs_control_title_is_unchanged():
     from scripts.analysis.dataset_means_specific_flies import default_arm_title
 
@@ -149,3 +176,39 @@ def test_a_three_arm_title_still_names_the_naive_arm():
     assert default_arm_title("Hexanol", "Trained", "Control", with_naive=True) == (
         "Hexanol - Trained vs Control vs Naive"
     )
+
+
+# ── the odor as drawn: "<Odor> <c>% (v/v)" on a sensitivity figure ────────
+
+
+@pytest.mark.parametrize("key, shown", [
+    ("isoamylacetate-1", "Isoamyl Acetate 1% (v/v)"),
+    ("3-octonol-0.1", "3-Octanol 0.1% (v/v)"),
+    ("EthylButyrate-0.1", "Ethyl Butyrate 0.1% (v/v)"),
+    ("isoamylacetate-1 2", "Isoamyl Acetate 1% (v/v) 2"),   # presentation kept
+    ("3-Octanol (0.1%) 2", "3-Octanol 0.1% (v/v) 2"),
+    ("Hexanol", "Hexanol"),          # pre-pins batch: no dose was recorded
+])
+def test_a_sensitivity_figure_draws_each_odor_with_its_dose(key, shown):
+    assert tvc.odor_display_label(key, ["IAA-Sensitivity-1-1"]) == shown
+
+
+@pytest.mark.parametrize("cohorts", [
+    ["Hex-HexTest-Training-32-1"],
+    ["3Oct-Training-24-0.1", "3Oct-Control-24-0.1"],
+    ["IAA-Sensitivity-1-1", "3Oct-Control-24-0.1"],    # not all sensitivity
+    [],
+])
+def test_any_other_figure_draws_the_odor_key_unchanged(cohorts):
+    for key in ("isoamylacetate-1", "3-Octanol (0.1%) 2", "Hexanol"):
+        assert tvc.odor_display_label(key, cohorts) == key
+
+
+def test_a_sensitivity_title_names_the_dose_and_the_phases():
+    from scripts.analysis.dataset_means_specific_flies import default_arm_title
+
+    cohort = "IAA-Sensitivity-1-1"
+    assert default_arm_title(
+        tvc.odor_display_label("isoamylacetate-1", [cohort]),
+        *tvc.phase_arm_labels(cohort),
+    ) == "Isoamyl Acetate 1% (v/v) - Post-exposure vs Pre-exposure"

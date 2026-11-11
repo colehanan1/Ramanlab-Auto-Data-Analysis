@@ -127,6 +127,20 @@ def test_ratio_scores_average_over_all_training_trials(train):
     assert scores[fid] == pytest.approx(expected)
 
 
+def test_ratio_first_caption_names_a_sensitivity_cohorts_odor_sensitized():
+    """Nothing is paired with a *-Sensitivity-* cohort's exposed odor, so its
+    first exposure is to the sensitized odor, not a trained one."""
+    blurb = mod._sort_blurb("ratio_first", "IAA-Sensitivity-1-1")
+    assert blurb == "AUC-During / AUC-Before on the FIRST sensitized odor exposure"
+    assert "trained" not in blurb
+
+
+@pytest.mark.parametrize("ds", ["Hex-HexTest-Training-32-1", DATASET, None])
+def test_ratio_first_caption_is_unchanged_for_other_cohorts(ds):
+    for key in mod._SORT_BLURB:
+        assert mod._sort_blurb(key, ds) == mod._SORT_BLURB[key]
+
+
 def test_ratio_first_uses_only_the_first_exposure(train):
     scores = mod.fly_scores(train, by="ratio_first")
     fid = next(iter(scores))

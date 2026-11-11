@@ -362,6 +362,145 @@ def test_load_config_remap_reads_the_real_config(restore_remap):
 
 
 # ---------------------------------------------------------------------------
+# A *-Sensitivity-* cohort draws each odor as "<Odor> <c>% (v/v)"
+# ---------------------------------------------------------------------------
+
+SENSITIVITY = "IAA-Sensitivity-1-1"
+#: Pins labels carry the vial concentration; the pre-pins "hexanol" carries none.
+_PINS_ODORS = ["isoamylacetate-1", "3-octonol-0.1", "hexanol"]
+#: The panel labels -- sort key and JSON value -- for every cohort.
+_PINS_LABELS = ["Isoamylacetate-1", "3-Octonol-0.1", "Hexanol"]
+
+
+def _pins_trials(ds, odors=_PINS_ODORS):
+    train, test = [], []
+    for (fly, num), ones in _TRAIN.items():
+        for t, n_ones in enumerate(ones, start=1):
+            train.append(_row(fly, num, "training", f"training_{t}_isoamylacetate-1", n_ones))
+        for t, odor in enumerate(odors, start=1):
+            test.append(_row(fly, num, "testing", f"testing_{t}_{odor}", t % 3))
+    tr = mod.build_trials(pd.DataFrame(train).assign(dataset=ds), dataset=ds,
+                          trial_type="training")
+    te = mod.build_trials(pd.DataFrame(test).assign(dataset=ds), dataset=ds,
+                          trial_type="testing")
+    return tr, te
+
+
+def _render(figure, ds, **kw):
+    """(drawn panel titles or tick labels, JSON labels, figure text) for ``ds``."""
+    train, test = _pins_trials(ds)
+    fig, meta = figure(test, mod.fly_order(train, by="auc"), dataset=ds,
+                       trained=mod.trained_odor(train), pre_s=4.0, post_s=4.0,
+                       bin_s=1.0, **kw)
+    try:
+        if figure is mod.figure_testing:
+            labels = [p["label"] for p in meta["panels"]]
+            # The panels come first; a graded figure adds its colorbar after.
+            drawn = [ax.get_title() for ax in fig.axes[:len(labels)]]
+        elif figure is mod.figure_testing_continuous_heatmap:
+            labels = [s["label"] for s in meta["segments"]]
+            drawn = [t.get_text() for t in fig.axes[0].get_xticklabels()]
+        else:                       # the stack draws its odors in the key only
+            labels, drawn = list(meta["panel_order"]), []
+        return drawn, labels, " ".join(t.get_text() for t in fig.texts)
+    finally:
+        plt.close(fig)
+
+
+def test_odor_text_formats_only_sensitivity_cohorts(restore_remap):
+    from scripts.analysis.envelope_visuals import set_dataset_odor_remap
+
+    set_dataset_odor_remap({})
+    assert mod.odor_text("isoamylacetate-1", SENSITIVITY) == "Isoamyl Acetate 1% (v/v)"
+    assert mod.odor_text("ethylbutyrate-10", SENSITIVITY) == "Ethyl Butyrate 10% (v/v)"
+    # No concentration recorded: the display name, and no percent invented.
+    assert mod.odor_text("3-octonol", "3Oct-Sensitivity-24-0.1") == "3-Octanol"
+    assert mod.odor_text("lightonly", SENSITIVITY) == "Light only"
+    for ds in (DATASET, "Hex-HexTest-Training-32-1"):
+        assert mod.odor_text("isoamylacetate-1", ds) == mod.odor_display("isoamylacetate-1", ds)
+
+
+@pytest.mark.parametrize("mode", [mod.BINARY_MODE, mod.GRADED_MODE], ids=["binary", "graded"])
+def test_a_sensitivity_cohorts_panels_are_titled_with_the_concentration(restore_remap, mode):
+    from scripts.analysis.envelope_visuals import set_dataset_odor_remap
+
+    set_dataset_odor_remap({})
+    titles, labels, _ = _render(mod.figure_testing, SENSITIVITY, mode=mode)
+    # Name above concentration: one line does not fit a 1.75 in panel.
+    assert titles == ["Isoamyl Acetate\n1% (v/v)", "3-Octanol\n0.1% (v/v)", "Hexanol"]
+    # Display only: the JSON keeps the label, and the panel order with it.
+    assert labels == _PINS_LABELS
+
+
+@pytest.mark.parametrize("ds", [DATASET, "Hex-HexTest-Training-32-1"])
+def test_other_cohorts_keep_their_panel_titles(restore_remap, ds):
+    from scripts.analysis.envelope_visuals import set_dataset_odor_remap
+
+    set_dataset_odor_remap({})
+    titles, labels, _ = _render(mod.figure_testing, ds)
+    assert titles == labels == _PINS_LABELS
+
+
+def test_two_line_titles_get_their_room(restore_remap):
+    from scripts.analysis.envelope_visuals import set_dataset_odor_remap
+
+    set_dataset_odor_remap({})
+    train, test = _pins_trials(SENSITIVITY)
+    order = mod.fly_order(train, by="auc")
+    tops = {}
+    for ds in (SENSITIVITY, DATASET):
+        fig, _ = mod.figure_testing(test.assign(dataset=ds), order, dataset=ds)
+        tops[ds] = (fig.subplotpars.top, fig.get_figheight())
+        plt.close(fig)
+    (top_s, h_s), (top_c, h_c) = tops[SENSITIVITY], tops[DATASET]
+    assert (1 - top_s) * h_s == pytest.approx((1 - top_c) * h_c + 0.16)
+
+
+def test_a_repeated_sensitivity_odor_keeps_its_number_beside_the_name(restore_remap):
+    from scripts.analysis.envelope_visuals import set_dataset_odor_remap
+
+    set_dataset_odor_remap({})
+    _, test = _pins_trials(SENSITIVITY, odors=["hexanol-0.1", "citral-1", "hexanol-0.1"])
+    panels = mod.testing_panels(test, dataset=SENSITIVITY, trained="hexanol-0.1")
+    assert [p.label for p in panels] == ["Hexanol-0.1 1", "Hexanol-0.1 2", "Citral-1"]
+    assert [p.shown for p in panels] == [
+        "Hexanol 1 0.1% (v/v)", "Hexanol 2 0.1% (v/v)", "Citral 1% (v/v)",
+    ]
+
+
+@pytest.mark.parametrize("ds,note", [
+    (SENSITIVITY, "3-Octanol 0.1% (v/v) not shown."),
+    (DATASET, "3-Octonol-0.1 not shown."),
+])
+def test_the_dropped_odor_note_follows_the_cohort(restore_remap, ds, note):
+    from scripts.analysis.envelope_visuals import set_dataset_odor_remap
+
+    set_dataset_odor_remap({})
+    _, _, text = _render(mod.figure_testing, ds, exclude_odors=("3-octonol-0.1",))
+    assert note in text
+
+
+@pytest.mark.parametrize("figure", [
+    mod.figure_testing_continuous_heatmap, mod.figure_testing_stacked_heatmap,
+], ids=["timeline", "stack"])
+def test_the_heatmap_order_key_names_the_concentration(restore_remap, figure):
+    from scripts.analysis.envelope_visuals import set_dataset_odor_remap
+
+    set_dataset_odor_remap({})
+    for ds, shown in (
+        (SENSITIVITY, ["Isoamyl Acetate 1% (v/v)", "3-Octanol 0.1% (v/v)", "Hexanol"]),
+        (DATASET, _PINS_LABELS),
+    ):
+        drawn, labels, text = _render(figure, ds, mode=mod.ENVELOPE_MODE)
+        assert "Order: " + "  |  ".join(
+            f"{i}. {s}" for i, s in enumerate(shown, start=1)
+        ) in text
+        assert labels == _PINS_LABELS
+        if figure is mod.figure_testing_continuous_heatmap:
+            assert [t.replace("\n", " ") for t in drawn] == shown
+
+
+# ---------------------------------------------------------------------------
 # Raster assembly
 # ---------------------------------------------------------------------------
 
@@ -535,6 +674,36 @@ def test_heatmap_testing_figure_keeps_the_auc_order():
     try:
         assert meta["fly_order"] == order
         assert meta["mode"] == "envelope"
+    finally:
+        plt.close(fig)
+
+
+@pytest.mark.parametrize("figure,title,subtitle,starts_sentence", [
+    (mod.figure_testing_continuous_heatmap, "{} proboscis extension timeline by odor",
+     "{} odors are placed in the same fixed left-to-right order", True),
+    (mod.figure_testing_stacked_heatmap, "{} proboscis extension stacked by fly",
+     "rows follow the fixed {} odor order", False),
+], ids=["timeline", "stack"])
+@pytest.mark.parametrize("ds,word", [
+    (DATASET, "Testing"),
+    ("Hex-HexTest-Training-32-1", "Testing"),
+    ("IAA-Sensitivity-1-1", "Post-exposure"),
+])
+def test_heatmap_testing_figures_name_the_post_panel_by_protocol(
+    figure, title, subtitle, starts_sentence, ds, word
+):
+    """A *-Sensitivity-* cohort's testing panel is post-exposure: nothing
+    is paired with its odor. Every other cohort keeps "Testing"."""
+    train = mod.build_trials(_training_frame().assign(dataset=ds), dataset=ds,
+                             trial_type="training")
+    test = mod.build_trials(_testing_frame().assign(dataset=ds), dataset=ds,
+                            trial_type="testing")
+    fig, _ = figure(test, mod.fly_order(train, by="auc"), dataset=ds,
+                    mode=mod.ENVELOPE_MODE, pre_s=4.0, post_s=4.0, bin_s=1.0)
+    try:
+        assert fig._suptitle.get_text() == f"{title.format(word)} — {ds}"
+        texts = " ".join(t.get_text() for t in fig.texts)
+        assert subtitle.format(word if starts_sentence else word.lower()) in texts
     finally:
         plt.close(fig)
 

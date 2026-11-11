@@ -199,3 +199,165 @@ def test_every_figure_shows_n_under_each_bin():
     labels = [t.get_text() for t in grid.axes[-1].get_xticklabels()]
     assert any("n=2" in s for s in labels) and any("n=1" in s for s in labels)
     plt.close(grid)
+
+
+def test_starvation_colors_past_six_levels_stay_ordered():
+    import matplotlib.colors as mcolors
+
+    levels = [1.0, 6, 7, 12, 18, 24, 30, 40]
+    cols = tod.starvation_colors(levels)
+    lum = [sum(mcolors.to_rgb(cols[float(h)])) for h in levels]
+    assert lum == sorted(lum, reverse=True) and len(set(cols.values())) == 8
+
+
+# ── phase wording by protocol (scripts/analysis/phase_terms.py) ────────────
+
+
+def _drawn_text(figs) -> str:
+    """Every string the figures draw (suptitle, titles, labels, notes, legends); closes them."""
+    import matplotlib.pyplot as plt
+
+    parts = []
+    for fig in figs:
+        parts.append(fig.get_suptitle())
+        for ax in fig.axes:
+            parts += [ax.get_title(loc=loc) for loc in ("left", "center", "right")]
+            parts += [ax.get_xlabel(), ax.get_ylabel()] + [t.get_text() for t in ax.texts]
+            if ax.get_legend():
+                parts += [t.get_text() for t in ax.get_legend().get_texts()]
+        parts += [t.get_text() for leg in fig.legends for t in leg.get_texts()]
+        plt.close(fig)
+    return "\n".join(parts)
+
+
+def _every_figure(cohort):
+    p = tod.assign_bins(_paired(), 1)
+    table, comp, pooled = tod.bin_table(p), tod.composition(p), tod.pooled_pretest(p)
+    # a real omnibus, so the "post-... FFH" notes are drawn too
+    kw = dict(omnibus=tod.omnibus(p), trained_odor="Isoamyl Acetate", title="T", width=1,
+              cohort=cohort)
+    return [tod.build_pretest(table, pooled, comp, stats=tod.pretest_stats(p), title="T",
+                              width=1, cohort=cohort),
+            tod.build_emphasis(table, comp, **kw), tod.build_spotlight(table, p, comp, **kw),
+            tod.build_grid(table, **kw)]
+
+
+def test_sensitivity_figures_say_pre_and_post_sensitization_and_sensitized_odor():
+    text = _drawn_text(_every_figure("IAA-Sensitivity-24-1"))
+    for new in ("Pre-exposure", "Post-exposure", "post-exposure FFH",
+                "Pre-exposure PER score", "is pre-exposure PER different",
+                "Start of pre-exposure", "effect of exposure",
+                "Sensitized odor mean ± SEM", "Isoamyl Acetate (sensitized odor)",
+                "Isoamyl Acetate  (sensitized odor)"):
+        assert new in text
+    # nothing is paired with the odor: no conditioning words anywhere
+    for old in ("Pre-test", "pre-test", "Post-training", "post-training", "CS+", "naive", "train"):
+        assert old not in text
+
+
+def test_conditioning_cohort_keeps_pre_test_post_training_and_cs_plus():
+    text = _drawn_text(_every_figure("Hex-HexTest-Training-32-1"))
+    for old in ("Pre-test (naive)", "Post-training", "post-training FFH",
+                "Pre-test PER score\n(naive, before training)", "is the naive pre-test different",
+                "Start of first pre-test", "First pre-test (n = flies)", "effect of training",
+                "CS+ mean ± SEM", "Isoamyl Acetate (trained, CS+)",
+                "Isoamyl Acetate (trained odor, CS+)", "Isoamyl Acetate  (CS+)"):
+        assert old in text
+    assert "sensitiz" not in text.lower() and "exposure" not in text.lower()
+
+
+def test_render_width_words_figures_by_the_datasets_it_draws(monkeypatch, tmp_path):
+    drawn = []
+    monkeypatch.setattr(tod, "_save", lambda fig, path: drawn.append(fig) or path)
+    p = _paired()
+    kw = dict(trained="Isoamyl Acetate", title="T", spearman=tod.spearman_by_odor(p))
+    tod.render_width(p, 1, out_dir=tmp_path / "sensitivity", **kw)
+    assert "Post-exposure" in _drawn_text(drawn)  # from the data, not the title
+    drawn.clear()
+    mixed = p.assign(dataset_canon=p["dataset_canon"].where(p["fly"] != "c",
+                                                            "Hex-HexTest-Training-32-1"))
+    tod.render_width(mixed, 1, out_dir=tmp_path / "mixed", **kw)
+    text = _drawn_text(drawn)
+    assert "Post-training" in text and "sensitiz" not in text.lower() and "exposure" not in text.lower()
+
+
+# ── odor concentration in the figure text (scripts/analysis/odor_conc_labels.py) ──
+
+_CONC = {"Isoamyl Acetate": "1", "Hexanol": "0.1"}
+
+
+def _every_figure_with_conc(cohort, odor_conc):
+    p = tod.assign_bins(_paired(), 1)
+    table, comp, pooled = tod.bin_table(p), tod.composition(p), tod.pooled_pretest(p)
+    kw = dict(omnibus=tod.omnibus(p), trained_odor="Isoamyl Acetate", title="T", width=1,
+              cohort=cohort, odor_conc=odor_conc)
+    figs = [tod.build_pretest(table, pooled, comp, stats=tod.pretest_stats(p), title="T",
+                              width=1, cohort=cohort, odor_conc=odor_conc),
+            tod.build_emphasis(table, comp, **kw), tod.build_spotlight(table, p, comp, **kw),
+            tod.build_grid(table, **kw)]
+    return _drawn_text(figs)
+
+
+def test_sensitivity_figures_name_each_odor_with_its_concentration():
+    text = _every_figure_with_conc("IAA-Sensitivity-1-1", _CONC)
+    for new in ("Isoamyl Acetate 1% (v/v) (sensitized odor)",          # legend, suptitle
+                "Isoamyl Acetate 1% (v/v): Kruskal-Wallis across bins",
+                "Isoamyl Acetate 1% (v/v)\n(sensitized odor)",          # grid column, wrapped
+                "Hexanol 0.1% (v/v)"):
+        assert new in text
+    assert "Isoamyl Acetate (sensitized odor)" not in text
+
+
+def test_odor_with_no_recorded_concentration_keeps_its_bare_name():
+    text = _every_figure_with_conc("IAA-Sensitivity-40-1", {"Hexanol": "0.1"})
+    assert "Isoamyl Acetate  (sensitized odor)" in text  # one line, as before
+    assert "Isoamyl Acetate (sensitized odor)" in text
+    assert "Isoamyl Acetate 1%" not in text and "Hexanol 0.1% (v/v)" in text
+
+
+def test_conditioning_figures_never_add_a_concentration():
+    text = _every_figure_with_conc("Hex-HexTest-Training-32-1", _CONC)
+    assert "% (v/v)" not in text
+    assert "Isoamyl Acetate  (CS+)" in text and "Isoamyl Acetate (trained, CS+)" in text
+
+
+def test_load_paired_keeps_the_stripped_concentration_for_the_figures(tmp_path):
+    rows = []
+    for fly, conc in (("october_08_batch_1", "-1"), ("october_09_batch_1", "-1")):
+        for phase, n in (("pretest", 1), ("testing", 2)):
+            for odor, c in (("isoamylacetate", conc), ("hexanol", "")):
+                rows.append(dict(dataset="IAA-Sensitivity-1-1", fly=fly, fly_number=1,
+                                 trial_label=f"{phase}_{n}_{odor}{c}", score=1,
+                                 trial_type=phase))
+    csv = tmp_path / "preds.csv"
+    pd.DataFrame(rows).to_csv(csv, index=False)
+    paired = tod.load_paired(["IAA-Sensitivity-1-1"], predictions_csv=csv,
+                             flagged_flies_csv=tmp_path / "none.csv", tmp_dir=tmp_path / "in")
+    assert paired.attrs["odor_conc"] == {"Isoamyl Acetate": "1"}
+    assert set(paired["odor"]) == {"Isoamyl Acetate", "Hexanol"}  # the key stays bare
+
+
+# ── --min-flies: only bins with enough flies are drawn and tested ──
+
+
+def test_drop_small_bins_counts_flies_not_rows():
+    # bin 9:00 holds flies a and b (2 odors each -> 4 rows), bin 13:00 holds fly c
+    binned = tod.assign_bins(_paired(), 1)
+    kept = tod.drop_small_bins(binned, 2)
+    assert sorted(kept["fly"].unique()) == ["a", "b"]
+    assert set(kept["bin_start"]) == {9.0}
+    assert tod.drop_small_bins(binned, 3).empty
+    assert len(tod.drop_small_bins(binned, 0)) == len(binned)
+
+
+def test_render_width_min_flies_drops_the_bin_from_tables_and_stats(monkeypatch, tmp_path):
+    monkeypatch.setattr(tod, "_save", lambda fig, path: path)
+    p = _paired()
+    tod.render_width(p, 1, out_dir=tmp_path, trained="Isoamyl Acetate", title="T",
+                     spearman=tod.spearman_by_odor(p), min_flies=2)
+    table = pd.read_csv(tmp_path / "time_of_day_table.csv")
+    assert set(table["bin_start"]) == {9.0}
+    comp = pd.read_csv(tmp_path / "flies_per_bin_by_starvation.csv")
+    assert comp["bin_start"].tolist() == [9.0]
+    pooled = pd.read_csv(tmp_path / "pretest_pooled_by_bin.csv")
+    assert set(pooled["bin_start"]) == {9.0}

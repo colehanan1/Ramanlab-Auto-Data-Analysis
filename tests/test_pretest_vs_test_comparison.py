@@ -584,3 +584,232 @@ def test_render_cohort_with_fisher_writes_the_same_set(tmp_path):
     stems = " ".join(p.stem for p in written)
     for expected in ("score_bars", "rate_bars", "trained_odor"):
         assert expected in stems, expected
+
+
+# ── figure wording: sensitization vs conditioning ─────────────────────────
+
+
+def _paired_for(cohort, n_flies=8, odors=("Hexanol", "Citral", "Linalool")):
+    """Paired scores whose panel includes both cohorts' exposed odor, Hexanol."""
+    return pd.DataFrame([
+        {"dataset_canon": cohort, "fly": "b1", "fly_number": fn, "odor": odor,
+         "score_pre": fn % 3, "score_post": (fn + 2) % 6}
+        for fn in range(1, n_flies + 1)
+        for odor in odors
+    ])
+
+
+@pytest.fixture
+def figure_text(monkeypatch):
+    """Every string drawn on each figure render_cohort saves, by file stem."""
+    from pathlib import Path
+
+    import matplotlib.figure
+    import matplotlib.text
+
+    seen = {}
+    real_savefig = matplotlib.figure.Figure.savefig
+
+    def spy(fig, fname, *args, **kwargs):
+        real_savefig(fig, fname, *args, **kwargs)  # drawn, so tick text is final
+        seen[Path(fname).stem] = " | ".join(
+            t.get_text() for t in fig.findobj(matplotlib.text.Text) if t.get_text()
+        )
+
+    monkeypatch.setattr(matplotlib.figure.Figure, "savefig", spy)
+    return seen
+
+
+#: Figure -> (wording on a *-Sensitivity-* cohort, wording on a conditioned one).
+_WORDING = {
+    "score_bars": (["Pre-exposure", "Post-exposure",
+                    "pre-exposure vs post-exposure"],
+                   ["Pre-test (naive)", "Post-training", "pre-test vs post-training"]),
+    "rate_bars": (["Pre-exposure", "Post-exposure",
+                   "pre-exposure vs post-exposure"],
+                  ["Pre-test (naive)", "Post-training", "pre-test vs post-training"]),
+    "trained_odor": (["Hexanol (sensitized odor)", "Pre-exposure", "Post-exposure"],
+                     ["Hexanol (CS+)", "Pre-test", "Post-training"]),
+    "slopes": (["Hexanol (sensitized odor)", "Pre-exposure", "Post-exposure"],
+               ["Hexanol (CS+)", "Pre-test", "Post-training"]),
+    "heatmap": (["Pre-exposure", "Post-exposure"],
+                ["Pre-test (naive)", "Post-training"]),
+}
+
+
+def test_a_sensitivity_cohort_says_pre_and_post_sensitization(tmp_path, figure_text):
+    """Nothing is paired with the odor in a *-Sensitivity-* cohort, so its panels
+    are pre-/post-exposure and the exposed odor is the sensitized odor."""
+    cohort = "Hex-Sensitivity-24-0.1"
+    pvt.render_cohort(_paired_for(cohort), cohort=cohort, out_dir=tmp_path)
+    assert {s.split(f"{cohort}_")[-1] for s in figure_text} == set(_WORDING)
+    for stem, text in figure_text.items():
+        text = text.replace("-\n", "-")  # the two-bar ticks wrap after the hyphen
+        for wanted in _WORDING[stem.split(f"{cohort}_")[-1]][0]:
+            assert wanted in text, (stem, wanted)
+        for old in ("Pre-test", "pre-test", "Post-training", "post-training", "CS+", "naive"):
+            assert old not in text, (stem, old)
+
+
+def test_a_conditioned_cohort_with_a_pretest_keeps_its_wording(tmp_path, figure_text):
+    """Hex-HexTest-Training-* pairs the odor with light AND runs a pre-test, so it
+    goes through these same figures and must still say pre-test / CS+."""
+    cohort = "Hex-HexTest-Training-32-1"
+    pvt.render_cohort(_paired_for(cohort), cohort=cohort, out_dir=tmp_path)
+    assert {s.split(f"{cohort}_")[-1] for s in figure_text} == set(_WORDING)
+    for stem, text in figure_text.items():
+        for wanted in _WORDING[stem.split(f"{cohort}_")[-1]][1]:
+            assert wanted in text, (stem, wanted)
+        assert "ensitiz" not in text, stem
+
+
+def test_the_shared_phase_labels_keep_the_conditioning_wording():
+    """starvation_*, time_of_day_trend and others import these; the sensitivity
+    wording is picked per figure, never by changing the constants."""
+    assert pvt.PRE_LABEL == "Pre-test (naive)"
+    assert pvt.POST_LABEL == "Post-training"
+
+
+# ── odor labels: "<Odor> <c>% (v/v)" on a sensitivity figure ──────────────
+
+#: Raw ~/odor_pins.txt labels, as batches recorded after ~2026-10-06 load.
+_PINS = ("3-octonol-0.1", "hexanol-0.1", "isoamylacetate-1")
+_PINS_TEXT = ("3-Octanol 0.1% (v/v)", "Hexanol 0.1% (v/v)", "Isoamyl Acetate 1% (v/v)")
+
+
+def _stems(figure_text, cohort):
+    return {stem.split(f"{cohort}_")[-1]: text for stem, text in figure_text.items()}
+
+
+def test_a_sensitivity_cohort_draws_each_odor_with_its_concentration(tmp_path, figure_text):
+    cohort = "IAA-Sensitivity-1-1"
+    pvt.render_cohort(_paired_for(cohort, odors=_PINS), cohort=cohort, out_dir=tmp_path)
+    drawn = _stems(figure_text, cohort)
+    assert set(drawn) == set(_WORDING)
+    for stem in ("score_bars", "rate_bars", "heatmap"):
+        for wanted in _PINS_TEXT:
+            assert wanted in drawn[stem], (stem, wanted)
+    for stem in ("trained_odor", "slopes"):
+        assert "Isoamyl Acetate 1% (v/v) (sensitized odor)" in drawn[stem], stem
+    for stem, text in drawn.items():
+        for raw in _PINS:
+            assert raw not in text, (stem, raw)
+
+
+def test_a_label_with_no_concentration_gets_no_percent(tmp_path, figure_text):
+    """Batches before the pins labels recorded no concentration; none is invented."""
+    cohort = "IAA-Sensitivity-40-1"
+    odors = ("Isoamyl Acetate", "Hexanol", "3-Octanol")
+    pvt.render_cohort(_paired_for(cohort, odors=odors), cohort=cohort, out_dir=tmp_path)
+    drawn = _stems(figure_text, cohort)
+    assert set(drawn) == set(_WORDING)
+    for stem, text in drawn.items():
+        assert "(v/v)" not in text, stem
+    for stem in ("score_bars", "heatmap"):
+        for odor in odors:
+            assert odor in drawn[stem], (stem, odor)
+    assert "Isoamyl Acetate (sensitized odor)" in drawn["slopes"]
+
+
+def test_a_conditioned_cohort_draws_its_odor_labels_as_loaded(tmp_path, figure_text):
+    """Hex-HexTest-Training-* is not a sensitivity cohort, so every odor label,
+    pins token or not, is drawn exactly as loaded."""
+    cohort = "Hex-HexTest-Training-32-1"
+    odors = ("ethylbutyrate-0.1", "hexanol-1", "isoamylacetate-1")
+    pvt.render_cohort(_paired_for(cohort, odors=odors), cohort=cohort, out_dir=tmp_path)
+    drawn = _stems(figure_text, cohort)
+    assert set(drawn) == set(_WORDING)
+    for stem in ("score_bars", "rate_bars", "heatmap"):
+        for odor in odors:
+            assert odor in drawn[stem], (stem, odor)
+    for stem in ("trained_odor", "slopes"):
+        assert f"{cohort} — hexanol-1 (CS+)" in drawn[stem], stem
+    for stem, text in drawn.items():
+        assert "(v/v)" not in text, stem
+
+
+def test_odor_text_formats_only_sensitivity_cohorts():
+    assert pvt._odor_text("isoamylacetate-1", "IAA-Sensitivity-1-1") == "Isoamyl Acetate 1% (v/v)"
+    assert pvt._odor_text("3-Octanol", "3Oct-Sensitivity-24-0.1") == "3-Octanol"
+    assert pvt._odor_text("isoamylacetate-1", "Hex-HexTest-Training-32-1") == "isoamylacetate-1"
+
+
+def test_the_summary_csv_keeps_the_loaded_labels(tmp_path):
+    """Display only: the CSV other scripts read keeps the grouping key."""
+    cohort = "IAA-Sensitivity-1-1"
+    pvt.render_cohort(_paired_for(cohort, odors=_PINS), cohort=cohort, out_dir=tmp_path)
+    summary = pd.read_csv(tmp_path / f"{cohort}_summary.csv")
+    assert sorted(summary["odor"]) == sorted(_PINS)
+
+
+# ── the sensitized odor, matched by name ──────────────────────────────────
+
+
+@pytest.mark.parametrize("cohort,token", [
+    ("IAA-Sensitivity-1-1", "isoamylacetate-1"),
+    ("IAA-Sensitivity5s-1-1", "isoamylacetate-1"),
+    ("3Oct-Sensitivity-1-0.1", "3-octonol-0.1"),
+])
+def test_a_pins_labelled_cohort_gets_its_sensitized_odor_figures(tmp_path, cohort, token):
+    """The prefix match compared "isoamylacetate-1" with "Isoamyl Acetate", so
+    these cohorts never drew trained_odor / slopes and their tick was never bold."""
+    rows = [
+        {"dataset": cohort, "fly": "october_08_batch_2", "fly_number": fn,
+         "trial_label": f"{phase}_{i}_{odor}", "score": score, "trial_type": phase}
+        for fn in range(1, 9)
+        for phase, score in (("pretest", 0), ("testing", 4))
+        for i, odor in enumerate((token, "citral-1", "linalool-1"), start=1)
+    ]
+    path = tmp_path / "p.csv"
+    pd.DataFrame(rows).to_csv(path, index=False)
+
+    written = pvt.render_cohort(pvt.load_paired_scores(path), cohort=cohort,
+                                out_dir=tmp_path / "figs")
+    stems = " ".join(p.stem for p in written)
+    assert "trained_odor" in stems
+    assert "slopes" in stems
+
+
+def _bold_ticks(summary, cohort):
+    import matplotlib.pyplot as plt
+
+    fig, ax = pvt.build_grouped_bars(summary, cohort=cohort, kind="score", p_key="p_score")
+    bold = {t.get_text() for t in ax.get_xticklabels() if t.get_fontweight() == "bold"}
+    plt.close(fig)
+    return bold
+
+
+def test_the_sensitized_odor_tick_is_bold_for_a_pins_label():
+    cohort = "IAA-Sensitivity-1-1"
+    summary = pvt.per_odor_summary(_paired_for(cohort, odors=_PINS))
+    assert _bold_ticks(summary, cohort) == {"Isoamyl Acetate 1% (v/v)"}
+
+
+def test_mixed_labels_keep_the_old_label_row(tmp_path, figure_text):
+    """IAA-Sensitivity-24-1 holds both spellings as separate odor groups. Its
+    old-label "Isoamyl Acetate" row was the one the prefix match found, so the
+    trained-odor and slope figures keep drawing it; both of its ticks are bold."""
+    cohort = "IAA-Sensitivity-24-1"
+    paired = _paired_for(cohort, odors=("Isoamyl Acetate", "isoamylacetate-1", "Hexanol"))
+    summary = pvt.per_odor_summary(paired)
+
+    assert pvt._trained_odor_row(summary, cohort)["odor"] == "Isoamyl Acetate"
+    # Whatever the order: a row the original prefix rule matches wins.
+    flipped = summary.iloc[::-1].reset_index(drop=True)
+    assert flipped["odor"].iloc[0] == "isoamylacetate-1"
+    assert pvt._trained_odor_row(flipped, cohort)["odor"] == "Isoamyl Acetate"
+
+    assert _bold_ticks(summary, cohort) == {"Isoamyl Acetate", "Isoamyl Acetate 1% (v/v)"}
+
+    pvt.render_cohort(paired, cohort=cohort, out_dir=tmp_path)
+    drawn = _stems(figure_text, cohort)
+    for stem in ("trained_odor", "slopes"):
+        assert "Isoamyl Acetate (sensitized odor)" in drawn[stem], stem
+        assert "Isoamyl Acetate 1% (v/v) (sensitized odor)" not in drawn[stem], stem
+
+
+def test_name_matching_applies_to_a_conditioned_cohort_too():
+    cohort = "IAA-Odor10s-Training-24-1"
+    summary = pvt.per_odor_summary(_paired_for(cohort, odors=("citral-1", "isoamylacetate-1")))
+    assert pvt._trained_odor_row(summary, cohort)["odor"] == "isoamylacetate-1"
+    assert _bold_ticks(summary, cohort) == {"isoamylacetate-1"}

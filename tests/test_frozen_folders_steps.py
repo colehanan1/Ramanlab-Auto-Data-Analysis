@@ -107,6 +107,7 @@ def test_iter_live_batch_dirs_on_a_missing_root_is_empty(tmp_path):
         # Every compute step in pipeline.ORDERED_STEPS that walks batch dirs...
         "fbpipe.steps.yolo_infer",
         "fbpipe.steps.check_light_stimulus",
+        "fbpipe.steps.check_light_leak",
         "fbpipe.steps.eye_drift_qc",
         "fbpipe.steps.reject_bad_proboscis",
         "fbpipe.steps.distance_stats",

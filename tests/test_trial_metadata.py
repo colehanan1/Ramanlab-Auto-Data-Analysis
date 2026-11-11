@@ -245,6 +245,52 @@ def test_parse_active_ofm_handles_never_on(tmp_path: Path) -> None:
     assert on_f is None and off_f is None and channel is None
 
 
+def _ofm_csv(path: Path, runs: list[tuple[str, int]]) -> Path:
+    """Write a frame CSV whose ActiveOFM column is the given (state, n_frames) runs."""
+    states = [state for state, n in runs for _ in range(n)]
+    pd.DataFrame({
+        "FrameNumber": range(1, len(states) + 1),
+        "ActiveOFM": states,
+    }).to_csv(path, index=False)
+    return path
+
+
+def test_parse_active_ofm_bridges_paraffin_clicks(tmp_path: Path) -> None:
+    # Paraffin (P) flicks the master ON/OFF/ON at onset and OFF/ON/OFF at
+    # offset, 50 ms apart. Frame pattern from Pi 2, 2026-11-05
+    # (training_1_ParaffinOil-100): on 1194, off 1196, on 1198 ... off 2399,
+    # on 2401, off 2403. The window is first click -> final close, not 2 frames.
+    csv = _ofm_csv(tmp_path / "p.csv", [
+        ("off", 1193), ("OFM_P", 2), ("off", 2), ("OFM_P", 1201),
+        ("off", 2), ("OFM_P", 2), ("off", 1200),
+    ])
+    on_f, off_f, channel = parse_active_ofm(csv)
+    assert (on_f, off_f, channel) == (1194, 2403, "OFM_P")
+
+
+def test_parse_active_ofm_spans_the_two_paraffin_clicks(tmp_path: Path) -> None:
+    # Since 2026-11-10 the master stays OFF -- which IS the paraffin line (user:
+    # "FOR PAR OIL OFF IS WHEN VALVE IS OPEN") -- and is only clicked ON for
+    # 50 ms at onset and again 30 s later at offset, so the frame log shows two
+    # 2-frame OFM_P blips. The window is onset click -> end of the offset
+    # click, not the 2 frames of the first click.
+    csv = _ofm_csv(tmp_path / "p2.csv", [
+        ("off", 1199), ("OFM_P", 2), ("off", 1196), ("OFM_P", 2), ("off", 1201),
+    ])
+    on_f, off_f, channel = parse_active_ofm(csv)
+    assert (on_f, off_f, channel) == (1200, 2400, "OFM_P")
+
+
+def test_parse_active_ofm_keeps_a_later_separate_odor_out(tmp_path: Path) -> None:
+    # Only click-length gaps are bridged: a second delivery seconds later is
+    # not folded into the first window.
+    csv = _ofm_csv(tmp_path / "two.csv", [
+        ("off", 100), ("OFM_H", 400), ("off", 200), ("OFM_H", 400), ("off", 100),
+    ])
+    on_f, off_f, _ = parse_active_ofm(csv)
+    assert (on_f, off_f) == (101, 501)
+
+
 # ---------------------------------------------------------------------------
 # load_trial_metadata: end-to-end shapes
 # ---------------------------------------------------------------------------

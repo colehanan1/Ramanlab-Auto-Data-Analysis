@@ -72,12 +72,15 @@ def _registered_remap():
         ev.set_dataset_odor_remap(saved_remap)
 
 
-def _wide_frame(datasets=(TRAIN, CTRL), flies=("july_20_batch_1", "july_20_batch_2")):
+def _wide_frame(
+    datasets=(TRAIN, CTRL), flies=("july_20_batch_1", "july_20_batch_2"),
+    schedule=SCHEDULE,
+):
     rows = []
     for dataset in datasets:
         for fly in flies:
             for fly_number in (1, 2):
-                for label, value in SCHEDULE:
+                for label, value in schedule:
                     row = {
                         "dataset": dataset,
                         "fly": fly,
@@ -432,3 +435,150 @@ def test_batch_filter_that_matches_nothing_fails_loudly(tmp_path: Path) -> None:
             "--fps", str(FPS), "--odor-on-s", str(ODOR_ON_S), "--odor-off-s", "2.0",
             "--batch", "9",
         ])
+
+
+# ---------------------------------------------------------------------------
+# Phase mode (--pretest-wide-csv): arm wording follows the cohort's protocol
+# ---------------------------------------------------------------------------
+
+
+def _phase_figure_text(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, dataset: str,
+    *, schedule=SCHEDULE,
+) -> list[list[str]]:
+    """``[title, *legend]`` of every figure phase mode draws for ``dataset``.
+
+    The pre-test table is the testing schedule relabelled ``pretest_N``: the
+    same flies, before and after.
+    """
+    import scripts.analysis.dataset_mean_traces_tvc as tvc
+
+    post = _wide_frame(datasets=(dataset,), schedule=schedule)
+    pre = post.assign(
+        trial_type="pretest",
+        trial_label=post["trial_label"].str.replace("testing_", "pretest_", regex=False),
+    )
+    post.to_parquet(tmp_path / "testing.parquet", index=False)
+    pre.to_parquet(tmp_path / "pretest.parquet", index=False)
+
+    drawn = []
+    plot = tvc._plot_training_vs_control_for_odor
+
+    def _recording_plot(**kwargs):
+        drawn.append(plot(**kwargs))
+        return drawn[-1]
+
+    monkeypatch.setattr(tvc, "_plot_training_vs_control_for_odor", _recording_plot)
+    main([
+        "--wide-csv", str(tmp_path / "testing.parquet"),
+        "--pretest-wide-csv", str(tmp_path / "pretest.parquet"),
+        "--train-dataset", dataset,
+        "--out-dir", str(tmp_path / "Pre-Test_vs_Post-Training"),
+        "--fps", str(FPS), "--odor-on-s", str(ODOR_ON_S), "--odor-off-s", "2.0",
+    ])
+    assert drawn, "phase mode drew no figures"
+    return [
+        [fig.axes[0].get_title(),
+         *(t.get_text() for t in fig.axes[0].get_legend().get_texts())]
+        for fig in drawn
+    ]
+
+
+def test_phase_mode_names_a_sensitivity_cohorts_panels_for_sensitization(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Nothing is paired with the odor in a *-Sensitivity-* cohort, so its
+    panels are pre/post-exposure, not pre-test/post-training."""
+    for title, *legend in _phase_figure_text(tmp_path, monkeypatch, "IAA-Sensitivity-1-1"):
+        assert title.endswith(" - Post-exposure vs Pre-exposure")
+        assert legend == ["Pre-exposure (n=4)", "Post-exposure (n=4)"]
+
+
+def test_phase_mode_keeps_the_training_wording_for_a_conditioned_cohort(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Hex-HexTest-Training-* also runs a pre-test, but it IS light-conditioned."""
+    for title, *legend in _phase_figure_text(
+        tmp_path, monkeypatch, "Hex-HexTest-Training-32-1"
+    ):
+        assert title.endswith(" - Post-training vs Pre-test")
+        assert legend == ["Pre-test (n=4)", "Post-training (n=4)"]
+
+
+# ---------------------------------------------------------------------------
+# Odor names as drawn: "<Odor> <c>% (v/v)" on a sensitivity cohort's figures
+# ---------------------------------------------------------------------------
+
+# Pins tokens carry the dose; "hexanol" is a pre-pins label with none recorded
+# (IAA-Sensitivity-24-1 has both kinds).
+PINS_SCHEDULE = [
+    ("testing_1_isoamylacetate-1", 1.0),
+    ("testing_2_3-octonol-0.1", 2.0),
+    ("testing_3_hexanol", 3.0),
+]
+
+
+def test_a_sensitivity_cohorts_titles_give_each_odor_its_dose(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Display only: the files and the sidecar keep the pins token."""
+    texts = _phase_figure_text(
+        tmp_path, monkeypatch, "IAA-Sensitivity-1-1", schedule=PINS_SCHEDULE
+    )
+    assert sorted(title for title, *_ in texts) == [
+        "3-Octanol 0.1% (v/v) - Post-exposure vs Pre-exposure",
+        "Hexanol - Post-exposure vs Pre-exposure",
+        "Isoamyl Acetate 1% (v/v) - Post-exposure vs Pre-exposure",
+    ]
+    out_dir = tmp_path / "Pre-Test_vs_Post-Training"
+    assert {p.name for p in out_dir.glob("*.png")} == {
+        "3-octonol-0.1_post_vs_pretest.png",
+        "Hexanol_post_vs_pretest.png",
+        "isoamylacetate-1_post_vs_pretest.png",
+    }
+    meta = json.loads((out_dir / "post_vs_pretest.json").read_text())
+    assert set(meta["per_odor"]) == {"3-octonol-0.1", "Hexanol", "isoamylacetate-1"}
+
+
+def test_a_conditioned_cohorts_titles_keep_the_odor_as_loaded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Hex-HexTest-Training-* figures are not sensitivity figures."""
+    texts = _phase_figure_text(
+        tmp_path, monkeypatch, "Hex-HexTest-Training-32-1", schedule=PINS_SCHEDULE
+    )
+    assert sorted(title for title, *_ in texts) == [
+        "3-octonol-0.1 - Post-training vs Pre-test",
+        "Hexanol - Post-training vs Pre-test",
+        "isoamylacetate-1 - Post-training vs Pre-test",
+    ]
+
+
+def test_a_sensitivity_rig_split_title_gives_the_odor_its_dose(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The rig-split title is built in main, not by the plot helper."""
+    import scripts.analysis.dataset_mean_traces_tvc as tvc
+
+    dataset = "IAA-Sensitivity-1-1"
+    wide = tmp_path / "wide.parquet"
+    _wide_frame(
+        datasets=(dataset,),
+        flies=("october_08_batch_1", "october_08_batch_1_rig_3"),
+        schedule=PINS_SCHEDULE,
+    ).to_parquet(wide, index=False)
+    titles = []
+    plot = tvc._plot_training_vs_control_for_odor
+    monkeypatch.setattr(
+        tvc, "_plot_training_vs_control_for_odor",
+        lambda **kwargs: titles.append(kwargs["title"]) or plot(**kwargs),
+    )
+    main([
+        "--wide-csv", str(wide),
+        "--train-dataset", dataset, "--control-dataset", dataset,
+        "--out-dir", str(tmp_path / "rig_split"),
+        "--fps", str(FPS), "--odor-on-s", str(ODOR_ON_S), "--odor-off-s", "2.0",
+        "--rig-split", "1:3", "--odor", "isoamylacetate-1",
+    ])
+    assert len(titles) == 1
+    assert titles[0].startswith("Isoamyl Acetate 1% (v/v) - ")

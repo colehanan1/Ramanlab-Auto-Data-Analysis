@@ -12,7 +12,9 @@ These tests pin that:
   * ``generate_envelope_plots`` renders identical figures from ``wide_input``
     without ever opening ``matrix_npy`` (which is kept only as a label hint);
   * the config guards against the ``use_per_trial_baseline`` regression that
-    removing ``combined.wide`` would otherwise cause.
+    removing ``combined.wide`` would otherwise cause;
+  * the figure title names a ``*-Sensitivity-*`` cohort's panels Pre-/Post-
+    Sensitization, and every other cohort's Pre-Test / Testing.
 """
 
 from __future__ import annotations
@@ -21,6 +23,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import pytest
 import yaml
 
 from scripts.analysis import envelope_combined as ec
@@ -155,6 +158,137 @@ def test_wide_input_render_matches_matrix_render(tmp_path):
         rel(matrix_out),
         rel(wide_out),
     )
+
+
+def _write_phase_wide_csv(
+    path: Path,
+    dataset: str,
+    trial_type: str,
+    odors: tuple[str, ...] = ("isoamylacetate-1", "hexanol-0.1"),
+) -> None:
+    """One fly, one trial per odor of one phase (v2 labels carry the odor), 4-sample traces."""
+    rows = [
+        {
+            "dataset": dataset,
+            "fly": "oct_01_batch_1",
+            "fly_number": "1",
+            "trial_type": trial_type,
+            "trial_label": f"{trial_type}_{trial_num}_{odor}",
+            "fps": 40.0,
+            "global_min": 1.0,
+            "global_max": 25.0,
+            "trace_len": 4,
+            "dir_val_0": 1.0,
+            "dir_val_1": 8.5,
+            "dir_val_2": 16.25,
+            "dir_val_3": 4.0,
+        }
+        for trial_num, odor in enumerate(odors, start=1)
+    ]
+    pd.DataFrame(rows).to_csv(path, index=False)
+
+
+@pytest.mark.parametrize(
+    "dataset, trial_type, phase",
+    [
+        ("IAA-Sensitivity-1-1", "pretest", "Pre-Exposure"),
+        ("IAA-Sensitivity-1-1", "testing", "Post-Exposure"),
+        ("IAA-Sensitivity-1-1", "training", "Training"),
+        # Light-conditioned and also pre-tested: same path, conditioning words.
+        ("Hex-HexTest-Training-32-1", "pretest", "Pre-Test"),
+        ("Hex-HexTest-Training-32-1", "testing", "Testing"),
+    ],
+)
+def test_trace_title_names_the_phase_by_cohort(tmp_path, monkeypatch, dataset, trial_type, phase):
+    """A sensitivity cohort's odor is never paired, so its panels are pre-/post-exposure."""
+    monkeypatch.setattr(ev, "_ACTIVE_PROTOCOL", "v2")
+    wide_csv = tmp_path / "wide.csv"
+    _write_phase_wide_csv(wide_csv, dataset, trial_type)
+    texts: list[str] = []
+    close = ev.plt.close
+
+    def _close(fig=None):
+        texts.extend(t.get_text() for t in getattr(fig, "texts", ()))
+        close(fig)
+
+    monkeypatch.setattr(ev.plt, "close", _close)
+    cfg = _wide_cfg(wide_csv, tmp_path / "plots", matrix_npy=tmp_path / "nope.npy")
+    cfg.trial_type = trial_type
+    ev.generate_envelope_plots(cfg)
+
+    assert f"Proboscis Distance Across {phase} Trials" in texts
+
+
+def _render_panels(tmp_path, monkeypatch, dataset, odors, **style) -> list[list]:
+    """Render one fly's testing figure: per panel, each text and its extent in inches."""
+    monkeypatch.setattr(ev, "_ACTIVE_PROTOCOL", "v2")
+    wide_csv = tmp_path / "wide.csv"
+    _write_phase_wide_csv(wide_csv, dataset, "testing", odors)
+    panels: list[list] = []
+    close = ev.plt.close
+
+    def _close(fig=None):
+        renderer = fig.canvas.get_renderer()
+        to_inches = fig.dpi_scale_trans.inverted()
+        panels.extend(
+            [(t.get_text(), t.get_window_extent(renderer).transformed(to_inches))
+             for t in ax.texts]
+            for ax in fig.axes
+        )
+        close(fig)
+
+    monkeypatch.setattr(ev.plt, "close", _close)
+    cfg = _wide_cfg(wide_csv, tmp_path / "plots", matrix_npy=tmp_path / "nope.npy")
+    for key, value in style.items():
+        setattr(cfg, key, value)
+    ev.generate_envelope_plots(cfg)
+    return panels
+
+
+@pytest.mark.parametrize(
+    "dataset, odors, titles",
+    [
+        # Pins tokens carry the concentration: drawn as "% (v/v)".
+        ("IAA-Sensitivity-1-1", ("isoamylacetate-1", "hexanol-0.1"),
+         ["Isoamyl Acetate 1% (v/v)", "Hexanol 0.1% (v/v)"]),
+        # No concentration recorded: the name alone (the sensitized odor in caps).
+        ("IAA-Sensitivity-40-1", ("isoamylacetate", "hexanol"),
+         ["ISOAMYL ACETATE", "Hexanol"]),
+        # Every other cohort's panel titles are drawn exactly as before.
+        ("Hex-HexTest-Training-32-1", ("isoamylacetate-1", "hexanol-0.1"),
+         ["isoamylacetate-1", "hexanol-0.1"]),
+    ],
+)
+def test_panel_titles_write_a_sensitivity_cohorts_concentration_as_v_v(
+    tmp_path, monkeypatch, dataset, odors, titles
+):
+    panels = _render_panels(tmp_path, monkeypatch, dataset, odors)
+    # The odor title is each panel's first text; score / light notes follow it.
+    assert [texts[0][0] for texts in panels] == titles
+
+
+def test_trained_caps_leave_the_unit_alone():
+    assert ev._panel_odor_label(
+        "IAA-Sensitivity-1-1", "isoamylacetate-1", trained=True
+    ) == "ISOAMYL ACETATE 1% (v/v)"
+    assert ev._panel_odor_label("Hex-HexTest-Training-32-1", "Hexanol", trained=True) == "HEXANOL"
+
+
+def test_longest_sensitivity_title_clears_the_score(tmp_path, monkeypatch):
+    """At the nightly trace style the longer title must not run into "Score: N"."""
+    from scripts.pipeline.run_workflows import _PIPELINE_ENVELOPE_STYLE_DEFAULTS
+
+    dataset, odors = "IAA-Sensitivity-1-1", ("isoamylacetate-1", "ethylbutyrate-1")
+    monkeypatch.setattr(ev, "_MODEL_SCORES", {
+        (dataset, "oct_01_batch_1", "1", f"testing_{n}_{odor}"): -1
+        for n, odor in enumerate(odors, start=1)
+    })
+    panels = _render_panels(tmp_path, monkeypatch, dataset, odors,
+                            **_PIPELINE_ENVELOPE_STYLE_DEFAULTS)
+    assert len(panels) == 2
+    for (title, title_box), (score, score_box) in (texts[:2] for texts in panels):
+        assert title.endswith("% (v/v)") and score == "Score: -1"
+        assert score_box.x0 - title_box.x1 > 1.0, "title runs into the score"
 
 
 def test_config_new_keeps_combined_base_baseline_and_drops_removed_blocks():

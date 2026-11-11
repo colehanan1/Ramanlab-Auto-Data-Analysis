@@ -112,3 +112,38 @@ def test_all_figures_build(tmp_path):
     for f in figs:
         assert "?" in f._suptitle.get_text()
         plt.close(f)
+
+
+@pytest.mark.parametrize("cohorts, sensitization", [
+    (["IAA-Sensitivity-1-1", "IAA-Sensitivity-24-1"], True),
+    (["Hex-HexTest-Training-32-1"], False),
+    ([], False),
+])
+def test_phase_wording_follows_the_cohorts(cohorts, sensitization):
+    from matplotlib.text import Text
+
+    m = _matrix()
+    l1, l2, l3 = _results()
+    ex = rx.worked_example(m, "Benzaldehyde", "pre")
+    figs = [rx.fig_how_it_works(m, ex, cohorts=cohorts),
+            rx.fig_skill_by_odor(rx.skill_table(l2, l3), cohorts=cohorts),
+            rx.fig_within_group(l1, cohorts=cohorts),
+            rx.fig_ridge_vs_lasso(rx.coefficients(m, "Benzaldehyde", "pre"), l1, l2, l3, ex,
+                                  cohorts=cohorts),
+            rx.fig_odors_together(rx.odor_correlations(m), cohorts=cohorts),
+            rx.fig_starvation(l2, l3, cohorts=cohorts)]
+    for f in figs:
+        text = "\n".join(t.get_text() for t in f.findobj(Text)).lower()
+        plt.close(f)
+        assert ("pre-exposure" in text) is sensitization
+        assert ("pre-test" in text) is not sensitization
+
+
+def test_cohorts_come_from_the_comparison_next_to_the_regression(tmp_path):
+    reg = tmp_path / "odor_holdout_regression"
+    reg.mkdir()
+    assert rx.regression_cohorts(reg) == []
+    (tmp_path / "1h_vs_24h").mkdir()
+    pd.DataFrame({"dataset_canon": ["IAA-Sensitivity-24-1", "IAA-Sensitivity-1-1"]}).to_csv(
+        tmp_path / "1h_vs_24h" / "paired_scores_per_fly.csv", index=False)
+    assert rx.regression_cohorts(reg) == ["IAA-Sensitivity-1-1", "IAA-Sensitivity-24-1"]

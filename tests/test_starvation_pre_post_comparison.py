@@ -8,6 +8,7 @@ first. These tests pin that normalisation and the per-group statistics.
 
 from __future__ import annotations
 
+import numpy as np
 import pandas as pd
 import pytest
 from scipy.stats import fisher_exact, mannwhitneyu
@@ -316,7 +317,7 @@ def test_five_groups_render_with_light_to_dark_ramps(tmp_path):
     spc.check_group_count([spc.parse_group(f"{i}=X") for i in range(5)])
 
 
-def test_six_groups_render_and_seven_are_refused(tmp_path):
+def test_six_groups_render(tmp_path):
     import matplotlib.colors as mcolors
 
     labels = ["1 h", "6 h", "12 h", "18 h", "24 h", "30 h"]
@@ -337,4 +338,136 @@ def test_six_groups_render_and_seven_are_refused(tmp_path):
     assert spc.group_colors(5)[0] == ("#86b6ef", "#f0915f")
     spc.check_group_count([spc.parse_group(f"{i}=X") for i in range(6)])
     with pytest.raises(SystemExit):
-        spc.check_group_count([spc.parse_group(f"{i}=X") for i in range(7)])
+        spc.check_group_count([spc.parse_group("0=X")])  # one group is not a comparison
+
+
+def test_more_than_six_groups_render_with_sampled_light_to_dark_ramps(tmp_path):
+    """IAA-Sensitivity-1-1 had eight batches on 2026-10-15: no upper limit any more."""
+    import matplotlib.colors as mcolors
+
+    labels = [f"Oct {d} b1" for d in range(8, 16)]  # eight groups
+    paired = pd.concat([_paired(g, [0, 1, 2, 0], [2, 3, 1, 4], odor="Isoamyl Acetate")
+                        for g in labels])
+    spc.check_group_count([spc.parse_group(f"{i}=X") for i in range(len(labels))])
+    summary = spc.group_summary(paired, labels, binary_threshold=2)
+    between = spc.pairwise_between_stats(paired, labels, binary_threshold=2)
+    written = spc.render_bar_figures(paired, summary, between, groups=labels,
+                                     trained_odor="Isoamyl Acetate", title="t", out_dir=tmp_path)
+    assert len(written) == 5
+    for n in (7, 8, 12):
+        cols, deltas = spc.group_colors(n), spc.delta_colors(n)
+        assert len(cols) == len(deltas) == n
+        for phase in (0, 1):
+            lum = [sum(mcolors.to_rgb(c[phase])) for c in cols]
+            assert lum == sorted(lum, reverse=True) and len(set(lum)) == n
+        # sampled along the validated six-step ramp: same light and dark ends
+        assert cols[0] == spc.group_colors(6)[0] and cols[-1] == spc.group_colors(6)[-1]
+    # existing small-group palettes are untouched
+    assert spc.group_colors(6) == tuple(zip(spc._BLUE6, spc._ORANGE6))
+
+
+# ── phase wording: *-Sensitivity-* cohorts are pre-/post-exposure ─────
+
+SENS = ["IAA-Sensitivity-1-1", "IAA-Sensitivity-24-1"]
+#: Light-conditioned AND run with a pre-test: same code path, old wording.
+HEX = ["Hex-HexTest-Training-24-1", "Hex-HexTest-Training-32-1"]
+
+
+def _texts(fig) -> str:
+    """Every string drawn on the figure: titles, legends, tick labels, notes."""
+    from matplotlib.text import Text
+
+    fig.canvas.draw()
+    return "\n".join(t.get_text() for t in fig.findobj(Text))
+
+
+def _bar_texts(cohorts):
+    import matplotlib.pyplot as plt
+
+    paired, summary, between, groups = _two_group_inputs()
+    kw = dict(groups=groups, trained_odor="Hexanol", title="t", cohorts=cohorts)
+    figs = (spc.build_pre_post_bars(summary, kind="score", **kw),
+            spc.build_by_phase_bars(summary, between, kind="rate", **kw),
+            spc.build_delta_strip(paired, between, **kw))
+    texts = [_texts(f) for f in figs]
+    for f in figs:
+        plt.close(f)
+    return texts
+
+
+def test_sensitivity_cohorts_get_pre_and_post_sensitization():
+    pre_post, by_phase, delta = _bar_texts(SENS)
+    assert "pre-exposure vs post-exposure" in pre_post
+    assert "Oct 6 — Pre-exposure" in pre_post and "Oct 7 — Post-exposure" in pre_post
+    assert "Pre-exposure" in by_phase and "Post-exposure" in by_phase
+    assert "change in PER score after exposure" in delta
+    for text in (pre_post, by_phase, delta):
+        assert "pre-test" not in text.lower() and "training" not in text and "naive" not in text
+
+
+def test_conditioning_cohorts_keep_pre_test_and_post_training():
+    pre_post, by_phase, delta = _bar_texts(HEX)
+    assert "pre-test vs post-training" in pre_post
+    assert "Oct 6 — Pre-test (naive)" in pre_post and "Oct 7 — Post-training" in pre_post
+    assert "Pre-test (naive)" in by_phase and "Post-training" in by_phase
+    assert "change in PER score after training" in delta
+    assert not any(w in t.lower() for w in ("sensitiz", "exposure") for t in (pre_post, by_phase, delta))
+
+
+@pytest.mark.parametrize("cohorts", [[SENS[0], HEX[0]], ()], ids=["mixed", "not given"])
+def test_mixed_or_unnamed_cohorts_keep_the_old_wording(cohorts):
+    assert not any(w in t.lower() for w in ("sensitiz", "exposure") for t in _bar_texts(cohorts))
+
+
+@pytest.mark.parametrize("cohorts, pre, post, tag", [
+    (SENS, "Pre-exposure", "Post-exposure", "(sensitized odor)"),
+    (HEX, "Pre-test (naive)", "Post-training", "(CS+)"),
+])
+def test_trace_figures_name_phases_and_exposed_odor_by_cohort(tmp_path, monkeypatch,
+                                                               cohorts, pre, post, tag):
+    paired, *_ = _two_group_inputs()
+    monkeypatch.setattr(spc, "group_traces", lambda *a, **k: {"Hexanol": np.zeros((2, 90))})
+    figs = []
+    real = spc.build_trace_grid
+
+    def spy(*args, **kwargs):
+        figs.append(real(*args, **kwargs))
+        return figs[-1]
+
+    monkeypatch.setattr(spc, "build_trace_grid", spy)
+    groups = [spc.Group("Oct 6", cohorts[0]), spc.Group("Oct 7", cohorts[1])]
+    written = spc.render_trace_figures(
+        paired, groups, pretest_wide=None, testing_wide=None, fps=1.0, odor_on_s=30.0,
+        odor_off_s=60.0, trained_odor="Hexanol", title="t", out_dir=tmp_path)
+    assert [p.name for p in written] == ["mean_traces_pretest_by_starvation.png",
+                                         "mean_traces_posttraining_by_starvation.png"]
+    pre_text, post_text = (_texts(f) for f in figs)
+    assert f"mean PER trace, {pre}:" in pre_text and f"mean PER trace, {post}:" in post_text
+    assert f"Hexanol  {tag}" in pre_text and f"Hexanol  {tag}" in post_text
+
+
+@pytest.mark.parametrize("cohorts, phases", [
+    (SENS, "pre-exposure vs post-exposure"),
+    (HEX, "pre-test vs post-training"),
+])
+def test_main_words_bar_figures_by_the_group_datasets(tmp_path, monkeypatch, cohorts, phases):
+    """The CLI (also what day_vs_day_report runs) hands the --group datasets to the figures."""
+    paired, *_ = _two_group_inputs()
+    paired["dataset_canon"] = paired["group"].map({"Oct 6": cohorts[0], "Oct 7": cohorts[1]})
+    preds = tmp_path / "preds.csv"
+    pd.DataFrame({"dataset": cohorts, "fly": ["f0", "f1"], "fly_number": [1, 1],
+                  "trial_label": ["pretest_1_hexanol", "testing_1_hexanol"]}).to_csv(preds, index=False)
+    monkeypatch.setattr(spc, "load_paired_scores", lambda *a, **k: paired)
+    titles = []
+    real = spc.build_pre_post_bars
+
+    def spy(*args, **kwargs):
+        fig = real(*args, **kwargs)
+        titles.append(fig.axes[0].get_title(loc="left"))
+        return fig
+
+    monkeypatch.setattr(spc, "build_pre_post_bars", spy)
+    spc.main(["--predictions-csv", str(preds), "--out-dir", str(tmp_path / "out"),
+              "--group", f"Oct 6={cohorts[0]}", "--group", f"Oct 7={cohorts[1]}",
+              "--trained-odor", "Hexanol"])
+    assert len(titles) == 2 and all(phases in t for t in titles)

@@ -8,6 +8,7 @@ implementation (statsmodels, scipy), never against another function here.
 from __future__ import annotations
 
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -338,6 +339,218 @@ def test_trial_profile_renders_for_a_randomized_panel():
     assert payload
     import matplotlib.pyplot as plt
     plt.close(fig)
+
+
+def _drawn_text(dataset: str, suffix: str = "") -> str:
+    """Every string drawn on every figure the CLI writes, for the fixture
+    cohort filed under ``dataset``; ``suffix`` ("-0.1") spells its hexanol
+    labels the way the odor pins do."""
+    import matplotlib.pyplot as plt
+    from matplotlib.text import Text
+
+    def renamed(df):
+        df = df.assign(dataset=df["dataset"].replace(DATASET, dataset))
+        return df.assign(trial_label=df["trial_label"].str.replace(
+            r"_hexanol$", f"_hexanol{suffix}", regex=True
+        ))
+
+    table = mod.build_fly_table(
+        renamed(_training_frame()), renamed(_testing_frame()), dataset=dataset,
+        testing_auc_df=renamed(_testing_auc_frame()),
+    )
+    kw = {"dataset": dataset, "odor_label": "Hexanol"}
+    figs = [
+        mod.figure_simple_overview(table, n_bins=2, **kw)[0],
+        mod.figure_trial_predictors(table, presentation_index=0, **kw)[0],
+        mod.figure_per(table, **kw)[0],
+        mod.figure_score(table, **kw)[0],
+        mod.figure_trial_matrix(table, **kw)[0],
+        mod.figure_trial_profile(table, **kw)[0],
+    ]
+    try:
+        return "\n".join(t.get_text() for fig in figs for t in fig.findobj(Text))
+    finally:
+        for fig in figs:
+            plt.close(fig)
+
+
+def test_a_sensitivity_cohorts_test_panel_is_post_sensitization():
+    """Nothing is paired with a *-Sensitivity-* cohort's odor, so its second
+    panel is post-exposure -- no figure may call it the test."""
+    text = _drawn_text("Hex-Sensitivity-24-0.1")
+    for drawn in (
+        # Two lines: the longer phase name outruns the overview's short axes.
+        "Flies that reacted\nat post-exposure (%)",
+        "Reaction score\nat post-exposure (−1 … 5)",
+        "Do flies that extend more during training react more at post-exposure?",
+        "Predicts the size of the post-exposure response",
+        # The odor in full (odor_conc_labels); the fixture records no
+        # concentration, so none is drawn.
+        "Which training trial predicts the Hexanol #1 post-exposure response?",
+        "P(PER at post-exposure)",
+        "no PER at post-exposure",
+        "Post-exposure score (−1 … 5)",
+        "Which conditioning trial predicts the post-exposure response?",
+        "Post-exposure PER (0/1)",
+        "each post-exposure outcome",
+    ):
+        assert drawn in text
+    assert re.search(r"\b(?:test|testing)\b", text, re.IGNORECASE) is None
+
+
+@pytest.mark.parametrize("dataset", ["Hex-HexTest-Training-32-1", DATASET])
+def test_other_cohorts_keep_the_test_wording(dataset):
+    """Hex-HexTest-Training-* also runs a pre-test, but it is light-conditioned,
+    so its second panel really is the test. Controls keep it too."""
+    text = _drawn_text(dataset)
+    for drawn in (
+        "Flies that reacted at test (%)",
+        "Reaction score at test (−1 … 5)",
+        "Do flies that extend more during training react more at test?",
+        "Predicts the size of the test response",
+        "Which training trial predicts the Hex 1 test?",
+        "P(PER at test)",
+        "no PER at test",
+        "Testing score (−1 … 5)",
+        "Which conditioning trial predicts the test response?",
+        "Testing PER (0/1)",
+        "each testing outcome",
+    ):
+        assert drawn in text
+    assert "sensitiz" not in text.lower() and "exposure" not in text.lower()
+
+
+# ---------------------------------------------------------------------------
+# Odor names: a *-Sensitivity-* cohort draws "<Odor> <c>% (v/v)"
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("labels,token,expected", [
+    (["training_1_isoamylacetate-1", "testing_3_isoamylacetate-1"], "isoamylacetate", "1"),
+    # Other odors' concentrations are not this odor's.
+    (["training_1_3-octonol-0.1", "testing_2_hexanol-10"], "3-octonol", "0.1"),
+    # IAA-Sensitivity-24-1 mixes pre-pins and pins batches: part of it
+    # recorded no concentration, so none is claimed for the whole.
+    (["training_1_isoamylacetate", "training_2_isoamylacetate-1"], "isoamylacetate", None),
+    (["training_1_isoamylacetate-1", "training_2_isoamylacetate-10"], "isoamylacetate", None),
+    (["training_1_isoamylacetate"], "isoamylacetate", None),
+    ([], "isoamylacetate", None),
+])
+def test_recorded_conc(labels, token, expected):
+    assert mod.recorded_conc(labels, token) == expected
+
+
+def test_build_fly_table_carries_the_recorded_concentration():
+    train, test, test_auc = _random_panel_frames()
+    table = mod.build_fly_table(train, test, dataset=_RANDOM_DATASET)
+    assert table.attrs["odor_conc"] == "1"
+    plain = mod.build_fly_table(_training_frame(), _testing_frame(), dataset=DATASET)
+    assert plain.attrs["odor_conc"] is None
+
+
+def _random_panel_figures():
+    """Every figure for the randomized IAA-Sensitivity-12-1 panel, which
+    records "isoamylacetate-1": (all drawn text, the payloads, the figures)."""
+    from matplotlib.text import Text
+
+    train, test, test_auc = _random_panel_frames()
+    table = mod.build_fly_table(
+        train, test, dataset=_RANDOM_DATASET, testing_auc_df=test_auc
+    )
+    kw = {"dataset": _RANDOM_DATASET, "odor_label": "Isoamyl Acetate"}
+    made = [
+        mod.figure_simple_overview(table, n_bins=2, **kw),
+        mod.figure_trial_predictors(table, presentation_index=0, **kw),
+        mod.figure_per(table, **kw),
+        mod.figure_score(table, **kw),
+        mod.figure_trial_matrix(table, **kw),
+        mod.figure_trial_profile(table, **kw),
+    ]
+    figs = [fig for fig, _ in made]
+    text = "\n".join(t.get_text() for fig in figs for t in fig.findobj(Text))
+    return text, [payload for _, payload in made], figs
+
+
+def test_a_sensitivity_cohort_names_its_odor_with_the_concentration():
+    """Where every figure said "IAA 1" -- which read as IAA at 1 % -- it now
+    names the odor in full: "Isoamyl Acetate 1% (v/v)"."""
+    import matplotlib.pyplot as plt
+
+    text, payloads, figs = _random_panel_figures()
+    try:
+        for drawn in (
+            "Isoamyl Acetate 1% (v/v) throughout.",
+            "Which training trial predicts the Isoamyl Acetate 1% (v/v) "
+            "post-exposure response?",
+            "against the Isoamyl Acetate 1% (v/v) post-exposure outcome",
+            "Control cohort: Isoamyl Acetate 1% (v/v) presented during conditioning",
+            "same flies as Isoamyl Acetate 1% (v/v) — every other responder",
+            "Isoamyl Acetate 1% (v/v) mean",
+        ):
+            assert drawn in text
+        # Panel titles, the matrix header and the legend entry.
+        assert text.split("\n").count("Isoamyl Acetate 1% (v/v)") >= 5
+        assert re.search(r"\bIAA \d", text) is None
+        # The legend names the lone series; a direct label beside the mean
+        # diamond would run into the next panel.
+        assert all(not ax.texts for ax in figs[-1].axes)
+    finally:
+        for fig in figs:
+            plt.close(fig)
+    # Display only: the payloads keep the labels they are keyed by.
+    _overview, predictors, per, score, matrix, profile = payloads
+    assert predictors["presentation"] == "IAA 1"
+    assert predictors["odor"] == "Isoamyl Acetate"
+    assert [s["column"] for s in per] == ["IAA 1", "IAA 1"]
+    assert [s["column"] for s in score] == ["IAA 1", "IAA 1 mean"]
+    assert {c["presentation"] for c in matrix["cells"]} == {"IAA 1"}
+    assert set(profile[0]["series"]) == {"IAA 1"}
+
+
+def test_a_sensitivity_cohort_without_a_recorded_concentration_claims_none():
+    """Pre-pins batches recorded no concentration: the odor is named in full,
+    with no percent, and repeat presentations are numbered."""
+    text = _drawn_text("Hex-Sensitivity-24-0.1")
+    for drawn in ("Hexanol #1", "Hexanol #2", "Hexanol #1 or #2",
+                  "Hexanol #1 & #2 mean", "Hexanol throughout."):
+        assert drawn in text
+    assert "%" not in text.replace("95% CI", "").replace("95% Wilson", "")
+    assert re.search(r"\bHex \d", text) is None
+
+
+def test_a_sensitivity_cohort_numbers_repeats_after_the_concentration():
+    text = _drawn_text("Hex-Sensitivity-24-0.1", suffix="-0.1")
+    for drawn in ("Hexanol 0.1% (v/v) #1", "Hexanol 0.1% (v/v) #1 or #2",
+                  "Hexanol 0.1% (v/v) #1 & #2 mean", "Hexanol 0.1% (v/v) throughout."):
+        assert drawn in text
+
+
+@pytest.mark.parametrize("dataset", ["Hex-HexTest-Training-32-1", DATASET])
+def test_other_cohorts_keep_their_odor_labels(dataset):
+    """A recorded concentration changes nothing outside the sensitivity cohorts."""
+    for suffix in ("", "-0.1"):
+        text = _drawn_text(dataset, suffix=suffix)
+        for drawn in ("Hex 1", "Hex 2", "Hex 1 or 2", "Hex 1 & 2 mean",
+                      "Hexanol throughout.", "Which training trial predicts the Hex 1 test?"):
+            assert drawn in text
+        assert "(v/v)" not in text
+        assert "#1" not in text
+
+
+def test_the_stats_keep_the_bare_odor_and_presentation_keys(tmp_path, monkeypatch):
+    train, test, test_auc = _random_panel_frames()
+    monkeypatch.setattr(mod, "_load_inputs", lambda args: (train, test, test_auc))
+    mod.main([
+        "--training-wide-csv", "unused", "--predictions-csv", "unused",
+        "--dataset", _RANDOM_DATASET, "--out-dir", str(tmp_path), "--no-svg",
+    ])
+    entry = json.loads(
+        (tmp_path / _RANDOM_DATASET / f"{_RANDOM_DATASET}_stats.json").read_text()
+    )
+    assert entry["odor"] == "Isoamyl Acetate"
+    assert entry["odor_token"] == "isoamylacetate"
+    assert [o["presentation"] for o in entry["overview"]] == ["IAA 1"]
+    assert "(v/v)" not in json.dumps(entry)
 
 
 def test_main_renders_later_cohorts_when_one_fails(tmp_path, monkeypatch):

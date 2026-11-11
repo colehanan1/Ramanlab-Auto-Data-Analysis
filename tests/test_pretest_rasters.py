@@ -15,6 +15,7 @@ every panel, ranked once by conditioning vigour. The pre-test panel therefore
 reuses the training order rather than ranking itself.
 """
 
+import re
 from pathlib import Path
 
 import matplotlib
@@ -31,6 +32,9 @@ FPS = 40.0
 N_FRAMES = 400
 ODOR_ON, ODOR_OFF = 4.0, 6.0
 DATASET = "Hex-Sensitivity-24-0.1"
+#: Light-conditioned AND runs a pre-test: the same pre/post code path as the
+#: sensitivity cohorts, but real conditioning, so it keeps "pre-test" / "test".
+CONDITIONED = "Hex-HexTest-Training-32-1"
 
 
 def _row(fly, num, trial_type, label, odor, during_ones):
@@ -76,6 +80,18 @@ def frames():
     }
 
 
+def _as(frames, dataset):
+    """The same three phases, filed under another cohort name."""
+    return {phase: df.assign(dataset=dataset) for phase, df in frames.items()}
+
+
+def _drawn_text(fig):
+    """Every string drawn on ``fig``; closes it."""
+    text = " ".join(t.get_text() for t in fig.findobj(matplotlib.text.Text))
+    matplotlib.pyplot.close(fig)
+    return text
+
+
 # ── the pre-test trials reach build_trials at all ─────────────────────────
 
 
@@ -112,27 +128,101 @@ def test_a_pretest_panel_renders(frames):
 
 def test_the_pretest_panel_is_titled_pre_test_not_test(frames):
     """A naive panel labelled "at test" is the exact pre/post confusion the
-    phase split exists to prevent — the two figures sit in one folder."""
-    train = bpr.build_trials(frames["training"], dataset=DATASET, trial_type="training")
-    pre = bpr.build_trials(frames["pretest"], dataset=DATASET, trial_type="pretest")
-    order = bpr.fly_order(train, by="ratio", seed=DATASET)
+    phase split exists to prevent — the two figures sit in one folder.
 
-    fig, _ = bpr.figure_testing(pre, order, dataset=DATASET, phase="pre-test")
+    On a light-conditioned cohort; a sensitivity cohort's panels are pre- and
+    post-exposure instead (see below)."""
+    frames = _as(frames, CONDITIONED)
+    train = bpr.build_trials(frames["training"], dataset=CONDITIONED, trial_type="training")
+    pre = bpr.build_trials(frames["pretest"], dataset=CONDITIONED, trial_type="pretest")
+    order = bpr.fly_order(train, by="ratio", seed=CONDITIONED)
+
+    fig, _ = bpr.figure_testing(pre, order, dataset=CONDITIONED, phase="pre-test")
     text = " ".join(t.get_text() for t in fig.texts) + " " + (fig._suptitle.get_text() if fig._suptitle else "")
     matplotlib.pyplot.close(fig)
     assert "pre-test" in text.lower()
 
 
 def test_the_testing_panel_still_says_test(frames):
-    train = bpr.build_trials(frames["training"], dataset=DATASET, trial_type="training")
-    test = bpr.build_trials(frames["testing"], dataset=DATASET, trial_type="testing")
-    order = bpr.fly_order(train, by="ratio", seed=DATASET)
+    frames = _as(frames, CONDITIONED)
+    train = bpr.build_trials(frames["training"], dataset=CONDITIONED, trial_type="training")
+    test = bpr.build_trials(frames["testing"], dataset=CONDITIONED, trial_type="testing")
+    order = bpr.fly_order(train, by="ratio", seed=CONDITIONED)
 
-    fig, _ = bpr.figure_testing(test, order, dataset=DATASET)
+    fig, _ = bpr.figure_testing(test, order, dataset=CONDITIONED)
     text = " ".join(t.get_text() for t in fig.texts) + " " + (fig._suptitle.get_text() if fig._suptitle else "")
     matplotlib.pyplot.close(fig)
     assert "at test" in text.lower()
     assert "pre-test" not in text.lower()
+
+
+# ── a sensitivity cohort: pre- and post-exposure ─────────────────────
+
+
+@pytest.mark.parametrize("mode", [bpr.BINARY_MODE, bpr.GRADED_MODE], ids=["binary", "graded"])
+def test_a_sensitivity_pretest_panel_is_pre_sensitization(frames, mode):
+    """Nothing is paired with a *-Sensitivity-* cohort's odor, so its naive
+    panel is pre-exposure, never a pre-test."""
+    train = bpr.build_trials(frames["training"], dataset=DATASET, trial_type="training")
+    pre = bpr.build_trials(frames["pretest"], dataset=DATASET, trial_type="pretest")
+    order = bpr.fly_order(train, by="ratio", seed=DATASET)
+
+    fig, _ = bpr.figure_testing(pre, order, dataset=DATASET, mode=mode, phase="pre-test")
+    title = fig._suptitle.get_text()
+    text = _drawn_text(fig)
+    assert title.endswith(f" at pre-exposure, by odor — {DATASET}")
+    assert "pre-exposure trials are randomised per fly" in text
+    assert "pre-test" not in text.lower()
+    assert "post-exposure" not in text.lower()
+
+
+@pytest.mark.parametrize("mode", [bpr.BINARY_MODE, bpr.GRADED_MODE], ids=["binary", "graded"])
+def test_a_sensitivity_testing_panel_is_post_sensitization(frames, mode):
+    train = bpr.build_trials(frames["training"], dataset=DATASET, trial_type="training")
+    test = bpr.build_trials(frames["testing"], dataset=DATASET, trial_type="testing")
+    order = bpr.fly_order(train, by="ratio", seed=DATASET)
+
+    fig, _ = bpr.figure_testing(test, order, dataset=DATASET, mode=mode)
+    title = fig._suptitle.get_text()
+    text = _drawn_text(fig)
+    assert title.endswith(f" at post-exposure, by odor — {DATASET}")
+    assert "post-exposure trials are randomised per fly" in text
+    assert re.search(r"\b(?:test|testing|pre-test)\b", text, re.IGNORECASE) is None
+    assert "pre-exposure" not in text.lower()
+
+
+@pytest.mark.parametrize("phase,table,word", [
+    ("test", "testing", "post-exposure"),
+    ("pre-test", "pretest", "pre-exposure"),
+])
+def test_the_random_order_caption_names_the_sensitivity_panel(frames, phase, table, word):
+    """The --sort-by random caption says "testing rows" on either panel; a
+    sensitivity cohort's caption names the panel it is drawn on."""
+    train = bpr.build_trials(frames["training"], dataset=DATASET, trial_type="training")
+    trials = bpr.build_trials(frames[table], dataset=DATASET, trial_type=table)
+    order = bpr.fly_order(train, by="random", seed=DATASET)
+
+    fig, _ = bpr.figure_testing(trials, order, dataset=DATASET, sort_by="random", phase=phase)
+    text = _drawn_text(fig)
+    assert f"rank {word} rows by" in text
+    assert f"{word} trials 2–7 are randomised per fly" in text
+    assert "testing" not in text.lower()
+
+
+@pytest.mark.parametrize("phase,table", [("test", "testing"), ("pre-test", "pretest")])
+def test_a_conditioned_cohort_keeps_its_random_order_caption(frames, phase, table):
+    frames = _as(frames, CONDITIONED)
+    train = bpr.build_trials(frames["training"], dataset=CONDITIONED, trial_type="training")
+    trials = bpr.build_trials(frames[table], dataset=CONDITIONED, trial_type=table)
+    order = bpr.fly_order(train, by="random", seed=CONDITIONED)
+
+    fig, _ = bpr.figure_testing(
+        trials, order, dataset=CONDITIONED, sort_by="random", phase=phase
+    )
+    text = _drawn_text(fig)
+    assert "rank testing rows by" in text
+    assert "testing trials 2–7 are randomised per fly" in text
+    assert "sensitiz" not in text.lower() and "exposure" not in text.lower()
 
 
 def test_the_pretest_panel_uses_the_training_row_order(frames):

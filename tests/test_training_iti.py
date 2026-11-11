@@ -164,7 +164,9 @@ def test_sensitivity_flag_does_not_mutate_the_caller_config():
 def test_pretest_configs_train_back_to_back(path):
     with open(path) as fh:
         cfg = yaml.safe_load(fh)
-    cycles = _cycles(cfg)
+    # control=True: config_v2_A_pretest.yaml (5 s odor) is control-only; the
+    # gaps are identical in both modes.
+    cycles = {c["cycle"]: c for c in expand_config(cfg, control=True)["cycles"]}
     assert _training_gap(cycles[6]) == 0, f"{path.name} still spaces training trials"
     assert set(_testing_gaps(cycles[7])) == {240}, f"{path.name} lost its testing gap"
 

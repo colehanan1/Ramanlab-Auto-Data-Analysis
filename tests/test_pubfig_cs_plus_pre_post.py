@@ -67,7 +67,7 @@ def test_figure_style(tmp_path):
                 assert min(ys) == pytest.approx(tops[round(xs[0], 6)])
     assert axes[0].get_ylim() == axes[1].get_ylim()
     texts = [t.get_text() for ax in axes for t in ax.texts]
-    assert "Isoamyl Acetate 1%" in texts and "3-Octanol 0.1%" in texts
+    assert "Isoamyl Acetate 1% (v/v)" in texts and "3-Octanol 0.1% (v/v)" in texts
     assert "n = 8 flies" in texts and "n = 4 flies" in texts
     joined = " ".join(texts)
     for gone in ("Sensitivity", "CS+", "starved"):  # header is odor + conc, then n
@@ -150,3 +150,50 @@ def test_data_taller_than_the_default_top_still_fits():
     tall = cs.Panel("X-Sensitivity-1-1", "Hexanol", 5, 1.0, 0.1, 3.4, 0.4, None, 0.0, "1")
     ax = cs.build_figure([tall]).axes[0]
     assert ax.get_ylim()[1] > 3.8 + 0.5  # bar + SEM + room for the header
+
+
+def test_sensitivity_panels_draw_no_conditioning_words():
+    """Nothing is paired with the odor in these datasets: no CS+, pre-test or post-training."""
+    fig = cs.build_figure(_panels())
+    fig.canvas.draw()
+    drawn = [t.get_text() for ax in fig.axes
+             for t in (*ax.texts, *ax.get_xticklabels(), ax.yaxis.label)]
+    joined = " ".join(drawn).casefold()
+    assert "pre" in joined and "post" in joined
+    for gone in ("cs+", "trained", "training", "test"):
+        assert gone not in joined
+
+
+def _panel(dataset, odor, conc):
+    return cs.Panel(dataset, odor, 5, 0.5, 0.1, 1.0, 0.2, None, 0.0, conc)
+
+
+@pytest.mark.parametrize("dataset, odor, conc, header", [
+    ("IAA-Sensitivity-1-1", "Isoamyl Acetate", "1", "Isoamyl Acetate 1% (v/v)"),
+    ("3Oct-Sensitivity-24-0.1", "3-Octanol", "0.1", "3-Octanol 0.1% (v/v)"),
+    # _HOURS_RE (the .csv's conc) misses the 5s name; the header still reads its 1%.
+    ("IAA-Sensitivity5s-1-1", "Isoamyl Acetate", None, "Isoamyl Acetate 1% (v/v)"),
+    # The name's concentration is the sensitized odor's: another odor gets none.
+    ("IAA-Sensitivity-1-1", "3-Octanol", "1", "3-Octanol"),
+    # No concentration in the name: the odor alone, none guessed.
+    ("IAA-Sensitivity", "Isoamyl Acetate", None, "Isoamyl Acetate"),
+    # A conditioning cohort keeps its old header text exactly.
+    ("Hex-HexTest-Training-32-1", "Hexanol", None, "Hexanol"),
+    ("Hex-HexTest-Training-32-1", "Hexanol", "1", "Hexanol 1%"),
+])
+def test_header_writes_a_sensitivity_concentration_as_v_v(dataset, odor, conc, header):
+    fig = cs.build_figure([_panel(dataset, odor, conc)])
+    assert [t.get_text() for t in fig.axes[0].texts if "flies" not in t.get_text()] == [header]
+    matplotlib.pyplot.close(fig)
+
+
+def test_a_long_header_widens_the_figure_instead_of_shrinking_its_type():
+    default_w = 2.05 * 2 + 0.5
+    short = cs.build_figure([_panel("Hex-HexTest-Training-32-1", "Hexanol", None)] * 2)
+    assert short.get_size_inches()[0] == pytest.approx(default_w)  # fits already: untouched
+    wide = cs.build_figure(_panels())
+    assert wide.get_size_inches()[0] > default_w
+    head = next(t for t in wide.axes[0].texts if t.get_text().endswith("(v/v)"))
+    assert head.get_fontsize() == cs.HEAD_PT
+    for fig in (short, wide):
+        matplotlib.pyplot.close(fig)

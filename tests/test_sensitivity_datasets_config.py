@@ -38,6 +38,9 @@ SENSITIVITY = [
     "3Oct-Sensitivity-24-0.1",
     # 1 h starved, 3-Octanol @ 0.1%.
     "3Oct-Sensitivity-1-0.1",
+    # 1 h starved, Hexanol @ 0.1% (PiCode config_v2_H.yaml). Added 2026-11-02;
+    # first batch november_01_batch_1_rig_3.
+    "Hex-Sensitivity-1-0.1",
     # 40 h starved, IAA @ 1%. Added 2026-09-30.
     "IAA-Sensitivity-40-1",
     # The IAA starvation series (1-30 h), IAA @ 1%. Listed in `datasets:` from
@@ -48,6 +51,10 @@ SENSITIVITY = [
     "IAA-Sensitivity-12-1",
     "IAA-Sensitivity-18-1",
     "IAA-Sensitivity-30-1",
+    # Paraffin oil (master valve only, always 100 %), 1 h starved: the no-odor
+    # exposure control. Registered 2026-11-04; moved here from OTHER_LIVE with
+    # its first batch (november_05_batch_1).
+    "Paraffin-Sensitivity-1-100",
 ]
 
 # Live cohorts that are NOT sensitivity cohorts, so they carry no obligation

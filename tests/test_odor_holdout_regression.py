@@ -129,3 +129,41 @@ def test_figures_only_redraws_from_the_saved_tables(tmp_path):
     assert sorted(p.name for p in written) == [
         "level1_individual_within_starvation_heatmap.png", "overview_q2_all_levels.png",
         "relationships_ridge_coefficients.png"]
+
+
+# ── wording: sensitivity cohorts vs conditioning cohorts ───────────────────
+
+
+@pytest.mark.parametrize("cohorts, pre, post", [
+    (["IAA-Sensitivity-1-1", "IAA-Sensitivity-24-1"], "pre-exposure", "post-exposure"),
+    (["Hex-HexTest-Training-24-1", "Hex-HexTest-Training-32-1"], "pre-test", "post-training"),
+    (["IAA-Sensitivity-1-1", "Hex-HexTest-Training-32-1"], "pre-test", "post-training"),  # a mix
+    ([], "pre-test", "post-training"),
+])
+def test_target_labels_name_the_phases_by_cohort(cohorts, pre, post):
+    c = ohr.wording_cohort(cohorts)
+    assert ohr._target_label("Citral", "pre", c) == f"Citral — {pre}"
+    assert ohr._target_label("Citral", "post", c) == f"Citral — {post}"
+
+
+def test_comparison_cohorts_are_the_paired_tables_datasets(tmp_path):
+    assert ohr.comparison_cohorts(tmp_path) == []
+    paired = _paired().assign(dataset_canon=["IAA-Sensitivity-12-1", "IAA-Sensitivity-1-1"] * 18)
+    paired.to_csv(tmp_path / "paired_scores_per_fly.csv", index=False)
+    assert ohr.comparison_cohorts(tmp_path) == ["IAA-Sensitivity-1-1", "IAA-Sensitivity-12-1"]
+
+
+def test_heatmap_ticks_follow_the_cohorts(tmp_path, monkeypatch):
+    from matplotlib.figure import Figure
+
+    drawn = []
+    monkeypatch.setattr(Figure, "savefig", lambda fig, *a, **k: drawn.append(fig))
+    l1 = pd.DataFrame([dict(group=g, hours=h, odor=o, phase=p, target=t, model=mdl, q2=0.3,
+                            p_perm=0.01)
+                       for g, h in (("1 h", 1.0), ("12 h", 12.0)) for o in ODORS
+                       for p in ohr.PHASES for t in ("score", "responded")
+                       for mdl in ("Ridge", "Lasso")])
+    for cohorts, pre in ((["IAA-Sensitivity-1-1"], "pre-exposure"),
+                         (["Hex-HexTest-Training-32-1"], "pre-test")):
+        ohr.figure_level1_heatmap(l1, tmp_path, "Isoamyl Acetate", cohorts=cohorts)
+        assert f"Citral — {pre}" in [t.get_text() for t in drawn[-1].axes[0].get_yticklabels()]

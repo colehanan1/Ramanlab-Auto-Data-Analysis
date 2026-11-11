@@ -357,6 +357,37 @@ def test_render_skips_a_plan_with_no_data(tmp_path, scores, training):
     assert nvt.render(plan, scores, training, tmp_path) == []
 
 
+def test_naive_baselined_figures_keep_their_wording(tmp_path, scores, training, monkeypatch):
+    """Only *-Sensitivity-* cohorts take the pre-/post-exposure wording."""
+    figs = []
+    close = nvt.plt.close
+
+    def _keep(fig=None):
+        figs.append(fig)
+        close(fig)
+
+    monkeypatch.setattr(nvt.plt, "close", _keep)
+    plan = nvt.figure_plans(nvt.COHORTS["Hex-Control-24-0.1"])[2]  # testing, naive 1
+    nvt.render(plan, scores, training, tmp_path)
+    ax = figs[0].axes[0]
+    assert ax.get_title().startswith(
+        "Hexanol (0.1%) — testing trials vs naive exposure 1\n"
+        "Hex-Control-24-0.1, unpaired odor presentation"
+    )
+    assert [t.get_text() for t in ax.get_xticklabels()] == [
+        "Naive 1\nn=4", "Test 1\nn=4", "Test 2\nn=4",
+    ]
+
+
+@pytest.mark.parametrize("key", sorted(nvt.COHORTS))
+def test_naive_baselined_titles_keep_the_parenthesised_dose(key):
+    """Only *-Sensitivity-* titles write the dose as "% (v/v)"."""
+    spec = nvt.COHORTS[key]
+    for plan in nvt.figure_plans(spec):
+        assert plan.title.startswith(f"{spec.odor} ({spec.concentration}) — ")
+        assert "(v/v)" not in plan.title
+
+
 # ---------------------------------------------------------------------------
 # Date-excluded variants
 # ---------------------------------------------------------------------------

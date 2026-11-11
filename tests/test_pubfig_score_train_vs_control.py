@@ -362,3 +362,213 @@ def test_cli_accepts_flagged_flies_csv(tmp_path):
         ]
     )
     assert set(pd.read_csv(out_dir / "flagged.csv")["n_train"]) == {1}
+
+
+# ---------------------------------------------------------------------------
+# Hand-picked flies (--fly) and odor_pins labels
+# ---------------------------------------------------------------------------
+# A figure over a named subset of both cohorts (e.g. the unglued-leg flies),
+# given as the DATASET/FOLDER_flyN paths the user copies out of flys_New. These
+# cohorts were recorded under ~/odor_pins.txt, so every label carries its vial
+# concentration ("testing_8_isoamylacetate-1"), which the shared label code
+# does not parse: without handling, the odors render raw and the trained odor's
+# two presentations pool into one column.
+
+IAA_TRAIN, IAA_CTRL = "IAA-Odor10s-Training-24-1", "IAA-Odor10s-Control-24-1"
+PICKED = [
+    f"{IAA_TRAIN}/october_21_batch_1_rig_3_fly1",
+    f"{IAA_TRAIN}/october_22_batch_1_rig_2_fly2",
+    f"{IAA_CTRL}/october_22_batch_1_fly1",
+    f"{IAA_CTRL}/october_24_batch_1_fly1",
+]
+
+
+def _pins_predictions(tmp_path: Path, extra=()) -> Path:
+    """Picked training flies score 4 then 2 on IAA, 0 on hexanol; controls 0.
+
+    Every fly NOT in ``PICKED`` scores 5 on everything, so one leaking into the
+    figure moves a mean.
+    """
+    flies = [
+        (IAA_TRAIN, "october_21_batch_1_rig_3", 1),
+        (IAA_TRAIN, "october_22_batch_1_rig_2", 1),
+        (IAA_TRAIN, "october_22_batch_1_rig_2", 2),
+        (IAA_CTRL, "october_22_batch_1", 1),
+        (IAA_CTRL, "october_24_batch_1", 1),
+        (IAA_CTRL, "october_24_batch_1_rig_2", 2),
+    ]
+    picked = {pub.parse_fly_spec(s) for s in PICKED}
+    rows = []
+    for dataset, fly, n in flies:
+        for trial, trained_score in (
+            ("testing_1_isoamylacetate-1", 4.0),
+            ("testing_2_hexanol-0.1", 0.0),
+            ("testing_8_isoamylacetate-1", 2.0),
+            ("testing_9_lightonly", 5.0),
+        ):
+            if (dataset, fly, n) not in picked:
+                score = 5.0
+            else:
+                score = trained_score if dataset == IAA_TRAIN else 0.0
+            rows.append(
+                {"dataset": dataset, "fly": fly, "fly_number": n,
+                 "trial_label": trial, "score": score,
+                 "trial_type": "testing", "fly_type": "GR5a-Old"}
+            )
+    rows.extend(extra)
+    out = tmp_path / "model_predictions.csv"
+    pd.DataFrame(rows).to_csv(out, index=False)
+    return out
+
+
+def _by_odor(rows: pd.DataFrame) -> dict:
+    return {r.odor: r for r in rows.itertuples(index=False)}
+
+
+def test_parse_fly_spec_splits_dataset_folder_and_number():
+    assert pub.parse_fly_spec(f"{IAA_CTRL}/october_24_batch_1_rig_2_fly2") == (
+        IAA_CTRL, "october_24_batch_1_rig_2", 2,
+    )
+    assert pub.parse_fly_spec(f" {IAA_CTRL}/october_22_batch_1_fly1 ") == (
+        IAA_CTRL, "october_22_batch_1", 1,
+    )
+
+
+@pytest.mark.parametrize(
+    "spec",
+    [f"{IAA_CTRL}/october_22_batch_1", "october_22_batch_1_fly1", f"{IAA_CTRL}/_fly1"],
+)
+def test_parse_fly_spec_rejects_a_path_it_cannot_split(spec):
+    with pytest.raises(SystemExit):
+        pub.parse_fly_spec(spec)
+
+
+def test_only_the_picked_flies_are_drawn(tmp_path):
+    rows = pub.rows_from_score_summary(
+        _pins_predictions(tmp_path), IAA_TRAIN, config=None, flies=PICKED,
+    )
+    assert set(rows["n_train"]) == {2} and set(rows["n_ctrl"]) == {2}
+    assert set(rows["mean_ctrl"]) == {0.0}, "an unpicked control fly leaked in"
+
+
+def test_pins_labels_resolve_to_named_odors_with_their_concentration(tmp_path):
+    rows = pub.rows_from_score_summary(
+        _pins_predictions(tmp_path), IAA_TRAIN, config=None, flies=PICKED,
+    )
+    assert sorted(rows["odor"]) == [
+        "Hexanol (0.1%)", "Isoamyl Acetate (1%) 1", "Isoamyl Acetate (1%) 2",
+    ]
+
+
+def test_the_trained_odor_keeps_its_two_presentations_apart(tmp_path):
+    by_odor = _by_odor(pub.rows_from_score_summary(
+        _pins_predictions(tmp_path), IAA_TRAIN, config=None, flies=PICKED,
+    ))
+    first, second = by_odor["Isoamyl Acetate (1%) 1"], by_odor["Isoamyl Acetate (1%) 2"]
+    assert (first.mean_train, second.mean_train) == (4.0, 2.0)
+    assert first.is_trained and second.is_trained
+    assert not by_odor["Hexanol (0.1%)"].is_trained
+
+
+def test_percent_responding_draws_the_same_flies(tmp_path):
+    by_odor = _by_odor(pub.rows_from_percent_responding(
+        _pins_predictions(tmp_path), IAA_TRAIN, config=None, flies=PICKED,
+    ))
+    assert by_odor["Isoamyl Acetate (1%) 1"].n_train == 2
+    assert by_odor["Isoamyl Acetate (1%) 1"].mean_train == 100.0
+    assert by_odor["Isoamyl Acetate (1%) 1"].mean_ctrl == 0.0
+    assert by_odor["Isoamyl Acetate (1%) 1"].is_trained
+
+
+def test_a_picked_fly_missing_from_the_csv_is_fatal(tmp_path, capsys):
+    typo = f"{IAA_CTRL}/october_23_batch_1_fly1"
+    with pytest.raises(SystemExit):
+        pub.rows_from_score_summary(
+            _pins_predictions(tmp_path), IAA_TRAIN, config=None,
+            flies=[*PICKED, typo],
+        )
+    assert "october_23_batch_1" in capsys.readouterr().out
+
+
+def test_two_vials_of_one_odor_are_never_merged(tmp_path):
+    """The hex-test panel carries hexanol at 0.1 and 1 -- one column would lie."""
+    stronger_hex = {
+        "dataset": IAA_CTRL, "fly": "october_22_batch_1", "fly_number": 1,
+        "trial_label": "testing_3_hexanol-1", "score": 0.0,
+        "trial_type": "testing", "fly_type": "GR5a-Old",
+    }
+    with pytest.raises(SystemExit):
+        pub.rows_from_score_summary(
+            _pins_predictions(tmp_path, extra=[stronger_hex]), IAA_TRAIN,
+            config=None, flies=PICKED,
+        )
+
+
+def test_cli_takes_repeated_fly_flags(tmp_path):
+    out_dir = tmp_path / "figs"
+    argv = ["dataset", "--train-dataset", IAA_TRAIN,
+            "--predictions-csv", str(_pins_predictions(tmp_path)),
+            "--figures-dir", str(out_dir), "--out-stem", "picked"]
+    for spec in PICKED:
+        argv += ["--fly", spec]
+    pub.main(argv)
+    written = pd.read_csv(out_dir / "picked.csv")
+    assert set(written["n_train"]) == {2} and set(written["n_ctrl"]) == {2}
+
+
+# ---------------------------------------------------------------------------
+# SEM drawn upward only (--sem-up)
+# ---------------------------------------------------------------------------
+# The pre-vs-post publication figures draw each SEM from the bar top up to
+# mean + SEM, capped at the top only. Opt-in here, so the figures already
+# published from this script regenerate unchanged.
+
+
+def _vertical_segments(ax):
+    return [
+        (line.get_xdata()[0], sorted(line.get_ydata()))
+        for line in ax.get_lines()
+        if len(line.get_xdata()) == 2 and line.get_xdata()[0] == line.get_xdata()[1]
+    ]
+
+
+def test_sem_up_draws_each_error_bar_from_the_bar_top_upward():
+    fig, ax = plt.subplots()
+    rows = _rows()
+    pub.plot_train_vs_control(ax, rows, title="t", sem_up=True)
+    try:
+        assert all(g.errorbar is None for g in _bar_groups(ax)), (
+            "the symmetric matplotlib error bars must not be drawn as well"
+        )
+        tops = {
+            round(b.get_x() + b.get_width() / 2, 6): b.get_height()
+            for g in _bar_groups(ax) for b in g.patches
+        }
+        segments = [(round(x, 6), ys) for x, ys in _vertical_segments(ax)
+                    if round(x, 6) in tops]
+        assert len(segments) == 2 * len(rows), "one upward SEM per bar"
+        sems = dict(zip(
+            [round(b.get_x() + b.get_width() / 2, 6) for b in _train_bars(ax)],
+            rows["sem_train"],
+        ))
+        for x, (low, high) in segments:
+            assert low == pytest.approx(tops[x]), "starts at the bar top, not below it"
+            if x in sems:
+                assert high - low == pytest.approx(sems[x])
+    finally:
+        plt.close(fig)
+
+
+def test_error_bars_stay_symmetric_by_default(ax):
+    assert all(g.errorbar is not None for g in _bar_groups(ax))
+
+
+def test_cli_sem_up_flag(tmp_path):
+    out_dir = tmp_path / "figs"
+    argv = ["dataset", "--train-dataset", IAA_TRAIN,
+            "--predictions-csv", str(_pins_predictions(tmp_path)),
+            "--figures-dir", str(out_dir), "--out-stem", "up", "--sem-up"]
+    for spec in PICKED:
+        argv += ["--fly", spec]
+    pub.main(argv)
+    assert (out_dir / "up.png").exists()

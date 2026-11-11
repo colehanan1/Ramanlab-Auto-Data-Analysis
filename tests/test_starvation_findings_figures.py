@@ -106,3 +106,94 @@ def test_time_blocks_split_on_gaps_not_clock_bins():
     clock = pd.Series([9.5, 10.9, 13.2, 17.7, 18.4, 18.8, 10.1])
     b = sf.time_blocks(clock)
     assert b.tolist() == [0, 0, 1, 2, 2, 2, 0]
+
+
+# ── phase wording: *-Sensitivity-* cohorts are pre-/post-exposure ─────
+
+
+def _texts(fig) -> str:
+    """Every string drawn on the figure, plus the unwrapped question and answer."""
+    from matplotlib.text import Text
+
+    fig.canvas.draw()
+    return "\n".join([t.get_text() for t in fig.findobj(Text)] + [fig.answer])
+
+
+def _regression():
+    """A minimal odor_holdout_regression table: each series, pre phase, every odor."""
+    rows = [(series, odor, "pre", 4, 0.2, 0.05)
+            for series in ("single fly, from its other odors", "batch average, from its other odors",
+                           "single fly, from starvation time only")
+            for odor in (IAA, "Hexanol", "Citral")]
+    return pd.DataFrame(rows, columns=["series", "odor", "phase", "n", "q2", "p_perm"])
+
+
+def _figure_texts(paired, monkeypatch) -> dict[str, str]:
+    """Text of all six figures; Q6's raw-data lookup is stubbed (no batch folders)."""
+    import sys
+    import types
+    from pathlib import Path
+
+    hour = {f: 9 + i for i, f in enumerate(sorted(paired["fly"].unique()))}
+    starts = paired.assign(start_time=paired["fly"].map(lambda f: pd.Timestamp(2026, 10, 8, hour[f])))
+    tod = types.ModuleType("scripts.analysis.time_of_day_trend")
+    tod.attach_start_times = lambda p, root: (starts, [])
+    tod.clock_hours = lambda t: t.hour + t.minute / 60
+    monkeypatch.setitem(sys.modules, "scripts.analysis.time_of_day_trend", tod)
+    figs = {"direction": sf.fig_direction(paired, trained=IAA),
+            "specificity": sf.fig_specificity(paired, trained=IAA),
+            "change_map": sf.fig_change_map(paired, trained=IAA),
+            "baseline": sf.fig_baseline(paired),
+            "responsiveness": sf.fig_responsiveness(paired, regression=_regression()),
+            "time_of_day": sf.fig_time_of_day(paired, data_root=Path("unused"))}
+    texts = {k: _texts(f) for k, f in figs.items()}
+    for f in figs.values():
+        plt.close(f)
+    return texts
+
+
+def test_sensitivity_cohorts_say_sensitized_odor_and_pre_sensitization(monkeypatch):
+    p = _paired()
+    p["dataset_canon"] = p["group"].map({"1 h": "IAA-Sensitivity-1-1", "24 h": "IAA-Sensitivity-24-1"})
+    t = _figure_texts(p, monkeypatch)
+    assert "Did exposure raise the PER to the sensitized odor (Isoamyl Acetate)?" in t["direction"]
+    assert "Isoamyl Acetate — the sensitized odor" in t["direction"]
+    assert "PER went up after exposure" in t["direction"]
+    assert "Was the rise specific to the sensitized odor?" in t["specificity"]
+    assert "↑ rose more for the sensitized odor" in t["specificity"]
+    assert "Isoamyl Acetate  (sensitized odor)" in t["change_map"]
+    assert "Where did PER change after exposure?" in t["change_map"]
+    assert "Before exposure, does starvation change how much flies respond?" in t["baseline"]
+    assert "Pre-exposure PER score, all odors" in t["baseline"]
+    assert "the average pre-exposure score is" in t["baseline"]
+    assert "Pre-exposure, every fly × odor" in t["responsiveness"]
+    assert "Predicting the pre-exposure score" in t["responsiveness"]
+    assert "Pre-exposure: the other odors predict" in t["responsiveness"]
+    assert "first pre-exposure trial" in t["time_of_day"]
+    assert "Before exposure, does the time of day" in t["time_of_day"]
+    for text in t.values():
+        for old in ("trained odor", "(trained)", "pre-test", "Pre-test", "after training",
+                    "Before training"):
+            assert old not in text, old
+
+
+@pytest.mark.parametrize("datasets", [
+    {"1 h": "Hex-HexTest-Training-32-1", "24 h": "Hex-HexTest-Training-32-1"},
+    {"1 h": "IAA-Sensitivity-1-1", "24 h": "Hex-HexTest-Training-24-1"},  # a mix keeps it too
+], ids=["conditioning", "mixed"])
+def test_conditioning_cohorts_keep_trained_odor_and_pre_test(monkeypatch, datasets):
+    p = _paired()
+    p["dataset_canon"] = p["group"].map(datasets)
+    t = _figure_texts(p, monkeypatch)
+    assert "Did training raise the PER to the trained odor (Isoamyl Acetate)?" in t["direction"]
+    assert "Isoamyl Acetate — the trained odor" in t["direction"]
+    assert "PER went up after training" in t["direction"]
+    assert "Was the rise specific to the trained odor?" in t["specificity"]
+    assert "Isoamyl Acetate  (trained)" in t["change_map"]
+    assert "Where did PER change after training?" in t["change_map"]
+    assert "Before training, does starvation change how much flies respond?" in t["baseline"]
+    assert "Pre-test PER score, all odors" in t["baseline"]
+    assert "Pre-test, every fly × odor" in t["responsiveness"]
+    assert "Predicting the pre-test score" in t["responsiveness"]
+    assert "first pre-test trial" in t["time_of_day"]
+    assert not any(w in text.lower() for w in ("sensitiz", "exposure") for text in t.values())

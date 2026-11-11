@@ -85,6 +85,13 @@ def test_light_only_probe_still_present(letter):
 
 # ── config_v2_*_pretest.yaml: pre-test / train / post-test ────────────
 
+def _expand_pretest(letter):
+    # Control mode: config_v2_A_pretest.yaml runs a 5 s odor and is control-only
+    # (expand_config refuses its default light in training mode). The cycle
+    # structure these tests check is the same in both modes.
+    return expand_config(_load_pretest(letter), control=True)
+
+
 def _load_pretest(letter):
     with open(os.path.join(PICODE, f"config_v2_{letter}_pretest.yaml")) as fh:
         return yaml.safe_load(fh)
@@ -99,13 +106,13 @@ def test_pretest_config_exists_per_odor(letter):
 
 @pytest.mark.parametrize("letter", LETTERS)
 def test_pretest_config_cycle_order(letter):
-    result = expand_config(_load_pretest(letter))
+    result = _expand_pretest(letter)
     assert [c["cycle"] for c in result["cycles"]] == [5, 6, 7, 8]
 
 
 @pytest.mark.parametrize("letter", LETTERS)
 def test_pretest_config_timings(letter):
-    cyc = {c["cycle"]: c for c in expand_config(_load_pretest(letter))["cycles"]}
+    cyc = {c["cycle"]: c for c in _expand_pretest(letter)["cycles"]}
     assert cyc[5]["delay_after"] == 1500      # 29 min flat of dark after the naive panel
     assert cyc[6]["repeat"] == 6              # 6 training trials
     assert cyc[6]["delay_after"] == 0         # post-test starts right after
@@ -113,16 +120,22 @@ def test_pretest_config_timings(letter):
 
 @pytest.mark.parametrize("letter", LETTERS)
 def test_pretest_config_both_panels_are_full_random(letter):
-    cyc = {c["cycle"]: c for c in expand_config(_load_pretest(letter))["cycles"]}
+    cyc = {c["cycle"]: c for c in _expand_pretest(letter)["cycles"]}
     every = sorted(_PIN_DISPLAY[p] for p in _ALL_ODOR_PINS)
-    for n in (5, 7):
-        assert sorted(_odors(cyc[n])) == every
+    # paraffin bookends both panels (pre-test first, post-test last; 2026-11-04)
+    paraffin = _PIN_DISPLAY["OFM_P"]
+    pre, post = _odors(cyc[5]), _odors(cyc[7])
+    assert pre[0] == post[-1] == paraffin
+    for vials in (pre[1:], post[:-1]):
+        assert sorted(vials) == every
 
 
 @pytest.mark.parametrize("letter", LETTERS)
 def test_pretest_config_trains_its_own_odor_for_30s(letter):
-    cyc = {c["cycle"]: c for c in expand_config(_load_pretest(letter))["cycles"]}
+    """30 s odor, except A: 5 s on every odor trial since 2026-10-14."""
+    cyc = {c["cycle"]: c for c in _expand_pretest(letter)["cycles"]}
     label = _PIN_DISPLAY[f"OFM_{letter}"]
+    want = 5 if letter == "A" else 30
     assert _odors(cyc[6]) == [label]
-    assert any(s.get("odor_label") == label and s.get("duration") == 30
+    assert any(s.get("odor_label") == label and s.get("duration") == want
                for s in cyc[6]["steps"])

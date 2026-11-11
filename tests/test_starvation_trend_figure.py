@@ -107,3 +107,77 @@ def test_reference_lines_are_solid_and_markers_carry_a_surface_ring():
             # Error-bar caps ("_") are ticks, not data markers.
             if ln.get_marker() not in (None, "None", "", "_", "|"):
                 assert _same(ln.get_markeredgecolor(), "white")
+
+
+# ── phase wording: *-Sensitivity-* cohorts are pre-/post-exposure ─────
+
+
+def _texts(fig) -> str:
+    """Every string drawn on the figure: titles, legends, tick labels, notes."""
+    from matplotlib.text import Text
+
+    fig.canvas.draw()
+    return "\n".join(t.get_text() for t in fig.findobj(Text))
+
+
+_OMNIBUS = pd.DataFrame({"odor": ["Isoamyl Acetate", "Citral"], "p_kw_delta_score": [0.04, 0.5],
+                         "p_ffh_post_rate": [0.2, 0.9]})
+
+
+def _trend_texts(cohorts) -> dict[str, str]:
+    import matplotlib.pyplot as plt
+
+    paired = _paired()
+    t = stf.trend_table(paired, binary_threshold=2)
+    kw = dict(omnibus=_OMNIBUS, trained_odor="Isoamyl Acetate", title="t", cohorts=cohorts)
+    figs = {"grid": stf.build_grid(t, **kw), "emphasis": stf.build_emphasis(t, **kw),
+            "spotlight": stf.build_spotlight(t, paired, **kw)}
+    texts = {k: _texts(f) for k, f in figs.items()}
+    for f in figs.values():
+        plt.close(f)
+    return texts
+
+
+def test_sensitivity_cohort_says_sensitized_odor_and_pre_post_sensitization():
+    txt = _trend_texts(["IAA-Sensitivity-12-1"])
+    assert "Isoamyl Acetate  (sensitized odor)" in txt["grid"]
+    assert "Pre-exposure" in txt["grid"] and "Post-exposure" in txt["grid"]
+    # end-of-line label on two lines, so it stays clear of the right panel
+    assert "Isoamyl Acetate\n(sensitized odor)" in txt["emphasis"]
+    assert "Isoamyl Acetate (sensitized odor)" in txt["emphasis"]  # legend
+    assert "Sensitized odor shown as mean ± SEM" in txt["emphasis"]
+    assert "Isoamyl Acetate (sensitized odor): effect of starvation" in txt["spotlight"]
+    assert "Pre-exposure" in txt["spotlight"] and "post-exposure FFH" in txt["spotlight"]
+    for text in txt.values():
+        assert "CS+" not in text and "pre-test" not in text.lower()
+        assert "post-training" not in text.lower()
+
+
+def test_conditioning_cohort_keeps_cs_plus_and_pre_test_wording():
+    txt = _trend_texts(["Hex-HexTest-Training-32-1"])
+    assert "Isoamyl Acetate  (CS+)" in txt["grid"]
+    assert "Pre-test (naive)" in txt["grid"] and "Post-training" in txt["grid"]
+    assert "Isoamyl Acetate (CS+)" in txt["emphasis"]
+    assert "Isoamyl Acetate (trained, CS+)" in txt["emphasis"]
+    assert "CS+ shown as mean ± SEM" in txt["emphasis"]
+    assert "Isoamyl Acetate (trained odor, CS+): effect of starvation" in txt["spotlight"]
+    assert "post-training FFH" in txt["spotlight"]
+    assert not any(w in text.lower() for w in ("sensitiz", "exposure") for text in txt.values())
+
+
+@pytest.mark.parametrize("dataset, pre", [("IAA-Sensitivity-12-1", "Pre-exposure"),
+                                          ("Hex-HexTest-Training-32-1", "Pre-test (naive)")])
+def test_main_words_figures_by_the_datasets_not_the_title(tmp_path, monkeypatch, dataset, pre):
+    """--title defaults to "IAA sensitivity"; the wording follows dataset_canon."""
+    _paired().assign(dataset_canon=dataset).to_csv(tmp_path / "paired_scores_per_fly.csv",
+                                                   index=False)
+    figs = []
+    real = stf.build_grid
+
+    def spy(*args, **kwargs):
+        figs.append(real(*args, **kwargs))
+        return figs[-1]
+
+    monkeypatch.setattr(stf, "build_grid", spy)
+    stf.main(["--comparison-dir", str(tmp_path)])
+    assert pre in _texts(figs[0])

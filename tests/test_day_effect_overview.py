@@ -59,3 +59,76 @@ def test_overview_figure_renders_with_a_row_per_dataset(tmp_path):
     assert len(fig.axes) == 2 * 3
     stars = [t.get_text() for ax in fig.axes for t in ax.texts]
     assert "*" in stars  # 12-1 pre-test p=0.01 and every delta p=0.01
+
+
+def _column_titles(fig):
+    return [ax.get_title(loc="left") for ax in fig.axes[:3]]  # set on the top row only
+
+
+def test_sensitivity_page_names_pre_and_post_sensitization(tmp_path):
+    import matplotlib.pyplot as plt
+
+    a = _comparison_dir(tmp_path, "IAA-Sensitivity-24-1", ("Oct 6", "Oct 7"))
+    # day_vs_day_report's folder: <dataset>_<A>-vs-<B>/<A>-vs-<B>/
+    b = _comparison_dir(tmp_path, "IAA-Sensitivity-1-1_Oct09b2-vs-Oct14b1", ("Oct 9", "Oct 14"))
+    fig = deo.build_figure(deo.overview_table([a, b]))
+    assert _column_titles(fig) == ["Pre-exposure score", "Post-exposure score",
+                                   "Change (post − pre)"]
+    plt.close(fig)
+
+
+def test_conditioning_or_mixed_page_keeps_pre_test_and_post_training(tmp_path):
+    import matplotlib.pyplot as plt
+
+    hex_ = _comparison_dir(tmp_path, "Hex-HexTest-Training-32-1", ("Oct 6", "Oct 7"))
+    iaa = _comparison_dir(tmp_path, "IAA-Sensitivity-24-1", ("Oct 6", "Oct 7"))
+    for dirs in ([hex_], [iaa, hex_]):  # the titles head every row, so a mixed page keeps them
+        fig = deo.build_figure(deo.overview_table(dirs))
+        assert _column_titles(fig) == ["Pre-test score", "Post-training score",
+                                       "Change (post − pre)"]
+        plt.close(fig)
+
+
+# ── odor concentration in the ticks (scripts/analysis/odor_conc_labels.py) ──
+
+
+def _predictions(path, dataset, labels):
+    pd.DataFrame([dict(dataset=dataset, fly=f"b{f}", fly_number=1, trial_label=lab)
+                  for f in range(6) for lab in labels]).to_csv(path, index=False)
+    return path
+
+
+def _odor_ticks(fig):
+    return [t.get_text() for t in fig.axes[0].get_yticklabels()]
+
+
+def test_sensitivity_ticks_carry_each_odors_recorded_concentration(tmp_path):
+    import matplotlib.pyplot as plt
+
+    # (the fixture writes the folder name as dataset_canon, so it is the plain dataset here)
+    a = _comparison_dir(tmp_path, "IAA-Sensitivity-1-1", ("Oct 9", "Oct 12"))
+    # Citral recorded no concentration (a pre-pins label): no percent is invented for it.
+    preds = _predictions(tmp_path / "preds.csv", "IAA-Sensitivity-1-1",
+                         ["pretest_1_isoamylacetate-1", "testing_1_isoamylacetate-1",
+                          "testing_2_citral"])
+    concs = deo.page_concentrations([a], predictions_csv=preds)
+    assert concs == {"Isoamyl Acetate": "1"}
+    fig = deo.build_figure(deo.overview_table([a]), odor_conc=concs)
+    assert _odor_ticks(fig) == ["Citral", "Isoamyl Acetate 1% (v/v)"]
+    plt.close(fig)
+    # through the CLI too; the CSV keeps the plain odor names
+    deo.main(["--comparison-dir", str(a), "--out-dir", str(tmp_path / "out"),
+              "--predictions-csv", str(preds)])
+    assert set(pd.read_csv(tmp_path / "out" / "day_effect_overview.csv")["odor"]) == {
+        "Citral", "Isoamyl Acetate"}
+    assert deo.page_concentrations([a], predictions_csv=tmp_path / "missing.csv") == {}
+
+
+def test_conditioning_page_ticks_stay_the_plain_odor_names(tmp_path):
+    import matplotlib.pyplot as plt
+
+    hex_ = _comparison_dir(tmp_path, "Hex-HexTest-Training-32-1", ("Oct 6", "Oct 7"))
+    fig = deo.build_figure(deo.overview_table([hex_]),
+                           odor_conc={"Isoamyl Acetate": "1", "Citral": "1"})
+    assert _odor_ticks(fig) == ["Citral", "Isoamyl Acetate"]
+    plt.close(fig)

@@ -318,7 +318,8 @@ def test_sensitivity_flag_does_not_change_the_hex_test():
 def test_existing_pretest_configs_keep_their_panels():
     """Adding pretest_sequence must not change the sensitivity protocol."""
     cyc = _cycles("config_v2_H_pretest.yaml")
-    assert len(_odors(cyc[PRETEST])) == 7 and len(_odors(cyc[POSTTEST])) == 7
+    # 7 vials + the paraffin bookend trial in each panel (2026-11-04)
+    assert len(_odors(cyc[PRETEST])) == 8 and len(_odors(cyc[POSTTEST])) == 8
     assert cyc[TRAINING]["steps"][-1]["name"] == "Stop Recording"   # 0 s ITI
 
 

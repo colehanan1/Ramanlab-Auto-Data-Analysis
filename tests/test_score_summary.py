@@ -137,3 +137,16 @@ def test_generate_score_summary_writes_train_vs_control_outputs_from_scores_only
     assert eb_export["trial_num"].tolist() == [1, 2, 3, 4, 5]
     assert eb_export["odor"].tolist().count("Hexanol") == 2
     assert eb_export["odor"].tolist().count("Ethyl Butyrate") == 3
+
+
+def test_load_scores_accepts_an_already_loaded_frame(tmp_path):
+    """A caller that must relabel rows first hands over the frame, not a path."""
+    csv_path = tmp_path / "scores.csv"
+    pd.DataFrame(_make_score_rows()).to_csv(csv_path, index=False)
+    frame = pd.read_csv(csv_path)
+    untouched = frame.copy()
+
+    from_frame = module._load_scores(frame)
+
+    pd.testing.assert_frame_equal(from_frame, module._load_scores(csv_path))
+    pd.testing.assert_frame_equal(frame, untouched)

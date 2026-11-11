@@ -860,3 +860,71 @@ def test_pair_columns_are_the_union_not_the_training_panel_alone(tmp_path):
         "training panel's Citral column must render as MISSING_COLOR grey, "
         f"expected {missing_rgba}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Odor names: "<Odor> <c>% (v/v)" on a sensitivity cohort's figure only
+# ---------------------------------------------------------------------------
+
+
+def _cohort_rows(dataset: str, odors: tuple[str, ...]) -> list[dict[str, object]]:
+    """3 flies x the given odor tokens, one testing trial each."""
+    return [
+        {"dataset": dataset, "fly": f"{dataset}_f{idx}", "fly_number": str(idx),
+         "trial_label": f"testing_{trial}_{odor}", "score": (idx + trial) % 4,
+         "trial_type": "testing"}
+        for idx in (1, 2, 3)
+        for trial, odor in enumerate(odors, start=1)
+    ]
+
+
+@pytest.mark.parametrize("dataset, odors, shown", [
+    # Pins tokens carry the concentration: drawn as "% (v/v)".
+    ("IAA-Sensitivity-1-1", ("isoamylacetate-1", "hexanol-0.1"),
+     ["Hexanol 0.1% (v/v)", "Isoamyl Acetate 1% (v/v)"]),
+    # No concentration recorded: the name alone, no invented percent.
+    ("IAA-Sensitivity-40-1", ("isoamylacetate", "hexanol"),
+     ["Hexanol", "Isoamyl Acetate"]),
+    # Every other cohort's names are drawn exactly as before.
+    ("Hex-HexTest-Training-32-1", ("isoamylacetate-1", "hexanol-0.1"),
+     ["hexanol-0.1", "isoamylacetate-1"]),
+])
+def test_odor_ticks_write_a_sensitivity_cohorts_concentration_as_v_v(
+    tmp_path, dataset, odors, shown
+):
+    fig, _ = _render_v2(tmp_path, _cohort_rows(dataset, odors))
+    ax_m = next(a for a in fig.axes if a.get_ylabel().endswith("Flies"))
+    ax_b = next(a for a in fig.axes if a.get_ylabel() == SCORE_Y_LABEL)
+    assert [t.get_text() for t in ax_m.child_axes[0].get_xticklabels()] == shown
+    assert [t.get_text() for t in ax_b.get_xticklabels()] == [
+        f"{name}\n(n=3)" for name in shown]
+
+
+@pytest.mark.parametrize("datasets, shown", [
+    # Every row a sensitivity cohort: the pooled heatmap takes the new names.
+    (("IAA-Sensitivity-1-1", "IAA-Sensitivity-40-1"),
+     ["Hexanol", "Hexanol 0.1% (v/v)", "Isoamyl Acetate", "Isoamyl Acetate 1% (v/v)"]),
+    # Any other cohort among them: it keeps its old names.
+    (("IAA-Sensitivity-1-1", "Hex-HexTest-Training-32-1"),
+     ["hexanol-0.1", "isoamylacetate-1"]),
+])
+def test_pooled_heatmap_formats_odors_only_when_every_row_is_a_sensitivity_cohort(
+    tmp_path, monkeypatch, datasets, shown
+):
+    import matplotlib.pyplot as plt
+    from scripts.analysis.envelope_visuals import set_protocol
+
+    set_protocol("v2")
+    tokens = {"IAA-Sensitivity-40-1": ("isoamylacetate", "hexanol")}
+    rows = [row for ds in datasets
+            for row in _cohort_rows(ds, tokens.get(ds, ("isoamylacetate-1", "hexanol-0.1")))]
+    summary = module._compute_summary(module._load_scores(pd.DataFrame(rows)))
+    figs = []
+    real_close = plt.close
+    monkeypatch.setattr(plt, "close", figs.append)
+    module._plot_heatmap(summary, tmp_path, overwrite=True)
+    (fig,) = figs
+    ax = next(a for a in fig.axes
+              if a.get_title() == "Mean Ordinal Score by Dataset and Trial")
+    assert [t.get_text() for t in ax.get_xticklabels()] == shown
+    real_close(fig)

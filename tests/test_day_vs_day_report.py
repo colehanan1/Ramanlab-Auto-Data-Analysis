@@ -134,13 +134,13 @@ def test_batch_unit_prefix_label_and_tag():
     assert u.tag == "Oct11b2"
 
 
-def test_pick_units_all_returns_every_unit_in_order_and_caps_at_five():
+def test_pick_units_all_returns_every_unit_in_order_with_no_upper_limit():
     units = [dvd.DayInfo(dt.date(2026, 10, 11), 3, batch=b) for b in (3, 1, 2)]
     picked = dvd.pick_units(units, all_units=True)
     assert [u.batch for u in picked] == [1, 2, 3]
-    many = [dvd.DayInfo(dt.date(2026, 10, d), 2) for d in range(1, 8)]
-    with pytest.raises(ValueError):
-        dvd.pick_units(many, all_units=True)
+    # IAA-Sensitivity-1-1 had eight batches on 2026-10-15 and grows by ~2 a day.
+    many = [dvd.DayInfo(dt.date(2026, 10, d), 2) for d in range(1, 13)]
+    assert [u.date.day for u in dvd.pick_units(many, all_units=True)] == list(range(1, 13))
 
 
 def test_pick_units_explicit_list():
@@ -172,3 +172,89 @@ def test_resolve_dataset_is_case_insensitive_and_suggests_on_a_miss():
     assert dvd.resolve_dataset("3OCT-Sensitivity-1-0.1", known) == "3Oct-Sensitivity-1-0.1"
     with pytest.raises(SystemExit, match="3Oct-Sensitivity-1-0.1"):
         dvd.resolve_dataset("3OCT-Sensitivity-1-1", known)
+
+
+# ── comparison-only by default ─────────────────────────────────────────────
+
+
+def _fake_run(monkeypatch, tmp_path, dataset="IAA-Sensitivity-1-1"):
+    calls = {"day": [], "comparison": []}
+    wide = pd.DataFrame({"dataset": [dataset] * 4,
+                         "fly": ["october_08_batch_2", "october_09_batch_2_rig_2",
+                                 "october_12_batch_1", "october_12_batch_1_rig_3"],
+                         "fly_number": [1, 1, 1, 2]})
+    monkeypatch.setattr(dvd.pd, "read_parquet", lambda *a, **k: wide)
+    monkeypatch.setattr(dvd, "FLAGGED", tmp_path / "none.csv")
+    monkeypatch.setattr(dvd, "_build_day", lambda out, group, log, pubfig: calls["day"].append(out))
+    monkeypatch.setattr(dvd, "_build_comparison",
+                        lambda out, units, dataset, **k: calls["comparison"].append(out))
+    return calls
+
+
+def test_run_dataset_builds_only_the_comparison_by_default(monkeypatch, tmp_path):
+    calls = _fake_run(monkeypatch, tmp_path)
+    out = dvd.run_dataset("IAA-Sensitivity-1-1", out_root=tmp_path, explicit=None, pubfig=True,
+                          by="batch", all_units=True, hours=0)
+    assert calls["day"] == []                      # no per-batch figure sets
+    assert len(calls["comparison"]) == 1
+    readme = (out / "README.md").read_text()
+    assert "--per-unit" in readme                  # says how to get the per-batch sets
+
+
+def test_run_dataset_per_unit_builds_every_unit_too(monkeypatch, tmp_path):
+    calls = _fake_run(monkeypatch, tmp_path)
+    dvd.run_dataset("IAA-Sensitivity-1-1", out_root=tmp_path, explicit=None, pubfig=False,
+                    by="batch", all_units=True, hours=0, per_unit=True)
+    assert len(calls["day"]) == 3 and len(calls["comparison"]) == 1
+
+
+def test_starvation_hours_reads_sensitivity_variants_like_5s():
+    assert dvd.starvation_hours("IAA-Sensitivity5s-1-1") == (1.0, "1")
+
+
+@pytest.mark.parametrize("dataset, present, absent", [
+    ("IAA-Sensitivity-1-1",
+     ["Sensitized odor: ", "blue = pre-exposure, orange = post-exposure"],
+     ["Trained odor (CS+)", "blue = pre-test", "post-training"]),
+    # Not reachable from the CLI (only *-Sensitivity-* names parse); pins that the
+    # README's figure key follows the cohort instead of hard-coding either wording.
+    ("Hex-HexTest-Training-32-1",
+     ["Trained odor (CS+): ", "blue = pre-test, orange = post-training"],
+     ["Sensitized odor", "pre-exposure", "post-exposure"]),
+])
+def test_readme_figure_key_words_the_panels_and_odor_by_protocol(monkeypatch, tmp_path, dataset,
+                                                                present, absent):
+    _fake_run(monkeypatch, tmp_path, dataset=dataset)
+    monkeypatch.setattr(dvd, "starvation_hours", lambda d: (0.0, "1"))
+    out = dvd.run_dataset(dataset, out_root=tmp_path, explicit=None, pubfig=False, by="batch",
+                          all_units=True, hours=0)
+    readme = (out / "README.md").read_text()
+    assert all(s in readme for s in present)
+    assert not any(s in readme for s in absent)
+
+
+# ── odor concentration in the figure text (scripts/analysis/odor_conc_labels.py) ──
+
+
+def test_odor_concentrations_reads_the_pins_suffix_back_per_display_odor():
+    concs = dvd.odor_concentrations([
+        "pretest_1_isoamylacetate-1", "testing_2_isoamylacetate-1",
+        "testing_3_3octanol-0.1", "testing_4_3-octonol-0.1",     # two pins spellings, one odor
+        "testing_5_hexanol-0.1", "testing_6_hexanol",            # one batch recorded none
+        "testing_7_citral-1", "testing_8_citral-0.1",            # two vials disagree
+        "testing_9_linalool"])
+    assert concs == {"Isoamyl Acetate": "1", "3-Octanol": "0.1"}
+
+
+@pytest.mark.parametrize("odor, cohort, concs, drawn", [
+    ("Isoamyl Acetate", "IAA-Sensitivity-1-1", {"Isoamyl Acetate": "1"}, "Isoamyl Acetate 1% (v/v)"),
+    ("3-Octanol", "3Oct-Sensitivity-1-0.1", {"3-Octanol": "0.1"}, "3-Octanol 0.1% (v/v)"),
+    # none recorded (pre-pins batches): the display name, never a guessed percent
+    ("Isoamyl Acetate", "IAA-Sensitivity-40-1", {}, "Isoamyl Acetate"),
+    ("Hexanol", "IAA-Sensitivity-24-1", None, "Hexanol"),
+    # every other cohort draws the name exactly as loaded
+    ("Isoamyl Acetate", "Hex-HexTest-Training-32-1", {"Isoamyl Acetate": "1"}, "Isoamyl Acetate"),
+    ("Hexanol", None, {"Hexanol": "0.1"}, "Hexanol"),
+])
+def test_odor_text_adds_the_concentration_on_sensitivity_figures_only(odor, cohort, concs, drawn):
+    assert dvd.odor_text(odor, cohort, concs) == drawn

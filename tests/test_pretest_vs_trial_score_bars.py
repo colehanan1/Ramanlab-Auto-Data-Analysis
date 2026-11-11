@@ -168,6 +168,40 @@ def test_the_1h_3oct_cohort_is_registered():
     assert spec.pretest_baseline is True
 
 
+def test_the_5s_iaa_cohort_is_registered():
+    """Listed in config_new from 2026-10-16 but not here, so argparse exited
+    the step with code 2 every night and no cohort's bars were redrawn."""
+    spec = nvt.PRETEST_COHORTS["IAA-Sensitivity5s-1-1"]
+    assert (spec.odor, spec.concentration) == ("Isoamyl Acetate", "1%")
+    assert spec.pretest_baseline is True and spec.naive_dataset is None
+    # Six odor-only exposures, as in the 30 s protocol.
+    assert spec.n_training == 6
+    assert {p.stem for p in nvt.figure_plans(spec)} == {
+        "IAA-Sensitivity5s-1-1_training_vs_pretest",
+        "IAA-Sensitivity5s-1-1_testing_vs_pretest",
+    }
+
+
+def test_the_cli_accepts_the_5s_cohort(monkeypatch):
+    seen = {}
+    monkeypatch.setattr(nvt, "run", lambda datasets, **kw: seen.update(datasets=datasets))
+    assert nvt.main(["--pretest-baseline", "--dataset", "IAA-Sensitivity5s-1-1"]) == 0
+    assert seen["datasets"] == ["IAA-Sensitivity5s-1-1"]
+
+
+def test_the_5s_cohort_never_pools_the_30s_cohorts_rows():
+    """Same odor, dose and starvation as IAA-Sensitivity-1-1; only the dataset
+    name keeps the two protocols apart."""
+    rows = _pins_scores(["isoamylacetate-1"])
+    other = rows.assign(dataset="IAA-Sensitivity-1-1", dataset_canon="IAA-Sensitivity-1-1")
+    five = rows.assign(dataset="IAA-Sensitivity5s-1-1", dataset_canon="IAA-Sensitivity5s-1-1",
+                       fly_number=2)
+    scores = pd.concat([other, five], ignore_index=True)
+    spec = nvt.PRETEST_COHORTS["IAA-Sensitivity5s-1-1"]
+    assert nvt.naive_bar(scores, spec, 1).n == 1
+    assert [b.n for b in nvt.testing_scores(scores, spec)] == [1]
+
+
 # ── odor_pins labels ("isoamylacetate-1") ─────────────────────────────────
 
 
@@ -310,5 +344,137 @@ def test_the_naive_cohorts_keep_their_two_indexed_bars():
 def test_the_title_names_the_pretest_baseline():
     """"vs naive exposure 1" on a pre-test figure misdescribes the baseline."""
     plan = [p for p in nvt.figure_plans(_spec()) if p.phase == "testing"][0]
-    assert "pre-test" in plan.title.casefold()
+    # A sensitivity cohort's pre-test panel is its pre-exposure panel.
+    assert "pre-exposure" in plan.title.casefold()
     assert "naive" not in plan.title.casefold()
+
+
+# ── sensitization wording ─────────────────────────────────────────────────
+#
+# Nothing is paired with the odor in a *-Sensitivity-* cohort, so its panels
+# are pre-/post-exposure. A light-conditioned cohort that also runs a
+# pre-test really is conditioning, so it keeps "Pre-test" / "Test".
+
+CONDITIONED = "Hex-HexTest-Training-32-1"
+
+
+def _conditioned_spec():
+    return _spec(dataset=CONDITIONED)
+
+
+def _conditioned_scores():
+    frame = _scores()
+    frame["dataset"] = frame["dataset_canon"] = CONDITIONED
+    return frame
+
+
+def _drawn(monkeypatch, tmp_path, spec, scores):
+    """The testing figure's title and tick texts, read off the rendered axes."""
+    figs = []
+    close = nvt.plt.close
+
+    def _keep(fig=None):
+        figs.append(fig)
+        close(fig)
+
+    monkeypatch.setattr(nvt.plt, "close", _keep)
+    plan = next(p for p in nvt.figure_plans(spec) if p.phase == "testing")
+    nvt.render(plan, scores, pd.DataFrame(), tmp_path)
+    ax = figs[0].axes[0]
+    return ax.get_title(), [t.get_text().split("\n")[0] for t in ax.get_xticklabels()]
+
+
+def test_a_sensitivity_cohorts_titles_say_pre_and_post_sensitization():
+    """The two-bar testing figure wraps before "vs": on one line the longer
+    words overhang its axes by up to an inch."""
+    titles = {p.phase: p.title for p in nvt.figure_plans(_spec())}
+    assert titles["testing"] == (
+        "Hexanol 0.1% (v/v) — post-exposure trials\nvs pre-exposure"
+    )
+    assert titles["training"] == (
+        "Hexanol 0.1% (v/v) — conditioning trials vs pre-exposure"
+    )
+
+
+def test_a_sensitivity_cohorts_bars_keep_their_stats_csv_labels():
+    """``label`` keys the stats CSV; only the drawn tick is reworded."""
+    scores = _scores()
+    baseline = nvt.naive_bar(scores, _spec(), 1)
+    tests = nvt.testing_scores(scores, _spec())
+    assert (baseline.label, baseline.display) == ("Pre-test", "Pre-exposure")
+    assert [(b.label, b.display) for b in tests] == [("Test", "Post-exposure")]
+
+
+def test_the_rendered_sensitivity_figure_says_pre_and_post_sensitization(
+    monkeypatch, tmp_path
+):
+    title, ticks = _drawn(monkeypatch, tmp_path, _spec(), _scores())
+    assert title.startswith(
+        "Hexanol 0.1% (v/v) — post-exposure trials\nvs pre-exposure"
+    )
+    assert ticks == ["Pre-exposure", "Post-exposure"]
+    stats = pd.read_csv(next(tmp_path.glob("*_stats.csv")))
+    assert list(stats["label"]) == ["Pre-test", "Test"]
+
+
+def test_a_conditioned_cohort_with_a_pretest_keeps_its_wording():
+    titles = {p.phase: p.title for p in nvt.figure_plans(_conditioned_spec())}
+    assert titles["testing"] == "Hexanol (0.1%) — testing trials vs pre-test"
+    assert titles["training"] == "Hexanol (0.1%) — conditioning trials vs pre-test"
+
+
+def test_the_rendered_conditioned_figure_keeps_pre_test(monkeypatch, tmp_path):
+    title, ticks = _drawn(
+        monkeypatch, tmp_path, _conditioned_spec(), _conditioned_scores()
+    )
+    assert title.startswith("Hexanol (0.1%) — testing trials vs pre-test")
+    assert ticks == ["Pre-test", "Test"]
+
+
+# ── the dose as "% (v/v)" ─────────────────────────────────────────────────
+#
+# A sensitivity cohort's title writes its dose "1% (v/v)". Display only: the
+# registry's odor and concentration still match rows and fill the stats CSV,
+# and the conditioned cohort above keeps "Hexanol (0.1%)".
+
+
+@pytest.mark.parametrize("key, shown", [
+    ("Hex-Sensitivity-24-0.1", "Hexanol 0.1% (v/v)"),
+    ("IAA-Sensitivity-1-1", "Isoamyl Acetate 1% (v/v)"),
+    ("IAA-Sensitivity5s-1-1", "Isoamyl Acetate 1% (v/v)"),
+    ("3Oct-Sensitivity-24-0.1", "3-Octanol 0.1% (v/v)"),
+    ("EB-Sensitivity-24-1", "Ethyl Butyrate 1% (v/v)"),
+])
+def test_a_sensitivity_title_writes_its_dose_as_v_v(key, shown):
+    for plan in nvt.figure_plans(nvt.PRETEST_COHORTS[key]):
+        assert plan.title.startswith(f"{shown} — "), plan.title
+
+
+def test_no_sensitivity_title_keeps_the_parenthesised_dose():
+    for spec in nvt.PRETEST_COHORTS.values():
+        for plan in nvt.figure_plans(spec):
+            assert "% (v/v) — " in plan.title, plan.title
+            assert f"({spec.concentration})" not in plan.title
+
+
+def test_a_sensitivity_spec_without_a_dose_draws_the_bare_name():
+    """No concentration is invented: an empty dose shows the odor alone."""
+    plan = next(p for p in nvt.figure_plans(_spec(concentration="")) if p.phase == "testing")
+    assert plan.title.startswith("Hexanol — post-exposure trials")
+    assert "%" not in plan.title
+
+
+def test_the_rendered_pins_cohort_title_writes_the_dose_as_v_v(monkeypatch, tmp_path):
+    title, ticks = _drawn(monkeypatch, tmp_path, _iaa_spec(),
+                          _pins_scores(["isoamylacetate-1", "Isoamyl Acetate"]))
+    assert title.startswith(
+        "Isoamyl Acetate 1% (v/v) — post-exposure trials\nvs pre-exposure"
+    )
+    assert ticks == ["Pre-exposure", "Post-exposure"]
+
+
+def test_the_stats_csv_keeps_the_registry_odor_and_dose(monkeypatch, tmp_path):
+    _drawn(monkeypatch, tmp_path, _spec(), _scores())
+    stats = pd.read_csv(next(tmp_path.glob("*_stats.csv")))
+    assert set(stats["odor"]) == {"Hexanol"}
+    assert set(stats["concentration"]) == {"0.1%"}
