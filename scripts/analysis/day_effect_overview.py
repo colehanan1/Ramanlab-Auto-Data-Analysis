@@ -19,7 +19,7 @@ from __future__ import annotations
 import argparse
 import sys
 from pathlib import Path
-from typing import Sequence
+from typing import Mapping, Sequence
 
 import matplotlib
 
@@ -32,6 +32,8 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from scripts.analysis import phase_terms  # noqa: E402
+from scripts.analysis.day_vs_day_report import CSV, odor_concentrations, odor_text  # noqa: E402
 from scripts.analysis.pretest_vs_test_comparison import (  # noqa: E402
     INK, _RC_CONTEXT, _recessive_grid, _sem)
 from scripts.analysis.significance_brackets import stars  # noqa: E402
@@ -68,13 +70,45 @@ def overview_table(comparison_dirs: Sequence[Path]) -> pd.DataFrame:
     return pd.concat(parts, ignore_index=True)[cols]
 
 
-def build_figure(table: pd.DataFrame, *, trained_odor: str = "Isoamyl Acetate"):
+def page_concentrations(comparison_dirs: Sequence[Path], *,
+                        predictions_csv: Path | str) -> dict[str, str]:
+    """Each odor's recorded concentration over every fly on the page, for the ticks.
+
+    The comparison folders hold labels with the pins concentration stripped, so it
+    is read back from the predictions table, for exactly those flies. Every row
+    shares the odor ticks, so one map serves the page: an odor whose flies record
+    none, or two, gets none (``day_vs_day_report.odor_concentrations``).
+    """
+    if not Path(predictions_csv).exists():
+        return {}
+    from fbpipe.config import canon_fly_number
+    from scripts.analysis.envelope_visuals import canonical_dataset
+
+    flies = pd.concat([pd.read_csv(Path(d) / "paired_scores_per_fly.csv",
+                                   usecols=["dataset_canon", "fly", "fly_number"])
+                       for d in comparison_dirs])
+    keys = set(zip(flies["dataset_canon"].astype(str), flies["fly"].astype(str),
+                   flies["fly_number"].map(canon_fly_number)))
+    preds = pd.read_csv(predictions_csv, usecols=["dataset", "fly", "fly_number", "trial_label"])
+    canon = {d: canonical_dataset(d) for d in preds["dataset"].astype(str).str.strip().unique()}
+    on_page = [(canon[str(d).strip()], str(f).strip(), canon_fly_number(n)) in keys
+               for d, f, n in zip(preds["dataset"], preds["fly"], preds["fly_number"])]
+    return odor_concentrations(preds.loc[on_page, "trial_label"])
+
+
+def build_figure(table: pd.DataFrame, *, trained_odor: str = "Isoamyl Acetate",
+                 odor_conc: Mapping[str, str] | None = None):
     datasets = list(dict.fromkeys(table["dataset"]))
     odors = sorted(table["odor"].unique(), key=str.casefold)
     y = np.arange(len(odors))
     score_lo = min(0.0, float(np.floor(table[["mean_pre", "mean_post"]].min().min())))
     score_hi = max(4.0, float(np.ceil(table[["mean_pre", "mean_post"]].max().max())))
     dmax = float(np.ceil(table["mean_delta"].abs().max() * 2) / 2) + 0.5
+    # The column titles head every dataset's row, so they say pre-/post-exposure
+    # only when every dataset is a *-Sensitivity-* one; a mixed page keeps pre-test.
+    cohort = datasets[0] if phase_terms.all_sensitivity(datasets) else None
+    titles = (f"{phase_terms.pre_label(cohort, 'Pre-test')} score",
+              f"{phase_terms.post_label(cohort, 'Post-training')} score", MEASURES[2][3])
 
     with plt.rc_context(_RC_CONTEXT):
         fig, axes = plt.subplots(len(datasets), 3, figsize=(13.5, 2.9 * len(datasets) + 0.9),
@@ -83,7 +117,7 @@ def build_figure(table: pd.DataFrame, *, trained_odor: str = "Isoamyl Acetate"):
             sub = table[table["dataset"] == ds]
             days = list(sub.sort_values("day_index")["day"].unique())
             ns = [int(sub.loc[sub["day"] == d, "n_flies"].max()) for d in days]
-            for c, (key, _sem_key, pkey, label) in enumerate(MEASURES):
+            for c, (key, _sem_key, pkey, _label) in enumerate(MEASURES):
                 ax = axes[r, c]
                 if c == 2:
                     ax.axvline(0, color="#9a9994", linewidth=0.9, zorder=1)
@@ -109,11 +143,11 @@ def build_figure(table: pd.DataFrame, *, trained_odor: str = "Isoamyl Acetate"):
                 ax.xaxis.grid(True, color="#e4e4e0", linewidth=0.6)
                 ax.yaxis.grid(False)
                 if r == 0:
-                    ax.set_title(label, loc="left", color=INK, fontsize=10)
+                    ax.set_title(titles[c], loc="left", color=INK, fontsize=10)
                 if r == len(datasets) - 1:
                     ax.set_xlabel("Mean PER score" if c < 2 else "Mean change per fly")
             axes[r, 0].set_yticks(y)
-            labels = axes[r, 0].set_yticklabels(odors)
+            labels = axes[r, 0].set_yticklabels([odor_text(o, cohort, odor_conc) for o in odors])
             for lab, odor in zip(labels, odors):
                 if trained_odor and odor.casefold().startswith(trained_odor.casefold()):
                     lab.set_fontweight("bold")
@@ -134,12 +168,17 @@ def main(argv: Sequence[str] | None = None) -> list[Path]:
                     help="A two-day comparison folder; repeat, one per dataset, in plot order.")
     ap.add_argument("--out-dir", required=True, type=Path)
     ap.add_argument("--trained-odor", default="Isoamyl Acetate")
+    ap.add_argument("--predictions-csv", type=Path, default=CSV / "model_predictions.csv",
+                    help="The labels as recorded, for each odor's concentration in the ticks "
+                         "(the comparison folders hold them stripped).")
     args = ap.parse_args(argv)
     args.out_dir.mkdir(parents=True, exist_ok=True)
     table = overview_table(args.comparison_dir)
     csv = args.out_dir / "day_effect_overview.csv"
     table.to_csv(csv, index=False)
-    fig = build_figure(table, trained_odor=args.trained_odor)
+    fig = build_figure(table, trained_odor=args.trained_odor,
+                       odor_conc=page_concentrations(args.comparison_dir,
+                                                     predictions_csv=args.predictions_csv))
     png = args.out_dir / "day_effect_overview.png"
     with plt.rc_context(_RC_CONTEXT):
         fig.savefig(png)

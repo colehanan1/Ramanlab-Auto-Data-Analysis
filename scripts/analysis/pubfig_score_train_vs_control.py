@@ -25,6 +25,7 @@ Sources, both recomputed from the predictions CSV so nothing is transcribed:
 from __future__ import annotations
 
 import argparse
+import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -240,6 +241,110 @@ def apply_flagged_exclusions(
     return kept
 
 
+_FLY_SPEC_RE = re.compile(r"^(?P<dataset>[^/]+)/(?P<fly>.+)_fly(?P<number>\d+)$")
+
+
+def parse_fly_spec(spec: str) -> tuple[str, str, int]:
+    """``"IAA-Odor10s-Control-24-1/october_24_batch_1_rig_2_fly2"`` -> a fly key.
+
+    The ``DATASET/FOLDER_flyN`` form is the path under ``flys_New`` plus the fly
+    number, which is how flies get copied out of the file browser.
+    """
+    m = _FLY_SPEC_RE.match(str(spec).strip())
+    if not m or not m["fly"]:
+        raise SystemExit(f"--fly wants DATASET/FOLDER_flyN, got {spec!r}")
+    return m["dataset"], m["fly"], int(m["number"])
+
+
+def select_flies(df: pd.DataFrame, flies) -> pd.DataFrame:
+    """Keep only the listed flies, from both cohorts.
+
+    A listed fly that matches nothing is fatal rather than quietly shrinking
+    the n: it is either misspelled or was removed by an earlier filter
+    (genotype, flagged, months), and either way the figure would not show the
+    flies it claims to.
+    """
+    from fbpipe.config import canon_fly_number
+
+    wanted = {
+        (ds, fly, canon_fly_number(num))
+        for ds, fly, num in map(parse_fly_spec, flies)
+    }
+    keys = _fly_keys(df)
+    present = set(keys)
+    missing = sorted(wanted - present)
+    for ds, fly, num in missing:
+        print(f"[FLIES] missing: {ds}  {fly}  fly {num} — not in the predictions "
+              f"CSV, or removed by the genotype / flagged / month filters")
+    if missing:
+        raise SystemExit(f"{len(missing)} of the --fly flies were not found")
+    kept = df.loc[[k in wanted for k in keys]].copy()
+    for ds, group in kept.groupby("dataset"):
+        names = sorted({f"{f}_fly{n}" for _, f, n in _fly_keys(group)})
+        print(f"[FLIES] {ds}: {len(names)} -> {', '.join(names)}")
+    return kept
+
+
+def strip_vial_concentrations(
+    df: pd.DataFrame, train_dataset: str
+) -> tuple[pd.DataFrame, dict[str, str]]:
+    """Resolve ``~/odor_pins.txt`` labels the shared label code cannot parse.
+
+    Rigs with a pins file (2026-10-01 on) record ``testing_8_isoamylacetate-1``.
+    Left as is the odor renders raw and never matches the trained label, so its
+    two presentations pool into one column. Each such label is relabelled to
+    the legacy spelling, and the vial concentration comes back as a display
+    remap ("Isoamyl Acetate" -> "Isoamyl Acetate (1%)") for this figure's pair.
+
+    An odor the pair carries at two concentrations is fatal -- one column would
+    pool two vials (the hex-test panel holds hexanol at 0.1 and 1). An odor
+    seen both with and without a concentration keeps its plain name, and one
+    the config already remaps keeps the config's label.
+    """
+    from scripts.analysis import score_summary as ss
+    from scripts.analysis.envelope_visuals import (
+        _canon_dataset,
+        _display_label_ci,
+        _extract_odor_from_label,
+        apply_dataset_odor_remap,
+    )
+    from scripts.analysis.starvation_pre_post_comparison import (
+        label_concentration,
+        normalize_trial_label,
+    )
+
+    out = df.copy()
+    concs = out["trial_label"].map(label_concentration)
+    has_conc = concs.notna()
+    out.loc[has_conc, "trial_label"] = (
+        out.loc[has_conc, "trial_label"].map(normalize_trial_label)
+    )
+
+    canon = out["dataset"].astype(str).str.strip().map(_canon_dataset)
+    train_canon = _canon_dataset(train_dataset)
+    pair = {train_canon, ss._auto_pairs(sorted(set(canon))).get(train_canon)}
+    in_pair = canon.isin(pair)
+    displays = out.loc[in_pair, "trial_label"].map(
+        lambda label: _display_label_ci(_extract_odor_from_label(label))
+    )
+
+    labels: dict[str, str] = {}
+    for display, group in concs[in_pair].groupby(displays, dropna=False):
+        distinct = sorted(set(group.dropna()))
+        if len(distinct) > 1:
+            raise SystemExit(
+                f"{display} appears at {' and '.join(distinct)}% in "
+                f"{' / '.join(sorted(p for p in pair if p))}; one column would "
+                f"pool two vials"
+            )
+        if not distinct or group.isna().any():
+            continue
+        if any(apply_dataset_odor_remap(p, display) != display for p in pair if p):
+            continue
+        labels[display] = f"{display} ({distinct[0]}%)"
+    return out, labels
+
+
 def _cohort_label(name: str, counts) -> str:
     """``"Training (n=23)"`` — the count belongs in the legend when it is shared."""
     uniq = {int(n) for n in pd.Series(counts).dropna()}
@@ -247,9 +352,14 @@ def _cohort_label(name: str, counts) -> str:
 
 
 def plot_train_vs_control(
-    ax, rows: pd.DataFrame, *, title: str, metric: Metric = SCORE_METRIC
+    ax, rows: pd.DataFrame, *, title: str, metric: Metric = SCORE_METRIC,
+    sem_up: bool = False,
 ) -> None:
-    """Draw one publication-grade training-vs-control panel."""
+    """Draw one publication-grade training-vs-control panel.
+
+    ``sem_up`` draws each SEM upward only, as the pre-vs-post publication
+    figures do; the default keeps the symmetric bars already published.
+    """
     rows = rows.reset_index(drop=True)
     x = np.arange(len(rows))
     bar_w = 0.35
@@ -257,16 +367,19 @@ def plot_train_vs_control(
     train_colors = pal.training_bar_colors(rows["odor"], rows["is_trained"])
     bars_train = ax.bar(
         x - bar_w / 2, rows["mean_train"].to_numpy(float), width=bar_w,
-        yerr=rows["sem_train"].to_numpy(float), capsize=3,
+        yerr=None if sem_up else rows["sem_train"].to_numpy(float), capsize=3,
         color=train_colors, edgecolor="black", linewidth=0.75,
         error_kw={"linewidth": 0.9},
     )
     bars_ctrl = ax.bar(
         x + bar_w / 2, rows["mean_ctrl"].to_numpy(float), width=bar_w,
-        yerr=rows["sem_ctrl"].to_numpy(float), capsize=3,
+        yerr=None if sem_up else rows["sem_ctrl"].to_numpy(float), capsize=3,
         color=pal.CTRL_COLOR, edgecolor="black", linewidth=0.75,
         error_kw={"linewidth": 0.9},
     )
+    if sem_up:
+        _draw_sem_up(ax, bars_train, rows["mean_train"], rows["sem_train"])
+        _draw_sem_up(ax, bars_ctrl, rows["mean_ctrl"], rows["sem_ctrl"])
 
     ax.set_xticks(x)
     ax.set_xticklabels(list(rows["odor"]), rotation=35, ha="right")
@@ -308,6 +421,20 @@ def plot_train_vs_control(
     )
 
 
+def _draw_sem_up(ax, bars, means, sems) -> None:
+    """SEM upward only: from the bar top to mean + SEM, capped at the top."""
+    for bar, mean_v, sem_v in zip(bars, means, sems):
+        mean_v, sem_v = float(mean_v), float(sem_v)
+        if not np.isfinite(mean_v) or not sem_v > 0:
+            continue
+        xc = bar.get_x() + bar.get_width() / 2
+        cap = bar.get_width() * 0.22
+        ax.plot([xc, xc], [mean_v, mean_v + sem_v], color="black", linewidth=0.9,
+                solid_capstyle="butt", zorder=3)
+        ax.plot([xc - cap, xc + cap], [mean_v + sem_v] * 2, color="black",
+                linewidth=0.9, zorder=3)
+
+
 def _draw_significant_brackets(
     ax, x, bar_w: float, rows: pd.DataFrame, *, metric: Metric = SCORE_METRIC
 ) -> None:
@@ -341,7 +468,7 @@ def _draw_significant_brackets(
 def rows_from_score_summary(
     predictions_csv: Path, train_dataset: str, *, config: Path | None = None,
     genotype: str = GENOTYPE, fly_months=None, flagged_flies_csv: str = "",
-    odor_remap=None,
+    odor_remap=None, flies=None,
 ) -> pd.DataFrame:
     """Per-dataset rows, recomputed with ``score_summary``'s own pipeline.
 
@@ -354,7 +481,7 @@ def rows_from_score_summary(
     df = _prepare_scores(
         predictions_csv, train_dataset, config=config, genotype=genotype,
         fly_months=fly_months, flagged_flies_csv=flagged_flies_csv,
-        odor_remap=odor_remap,
+        odor_remap=odor_remap, flies=flies,
     )
     summary = ss._compute_training_vs_control_summary(df)
     sub = summary[summary["training_dataset"] == train_dataset].copy()
@@ -425,7 +552,7 @@ def _install_cohort_odor_remap(train_dataset: str, overrides: dict[str, str]) ->
 def _prepare_scores(
     predictions_csv: Path, train_dataset: str, *, config: Path | None = None,
     genotype: str = GENOTYPE, fly_months=None, flagged_flies_csv: str = "",
-    odor_remap=None,
+    odor_remap=None, flies=None,
 ) -> pd.DataFrame:
     """Load the predictions CSV and apply every cohort filter, in order.
 
@@ -435,10 +562,16 @@ def _prepare_scores(
     from scripts.analysis import score_summary as ss
 
     _apply_config(config)
+    raw, vial_labels = strip_vial_concentrations(
+        pd.read_csv(predictions_csv), train_dataset
+    )
     # After the config, so a cohort override wins over the dataset-level map,
     # and before _load_scores, which is what resolves trial labels to odors.
-    _install_cohort_odor_remap(train_dataset, dict(odor_remap or {}))
-    df = ss._load_scores(predictions_csv, threshold=None, flagged_flies_csv="")
+    # An explicit --odor-remap wins over a label read off the vial.
+    _install_cohort_odor_remap(
+        train_dataset, {**vial_labels, **dict(odor_remap or {})}
+    )
+    df = ss._load_scores(raw, threshold=None, flagged_flies_csv="")
     # Judge "this exclusion matched nothing" against every fly the CSV holds,
     # before the genotype and month filters legitimately remove some.
     all_keys = _fly_keys(df)
@@ -465,13 +598,15 @@ def _prepare_scores(
             kept = sorted(group["fly"].unique())
             print(f"[MONTHS] {ds}: {len(kept)} fly folders in {', '.join(fly_months)}"
                   f" -> {', '.join(kept)}")
+    if flies:
+        df = select_flies(df, flies)
     return df
 
 
 def rows_from_percent_responding(
     predictions_csv: Path, train_dataset: str, *, config: Path | None = None,
     genotype: str = GENOTYPE, fly_months=None, flagged_flies_csv: str = "",
-    odor_remap=None,
+    odor_remap=None, flies=None,
 ) -> pd.DataFrame:
     """Per-odor share of flies that extended, training vs control.
 
@@ -490,7 +625,7 @@ def rows_from_percent_responding(
     df = _prepare_scores(
         predictions_csv, train_dataset, config=config, genotype=genotype,
         fly_months=fly_months, flagged_flies_csv=flagged_flies_csv,
-        odor_remap=odor_remap,
+        odor_remap=odor_remap, flies=flies,
     )
     train_canon = _canon_dataset(train_dataset)
     ctrl_canon = ss._auto_pairs(sorted(set(df["dataset_canon"]))).get(train_canon)
@@ -625,7 +760,7 @@ def _apply_config(config: Path | None, *, protocol: str = "v2") -> None:
 
 def save(
     rows: pd.DataFrame, *, title: str, out_stem: str, figures_dir: Path,
-    metric: Metric = SCORE_METRIC,
+    metric: Metric = SCORE_METRIC, sem_up: bool = False,
 ) -> None:
     rc = {
         "figure.dpi": 300, "savefig.dpi": 300,
@@ -636,7 +771,7 @@ def save(
     figures_dir.mkdir(parents=True, exist_ok=True)
     with plt.rc_context(rc):
         fig, ax = plt.subplots(figsize=(max(7.5, 1.05 * len(rows) + 3.0), 5.5))
-        plot_train_vs_control(ax, rows, title=title, metric=metric)
+        plot_train_vs_control(ax, rows, title=title, metric=metric, sem_up=sem_up)
         fig.tight_layout()
         for suffix in ("png", "svg"):
             out = figures_dir / f"{out_stem}.{suffix}"
@@ -674,6 +809,11 @@ def main(argv: list[str] | None = None) -> None:
     )
 
     common.add_argument(
+        "--sem-up", action="store_true",
+        help="draw each SEM upward only (bar top to mean + SEM), as the "
+             "pre-vs-post publication figures do",
+    )
+    common.add_argument(
         "--metric", choices=sorted(METRICS), default=SCORE_METRIC.key,
         help="mean-score: average PER score per odor. percent-responding: "
              "share of flies scoring >= 2 for that odor.",
@@ -689,6 +829,12 @@ def main(argv: list[str] | None = None) -> None:
         "--fly-months", default="",
         help="comma-separated collection months to keep, e.g. 'july,august'; "
              "flies whose folder carries no date are dropped",
+    )
+    p_ds.add_argument(
+        "--fly", action="append", default=[], metavar="DATASET/FOLDER_flyN",
+        help="draw only these flies, from both cohorts, e.g. "
+             "'IAA-Odor10s-Control-24-1/october_24_batch_1_rig_2_fly2'. "
+             "Repeatable; a fly that matches nothing is an error.",
     )
 
     p_batch = sub.add_parser("batch", parents=[common])
@@ -707,7 +853,7 @@ def main(argv: list[str] | None = None) -> None:
             args.predictions_csv, args.train_dataset,
             config=args.config, genotype=args.genotype, fly_months=months or None,
             flagged_flies_csv=args.flagged_flies_csv,
-            odor_remap=parse_odor_remap(args.odor_remap),
+            odor_remap=parse_odor_remap(args.odor_remap), flies=args.fly or None,
         )
         default_stem = (
             f"pubfig_pct_responding_train_vs_ctrl_{args.train_dataset}" if percent
@@ -726,7 +872,8 @@ def main(argv: list[str] | None = None) -> None:
         stem = args.out_stem or f"pubfig_mean_score_{args.tag}_{args.train_dataset}"
         title = args.title or f"Mean PER Score – {args.train_dataset} ({suffix})"
 
-    save(rows, title=title, out_stem=stem, figures_dir=args.figures_dir, metric=metric)
+    save(rows, title=title, out_stem=stem, figures_dir=args.figures_dir,
+         metric=metric, sem_up=args.sem_up)
     for row in rows.itertuples(index=False):
         if percent:
             summary = (

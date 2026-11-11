@@ -73,8 +73,10 @@ for _p in (str(ROOT), str(ROOT / "src")):
         sys.path.insert(0, _p)
 
 from fbpipe.analysis.threshold import ThresholdRule  # noqa: E402
+from scripts.analysis import phase_terms  # noqa: E402
 from scripts.analysis.envelope_visuals import _compute_theta as _ev_compute_theta  # noqa: E402
 from scripts.analysis.envelope_visuals import _rolling_baseline as _ev_rolling_baseline  # noqa: E402
+from scripts.analysis.odor_conc_labels import VV, odor_conc_label  # noqa: E402
 from scripts.analysis.score_scale_figure import SCORE_COLORS  # noqa: E402
 
 LOGGER = logging.getLogger("binarized_per_rasters")
@@ -175,6 +177,35 @@ def odor_display(token: str, dataset: str) -> str:
         if mapped != plain:
             return mapped
     return plain
+
+
+def odor_text(token: str, dataset: str) -> str:
+    """:func:`odor_display` as drawn on a figure.
+
+    A *-Sensitivity-* cohort writes the concentration its label carries as
+    ``<c>% (v/v)`` ("isoamylacetate-1" -> "Isoamyl Acetate 1% (v/v)"); a label
+    without one keeps the plain name. Every other cohort is unchanged. Display
+    only: panel order and the JSON stay on :func:`odor_display`.
+    """
+    label = odor_display(token, dataset)
+    return odor_conc_label(label) if phase_terms.is_sensitivity(dataset) else label
+
+
+#: The "<c>% (v/v)" tail odor_conc_labels writes: a title breaks before it, and
+#: a presentation number goes ahead of it.
+_CONC_TAIL_RE = re.compile(r" (\d+(?:\.\d+)?" + re.escape(VV) + r")$")
+
+
+def _with_rank(text: str, rank: int) -> str:
+    """``"Hexanol 0.1% (v/v)"``, 2 -> ``"Hexanol 2 0.1% (v/v)"``, not "... (v/v) 2"."""
+    m = _CONC_TAIL_RE.search(text)
+    return f"{text[:m.start()]} {rank} {m.group(1)}" if m else f"{text} {rank}"
+
+
+def _title_lines(text: str) -> str:
+    """Name above concentration: a 1.75 in panel cannot hold
+    "Isoamyl Acetate 1% (v/v)" on one line."""
+    return _CONC_TAIL_RE.sub(r"\n\1", text)
 
 
 def load_config_remap(config_path: Path | str) -> int:
@@ -871,6 +902,9 @@ class Panel:
     median_index: float
     odor: str = ""
     rank: int = 1
+    #: Drawn text when it differs from ``label``, which stays the sort key and
+    #: the JSON value (a *-Sensitivity-* cohort's "<c>% (v/v)" names).
+    shown: str = ""
 
 
 def trained_odor(training_trials: pd.DataFrame) -> Optional[str]:
@@ -924,15 +958,18 @@ def testing_panels(
         odor for odor, g in t.groupby("odor") if int(g["_rank"].max()) > 1
     }
 
+    sensitivity = phase_terms.is_sensitivity(ds)
     panels: list[Panel] = []
     for (odor, rank), g in t.groupby(["odor", "_rank"]):
         label = odor_display(odor, ds)
+        shown = odor_conc_label(label) if sensitivity else ""
         if odor in repeated:
             label = f"{label} {int(rank)}"
+            shown = _with_rank(shown, int(rank)) if shown else ""
         panels.append(
             Panel(label=label, trials=g.drop(columns="_rank"),
                   median_index=float(g["trial_index"].median()), odor=str(odor),
-                  rank=int(rank))
+                  rank=int(rank), shown=shown)
         )
     # A FIXED order: the trained odor's presentations first (1 then 2), then
     # every other odor alphanumerically by the label the reader actually sees.
@@ -1045,12 +1082,15 @@ def _figure(
     odor_span = float(np.nanmedian([
         p.trials["odor_off_s"].median() - p.trials["odor_on_s"].median() for p in panels
     ]))
+    titles = [_title_lines(p.shown) if p.shown else p.label for p in panels]
 
     # Fixed inch budgets for the chrome, so the layout holds whether there are
     # 3 panels or 9 and 4 flies or 40.
     left_in = 2.30                          # row labels live in the left margin
     right_in = 1.05 if mode.key != "binary" else 0.30   # colorbar gutter
     top_in, bottom_in = 1.35, 1.00          # title + subtitle / xlabel + legend
+    # A two-line panel title (name over concentration) needs its line of room.
+    top_in += 0.16 * max(t.count("\n") for t in titles)
     panel_in = 1.75
     width = left_in + panel_in * n + right_in
     height = max(3.4, 0.22 * len(order) + top_in + bottom_in)
@@ -1066,7 +1106,7 @@ def _figure(
                 column=mode.column,
             )
             _draw_panel(
-                axes[0][i], grid, time_axis, label=panel.label,
+                axes[0][i], grid, time_axis, label=titles[i],
                 odor_span=odor_span, first_col=(i == 0), order=order, scores=scores,
                 mode=mode,
             )
@@ -1162,6 +1202,13 @@ _SORT_BLURB = {
 }
 
 
+def _sort_blurb(sort_by: str, dataset: Optional[str] = None) -> str:
+    """``_SORT_BLURB[sort_by]``, naming a sensitivity cohort's exposed odor as such."""
+    return _SORT_BLURB.get(sort_by, sort_by).replace(
+        "trained-odor", phase_terms.odor_tag(dataset, "trained-odor")
+    )
+
+
 def figure_training(
     training_trials: pd.DataFrame, order: Sequence[str], *, dataset: str,
     k: float = K_DEFAULT, mode: Mode = BINARY_MODE, sort_by: str = "binary",
@@ -1194,7 +1241,7 @@ def figure_training(
             if sort_by == RANDOM_SORT else
             (
                 f"Each row is one fly ({len(order)} flies), sorted top-to-bottom by "
-                f"{_SORT_BLURB.get(sort_by, sort_by)} across all training trials.{rule}"
+                f"{_sort_blurb(sort_by, dataset)} across all training trials.{rule}"
             )
         ),
         **kw,
@@ -1214,9 +1261,11 @@ def figure_testing(
     "pre-test" for the naive panel the *-Sensitivity-* cohorts run first. Both
     land in the same cohort folder, so a shared title would make them
     indistinguishable — the exact pre/post confusion the phase split prevents.
+    A *-Sensitivity-* cohort draws them as "post-exposure" and
+    "pre-exposure" instead: nothing is paired with its odor.
     """
     dropped = sorted({
-        odor_display(o, dataset)
+        odor_text(o, dataset)
         for o in testing_trials["odor"].unique()
         if str(o).strip().lower() in {str(x).strip().lower() for x in (exclude_odors or ())}
     }) if not testing_trials.empty else []
@@ -1225,31 +1274,38 @@ def figure_testing(
         "binary": "Binarised PER",
         "graded": "PER above baseline",
     }.get(mode.key, "Proboscis extension")
+    # Only the drawn word changes; ``phase`` keeps its "test"/"pre-test" meaning.
+    shown = (
+        phase_terms.pre_label if phase == "pre-test" else phase_terms.post_label
+    )(dataset, phase, case="lower")
+    # The random-order caption says "testing" on either panel; a sensitivity
+    # cohort names the panel it is drawn on.
+    panel_word = shown if phase_terms.is_sensitivity(dataset) else "testing"
     return _figure(
         testing_panels(testing_trials, exclude_odors=exclude_odors,
                        dataset=dataset, trained=trained),
         order, dataset=dataset, scores=scores, mode=mode,
-        title=f"{what} at {phase}, by odor — {dataset}",
+        title=f"{what} at {shown}, by odor — {dataset}",
         subtitle=(
             (
                 "Same fly order as the training figure — row N is the same fly in "
                 "both. Rows are in random order, NOT ranked: this cohort's "
                 "conditioning trials were paired with light, so training PER is not "
-                "a neutral trait to rank testing rows by.  "
-                "Panels are keyed on the odor, not the trial index: testing trials "
-                f"2–7 are randomised per fly.{note}"
+                f"a neutral trait to rank {panel_word} rows by.  "
+                "Panels are keyed on the odor, not the trial index: "
+                f"{panel_word} trials 2–7 are randomised per fly.{note}"
             )
             if sort_by == RANDOM_SORT else
             (
                 "Same fly order as the training figure — row N is the same fly in both, "
-                f"sorted by {_SORT_BLURB.get(sort_by, sort_by)} during training.  "
+                f"sorted by {_sort_blurb(sort_by, dataset)} during training.  "
                 + (
                     "This panel was recorded BEFORE training; it is ordered by the "
                     "conditioning that followed so the three panels stack row-for-row.  "
                     if phase == "pre-test" else ""
                 )
                 + "Panels are keyed on the odor, not the trial index: "
-                f"{phase} trials are randomised per fly.{note}"
+                f"{shown} trials are randomised per fly.{note}"
             )
         ),
         **kw,
@@ -1347,6 +1403,8 @@ def _continuous_heatmap_figure(
         panels, order, pre_s=pre_s, post_s=post_s, bin_s=bin_s,
         mode=mode, row_gap_px=row_gap_px,
     )
+    # One segment per panel, in order; the segments keep ``label`` for the JSON.
+    texts = [p.shown or p.label for p in panels]
     cmap = matplotlib.colormaps[mode.cmap].copy()
     cmap.set_bad(color=MISSING_COLOR)
 
@@ -1377,7 +1435,10 @@ def _continuous_heatmap_figure(
         ax.set_yticklabels(_row_labels(order))
         ax.tick_params(axis="y", length=0, labelcolor=INK_SECONDARY)
         ax.set_xticks([s["center"] for s in segments])
-        ax.set_xticklabels([s["label"] for s in segments], rotation=35, ha="right")
+        ax.set_xticklabels(
+            [_title_lines(t) if p.shown else t for p, t in zip(panels, texts)],
+            rotation=35, ha="right",
+        )
         ax.tick_params(axis="x", direction="out", length=0, colors=INK_SECONDARY,
                        labelsize=8, pad=4)
         ax.xaxis.tick_top()
@@ -1394,7 +1455,7 @@ def _continuous_heatmap_figure(
                      y=1 - 0.25 / height)
         fig.text(0.5, 1 - 0.58 / height, subtitle, ha="center", va="top",
                  fontsize=8.5, color=MUTED, wrap=True)
-        _plot_order_key(fig, [s["label"] for s in segments], y=0.20 / height)
+        _plot_order_key(fig, texts, y=0.20 / height)
 
         cax = fig.add_axes([
             1 - (right_in - 0.28) / width, bottom_in / height + 0.10,
@@ -1438,7 +1499,7 @@ def figure_training_continuous_heatmap(
         title=f"Training proboscis extension timeline — {dataset}",
         subtitle=(
             f"Each row is one fly, sorted top-to-bottom by "
-            f"{_SORT_BLURB.get(sort_by, sort_by)}. Training trials are concatenated "
+            f"{_sort_blurb(sort_by, dataset)}. Training trials are concatenated "
             "left-to-right with odor on/off rules repeated in every segment."
         ),
         **kw,
@@ -1451,19 +1512,20 @@ def figure_testing_continuous_heatmap(
     mode: Mode = ENVELOPE_MODE, sort_by: str = "auc", row_gap_px: int = 2, trained: Optional[str] = None, **kw,
 ) -> tuple[plt.Figure, dict]:
     dropped = sorted({
-        odor_display(o, dataset)
+        odor_text(o, dataset)
         for o in testing_trials["odor"].unique()
         if str(o).strip().lower() in {str(x).strip().lower() for x in (exclude_odors or ())}
     }) if not testing_trials.empty else []
     note = f"  {', '.join(dropped)} not shown." if dropped else ""
+    post = phase_terms.post_label(dataset, "Testing")
     return _continuous_heatmap_figure(
         testing_panels(testing_trials, exclude_odors=exclude_odors,
                        dataset=dataset, trained=trained),
         order, dataset=dataset, mode=mode, row_gap_px=row_gap_px,
-        title=f"Testing proboscis extension timeline by odor — {dataset}",
+        title=f"{post} proboscis extension timeline by odor — {dataset}",
         subtitle=(
-            f"Each row is one fly, sorted by {_SORT_BLURB.get(sort_by, sort_by)} "
-            "during training. Testing odors are placed in the same fixed left-to-right "
+            f"Each row is one fly, sorted by {_sort_blurb(sort_by, dataset)} "
+            f"during training. {post} odors are placed in the same fixed left-to-right "
             f"order for every fly; repeated odors are split by presentation.{note}"
         ),
         **kw,
@@ -1599,7 +1661,7 @@ def _stacked_heatmap_figure(
                      y=1 - 0.25 / height)
         fig.text(0.5, 1 - 0.58 / height, subtitle, ha="center", va="top",
                  fontsize=8.5, color=MUTED, wrap=True)
-        _plot_order_key(fig, [p.label for p in panels], y=0.20 / height)
+        _plot_order_key(fig, [p.shown or p.label for p in panels], y=0.20 / height)
 
         cax = fig.add_axes([
             1 - (right_in - 0.30) / width, bottom_in / height + 0.10,
@@ -1641,7 +1703,7 @@ def figure_training_stacked_heatmap(
         row_gap_px=row_gap_px,
         title=f"Training proboscis extension stacked by fly — {dataset}",
         subtitle=(
-            f"Flies are sorted by {_SORT_BLURB.get(sort_by, sort_by)}. Within each "
+            f"Flies are sorted by {_sort_blurb(sort_by, dataset)}. Within each "
             "fly, rows are training trials 1-6 from top to bottom, then a white gap "
             "before the next fly."
         ),
@@ -1655,20 +1717,22 @@ def figure_testing_stacked_heatmap(
     mode: Mode = ENVELOPE_MODE, sort_by: str = "auc", row_gap_px: int = 2, trained: Optional[str] = None, **kw,
 ) -> tuple[plt.Figure, dict]:
     dropped = sorted({
-        odor_display(o, dataset)
+        odor_text(o, dataset)
         for o in testing_trials["odor"].unique()
         if str(o).strip().lower() in {str(x).strip().lower() for x in (exclude_odors or ())}
     }) if not testing_trials.empty else []
     note = f"  {', '.join(dropped)} not shown." if dropped else ""
+    post = phase_terms.post_label(dataset, "Testing")
     return _stacked_heatmap_figure(
         testing_panels(testing_trials, exclude_odors=exclude_odors,
                        dataset=dataset, trained=trained),
         order, dataset=dataset, mode=mode, row_gap_px=row_gap_px,
-        title=f"Testing proboscis extension stacked by fly — {dataset}",
+        title=f"{post} proboscis extension stacked by fly — {dataset}",
         subtitle=(
-            f"Flies are sorted by {_SORT_BLURB.get(sort_by, sort_by)} during training. "
-            "Within each fly, rows follow the fixed testing odor order shown in the key, "
-            f"then a white gap before the next fly.{note}"
+            f"Flies are sorted by {_sort_blurb(sort_by, dataset)} during training. "
+            "Within each fly, rows follow the fixed "
+            f"{phase_terms.post_label(dataset, 'testing', case='lower')} odor order "
+            f"shown in the key, then a white gap before the next fly.{note}"
         ),
         **kw,
     )

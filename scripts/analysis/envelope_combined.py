@@ -121,6 +121,38 @@ def set_runtime_settings(cfg: Settings | None) -> None:
     _RUNTIME_SETTINGS = cfg
 
 
+def _light_bound_mask(dist_df, dist_path, fly_dir):
+    """Frames to leave out of the fly's weighted min/max (stimulus light on),
+    or None when ``distance_limits.exclude_light_frames_from_minmax`` is off.
+
+    Under the light YOLO misplaces the eye and the light-evoked PER is usually
+    the biggest extension a fly makes, so with the option on the light-only
+    trial no longer sets the 0-100 % scale of every odor trace.
+    """
+    cfg = _RUNTIME_SETTINGS
+    from fbpipe.utils.light_frames import light_exclusion_applies, light_frame_mask, trial_meta_for_table
+
+    if cfg is None or not light_exclusion_applies(cfg, fly_dir):
+        return None
+
+    meta = trial_meta_for_table(Path(dist_path), Path(fly_dir))
+    frames = dist_df["frame"].to_numpy() if "frame" in dist_df.columns else np.arange(len(dist_df))
+    lit = light_frame_mask(frames, meta, cfg.minmax_light_before_s, cfg.minmax_light_after_s)
+    return lit if lit.any() else None
+
+
+def _bounds_outside_light(values, lit, scope: str = "min_and_max"):
+    """(min, max) of the finite ``values``, light frames (``lit``) left out --
+    of the min only when ``scope == "min"`` (the light PER still sets 100 %)."""
+    v = np.asarray(values, dtype=float)
+    finite = np.isfinite(v)
+    keep = finite if lit is None else (finite & ~np.asarray(lit, dtype=bool))
+    if not keep.any():
+        return None
+    hi = float(v[finite].max()) if scope == "min" else float(v[keep].max())
+    return float(v[keep].min()), hi
+
+
 # Parses ``<trial_type>_<N>...`` (and optional ``_<odor>``) from a filename so
 # we can locate the sidecar pair for callers that hold an *envelope* CSV path
 # (e.g. ``<batch>/angle_distance_rms_envelope/training_10_citral_fly1_…csv``)
@@ -144,6 +176,21 @@ def _trial_dir_for_label(batch_dir: Path, trial_type: str, trial_index: int) -> 
         return inferred_dir
     matches = [p for p in batch_dir.glob(f"*_{trial_type}_{trial_index}") if p.is_dir()]
     return matches[0] if len(matches) == 1 else None
+
+
+def _trial_window_seconds(meta, fps: float) -> tuple[float, float, float]:
+    """``(odor_on_s, odor_off_s, duration_s)`` of a trial, on the trace's time base.
+
+    Frames are divided by ``fps``, the rate the trace columns are indexed at,
+    never by the sidecar's "achieved" rate: that is frames / wall-clock and so
+    drops after a camera stall (36.27 fps for an 8.4 s stall), which pushed a
+    window opening on frame 1196 to 33 s. Consumers turn these seconds back
+    into frames with the row's fps, so the valve's own frame must round-trip.
+    """
+    rate = max(float(fps), 1e-6)
+    on_s = meta.odor_on_frame / rate if meta.odor_on_frame is not None else float("nan")
+    off_s = meta.odor_off_frame / rate if meta.odor_off_frame is not None else float("nan")
+    return on_s, off_s, float(meta.n_frames) / rate
 
 
 def _resolve_trial_meta_for_csv(
@@ -2466,11 +2513,15 @@ def combine_distance_angle(cfg: CombineConfig) -> None:
                     # Apply multiplier in pixel domain (NaN propagates naturally)
                     d_px_weighted = d_px * multiplier
 
-                    # Track per-fly-number weighted min and max
-                    finite_dpw = d_px_weighted[np.isfinite(d_px_weighted)]
-                    if finite_dpw.size > 0:
-                        local_min = float(np.min(finite_dpw))
-                        local_max = float(np.max(finite_dpw))
+                    # Track per-fly-number weighted min and max (light frames
+                    # left out when distance_limits.exclude_light_frames_from_minmax)
+                    light_frames = _light_bound_mask(dist_df, dist_path, fly_dir)
+                    bounds = _bounds_outside_light(
+                        d_px_weighted, light_frames,
+                        scope=getattr(_RUNTIME_SETTINGS, "minmax_light_scope", "min_and_max"),
+                    )
+                    if bounds is not None:
+                        local_min, local_max = bounds
                         current_min = fly_weighted_min_by_number.get(
                             fly_number_label, np.inf
                         )
@@ -2510,6 +2561,7 @@ def combine_distance_angle(cfg: CombineConfig) -> None:
                         "d_px_weighted": d_px_weighted,
                         "invalid_frames": invalid_frames,
                         "fly_number_label": fly_number_label,
+                        "light_frames": light_frames,
                     })
                 except Exception as exc:
                     print(f"[WARN] {fly_name} {trial_type} {base_key} → {exc}")
@@ -2575,6 +2627,11 @@ def combine_distance_angle(cfg: CombineConfig) -> None:
             else:
                 combined_pct = np.where(np.isfinite(d_px_weighted), 0.0, np.nan)
 
+            light_frames = data.get("light_frames")
+            if light_frames is not None and len(light_frames) == len(combined_pct):
+                # left out of the bounds, so they can run past them: cap, don't blank
+                combined_pct = np.where(light_frames & np.isfinite(combined_pct),
+                                        np.clip(combined_pct, 0.0, 100.0), combined_pct)
             combined_rms = _rolling_rms(combined_pct, cfg.window_frames)
             envelope = _hilbert_envelope(combined_rms, cfg.window_frames)
 
@@ -2702,24 +2759,82 @@ def secure_copy_and_cleanup(
     dest_root = Path(destination).expanduser().resolve()
     dest_root.mkdir(parents=True, exist_ok=True)
 
+    failures: list[tuple[Path, OSError]] = []
     for source in _normalise_roots(source_list):
         dest_path = dest_root / source.name
         print(f"\nCopying from {source} → {dest_path}")
         dest_path.mkdir(parents=True, exist_ok=True)
+        already = 0
         for item in source.rglob("*"):
             relative = item.relative_to(source)
             target = dest_path / relative
             if item.is_dir():
-                target.mkdir(parents=True, exist_ok=True)
+                try:
+                    target.mkdir(parents=True, exist_ok=True)
+                except OSError as exc:
+                    failures.append((item, exc))
+                    print(f"[WARN] Could not create {target}: {exc}")
                 continue
             if target.exists():
-                print(f"Skipping (already exists): {target}")
+                already += 1
                 continue
-            target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(item, target)
+            # Copy under a temporary name, then rename: a run killed mid-copy must not
+            # leave a short file under the real name, which every later run would skip
+            # and the file-server and Box syncs would pass on (2026-11-09).
+            partial = target.with_name(f".{target.name}.partial")
+            try:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                # A killed earlier run may have left one; never build on it.
+                partial.unlink(missing_ok=True)
+                before = item.stat()
+                shutil.copy2(item, partial)
+                after = item.stat()
+                # A file still being written would land complete-looking and, never
+                # being copied again, stay short: leave it for the next run.
+                if ((after.st_size, after.st_mtime_ns) != (before.st_size, before.st_mtime_ns)
+                        or partial.stat().st_size != after.st_size):
+                    raise OSError("source changed while it was copied; the next run retries it")
+                os.replace(partial, target)
+            except OSError as exc:
+                # e.g. EIO reading a bad source file: skip it, keep copying the rest.
+                # The cleanup stays safe -- it deletes a video only when an equal-size
+                # copy exists under its real name, which this file will not have.
+                try:
+                    partial.unlink(missing_ok=True)
+                except OSError:
+                    pass
+                failures.append((item, exc))
+                print(f"[WARN] Copy failed: {item}: {exc}")
+                continue
             print(f"Copied: {target}")
+        print(f"{already} file(s) already in secured storage under {dest_path}")
 
-    print("\nCopy phase completed successfully.")
+    if failures:
+        print(f"\n[WARN] Copy phase finished with {len(failures)} failed file(s):")
+        for path, exc in failures:
+            print(f"  {path}: {exc}")
+        from fbpipe.utils.notify import ntfy_notify
+
+        # ntfy shows at most 4,096 bytes as text: names only, the full list is in the log.
+        lines: list[str] = []
+        for path, exc in failures[:20]:
+            line = f"{path.name}: {exc.strerror or exc}"
+            if sum(len(x.encode()) + 1 for x in lines) + len(line.encode()) > 3500:
+                break
+            lines.append(line)
+        more = len(failures) - len(lines)
+        ntfy_notify(
+            f"Secured copy: {len(failures)} file(s) failed",
+            "Could not copy to secured storage:\n" + "\n".join(lines)
+            + (f"\n... and {more} more (full list in the run log)" if more else ""),
+            priority="high",
+            tags="warning",
+        )
+    else:
+        print("\nCopy phase completed successfully.")
+
+    # Flush the new copies to disk before any local video is deleted on their strength.
+    os.sync()
 
     if not perform_cleanup:
         print("[INFO] Cleanup disabled; source directories left untouched.")
@@ -3562,17 +3677,9 @@ def build_wide_csv(
             # figures can shade odor-on/off and set the x-axis per trial.
             _fps_for_seconds = float(fps) if math.isfinite(float(fps)) and float(fps) > 0 else float(fps_fallback)
             if meta is not None:
-                _trial_odor_on_s = (
-                    (meta.odor_on_frame / max(meta.fps, 1e-6))
-                    if meta.odor_on_frame is not None
-                    else float("nan")
+                _trial_odor_on_s, _trial_odor_off_s, _trial_duration_s = (
+                    _trial_window_seconds(meta, _fps_for_seconds)
                 )
-                _trial_odor_off_s = (
-                    (meta.odor_off_frame / max(meta.fps, 1e-6))
-                    if meta.odor_off_frame is not None
-                    else float("nan")
-                )
-                _trial_duration_s = float(meta.n_frames) / max(meta.fps, 1e-6)
                 _trial_light_on_s = (
                     float(meta.light_on_s)
                     if meta.light_on_s is not None and math.isfinite(float(meta.light_on_s))

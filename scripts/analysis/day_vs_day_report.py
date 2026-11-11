@@ -3,13 +3,13 @@
 
 Auto-detects the recording days present in a dataset (from its batch folder
 names), picks the two most recent days that have at least one unflagged fly,
-and builds the full figure set for each day plus their direct comparison --
-the same layout as a hand-built ``<dataset>_<DayA>-vs-<DayB>/`` folder:
+and builds their direct comparison. With ``--per-unit`` it also builds the
+full standard figure set for each day (slow), the same layout as a hand-built
+``<dataset>_<DayA>-vs-<DayB>/`` folder:
 
     <out-root>/<dataset>_<DayA>-vs-<DayB>/
-        <DayA>/                  every standard sensitivity figure set
-        <DayB>/                  every standard sensitivity figure set
         <DayA>-vs-<DayB>/        the direct comparison (starvation_pre_post_comparison.py)
+        <DayA>/, <DayB>/         every standard sensitivity figure set (--per-unit only)
         README.md
 
 Each day's input tables are filtered copies of the pipeline's own wide/
@@ -31,14 +31,14 @@ Usage
     python3 scripts/analysis/day_vs_day_report.py --dataset IAA-Sensitivity-18-1 \\
         --days october_07,october_08
 
-    # publication score-bar figures too (PNG/PDF/SVG, --ymax auto-raised if a
-    # bar + SEM would be clipped)
-    python3 scripts/analysis/day_vs_day_report.py --dataset IAA-Sensitivity-24-1 --pubfig
+    # each day's own figure set too (traces, rasters, ...), plus the publication
+    # score-bar figure per day (PNG/PDF/SVG)
+    python3 scripts/analysis/day_vs_day_report.py --dataset IAA-Sensitivity-24-1 --per-unit --pubfig
 
     # BATCH vs batch instead of day vs day (a batch = october_11_batch_2 on all
-    # rigs); --all compares every usable batch (up to 5) side by side
-    python3 scripts/analysis/day_vs_day_report.py --dataset 3Oct-Sensitivity-1-0.1 \\
-        --by batch --all --hours 0 --pubfig
+    # rigs); --all compares every usable batch side by side (no upper limit)
+    python3 scripts/analysis/day_vs_day_report.py --dataset IAA-Sensitivity-1-1 \\
+        --by batch --all --hours 0
 
     # pick exact units (days or batches) instead of the two most recent
     python3 scripts/analysis/day_vs_day_report.py --dataset 3Oct-Sensitivity-1-0.1 \\
@@ -58,7 +58,7 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
-from typing import Sequence
+from typing import Iterable, Mapping, Sequence
 
 import pandas as pd
 import yaml
@@ -70,6 +70,8 @@ if str(REPO_ROOT / "src") not in sys.path:
     sys.path.insert(0, str(REPO_ROOT / "src"))
 
 import scripts.analysis.starvation_pre_post_comparison as spc  # noqa: E402
+from scripts.analysis import phase_terms  # noqa: E402
+from scripts.analysis.odor_conc_labels import odor_conc_label, with_conc  # noqa: E402
 
 CONFIG = REPO_ROOT / "config" / "config_new.yaml"
 CSV = Path("/home/ramanlab/Documents/cole/Data/CSVs-New-Opto-Flys")
@@ -83,8 +85,7 @@ _MONTHS = {"january": 1, "february": 2, "march": 3, "april": 4, "may": 5, "june"
           "december": 12}
 _FOLDER_DATE_RE = re.compile(r"^([a-z]+)_(\d{2})")
 _FOLDER_BATCH_RE = re.compile(r"^[a-z]+_\d{2}_batch_(\d+)")
-MAX_UNITS = 5  # starvation_pre_post_comparison draws at most five groups
-_DATASET_RE = re.compile(r"^[A-Za-z0-9]+-Sensitivity-(?P<hours>[\d.]+)-(?P<conc>[\d.]+)$")
+_DATASET_RE = re.compile(r"^[A-Za-z0-9]+-Sensitivity[A-Za-z0-9]*-(?P<hours>[\d.]+)-(?P<conc>[\d.]+)$")
 
 
 # ── pure helpers ─────────────────────────────────────────────────────────
@@ -211,7 +212,7 @@ def pick_days(days: Sequence[DayInfo], *, explicit: tuple[str, str] | None = Non
 def pick_units(units: Sequence[DayInfo], *, explicit: Sequence[str] | None = None,
                all_units: bool = False) -> list[DayInfo] | None:
     """Units to compare, in time order: an explicit prefix list, every unit
-    (``all_units``, at most :data:`MAX_UNITS`), or the two most recent. None when
+    (``all_units``, no upper limit), or the two most recent. None when
     fewer than two are usable."""
     by_prefix = {u.prefix: u for u in units}
     if explicit:
@@ -225,9 +226,6 @@ def pick_units(units: Sequence[DayInfo], *, explicit: Sequence[str] | None = Non
         chosen = sorted(units, key=lambda u: u.sort_key)[-2:]
     if len(chosen) < 2:
         return None
-    if len(chosen) > MAX_UNITS:
-        raise ValueError(f"{len(chosen)} units to compare; at most {MAX_UNITS} -- "
-                         f"pass --units to choose ({sorted(by_prefix)})")
     return sorted(chosen, key=lambda u: u.sort_key)
 
 
@@ -277,6 +275,37 @@ def trained_odor(dataset: str) -> str:
     from scripts.analysis.envelope_visuals import _trained_label
 
     return _trained_label(dataset) or "Isoamyl Acetate"
+
+
+def odor_concentrations(trial_labels: Iterable[object]) -> dict[str, str]:
+    """``{display odor: vial concentration}`` from trial labels as recorded.
+
+    The comparison inputs strip the pins ``-<conc>`` suffix
+    (``spc.normalize_trial_label``) so every unit lands in one odor column; this
+    reads it back, for the figure text only. An odor is left out when any of its
+    labels records none (the pre-pins batches) or two disagree: a pooled odor then
+    has no one concentration to show, and none is guessed.
+    """
+    seen: dict[str, set] = {}
+    for label in trial_labels:
+        conc = spc.label_concentration(label)
+        seen.setdefault(odor_conc_label(spc.normalize_trial_label(label)), set()).add(
+            None if conc is None else f"{float(conc):g}")
+    return {odor: next(iter(c)) for odor, c in seen.items() if len(c) == 1 and None not in c}
+
+
+def odor_text(odor: str, cohort: str | None,
+              concentrations: Mapping[str, str] | None = None) -> str:
+    """An odor as drawn: ``"Isoamyl Acetate 1% (v/v)"`` on a ``*-Sensitivity-*`` figure.
+
+    The concentration comes from ``concentrations`` (:func:`odor_concentrations`),
+    so an odor with none recorded keeps its bare display name. Display only: the
+    name stays the grouping key, and every other cohort draws it unchanged.
+    """
+    if not phase_terms.is_sensitivity(cohort):
+        return odor
+    conc = (concentrations or {}).get(odor)
+    return with_conc(odor, conc) if conc else odor_conc_label(odor)
 
 
 # ── driver (shells out to the already-tested analysis scripts) ────────────
@@ -420,19 +449,17 @@ The exact command is the first line of `_build_log.txt`.
 |---|---|
 {rows}
 
-{hours_line}Trained odor (CS+): {cs}. Scores: current model
+{hours_line}{odor_word}: {cs}. Scores: current model
 (`{model}`). Tables as of the pipeline run this was built against.
 
 ## Folders
 
-- {unit_dirs}: every standard sensitivity figure set for that {unit_lower}'s flies
-  (Pre-vs-Post-Sensitivity, mean traces, pre-test-baselined trial score bars,
-  binarized/graded rasters, Training-AUC vs testing, reaction matrix, per-fly raw traces).
+{unit_dirs_line}
 - `{out_dir}/`: the direct comparison (score: Wilcoxon paired within fly / Mann-Whitney
   between {unit_lower}s; response %: Fisher's exact throughout). CSVs: `summary_by_group`,
   `stats_between_groups`, `paired_scores_per_fly`{omnibus}.
 
-Colors: blue = pre-test, orange = post-training; lighter = earlier {unit_lower}
+Colors: blue = {pre}, orange = {post}; lighter = earlier {unit_lower}
 ({order}).
 n counts flies; p-values are uncorrected. Trial labels since 2026-10-01 carry the vial
 concentration (`<Odor>-<conc>`); inputs are filtered copies with that suffix stripped so
@@ -442,7 +469,9 @@ odor names and the CS+ resolve.
 
 def run_dataset(dataset: str, *, out_root: Path, explicit: Sequence[str] | None,
                 pubfig: bool, by: str = "day", all_units: bool = False,
-                hours: float | None = None) -> Path | None:
+                hours: float | None = None, per_unit: bool = False) -> Path | None:
+    """Build the side-by-side comparison; with ``per_unit`` also every day's/batch's
+    own standard figure set (traces, rasters, reaction matrix, ...), which is slow."""
     name_hours, _conc = starvation_hours(dataset)
     hours = name_hours if hours is None else hours
     wide = pd.concat([
@@ -465,9 +494,12 @@ def run_dataset(dataset: str, *, out_root: Path, explicit: Sequence[str] | None,
         log.write(f"$ day_vs_day_report.py --dataset {dataset} --by {by}"
                   + (f" --units {','.join(explicit)}" if explicit else "")
                   + (" --all" if all_units else "") + f" --hours {hours:g}"
-                  + (" --pubfig" if pubfig else "") + "\n")
-        for u in chosen:
-            _build_day(out / u.tag, spc.Group(u.label, dataset, u.prefix), log, pubfig=pubfig)
+                  + (" --pubfig" if pubfig else "") + (" --per-unit" if per_unit else "") + "\n")
+        if per_unit:
+            for u in chosen:
+                _build_day(out / u.tag, spc.Group(u.label, dataset, u.prefix), log, pubfig=pubfig)
+        elif pubfig:
+            print("  note: --pubfig makes the per-unit publication figure; add --per-unit for it")
         _build_comparison(out / out_dir_name(*chosen), chosen, dataset, hours=hours, by=by, log=log)
     unit_word = "Day" if by == "day" else "Batch"
     (out / "README.md").write_text(_README.format(
@@ -475,7 +507,19 @@ def run_dataset(dataset: str, *, out_root: Path, explicit: Sequence[str] | None,
         date=dt.date.today().isoformat(), unit_word=unit_word, unit_lower=unit_word.lower(),
         rows="\n".join(f"| {u.label} | {u.n_flies} |" for u in chosen),
         hours_line=f"{hours:g} h starved. ", cs=trained_odor(dataset), model=_model_path(),
-        unit_dirs=", ".join(f"`{u.tag}/`" for u in chosen), out_dir=out_dir_name(*chosen),
+        # The figure key: a *-Sensitivity-* dataset is never conditioned (phase_terms).
+        odor_word=phase_terms.odor_tag(dataset, "Trained odor (CS+)", capital=True),
+        pre=phase_terms.pre_label(dataset, "pre-test", case="lower"),
+        post=phase_terms.post_label(dataset, "post-training", case="lower"),
+        unit_dirs_line=(
+            "- " + ", ".join(f"`{u.tag}/`" for u in chosen) + f": every standard sensitivity "
+            f"figure set for that {unit_word.lower()}'s flies (Pre-vs-Post-Sensitivity, mean traces, "
+            "pre-test-baselined trial score bars,\n  binarized/graded rasters, Training-AUC vs "
+            "testing, reaction matrix, per-fly raw traces)."
+            if per_unit else
+            f"- Comparison only. Re-run with `--per-unit` to also build each {unit_word.lower()}'s "
+            "own figure set (traces, rasters, reaction matrix, ...)."),
+        out_dir=out_dir_name(*chosen),
         omnibus=", `stats_omnibus` (all groups at once)" if len(chosen) > 2 else "",
         order=" → ".join(u.label for u in chosen)))
     text = (out / "_build_log.txt").read_text().splitlines()
@@ -497,13 +541,17 @@ def main(argv: Sequence[str] | None = None) -> int:
                          "october_11_batch_1,october_11_batch_3. Applies to every --dataset in "
                          "this call. Default: the two most recent usable units.")
     ap.add_argument("--all", dest="all_units", action="store_true",
-                    help=f"Compare every usable unit side by side (at most {MAX_UNITS}).")
+                    help="Compare every usable unit side by side.")
     ap.add_argument("--hours", type=float, default=None,
                     help="Starvation hours for titles/README; default read from the dataset "
                          "name (the *-Sensitivity-1-* datasets are really 0 h).")
     ap.add_argument("--out-root", type=Path, default=DEFAULT_OUT_ROOT)
+    ap.add_argument("--per-unit", action="store_true",
+                    help="Also build every day's/batch's own standard figure set (traces, rasters, "
+                         "reaction matrix, ...). Slow; by default only the comparison is built.")
     ap.add_argument("--pubfig", action="store_true",
-                    help="Also render the publication score-bar figure for each unit.")
+                    help="Also render the publication score-bar figure for each unit "
+                         "(needs --per-unit).")
     args = ap.parse_args(argv)
     explicit = [u.strip() for u in args.units.split(",") if u.strip()] if args.units else None
     if explicit is not None and len(explicit) < 2:
@@ -515,7 +563,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     for name in args.dataset:
         dataset = resolve_dataset(name, known)
         out = run_dataset(dataset, out_root=args.out_root, explicit=explicit, pubfig=args.pubfig,
-                          by=args.by, all_units=args.all_units, hours=args.hours)
+                          by=args.by, all_units=args.all_units, hours=args.hours,
+                          per_unit=args.per_unit)
         (built if out else skipped).append(dataset)
 
     print(f"\n{len(built)} built, {len(skipped)} skipped" + (f": {skipped}" if skipped else ""))

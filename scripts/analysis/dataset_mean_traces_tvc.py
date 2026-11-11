@@ -77,6 +77,8 @@ from scripts.analysis.envelope_visuals import (  # noqa: E402
     compute_non_reactive_flags,
     set_protocol,
 )
+from scripts.analysis import phase_terms  # noqa: E402
+from scripts.analysis.odor_conc_labels import odor_conc_label  # noqa: E402
 
 LOGGER = logging.getLogger("dataset_mean_traces_tvc")
 
@@ -96,13 +98,18 @@ DEFAULT_ARM_LABELS = ("Trained", "Control")
 PHASE_TAG = "post_vs_pretest"
 
 
-def phase_arm_labels() -> tuple[str, str]:
+def phase_arm_labels(cohort: Optional[str] = None) -> tuple[str, str]:
     """Arm labels for the pre-test comparison.
 
     Not "Trained"/"Control": both arms are the SAME flies, and neither is a
-    control cohort — the earlier phase is the control.
+    control cohort — the earlier phase is the control. A ``*-Sensitivity-*``
+    ``cohort`` gets "Post-exposure"/"Pre-exposure": nothing is paired
+    with its odor, so there is no training for the arms to be named after.
     """
-    return ("Post-training", "Pre-test")
+    return (
+        phase_terms.post_label(cohort, "Post-training"),
+        phase_terms.pre_label(cohort, "Pre-test"),
+    )
 
 
 def naive_dataset_for_odor(label: object) -> Optional[str]:
@@ -155,6 +162,23 @@ def base_odor_key(label: str) -> str:
     """
     stripped = _PRESENTATION_SUFFIX.sub("", str(label).strip())
     return _CONCENTRATION_SUFFIX.sub("", stripped).strip()
+
+
+def odor_display_label(label: object, cohorts: Sequence[str] = ()) -> str:
+    """An odor key as drawn: "Isoamyl Acetate 1% (v/v)" on a *-Sensitivity-* figure.
+
+    Display only: the key still names the file and the sidecar entry and finds
+    the naive panel, and a figure showing any other cohort draws it unchanged.
+    A presentation suffix (" 2") is split off and put back, because with it a
+    raw pins token would not parse at all.
+    """
+    text = str(label)
+    if not phase_terms.all_sensitivity(cohorts):
+        return text
+    m = _PRESENTATION_SUFFIX.search(text)
+    if m is None:
+        return odor_conc_label(text)
+    return odor_conc_label(text[: m.start()]) + m.group()
 
 
 def collect_per_presentation_traces(
@@ -595,7 +619,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         # training, so the second arm comes from the pre-test table rather than
         # a second dataset. _prepare already takes the frame as an argument,
         # which is the only reason this needs no other change.
-        label_a, label_b = phase_arm_labels()
+        label_a, label_b = phase_arm_labels(args.train_dataset)
         tag = PHASE_TAG
         pretest_df = read_wide_table(args.pretest_wide_csv)
         LOGGER.info("Loaded %d pre-test rows from %s",
@@ -675,12 +699,18 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     naive_written: list[Path] = []
     wanted_odors = {str(o).casefold() for o in args.odor}
     matched_odors: set[str] = set()
+    # Odor text follows the cohorts the figure shows: one arm in a rig split,
+    # otherwise both (the same cohort twice in phase mode).
+    drawn_cohorts = (
+        [arm_ds] if args.rig_split else [args.train_dataset, args.control_dataset]
+    )
 
     for odor in sorted(set(train) | set(control), key=_sort_key):
         if wanted_odors:
             if odor.casefold() not in wanted_odors:
                 continue
             matched_odors.add(odor.casefold())
+        odor_text = odor_display_label(odor, drawn_cohorts)
         train_per_fly = train.get(odor, {})
         ctrl_per_fly = control.get(odor, {})
         if not train_per_fly or not ctrl_per_fly:
@@ -691,7 +721,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             skipped.append(odor)
             continue
         fig = _plot_training_vs_control_for_odor(
-            odor=odor,
+            odor=odor_text,
             train_per_fly=train_per_fly,
             ctrl_per_fly=ctrl_per_fly,
             fps=args.fps,
@@ -702,7 +732,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             train_label=label_a,
             ctrl_label=label_b,
             title=(
-                f"{odor} - "
+                f"{odor_text} - "
                 f"{'Training' if args.split_arm == 'train' else 'Control'}: "
                 f"{label_a} vs {label_b}"
             ) if args.rig_split else None,
@@ -756,7 +786,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
                     )
                 else:
                     fig3 = _plot_training_vs_control_for_odor(
-                        odor=odor,
+                        odor=odor_text,
                         train_per_fly=train_per_fly,
                         ctrl_per_fly=ctrl_per_fly,
                         fps=args.fps,

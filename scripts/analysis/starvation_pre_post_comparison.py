@@ -22,7 +22,9 @@ concentration ("testing_4_3octanol-0.1"), which the shared figure code does not
 parse yet. :func:`normalize_trial_label` strips it back to the legacy rig
 spelling so both groups land in the same odor column. Only use it on cohorts
 whose panel holds each odor at ONE concentration -- the hex-test panel carries
-two hexanol vials, which this would merge.
+two hexanol vials, which this would merge. A sensitivity figure draws the
+concentration back into the name ("Isoamyl Acetate 1% (v/v)", :func:`odor_text`);
+the tables keep the normalised odor.
 
 Two or three groups. With three (e.g. 12 h / 18 h / 24 h) every pair is tested
 as above and ``stats_omnibus.csv`` adds Kruskal-Wallis (scores) and a
@@ -60,7 +62,8 @@ if str(REPO_ROOT) not in sys.path:
 if str(REPO_ROOT / "src") not in sys.path:
     sys.path.insert(0, str(REPO_ROOT / "src"))
 
-from scripts.analysis import odor_bar_palette, significance_brackets  # noqa: E402
+from scripts.analysis import odor_bar_palette, phase_terms, significance_brackets  # noqa: E402
+from scripts.analysis.odor_conc_labels import odor_conc_label, with_conc  # noqa: E402
 from scripts.analysis.pretest_vs_test_comparison import (  # noqa: E402
     BINARY_THRESHOLD,
     INK,
@@ -106,6 +109,77 @@ def normalize_trial_label(label: object) -> str:
 def label_concentration(label: object) -> str | None:
     """The vial concentration a pins-file label carries, or None."""
     return _split_label(label)[2]
+
+
+#: The pipeline's live predictions table. The trend and findings scripts read a
+#: comparison folder, whose tables keep only the normalised labels, so by
+#: default they look the recorded labels (the concentrations) up here.
+PREDICTIONS_CSV = Path("/home/ramanlab/Documents/cole/Data/CSVs-New-Opto-Flys/model_predictions.csv")
+_FLY_KEY = ("dataset_canon", "fly", "fly_number")
+
+
+def odor_concentrations(preds, flies: pd.DataFrame | None = None) -> dict[str, str]:
+    """Display odor -> the vial concentration its trial labels record ("0.1").
+
+    ``preds``: prediction rows with the labels as recorded, before
+    ``subset_and_relabel`` strips the concentration -- a frame, or a CSV path
+    (a missing or empty path gives {}). ``flies`` (dataset_canon / fly /
+    fly_number, e.g. the paired table) narrows them to the flies a figure draws.
+    An odor seen at two concentrations, or with and without one (a batch
+    recorded before the pins file), gets no entry: it is drawn without a
+    percent rather than with a guessed one.
+    """
+    from fbpipe.config import canon_fly_number
+    from scripts.analysis.envelope_visuals import (
+        _canon_dataset,
+        _display_label_ci,
+        _extract_odor_from_label,
+        apply_dataset_odor_remap,
+    )
+    from scripts.analysis.score_summary import _normalise_trial_label
+
+    if not isinstance(preds, pd.DataFrame):
+        if not preds or not Path(preds).is_file():
+            return {}
+        cols = {"dataset", "fly", "fly_number", "trial_label", "trial_type"}
+        preds = pd.read_csv(preds, usecols=lambda c: c in cols)
+    if "trial_type" in preds:  # the drawn phases only
+        preds = preds[preds["trial_type"].astype(str).str.strip().str.lower().isin(("pretest", "testing"))]
+    datasets = preds["dataset"].astype(str).str.strip().map(_canon_dataset)
+    if flies is not None:
+        if not set(_FLY_KEY) <= set(flies.columns):
+            return {}
+        drawn = set(zip(flies["dataset_canon"].astype(str), flies["fly"].astype(str).str.strip(),
+                        flies["fly_number"].map(canon_fly_number)))
+        keep = [k in drawn for k in zip(datasets, preds["fly"].astype(str).str.strip(),
+                                        preds["fly_number"].map(canon_fly_number))]
+        preds, datasets = preds[keep], datasets[keep]
+    if preds.empty:
+        return {}
+    labels = preds["trial_label"].astype(str)
+    # Named exactly as _load_scores names the paired table's odors.
+    odors = [apply_dataset_odor_remap(d, _display_label_ci(_extract_odor_from_label(
+                 _normalise_trial_label(normalize_trial_label(lab)))))
+             for d, lab in zip(datasets, labels)]
+    out = {}
+    for odor, concs in labels.map(label_concentration).groupby(odors):
+        if concs.notna().all() and len({float(c) for c in concs}) == 1:
+            out[odor] = concs.iloc[0]
+    return out
+
+
+def odor_text(odor: str, cohort: str | None, concentrations=None) -> str:
+    """How ``odor`` is drawn: "<Odor> <c>% (v/v)" on a sensitivity-cohort figure.
+
+    ``concentrations`` (``odor_concentrations``) supplies the percent; an odor
+    without one is drawn by its display name alone. Every other cohort's figure
+    keeps ``odor`` unchanged. Display only: grouping, sorting and trained-odor
+    matching keep using ``odor``.
+    """
+    if not phase_terms.is_sensitivity(cohort):
+        return odor
+    conc = (concentrations or {}).get(odor)
+    return with_conc(odor, conc) if conc else odor_conc_label(odor)
 
 
 # ── Groups ────────────────────────────────────────────────────────────────
@@ -305,8 +379,9 @@ def omnibus_stats(
 
 
 def check_group_count(groups: Sequence[Group]) -> None:
-    if not 2 <= len(groups) <= 6:
-        raise SystemExit(f"two to six --group specs are required, got {len(groups)}")
+    """At least two groups; no upper limit (past six, ramps are sampled -- see group_colors)."""
+    if len(groups) < 2:
+        raise SystemExit(f"at least two --group specs are required, got {len(groups)}")
 
 
 # ── Colour ────────────────────────────────────────────────────────────────
@@ -332,8 +407,23 @@ _ORANGE6 = ("#f29a6a", "#e5703f", "#d0582a", "#b0441b", "#863212", "#62230b")
 _GRAY6 = ("#a8a7a1", "#8c8b85", "#706f69", "#55544f", "#3b3a36", "#262522")
 
 
+def _sample_ramp(anchors: Sequence[str], n: int) -> tuple[str, ...]:
+    """n steps evenly along a validated ramp, keeping its light and dark ends.
+
+    Past six groups the steps sit closer than the dataviz ordinal check asks
+    for, so shade is a secondary cue only: every bar pair is also labelled with
+    its group underneath (``_group_ticks``).
+    """
+    from matplotlib.colors import LinearSegmentedColormap, to_hex
+
+    cmap = LinearSegmentedColormap.from_list("ramp", list(anchors))
+    return tuple(to_hex(cmap(i / (n - 1))) for i in range(n))
+
+
 def group_colors(n: int):
     """(pre, post) colour per group position, light (least starved) to dark."""
+    if n > 6:
+        return tuple(zip(_sample_ramp(_BLUE6, n), _sample_ramp(_ORANGE6, n)))
     if n == 6:
         return tuple(zip(_BLUE6, _ORANGE6))
     if n in _PICK:
@@ -342,6 +432,8 @@ def group_colors(n: int):
 
 
 def delta_colors(n: int):
+    if n > 6:
+        return _sample_ramp(_GRAY6, n)
     if n == 6:
         return _GRAY6
     if n in _PICK:
@@ -385,6 +477,21 @@ def _comparison(groups: Sequence[str], comparison: str | None) -> str:
     return comparison or " vs ".join(groups) + " starved"
 
 
+def _phase_cohort(cohorts) -> str | None:
+    """The cohort name ``phase_terms`` words a figure by, or None.
+
+    A sensitivity cohort only when every cohort drawn is one: a figure that
+    mixes in a conditioning cohort keeps pre-test / post-training / CS+.
+    """
+    names = sorted({str(c) for c in cohorts if pd.notna(c)})
+    return names[0] if phase_terms.all_sensitivity(names) else None
+
+
+def _phase_names(cohort: str | None) -> tuple[str, str]:
+    """(pre, post) panel names: Pre-/Post-exposure for a sensitivity cohort."""
+    return phase_terms.pre_label(cohort, PRE_LABEL), phase_terms.post_label(cohort, POST_LABEL)
+
+
 def _row(summary, group, odor):
     return summary[(summary["group"] == group) & (summary["odor"] == odor)]
 
@@ -426,11 +533,18 @@ def _p(frame: pd.DataFrame, key: str) -> float | None:
     return None if p is None or pd.isna(p) else float(p)
 
 
-def build_pre_post_bars(summary, *, groups, kind, trained_odor, title, comparison=None):
-    """Per odor: [g1 pre, g1 post] [g2 pre, g2 post]; paired brackets per group."""
+def build_pre_post_bars(summary, *, groups, kind, trained_odor, title, comparison=None,
+                        cohorts=(), concentrations=None):
+    """Per odor: [g1 pre, g1 post] [g2 pre, g2 post]; paired brackets per group.
+
+    ``cohorts`` (the datasets drawn) picks the phase wording, see ``_phase_cohort``;
+    ``concentrations`` (``odor_concentrations``) the percent in each odor name.
+    """
     is_score = kind == "score"
     pre_key, post_key = ("mean_pre", "mean_post") if is_score else ("pct_pre", "pct_post")
     p_key = "p_score" if is_score else "p_rate"
+    cohort = _phase_cohort(cohorts)
+    pre_name, post_name = _phase_names(cohort)
     odors = _odor_order(summary)
     x = np.arange(len(odors), dtype=float)
     n = len(groups)
@@ -452,21 +566,23 @@ def build_pre_post_bars(summary, *, groups, kind, trained_odor, title, compariso
             ax.bar(centre + sign * (bar_w / 2 + 0.005), vals, bar_w,
                    yerr=errs if is_score else None, color=color, linewidth=0,
                    error_kw=dict(ecolor=INK_MUTED, elinewidth=0.8, capsize=2, capthick=0.8))
-            handles.append(Patch(color=color, label=f"{g} — {PRE_LABEL if phase == 'pre' else POST_LABEL}"))
+            handles.append(Patch(color=color, label=f"{g} — {pre_name if phase == 'pre' else post_name}"))
         pvals = [_p(_row(summary, g, odor), p_key) for odor in odors]
         _group_ticks(ax, centre, g)
         (_apply_score_axis if is_score else _apply_rate_axis)(ax)
         significance_brackets.draw(ax, centre, 2 * bar_w, pvals, expand=False)
 
     ax.set_xticks(x)
-    ax.set_xticklabels(odors, rotation=28, ha="right")
+    ax.set_xticklabels([odor_text(o, cohort, concentrations) for o in odors], rotation=28, ha="right")
     ax.tick_params(axis="x", pad=13, length=0)
     ax.set_xlim(-0.6, len(odors) - 0.4)
     _tint_trained(ax, odors, trained_odor)
     metric = "Mean PER score" if is_score else "PER response rate"
     test = ("paired within fly (Wilcoxon signed-rank, uncorrected)" if is_score
             else "pre vs post: Fisher's exact (uncorrected)")
-    ax.set_title(f"{title} — {metric}, pre-test vs post-training, {_comparison(groups, comparison)}\n"
+    phases = (f"{phase_terms.pre_label(cohort, 'pre-test', case='lower')} vs "
+              f"{phase_terms.post_label(cohort, 'post-training', case='lower')}")
+    ax.set_title(f"{title} — {metric}, {phases}, {_comparison(groups, comparison)}\n"
                  f"{_n_text(summary, groups)} · {test}",
                  loc="left", color=INK, pad=8)
     ax.legend(handles=handles, loc="upper left", bbox_to_anchor=(1.0, 1.0), ncol=1,
@@ -474,9 +590,12 @@ def build_pre_post_bars(summary, *, groups, kind, trained_odor, title, compariso
     return fig
 
 
-def build_by_phase_bars(summary, between, *, groups, kind, trained_odor, title, comparison=None):
+def build_by_phase_bars(summary, between, *, groups, kind, trained_odor, title, comparison=None,
+                        cohorts=(), concentrations=None):
     """Two panels (pre-test | post-training); group vs group within each."""
     is_score = kind == "score"
+    cohort = _phase_cohort(cohorts)
+    pre_name, post_name = _phase_names(cohort)
     odors = _odor_order(summary)
     x = np.arange(len(odors), dtype=float)
     n = len(groups)
@@ -508,11 +627,12 @@ def build_by_phase_bars(summary, between, *, groups, kind, trained_odor, title, 
         p_col = f"p_{phase}_{'score' if is_score else 'rate'}"
         _pair_brackets(ax, odors, positions, groups, between, p_col)
         ax.set_xticks(x)
-        ax.set_xticklabels(odors, rotation=28, ha="right")
+        ax.set_xticklabels([odor_text(o, cohort, concentrations) for o in odors],
+                           rotation=28, ha="right")
         ax.tick_params(axis="x", pad=13, length=0)
         ax.set_xlim(-0.6, len(odors) - 0.4)
         _tint_trained(ax, odors, trained_odor)
-        ax.set_title(PRE_LABEL if phase == "pre" else POST_LABEL, loc="left", color=INK)
+        ax.set_title(pre_name if phase == "pre" else post_name, loc="left", color=INK)
         ax.legend(handles=handles, loc="upper right", handlelength=1.1, handleheight=0.9)
         if ai == 1 and n == 2:
             ax.set_ylabel("")
@@ -529,8 +649,11 @@ def build_by_phase_bars(summary, between, *, groups, kind, trained_odor, title, 
 DELTA_YLIM = (-6, 6)
 
 
-def build_delta_strip(paired, between, *, groups, trained_odor, title, comparison=None):
+def build_delta_strip(paired, between, *, groups, trained_odor, title, comparison=None,
+                      cohorts=(), concentrations=None):
     """Per-fly change in score (post - pre) per odor, the two groups side by side."""
+    cohort = _phase_cohort(cohorts)
+    after = f"after {phase_terms.block_label(cohort)}"
     odors = sorted(paired["odor"].unique(), key=str.casefold)
     x = np.arange(len(odors), dtype=float)
     n = len(groups)
@@ -562,11 +685,11 @@ def build_delta_strip(paired, between, *, groups, trained_odor, title, compariso
     _recessive_grid(ax)
     _pair_brackets(ax, odors, positions, groups, between, "p_delta_score")
     ax.set_xticks(x)
-    ax.set_xticklabels(odors, rotation=28, ha="right")
+    ax.set_xticklabels([odor_text(o, cohort, concentrations) for o in odors], rotation=28, ha="right")
     ax.tick_params(axis="x", pad=13, length=0)
     ax.set_xlim(-0.6, len(odors) - 0.4)
     _tint_trained(ax, odors, trained_odor)
-    ax.set_title(f"{title} — change in PER score after training, {_comparison(groups, comparison)}\n"
+    ax.set_title(f"{title} — change in PER score {after}, {_comparison(groups, comparison)}\n"
                  "dots = flies, open marker = mean ± SEM · Mann-Whitney U between groups "
                  f"({'pairwise, ' if n > 2 else ''}uncorrected)",
                  loc="left", color=INK, pad=8)
@@ -582,23 +705,29 @@ def _save(fig, path: Path) -> Path:
 
 
 def render_bar_figures(paired, summary, between, *, groups, trained_odor, title, out_dir,
-                       comparison=None, tag="starvation"):
-    """``tag`` names what separates the groups in the file names (default "starvation")."""
+                       comparison=None, tag="starvation", cohorts=(), concentrations=None):
+    """``tag`` names what separates the groups in the file names (default "starvation").
+
+    ``cohorts``: the datasets drawn, which pick the phase wording (``_phase_cohort``);
+    ``concentrations`` (``odor_concentrations``) the percent in each odor name.
+    """
     out_dir = Path(out_dir)
     written = []
+    kw = dict(cohorts=cohorts, concentrations=concentrations)
     with plt.rc_context(_RC_CONTEXT):
         for kind in ("score", "rate"):
             written.append(_save(
                 build_pre_post_bars(summary, groups=groups, kind=kind, trained_odor=trained_odor,
-                                    title=title, comparison=comparison),
+                                    title=title, comparison=comparison, **kw),
                 out_dir / f"pre_vs_post_by_{tag}_{kind}.png"))
             written.append(_save(
                 build_by_phase_bars(summary, between, groups=groups, kind=kind,
-                                    trained_odor=trained_odor, title=title, comparison=comparison),
+                                    trained_odor=trained_odor, title=title, comparison=comparison,
+                                    **kw),
                 out_dir / f"{tag}_compared_within_phase_{kind}.png"))
         written.append(_save(
             build_delta_strip(paired, between, groups=groups, trained_odor=trained_odor,
-                              title=title, comparison=comparison),
+                              title=title, comparison=comparison, **kw),
             out_dir / "change_post_minus_pre_score.png"))
     return written
 
@@ -634,7 +763,10 @@ def group_traces(
 
 
 def build_trace_grid(traces_by_group, *, groups, phase_index, odors, fps, odor_on_s,
-                     odor_off_s, trained_odor, title, phase_label, comparison=None):
+                     odor_off_s, trained_odor, title, phase_label, comparison=None, cohorts=(),
+                     concentrations=None):
+    cohort = _phase_cohort(cohorts)
+    odor_tag = phase_terms.odor_tag(cohort)
     ncols = 4
     nrows = int(np.ceil(len(odors) / ncols))
     fig, axes = plt.subplots(nrows, ncols, figsize=(3.1 * ncols, 2.5 * nrows + 0.6),
@@ -656,7 +788,8 @@ def build_trace_grid(traces_by_group, *, groups, phase_index, odors, fps, odor_o
             ax.fill_between(t, mean - sem, mean + sem, color=color, alpha=0.22, linewidth=0)
             ax.plot(t, mean, color=color, linewidth=1.4, label=f"{g} (n={arr.shape[0]})")
         is_cs = bool(trained_odor) and odor.casefold().startswith(trained_odor.casefold())
-        ax.set_title(odor + ("  (CS+)" if is_cs else ""), loc="left", fontsize=9,
+        ax.set_title(odor_text(odor, cohort, concentrations) + (f"  ({odor_tag})" if is_cs else ""),
+                     loc="left", fontsize=9,
                      color=odor_bar_palette.trained_tick_color(trained_odor) if is_cs else INK,
                      fontweight="bold" if is_cs else "normal")
         ax.legend(loc="upper right", fontsize=7)
@@ -675,14 +808,16 @@ def build_trace_grid(traces_by_group, *, groups, phase_index, odors, fps, odor_o
 
 def render_trace_figures(paired, groups_spec, *, pretest_wide, testing_wide, fps, odor_on_s,
                          odor_off_s, trained_odor, title, out_dir, comparison=None,
-                         tag="starvation"):
+                         tag="starvation", concentrations=None):
     out_dir = Path(out_dir)
     labels = [g.label for g in groups_spec]
+    cohorts = [g.dataset for g in groups_spec]
+    pre_name, post_name = _phase_names(_phase_cohort(cohorts))
     odors = sorted(paired["odor"].unique(), key=str.casefold)
     written = []
     for phase_index, (wide, trial_type, phase_label, stem) in enumerate((
-        (pretest_wide, "pretest", PRE_LABEL, f"mean_traces_pretest_by_{tag}.png"),
-        (testing_wide, "testing", POST_LABEL, f"mean_traces_posttraining_by_{tag}.png"),
+        (pretest_wide, "pretest", pre_name, f"mean_traces_pretest_by_{tag}.png"),
+        (testing_wide, "testing", post_name, f"mean_traces_posttraining_by_{tag}.png"),
     )):
         traces = {}
         for g in groups_spec:
@@ -694,7 +829,8 @@ def render_trace_figures(paired, groups_spec, *, pretest_wide, testing_wide, fps
             fig = build_trace_grid(traces, groups=labels, phase_index=phase_index, odors=odors,
                                    fps=fps, odor_on_s=odor_on_s, odor_off_s=odor_off_s,
                                    trained_odor=trained_odor, title=title,
-                                   phase_label=phase_label, comparison=comparison)
+                                   phase_label=phase_label, comparison=comparison,
+                                   cohorts=cohorts, concentrations=concentrations)
             written.append(_save(fig, out_dir / stem))
     return written
 
@@ -721,6 +857,10 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
                    help='Title phrase for the two groups. Default: "<A> vs <B> starved".')
     p.add_argument("--file-tag", default="starvation",
                    help="What separates the groups, used in file names (e.g. 'day').")
+    p.add_argument("--labels-csv", type=Path, default=None,
+                   help="Predictions table with the trial labels as recorded, whose concentrations "
+                        "name the odors on sensitivity figures. Default: --predictions-csv. Pass "
+                        "the live table when --predictions-csv is an already-relabelled snapshot.")
     return p.parse_args(argv)
 
 
@@ -739,8 +879,8 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     # The relabelled subset goes to disk: load_paired_scores reads a path, and
     # the file doubles as the exact input record of these figures.
-    preds = drop_flagged(subset_and_relabel(pd.read_csv(args.predictions_csv), groups),
-                         args.flagged_flies_csv)
+    raw = pd.read_csv(args.predictions_csv)
+    preds = drop_flagged(subset_and_relabel(raw, groups), args.flagged_flies_csv)
     subset_csv = out_dir / "inputs" / "predictions_subset_relabelled.csv"
     subset_csv.parent.mkdir(parents=True, exist_ok=True)
     preds.to_csv(subset_csv, index=False)
@@ -760,9 +900,13 @@ def main(argv: Sequence[str] | None = None) -> int:
             out_dir / "stats_omnibus.csv", index=False)
 
     comparison = args.comparison or None
+    # Display only: the tables above keep the normalised (concentration-free) odors.
+    concentrations = odor_concentrations(raw if args.labels_csv is None else args.labels_csv,
+                                         flies=paired)
     written = render_bar_figures(paired, summary, between, groups=labels,
                                  trained_odor=args.trained_odor, title=title, out_dir=out_dir,
-                                 comparison=comparison, tag=args.file_tag)
+                                 comparison=comparison, tag=args.file_tag,
+                                 cohorts=[g.dataset for g in groups], concentrations=concentrations)
     if args.pretest_wide_csv and args.testing_wide_csv:
         written += render_trace_figures(
             paired, groups,
@@ -772,7 +916,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 _read_table(args.testing_wide_csv), groups), args.flagged_flies_csv),
             fps=args.fps, odor_on_s=args.odor_on_s, odor_off_s=args.odor_off_s,
             trained_odor=args.trained_odor, title=title, out_dir=out_dir,
-            comparison=comparison, tag=args.file_tag)
+            comparison=comparison, tag=args.file_tag, concentrations=concentrations)
     for path in written:
         print(f"[OK] {path}")
     return 0

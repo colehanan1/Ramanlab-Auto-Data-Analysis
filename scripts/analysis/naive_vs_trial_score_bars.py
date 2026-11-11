@@ -73,6 +73,7 @@ for _p in (str(REPO_ROOT), str(REPO_ROOT / "src")):
         sys.path.insert(0, _p)
 
 from scripts.analysis import odor_bar_palette as pal  # noqa: E402
+from scripts.analysis import phase_terms  # noqa: E402
 from scripts.analysis.envelope_visuals import (  # noqa: E402
     _canon_dataset,
     _display_label_ci,
@@ -81,6 +82,7 @@ from scripts.analysis.envelope_visuals import (  # noqa: E402
     _trial_num,
     set_protocol,
 )
+from scripts.analysis.odor_conc_labels import with_conc  # noqa: E402
 from scripts.analysis.per_axis_labels import (  # noqa: E402
     PERCENT_Y_LABEL,
     SCORE_Y_LABEL,
@@ -238,6 +240,23 @@ PRETEST_COHORTS: dict[str, CohortSpec] = {
             naive_dataset=None,
             pretest_baseline=True,
         ),
+        # 1 h starved rather than 24 h; same odor and dose as
+        # Hex-Sensitivity-24-0.1. Added 2026-11-02.
+        CohortSpec(
+            dataset="Hex-Sensitivity-1-0.1",
+            odor="Hexanol",
+            concentration="0.1%",
+            naive_dataset=None,
+            pretest_baseline=True,
+        ),
+        # Paraffin oil = the master valve alone, always 100 % (2026-11-04).
+        CohortSpec(
+            dataset="Paraffin-Sensitivity-1-100",
+            odor="Paraffin Oil",
+            concentration="100%",
+            naive_dataset=None,
+            pretest_baseline=True,
+        ),
         CohortSpec(
             dataset="EB-Sensitivity-24-1",
             odor="Ethyl Butyrate",
@@ -267,6 +286,17 @@ PRETEST_COHORTS: dict[str, CohortSpec] = {
                 pretest_baseline=True,
             )
             for hours in (1, 6, 12, 18, 30)
+        ),
+        # The 5 s odor protocol: same odor, dose and 1 h starvation as
+        # IAA-Sensitivity-1-1, odor on 5 s instead of 30. No field here depends
+        # on the odor duration -- the scorer reads each trial's own odor window
+        # off the wide table, training trials included.
+        CohortSpec(
+            dataset="IAA-Sensitivity5s-1-1",
+            odor="Isoamyl Acetate",
+            concentration="1%",
+            naive_dataset=None,
+            pretest_baseline=True,
         ),
     )
 }
@@ -326,6 +356,9 @@ class Bar:
     values: Sequence[float]
     color: str
     hatch: str = ""
+    #: Tick text when it differs from ``label``. ``label`` stays the bar's key
+    #: in the stats CSV, so rewording a tick never changes the CSV.
+    display: str = ""
 
     @property
     def n(self) -> int:
@@ -576,7 +609,10 @@ def naive_scores(scores: pd.DataFrame, spec: CohortSpec, *, exposure: int) -> pd
 def naive_bar(scores: pd.DataFrame, spec: CohortSpec, exposure: int) -> Bar:
     values = [float(v) for v in naive_scores(scores, spec, exposure=exposure)["score"]]
     label = "Pre-test" if spec.pretest_baseline else f"Naive {exposure}"
-    return Bar(label, values, NAIVE_FACE, NAIVE_HATCH)
+    # A sensitivity cohort's first panel precedes odor-only exposure, not
+    # conditioning, so its tick reads "Pre-exposure".
+    display = phase_terms.pre_label(spec.dataset, label) if spec.pretest_baseline else ""
+    return Bar(label, values, NAIVE_FACE, NAIVE_HATCH, display=display)
 
 
 def testing_scores(scores: pd.DataFrame, spec: CohortSpec) -> list[Bar]:
@@ -596,7 +632,8 @@ def testing_scores(scores: pd.DataFrame, spec: CohortSpec) -> list[Bar]:
         # n=7 beside a test bar of n=2. Key on the odor instead: one
         # presentation per fly, one bar.
         values = _per_fly(frame)
-        return [Bar("Test", values, color)]
+        return [Bar("Test", values, color,
+                    display=phase_terms.post_label(spec.dataset, "Test"))]
     bars: list[Bar] = []
     for position, index in enumerate(spec.testing_indices, start=1):
         at = (
@@ -632,6 +669,18 @@ def training_scores(training: pd.DataFrame, spec: CohortSpec) -> list[Bar]:
 # ---------------------------------------------------------------------------
 
 
+def _odor_text(spec: CohortSpec) -> str:
+    """The cohort odor as a title draws it.
+
+    A sensitivity cohort writes its dose as ``1% (v/v)``; every other cohort
+    keeps ``Hexanol (0.1%)``. Display only: ``spec.odor`` and
+    ``spec.concentration`` still match rows and fill the stats CSV.
+    """
+    if phase_terms.is_sensitivity(spec.dataset):
+        return with_conc(spec.odor, _percent(spec.concentration))
+    return f"{spec.odor} ({spec.concentration})"
+
+
 @dataclass(frozen=True)
 class FigurePlan:
     spec: CohortSpec
@@ -655,11 +704,14 @@ class FigurePlan:
 
     @property
     def title(self) -> str:
-        head = f"{self.spec.odor} ({self.spec.concentration}) — "
+        head = f"{_odor_text(self.spec)} — "
         if self.phase == "summary":
             head += "first and last conditioning, then first test"
         else:
-            phase = "conditioning" if self.phase == "training" else "testing"
+            phase = (
+                "conditioning" if self.phase == "training"
+                else phase_terms.post_label(self.spec.dataset, "testing", case="lower")
+            )
             head += f"{phase} trials"
         cut = (
             f", excl. {'/'.join(self.spec.exclude_fly_dates)}"
@@ -671,8 +723,15 @@ class FigurePlan:
                 f"{head}\n{self.spec.dataset}{cut}"
                 " (no concentration-matched naive panel)"
             )
+        baseline = phase_terms.pre_label(self.spec.dataset, "pre-test", case="lower")
+        # Both exposure phase names on one line overhang the two-bar
+        # testing figure by up to an inch, so its baseline wraps.
+        sep = (
+            "\n" if self.phase == "testing" and phase_terms.is_sensitivity(self.spec.dataset)
+            else " "
+        )
         return (
-            f"{head} vs pre-test"
+            f"{head}{sep}vs {baseline}"
             if self.spec.pretest_baseline else
             f"{head} vs naive exposure {self.naive_exposure}"
             f"\n{self.spec.dataset}{cut}, unpaired odor presentation"
@@ -1025,7 +1084,7 @@ def render(
         )
         ax.axhline(0.0, color="#999999", lw=0.6, zorder=1)
         ax.set_xticks(xs)
-        ax.set_xticklabels([f"{b.label}\nn={b.n}" for b in bars], fontsize=8)
+        ax.set_xticklabels([f"{b.display or b.label}\nn={b.n}" for b in bars], fontsize=8)
         ax.set_ylabel(y_label)
         ax.set_ylim(y_min, y_max)
         ax.set_yticks(y_ticks)

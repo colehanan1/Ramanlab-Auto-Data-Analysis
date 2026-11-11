@@ -39,7 +39,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from scripts.analysis import significance_brackets  # noqa: E402
+from scripts.analysis import odor_conc_labels, phase_terms, significance_brackets  # noqa: E402
 from scripts.analysis.pretest_vs_test_comparison import POST_COLOR, PRE_COLOR  # noqa: E402
 
 BLACK = "#000000"
@@ -85,8 +85,15 @@ def _n_text(summary: pd.DataFrame) -> str:
 
 
 def build_figure(summary: pd.DataFrame, *, trained_odor: str = "", ymax: float = 4.0,
-                 figsize: tuple[float, float] = FIGSIZE):
-    """The styled figure, unsaved. Raises if any bar + SEM exceeds ``ymax``."""
+                 figsize: tuple[float, float] = FIGSIZE, cohort: str = ""):
+    """The styled figure, unsaved. Raises if any bar + SEM exceeds ``ymax``.
+
+    ``cohort`` names the legend's two phases: pre-/post-exposure for a
+    ``*-Sensitivity-*`` cohort, else pre-test / post-training. A sensitivity
+    cohort's ticks also write each odor's concentration as % (v/v)
+    ("isoamylacetate-1" -> "Isoamyl Acetate 1% (v/v)"); other cohorts' ticks are
+    the summary's labels as they are.
+    """
     means = summary[["mean_pre", "mean_post"]].to_numpy(dtype=float)
     sems = np.nan_to_num(summary[["sem_pre", "sem_post"]].to_numpy(dtype=float))
     tops = means + sems
@@ -97,6 +104,8 @@ def build_figure(summary: pd.DataFrame, *, trained_odor: str = "", ymax: float =
     ymin = 0.0 if np.nanmin(means) >= 0 else -1.0
 
     odors = list(summary["odor"])
+    names = ([odor_conc_labels.odor_conc_label(o) for o in odors]
+             if phase_terms.is_sensitivity(cohort) else odors)
     x = np.arange(len(odors), dtype=float)
     with plt.rc_context(_RC):
         fig, ax = plt.subplots(figsize=figsize)
@@ -118,18 +127,25 @@ def build_figure(summary: pd.DataFrame, *, trained_odor: str = "", ymax: float =
         ax.set_yticks(np.arange(ymin, ymax + 0.001, 1.0))
         ax.set_ylabel("Mean PER score", fontsize=LABEL_PT)
         ax.set_xticks(x)
-        ax.set_xticklabels(odors, rotation=40, ha="right", rotation_mode="anchor")
+        ax.set_xticklabels(names, rotation=40, ha="right", rotation_mode="anchor")
         ax.set_xlim(-0.6, len(odors) - 0.4)
         ax.tick_params(axis="x", length=0, pad=4)
-        for label, odor in zip(ax.get_xticklabels(), odors):
+        for label, odor, name in zip(ax.get_xticklabels(), odors, names):
             label.set_color(BLACK)
-            if trained_odor and str(odor).casefold().startswith(trained_odor.casefold()):
+            # The drawn name too: a raw pins token ("isoamylacetate-1") never
+            # starts with the display name the trained odor is given as.
+            if trained_odor and any(str(s).casefold().startswith(trained_odor.casefold())
+                                    for s in (odor, name)):
                 label.set_fontweight("bold")
 
-        handles = [Patch(facecolor=PRE_COLOR, edgecolor=BLACK, linewidth=EDGE_LW, label="Pre-test"),
-                   Patch(facecolor=POST_COLOR, edgecolor=BLACK, linewidth=EDGE_LW, label="Post-training")]
+        handles = [Patch(facecolor=PRE_COLOR, edgecolor=BLACK, linewidth=EDGE_LW,
+                         label=phase_terms.pre_label(cohort, "Pre-test")),
+                   Patch(facecolor=POST_COLOR, edgecolor=BLACK, linewidth=EDGE_LW,
+                         label=phase_terms.post_label(cohort, "Post-training"))]
+        # Side by side, the longer exposure names run into the n label: stack them.
         legend = ax.legend(handles=handles, loc="lower left", bbox_to_anchor=(0.0, 1.0),
-                           ncol=2, handlelength=1.2, handleheight=0.9, columnspacing=1.2,
+                           ncol=1 if phase_terms.is_sensitivity(cohort) else 2,
+                           handlelength=1.2, handleheight=0.9, columnspacing=1.2,
                            borderaxespad=0.2)
         for t in legend.get_texts():
             t.set_color(BLACK)
@@ -148,10 +164,10 @@ def build_figure(summary: pd.DataFrame, *, trained_odor: str = "", ymax: float =
 
 
 def render(summary: pd.DataFrame, *, out_stem: Path, trained_odor: str = "",
-           ymax: float = 4.0) -> list[Path]:
+           ymax: float = 4.0, cohort: str = "") -> list[Path]:
     out_stem = Path(out_stem)
     out_stem.parent.mkdir(parents=True, exist_ok=True)
-    fig = build_figure(summary, trained_odor=trained_odor, ymax=ymax)
+    fig = build_figure(summary, trained_odor=trained_odor, ymax=ymax, cohort=cohort)
     written = []
     with plt.rc_context(_RC):
         for ext in (".png", ".pdf", ".svg"):
@@ -183,7 +199,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         trained = _trained_label(cohort) or ""
     out_stem = args.out_stem or args.summary_csv.with_name(f"{cohort}_score_bars_pub")
     for path in render(pd.read_csv(args.summary_csv), out_stem=out_stem,
-                       trained_odor=trained, ymax=args.ymax):
+                       trained_odor=trained, ymax=args.ymax, cohort=cohort):
         print(f"[OK] {path}")
     return 0
 

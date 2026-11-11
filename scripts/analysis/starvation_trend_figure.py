@@ -41,6 +41,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from scripts.analysis import phase_terms  # noqa: E402
 from scripts.analysis.pretest_vs_test_comparison import (  # noqa: E402
     BINARY_THRESHOLD,
     INK,
@@ -52,6 +53,12 @@ from scripts.analysis.pretest_vs_test_comparison import (  # noqa: E402
     _RC_CONTEXT,
     _recessive_grid,
     _sem,
+)
+from scripts.analysis.starvation_pre_post_comparison import (  # noqa: E402
+    PREDICTIONS_CSV,
+    _phase_cohort,
+    odor_concentrations,
+    odor_text,
 )
 
 #: The change belongs to neither phase, so it wears ink, not blue or orange.
@@ -134,12 +141,14 @@ def _delta_panel(ax, t: pd.DataFrame) -> None:
             solid_joinstyle="round", zorder=4, **MARKER)
 
 
-def _rate_panel(ax, t: pd.DataFrame, *, labels: bool = True) -> None:
+def _rate_panel(ax, t: pd.DataFrame, *, labels: bool = True, cohort: str | None = None) -> None:
+    pre = phase_terms.pre_label(cohort, PRE_LABEL)
+    post = phase_terms.post_label(cohort, POST_LABEL)
     ax.plot(t["hours"], t["pct_pre"], "-", color=PRE_COLOR, linewidth=LINE_W, marker="o",
-            label=PRE_LABEL if labels else None, solid_joinstyle="round", zorder=3, **MARKER)
+            label=pre if labels else None, solid_joinstyle="round", zorder=3, **MARKER)
     # Square markers: phase is told by shape as well as hue.
     ax.plot(t["hours"], t["pct_post"], "-", color=POST_COLOR, linewidth=LINE_W, marker="s",
-            label=POST_LABEL if labels else None, solid_joinstyle="round", zorder=4, **MARKER)
+            label=post if labels else None, solid_joinstyle="round", zorder=4, **MARKER)
     ax.set_ylim(0, 100)
     ax.set_yticks([0, 25, 50, 75, 100])
 
@@ -150,7 +159,10 @@ def _n_footnote(t: pd.DataFrame) -> str:
 
 
 def build_grid(table: pd.DataFrame, *, omnibus: pd.DataFrame | None, trained_odor: str,
-               title: str):
+               title: str, cohorts: Sequence[str] = (), concentrations=None):
+    """``cohorts``: the datasets drawn, which pick the phase wording (``_phase_cohort``);
+    ``concentrations`` (``odor_concentrations``) the percent in each odor name."""
+    cohort = _phase_cohort(cohorts)
     odors = sorted(table["odor"].unique(), key=str.casefold)
     hours = sorted(table["hours"].unique())
     lo = float((table["mean_delta"] - table["sem_delta"]).min())
@@ -166,10 +178,12 @@ def build_grid(table: pd.DataFrame, *, omnibus: pd.DataFrame | None, trained_odo
             _delta_panel(top, t)
             top.set_ylim(*ylim)
             _p_text(top, "KW", _omnibus(omnibus, odor, "p_kw_delta_score"))
-            _rate_panel(bottom, t, labels=(c == 0))
+            _rate_panel(bottom, t, labels=(c == 0), cohort=cohort)
             _p_text(bottom, "post FFH", _omnibus(omnibus, odor, "p_ffh_post_rate"))
             cs = _is_cs(odor, trained_odor)
-            top.set_title(odor + ("  (CS+)" if cs else ""), loc="left", fontsize=9.5,
+            top.set_title(odor_text(odor, cohort, concentrations)
+                          + (f"  ({phase_terms.odor_tag(cohort)})" if cs else ""),
+                          loc="left", fontsize=9.5,
                           color=INK, fontweight="bold" if cs else "normal")
             for ax in (top, bottom):
                 _hour_axis(ax, hours)
@@ -192,10 +206,11 @@ def build_grid(table: pd.DataFrame, *, omnibus: pd.DataFrame | None, trained_odo
 
 
 def build_spotlight(table: pd.DataFrame, paired: pd.DataFrame, *, omnibus, trained_odor: str,
-                    title: str):
+                    title: str, cohorts: Sequence[str] = (), concentrations=None):
     odor = next((o for o in table["odor"].unique() if _is_cs(o, trained_odor)), None)
     if odor is None:
         return None
+    cohort = _phase_cohort(cohorts)
     t = table[table["odor"] == odor].sort_values("hours")
     hours = list(t["hours"])
     labels = [f"{h:g} h\nn={int(n)}" for h, n in zip(t["hours"], t["n_flies"])]
@@ -216,31 +231,39 @@ def build_spotlight(table: pd.DataFrame, paired: pd.DataFrame, *, omnibus, train
         left.set_title("PER score change per fly", loc="left", color=INK)
         _p_text(left, "Kruskal-Wallis", _omnibus(omnibus, odor, "p_kw_delta_score"))
 
-        _rate_panel(right, t)
+        _rate_panel(right, t, cohort=cohort)
         right.set_ylabel("PER response % (score ≥ 2)")
         right.set_title("Flies responding", loc="left", color=INK)
         right.legend(loc="upper right", frameon=False)
-        _p_text(right, "post-training FFH", _omnibus(omnibus, odor, "p_ffh_post_rate"))
+        post = phase_terms.post_label(cohort, "post-training", case="lower")
+        _p_text(right, f"{post} FFH", _omnibus(omnibus, odor, "p_ffh_post_rate"))
         for ax in (left, right):
             _hour_axis(ax, hours, labels=labels)
             ax.set_xlabel("Starvation (h)")
             _recessive_grid(ax)
-        fig.suptitle(f"{title} — {odor} (trained odor, CS+): effect of starvation",
+        fig.suptitle(f"{title} — {odor_text(odor, cohort, concentrations)} "
+                     f"({phase_terms.odor_tag(cohort, 'trained odor, CS+')}): "
+                     "effect of starvation",
                      x=0.01, ha="left", fontsize=10.5, color=INK)
         fig.tight_layout()
     return fig
 
 
 def build_emphasis(table: pd.DataFrame, *, omnibus: pd.DataFrame | None, trained_odor: str,
-                   title: str):
+                   title: str, cohorts: Sequence[str] = (), concentrations=None):
     """Every odor on one axis per measure; the trained odor inked, the rest gray.
 
     Left: change in PER score (CS+ with mean ± SEM). Right: change in % flies
     responding (post − pre, percentage points). Two measures, two panels.
     """
+    cohort = _phase_cohort(cohorts)
+    tag = phase_terms.odor_tag(cohort)
+    # "sensitized odor" on the same line would run into the right panel's axis.
+    end_sep = "\n" if phase_terms.is_sensitivity(cohort) else " "
     odors = sorted(table["odor"].unique(), key=str.casefold)
     hours = sorted(table["hours"].unique())
     cs = next((o for o in odors if _is_cs(o, trained_odor)), None)
+    cs_name = odor_text(cs, cohort, concentrations) if cs is not None else None
     n_labels = [f"{h:g} h\nn={int(table.loc[table['hours'] == h, 'n_flies'].max())}"
                 for h in hours]
 
@@ -267,7 +290,7 @@ def build_emphasis(table: pd.DataFrame, *, omnibus: pd.DataFrame | None, trained
                         zorder=4, **MARKER)
                 # Direct label at the line end; the gray lines share one label.
                 end = t.iloc[-1]
-                ax.annotate(f"{cs} (CS+)", (end["hours"], end[key]), xytext=(6, 0),
+                ax.annotate(f"{cs_name}{end_sep}({tag})", (end["hours"], end[key]), xytext=(6, 0),
                             textcoords="offset points", va="center", fontsize=8.5,
                             color=INK, fontweight="bold", annotation_clip=False)
             ax.set_ylabel(ylabel)
@@ -281,15 +304,17 @@ def build_emphasis(table: pd.DataFrame, *, omnibus: pd.DataFrame | None, trained
         right.set_ylim(-60, 60)
         right.set_yticks(range(-60, 61, 20))
         if cs is not None:
-            _p_text(left, f"{cs}: Kruskal-Wallis",
+            _p_text(left, f"{cs_name}: Kruskal-Wallis",
                     _omnibus(omnibus, cs, "p_kw_delta_score"))
         handles = [plt.Line2D([], [], color=EMPHASIS_COLOR, linewidth=LINE_W, marker="o",
-                              markerfacecolor=EMPHASIS_COLOR, label=f"{cs} (trained, CS+)"),
+                              markerfacecolor=EMPHASIS_COLOR,
+                              label=f"{cs_name} ({phase_terms.odor_tag(cohort, 'trained, CS+')})"),
                    plt.Line2D([], [], color=CONTEXT_COLOR, linewidth=1.2,
                               label=f"other {len(odors) - (cs is not None)} odors (untrained)")]
         right.legend(handles=handles, loc="upper right", frameon=False, fontsize=8)
         fig.suptitle(f"{title} — how starvation changes the effect of training\n"
-                     "CS+ shown as mean ± SEM; per-odor detail in starvation_trend_all_odors.png",
+                     f"{phase_terms.odor_tag(cohort, capital=True)} shown as mean ± SEM; "
+                     "per-odor detail in starvation_trend_all_odors.png",
                      x=0.01, ha="left", fontsize=10.5, color=INK)
         fig.tight_layout()
     return fig
@@ -303,6 +328,10 @@ def main(argv: Sequence[str] | None = None) -> list[Path]:
     p.add_argument("--trained-odor", default="Isoamyl Acetate")
     p.add_argument("--title", default="IAA sensitivity")
     p.add_argument("--binary-threshold", type=int, default=BINARY_THRESHOLD)
+    p.add_argument("--labels-csv", type=Path, default=PREDICTIONS_CSV,
+                   help="Predictions table with the trial labels as recorded: the concentrations "
+                        "in the odor names of a sensitivity figure. Default: the live table; "
+                        "'' draws the names without one.")
     args = p.parse_args(argv)
 
     src = args.comparison_dir
@@ -313,6 +342,10 @@ def main(argv: Sequence[str] | None = None) -> list[Path]:
     omnibus = pd.read_csv(omnibus_path) if omnibus_path.exists() else None
 
     table = trend_table(paired, binary_threshold=args.binary_threshold)
+    # The datasets drawn pick the phase wording, not --title.
+    cohorts = paired.get("dataset_canon", ())
+    # The folder's tables carry no concentration: the drawn flies' recorded labels do.
+    kw = dict(cohorts=cohorts, concentrations=odor_concentrations(args.labels_csv, flies=paired))
     written = []
     csv_path = out / "starvation_trend_table.csv"
     table.to_csv(csv_path, index=False)
@@ -320,12 +353,13 @@ def main(argv: Sequence[str] | None = None) -> list[Path]:
     for name, fig in (
         ("starvation_trend_emphasis.png",
          build_emphasis(table, omnibus=omnibus, trained_odor=args.trained_odor,
-                        title=args.title)),
+                        title=args.title, **kw)),
         ("starvation_trend_all_odors.png",
-         build_grid(table, omnibus=omnibus, trained_odor=args.trained_odor, title=args.title)),
+         build_grid(table, omnibus=omnibus, trained_odor=args.trained_odor, title=args.title,
+                    **kw)),
         ("starvation_trend_trained_odor.png",
          build_spotlight(table, paired, omnibus=omnibus, trained_odor=args.trained_odor,
-                         title=args.title)),
+                         title=args.title, **kw)),
     ):
         if fig is None:
             continue

@@ -53,7 +53,7 @@ import sys
 import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional, Sequence
+from typing import Iterable, Optional, Sequence
 
 import matplotlib
 
@@ -70,12 +70,14 @@ for _p in (str(ROOT), str(ROOT / "src")):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
+from scripts.analysis import phase_terms  # noqa: E402
 from scripts.analysis.corrected_stats import (  # noqa: E402
     bh_adjust,
     holm_adjust,
     score_test,
     wilson_ci,
 )
+from scripts.analysis.odor_conc_labels import with_conc  # noqa: E402
 from scripts.analysis.score_scale_figure import SCORE_COLORS  # noqa: E402
 
 LOGGER = logging.getLogger("training_auc_vs_control_response")
@@ -232,6 +234,27 @@ def parse_trial(label: object) -> tuple[int, str] | None:
     if not m:
         return None
     return int(m.group(1)), _CONC_SUFFIX_RE.sub("", m.group(2).strip().lower())
+
+
+def recorded_conc(labels: Iterable[object], token: str) -> Optional[str]:
+    """The vial concentration every ``token`` trial in ``labels`` records, else None.
+
+    ``"training_2_isoamylacetate-1"`` records ``"1"``. None when one of them
+    records none -- the batches before ~/odor_pins.txt did not -- or two
+    disagree, so a cohort mixing the spellings (IAA-Sensitivity-24-1) is never
+    labelled with a concentration only part of it recorded. Display only.
+    """
+    want = str(token).strip().lower()
+    found: set[Optional[str]] = set()
+    for value in labels:
+        m = _TRIAL_RE.match(str(value).strip())
+        if not m:
+            continue
+        raw = m.group(2).strip().lower()
+        if _CONC_SUFFIX_RE.sub("", raw) == want:
+            conc = _CONC_SUFFIX_RE.search(raw)
+            found.add(conc.group(0)[1:] if conc else None)
+    return found.pop() if len(found) == 1 else None
 
 
 def odor_short(token: str) -> str:
@@ -396,6 +419,7 @@ def build_fly_table(
     if not presentations:
         LOGGER.warning("%s: odor %r never presented at test", dataset, token)
         return pd.DataFrame()
+    conc = recorded_conc([*train["trial_label"], *test_cs["trial_label"]], token)
 
     train = _with_trial_number(train)
     train["AUC-During"] = pd.to_numeric(train["AUC-During"], errors="coerce")
@@ -468,6 +492,8 @@ def build_fly_table(
     summary.attrs["presentation_slots"] = slots
     summary.attrs["training_trials"] = training_trials
     summary.attrs["odor_short"] = odor_short(token)
+    # Display only (odor_text): the stats and CSVs keep the bare odor.
+    summary.attrs["odor_conc"] = conc
     return summary
 
 
@@ -487,6 +513,43 @@ def pooled_score_label(table: pd.DataFrame) -> str:
     short = table.attrs.get("odor_short", "Odor")
     idx = range(1, len(table.attrs["presentations"]) + 1)
     return f"{short} " + " & ".join(str(i) for i in idx) + " mean"
+
+
+def odor_text(table: pd.DataFrame, dataset: str, odor_label: str) -> str:
+    """``odor_label`` as drawn on this table's figures.
+
+    A *-Sensitivity-* cohort adds the concentration its trials recorded, as
+    ``<c>% (v/v)`` ("Isoamyl Acetate 1% (v/v)"), and none when they recorded
+    none. Every other cohort draws ``odor_label`` unchanged.
+    """
+    if not phase_terms.is_sensitivity(dataset):
+        return odor_label
+    return with_conc(odor_label, table.attrs.get("odor_conc"))
+
+
+def presentation_text(
+    table: pd.DataFrame, dataset: str, odor_label: str
+) -> dict[str, str]:
+    """Drawn text for the presentation labels above, keyed by the label.
+
+    The labels stay the stats keys. A *-Sensitivity-* cohort draws its odor in
+    full instead: there "IAA 1" read as IAA at 1 %, and "3Oct 1" as the wrong
+    concentration. Its panel presents each odor once, so a lone presentation
+    is just the odor; repeats are numbered "#1", "#2". Other cohorts get
+    ``{}``, i.e. every label drawn as it is.
+    """
+    if not phase_terms.is_sensitivity(dataset):
+        return {}
+    name = odor_text(table, dataset, odor_label)
+    labels = presentation_labels(table)
+    if len(labels) == 1:
+        # One presentation: pooled_per_label is that same label.
+        return {labels[0]: name, pooled_score_label(table): f"{name} mean"}
+    marks = [f"#{i}" for i in range(1, len(labels) + 1)]
+    shown = {label: f"{name} {mark}" for label, mark in zip(labels, marks)}
+    shown[pooled_per_label(table)] = f"{name} " + " or ".join(marks)
+    shown[pooled_score_label(table)] = f"{name} " + " & ".join(marks) + " mean"
+    return shown
 
 
 # --------------------------------------------------------------------------- #
@@ -1015,12 +1078,17 @@ def figure_simple_overview(
 
     presentations = list(table.attrs["presentations"])
     labels = presentation_labels(table)
+    shown = presentation_text(table, dataset, odor_label)
     auc = table["mean_auc"].to_numpy(dtype=float)
     bins = equal_count_bins(auc, n_bins)
     colours = bin_colors(n_bins)
     names = bin_names(n_bins)
     order = [b for b in range(n_bins) if (bins == b).any()]
     stats: list[dict] = []
+    # A *-Sensitivity-* cohort's test panel is post-exposure (phase_terms).
+    # That outruns these short axes, so its y-labels break onto a second line.
+    at_post = f"at {phase_terms.post_label(dataset, 'test', case='lower')}"
+    sep = "\n" if phase_terms.is_sensitivity(dataset) else " "
 
     with plt.rc_context(_RC):
         fig, axes = plt.subplots(
@@ -1084,7 +1152,8 @@ def figure_simple_overview(
             ax.set_xticklabels(ticks)
             ax.tick_params(axis="x", length=0, labelcolor=INK_SECONDARY)
             _style_axes(ax)
-            ax.set_title(label, fontsize=11, color=INK, weight="bold", pad=26)
+            ax.set_title(shown.get(label, label), fontsize=11, color=INK,
+                         weight="bold", pad=26)
             _verdict(
                 ax,
                 ("Higher training extension → more flies react"
@@ -1092,7 +1161,7 @@ def figure_simple_overview(
                 sig=sig,
             )
             if i == 0:
-                ax.set_ylabel("Flies that reacted at test (%)")
+                ax.set_ylabel(f"Flies that reacted{sep}{at_post} (%)")
 
             # ---- Row 2: how strongly they reacted ---------------------- #
             ax = axes[1][i]
@@ -1139,7 +1208,7 @@ def figure_simple_overview(
             )
             ax.set_xlabel("Training extension group\n(AUC-During, mean of all trials)")
             if i == 0:
-                ax.set_ylabel("Reaction score at test (−1 … 5)")
+                ax.set_ylabel(f"Reaction score{sep}{at_post} (−1 … 5)")
 
             stats.append({
                 "presentation": label,
@@ -1197,8 +1266,9 @@ def figure_simple_overview(
         )
         top = _suptitle(
             fig,
-            "Do flies that extend more during training react more at test?",
-            f"{dataset} {cohort_noun(dataset)} cohort, n = {len(table)} flies, {odor_label} throughout.  "
+            f"Do flies that extend more during training react more {at_post}?",
+            f"{dataset} {cohort_noun(dataset)} cohort, n = {len(table)} flies, "
+            f"{odor_text(table, dataset, odor_label)} throughout.  "
             f"Bars sort the flies into {len(order)} equal-sized groups by training "
             "extension; the bracket tests the trend over every fly individually "
             "(Spearman), not the end bars.\n"
@@ -1224,16 +1294,21 @@ def figure_trial_predictors(
     mat = trial_correlation_matrix(table)
     labels = presentation_labels(table)
     label = labels[presentation_index]
+    drawn = presentation_text(table, dataset, odor_label).get(label, label)
     trial = int(table.attrs["presentations"][presentation_index])
     trials = list(table.attrs["training_trials"])
     rows = [f"Train {t}" for t in trials] + ["Mean"]
     bar_labels = [str(t) for t in trials] + ["Mean"]
+    # A *-Sensitivity-* cohort's test panel is post-exposure (phase_terms);
+    # "the Hex 1 test" names a trial, so that wording needs its noun.
+    post = phase_terms.post_label(dataset, "test", case="lower")
+    target = f"{post} response" if phase_terms.is_sensitivity(dataset) else post
 
     kinds = [k for k in ("PER", "Score", "AUC") if (label, k) in mat.rho.columns]
     titles = {
         "PER": "Predicts WHETHER the fly reacts",
         "Score": "Predicts HOW STRONGLY it reacts",
-        "AUC": "Predicts the size of the test response",
+        "AUC": f"Predicts the size of the {post} response",
     }
     panels: list[dict] = []
 
@@ -1295,9 +1370,9 @@ def figure_trial_predictors(
 
         top = _suptitle(
             fig,
-            f"Which training trial predicts the {label} test? — {dataset}",
+            f"Which training trial predicts the {drawn} {target}? — {dataset}",
             f"Each bar is one conditioning trial's proboscis extension (AUC-During) "
-            f"against the {label} test outcome, n = {len(table)} {cohort_noun(dataset)} flies.\n"
+            f"against the {drawn} {post} outcome, n = {len(table)} {cohort_noun(dataset)} flies.\n"
             "Taller bar = better prediction.   "
             "* p < 0.05    ** p < 0.01    *** p < 0.001    n.s. = not significant.",
         )
@@ -1325,10 +1400,13 @@ def figure_per(
     labels = presentation_labels(table)
     columns = [(lab, f"per_{t}") for lab, t in zip(labels, presentations)]
     columns.append((pooled_per_label(table), "per_any"))
+    shown = presentation_text(table, dataset, odor_label)
 
     auc = table["mean_auc"].to_numpy(dtype=float)
     raw_p: list[float] = []
     stats: list[dict] = []
+    # A *-Sensitivity-* cohort's test panel is post-exposure (phase_terms).
+    at_post = f"at {phase_terms.post_label(dataset, 'test', case='lower')}"
 
     with plt.rc_context(_RC):
         fig, axes = plt.subplots(
@@ -1357,7 +1435,8 @@ def figure_per(
             )
             ax.tick_params(axis="x", length=0, labelcolor=INK_SECONDARY)
             _style_axes(ax)
-            ax.set_title(label, fontsize=10, color=INK, weight="bold", pad=21)
+            ax.set_title(shown.get(label, label), fontsize=10, color=INK,
+                         weight="bold", pad=21)
             if i == 0:
                 ax.set_ylabel("Training AUC-During (mean)")
             delta = f"δ = {test.delta:+.2f}" if np.isfinite(test.delta) else "δ n/a"
@@ -1375,7 +1454,10 @@ def figure_per(
                     )
                 ]
                 if same:
-                    note = f"same flies as {same[0]} — every other responder also reacted here"
+                    note = (
+                        f"same flies as {shown.get(same[0], same[0])} — every "
+                        "other responder also reacted here"
+                    )
                     ax.text(
                         0.5, 1.02, note, transform=ax.transAxes, ha="center",
                         va="bottom", fontsize=7.5, color=MUTED,
@@ -1410,7 +1492,7 @@ def figure_per(
             _style_axes(ax)
             ax.set_xlabel(_auc_label(table))
             if i == 0:
-                ax.set_ylabel("P(PER at test)")
+                ax.set_ylabel(f"P(PER {at_post})")
             or_txt = (
                 f"OR / 100 AUC = {fit.odds_ratio_100:.2f}"
                 if np.isfinite(fit.odds_ratio_100) and fit.odds_ratio_100 < 1e6
@@ -1473,10 +1555,10 @@ def figure_per(
         handles = [
             plt.Line2D([], [], marker="o", linestyle="", markersize=6,
                        markerfacecolor=NO_PER_COLOR, markeredgecolor=SURFACE,
-                       label="no PER at test"),
+                       label=f"no PER {at_post}"),
             plt.Line2D([], [], marker="o", linestyle="", markersize=6,
                        markerfacecolor=PER_COLOR, markeredgecolor=SURFACE,
-                       label="PER at test"),
+                       label=f"PER {at_post}"),
             plt.Line2D([], [], marker="s", linestyle="", markersize=6,
                        markerfacecolor=SURFACE, markeredgecolor=INK,
                        markeredgewidth=1.4,
@@ -1490,8 +1572,8 @@ def figure_per(
         top = _suptitle(
             fig,
             f"Conditioning vigor vs whether the fly reacts — {dataset}",
-            f"{protocol_line(dataset, odor_label)}  Each dot is one fly "
-            f"(n = {len(table)}); bar = median, spine = IQR.",
+            f"{protocol_line(dataset, odor_text(table, dataset, odor_label))}  "
+            f"Each dot is one fly (n = {len(table)}); bar = median, spine = IQR.",
         )
         fig.tight_layout(rect=(0, 0.045, 1, top))
     return fig, stats
@@ -1510,10 +1592,13 @@ def figure_score(
     labels = presentation_labels(table)
     columns = [(lab, f"score_{t}") for lab, t in zip(labels, presentations)]
     columns.append((pooled_score_label(table), "mean_score"))
+    shown = presentation_text(table, dataset, odor_label)
 
     auc = table["mean_auc"].to_numpy(dtype=float)
     raw_p: list[float] = []
     stats: list[dict] = []
+    # A *-Sensitivity-* cohort's test panel is post-exposure (phase_terms).
+    post = phase_terms.post_label(dataset, "Testing")
 
     with plt.rc_context(_RC):
         fig, axes = plt.subplots(
@@ -1529,10 +1614,11 @@ def figure_score(
             raw_p.append(p)
             _score_axis(ax)
             _style_axes(ax)
-            ax.set_title(label, fontsize=10, color=INK, weight="bold", pad=8)
+            ax.set_title(shown.get(label, label), fontsize=10, color=INK,
+                         weight="bold", pad=8)
             ax.set_xlabel(_auc_label(table))
             if i == 0:
-                ax.set_ylabel("Testing score (−1 … 5)")
+                ax.set_ylabel(f"{post} score (−1 … 5)")
             # Lower right: a rising fit leaves the top-left occupied, and at
             # score 5 the annotation sat on top of a fly.
             _annotate(ax, f"Spearman ρ = {rho:+.2f}\n{_p_text(p)}\nn = {n}",
@@ -1569,7 +1655,7 @@ def figure_score(
             _style_axes(ax)
             ax.set_xlabel("Training AUC-During bin (equal count)")
             if i == 0:
-                ax.set_ylabel("Testing score (−1 … 5)")
+                ax.set_ylabel(f"{post} score (−1 … 5)")
 
             stats.append({
                 "column": label,
@@ -1615,8 +1701,8 @@ def figure_score(
         top = _suptitle(
             fig,
             f"Conditioning vigor vs how strongly the fly reacts — {dataset}",
-            f"{protocol_line(dataset, odor_label)}  Each dot is one fly "
-            f"(n = {len(table)}).",
+            f"{protocol_line(dataset, odor_text(table, dataset, odor_label))}  "
+            f"Each dot is one fly (n = {len(table)}).",
         )
         fig.tight_layout(rect=(0, 0.045, 1, top))
     return fig, stats
@@ -1689,10 +1775,11 @@ def figure_trial_matrix(
         seen: dict[str, list[int]] = {}
         for idx, (pres, _kind) in enumerate(rho.columns):
             seen.setdefault(pres, []).append(idx)
+        shown = presentation_text(table, dataset, odor_label)
         for pres, idxs in seen.items():
             ax.text(
-                float(np.mean(idxs)), -0.82, pres, ha="center", va="bottom",
-                fontsize=9.5, weight="bold", color=INK,
+                float(np.mean(idxs)), -0.82, shown.get(pres, pres), ha="center",
+                va="bottom", fontsize=9.5, weight="bold", color=INK,
             )
             if max(idxs) + 1 < n_cols:
                 ax.axvline(max(idxs) + 0.5, color=SURFACE, linewidth=6, zorder=5)
@@ -1707,7 +1794,8 @@ def figure_trial_matrix(
 
         top = _suptitle(
             fig,
-            f"Which conditioning trial predicts the test response? — {dataset}",
+            "Which conditioning trial predicts the "
+            f"{phase_terms.post_label(dataset, 'test', case='lower')} response? — {dataset}",
             f"Spearman ρ, {len(table)} {cohort_noun(dataset)} flies.  "
             "* raw p < 0.05  ·  ** Benjamini-Hochberg q < 0.05 across the grid.  "
             "PER is binary, so its ρ is the rank-biserial correlation.",
@@ -1747,6 +1835,7 @@ def figure_trial_profile(
     mat = trial_correlation_matrix(table)
     trials = list(table.attrs["training_trials"])
     labels = presentation_labels(table)
+    shown = presentation_text(table, dataset, odor_label)
     kinds = [k for k in ("AUC", "Score", "PER")
              if any(c[1] == k for c in mat.rho.columns)]
     # Categorical slots 1..2 — identity is the presentation, never its rank.
@@ -1758,6 +1847,8 @@ def figure_trial_profile(
 
     rows = [f"Train {t}" for t in trials]
     payload: list[dict] = []
+    # A *-Sensitivity-* cohort's test panel is post-exposure (phase_terms).
+    post = phase_terms.post_label(dataset, "Testing")
     # The pooled predictor gets its own x slot rather than a horizontal rule
     # averaged over presentations -- averaging two rho values is not a rho.
     mean_x = max(trials) + 1.4
@@ -1816,7 +1907,11 @@ def figure_trial_profile(
                     endpoints.append((label, mean_rho))
 
             # Direct labels, nudged apart when two series land on top of
-            # each other -- otherwise "Hex 1" and "Hex 2" overprint.
+            # each other -- otherwise "Hex 1" and "Hex 2" overprint. A
+            # sensitivity cohort's full "<odor> <c>% (v/v)" would run into
+            # the next panel, so there the legend alone names each series.
+            if phase_terms.is_sensitivity(dataset):
+                endpoints = []
             endpoints.sort(key=lambda e: e[1])
             placed: list[float] = []
             gap = 0.085 * (1.05 - y_lo)
@@ -1839,8 +1934,8 @@ def figure_trial_profile(
             _style_axes(ax)
             ax.tick_params(axis="x", labelcolor=INK_SECONDARY)
             ax.set_title(
-                {"AUC": "Testing AUC-During", "Score": "Testing score (−1…5)",
-                 "PER": "Testing PER (0/1)"}[kind],
+                {"AUC": f"{post} AUC-During", "Score": f"{post} score (−1…5)",
+                 "PER": f"{post} PER (0/1)"}[kind],
                 fontsize=10, color=INK, weight="bold", pad=8,
             )
             ax.set_xlabel("Conditioning trial")
@@ -1850,7 +1945,7 @@ def figure_trial_profile(
 
         handles = [
             plt.Line2D([], [], color=series_colors[l], marker="o", markersize=5.5,
-                       markeredgecolor=SURFACE, linewidth=1.6, label=l)
+                       markeredgecolor=SURFACE, linewidth=1.6, label=shown.get(l, l))
             for l in labels
         ] + [
             plt.Line2D([], [], marker="o", linestyle="", markersize=9,
@@ -1867,8 +1962,10 @@ def figure_trial_profile(
         top = _suptitle(
             fig,
             f"Does the prediction build across conditioning? — {dataset}",
-            f"Spearman ρ between a single conditioning trial's AUC and each testing "
-            f"outcome, {len(table)} {cohort_noun(dataset)} flies, {odor_label} throughout.",
+            "Spearman ρ between a single conditioning trial's AUC and each "
+            f"{phase_terms.post_label(dataset, 'testing', case='lower')} "
+            f"outcome, {len(table)} {cohort_noun(dataset)} flies, "
+            f"{odor_text(table, dataset, odor_label)} throughout.",
         )
         fig.tight_layout(rect=(0, 0.075, 1, top))
     return fig, payload

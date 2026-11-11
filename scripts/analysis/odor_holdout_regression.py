@@ -48,6 +48,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from scripts.analysis import phase_terms  # noqa: E402
 from scripts.analysis.starvation_trend_figure import hours_from_label  # noqa: E402
 
 PHASES = ("pre", "post")
@@ -346,8 +347,27 @@ def _diverging_cmap():
     return LinearSegmentedColormap.from_list("q2", DIVERGING)
 
 
-def _target_label(odor: str, phase: str) -> str:
-    return f"{odor} — {'pre-test' if phase == 'pre' else 'post-training'}"
+def wording_cohort(cohorts: Iterable[str]) -> str | None:
+    """The cohort the figures are worded for: one of ``cohorts`` when every one
+    is a *-Sensitivity-* cohort (pre-/post-exposure), else None (pre-test /
+    post-training). A mix keeps the old words."""
+    names = sorted({str(c) for c in cohorts})
+    return names[0] if phase_terms.all_sensitivity(names) else None
+
+
+def comparison_cohorts(comparison_dir: Path) -> list[str]:
+    """The datasets in a comparison folder's paired_scores_per_fly.csv ([] without one)."""
+    path = Path(comparison_dir) / "paired_scores_per_fly.csv"
+    if not path.is_file():
+        return []
+    d = pd.read_csv(path)
+    return sorted(d["dataset_canon"].astype(str).unique()) if "dataset_canon" in d else []
+
+
+def _target_label(odor: str, phase: str, cohort: str | None = None) -> str:
+    name = (phase_terms.pre_label(cohort, "pre-test", case="lower") if phase == "pre"
+            else phase_terms.post_label(cohort, "post-training", case="lower"))
+    return f"{odor} — {name}"
 
 
 def figure_overview(l1, l2, l3, out: Path, trained_odor: str) -> Path:
@@ -417,11 +437,12 @@ def figure_overview(l1, l2, l3, out: Path, trained_odor: str) -> Path:
     return path
 
 
-def figure_level1_heatmap(l1, out: Path, trained_odor: str) -> Path:
+def figure_level1_heatmap(l1, out: Path, trained_odor: str, *, cohorts: Sequence[str] = ()) -> Path:
     import matplotlib.pyplot as plt
 
     from scripts.analysis.pretest_vs_test_comparison import INK, _RC_CONTEXT
 
+    cohort = wording_cohort(cohorts)
     groups = list(l1.sort_values("hours")["group"].unique())
     odors = sorted(l1["odor"].unique(), key=str.casefold)
     rows = [(o, p) for o in odors for p in PHASES]
@@ -455,7 +476,7 @@ def figure_level1_heatmap(l1, out: Path, trained_odor: str) -> Path:
             for spine in ax.spines.values():
                 spine.set_visible(False)
         axes[0].set_yticks(range(len(rows)))
-        labels = axes[0].set_yticklabels([_target_label(o, p) for o, p in rows], fontsize=8)
+        labels = axes[0].set_yticklabels([_target_label(o, p, cohort) for o, p in rows], fontsize=8)
         for lab, (o, _p) in zip(labels, rows):
             if trained_odor and o.casefold().startswith(trained_odor.casefold()):
                 lab.set_fontweight("bold")
@@ -474,7 +495,8 @@ def figure_level1_heatmap(l1, out: Path, trained_odor: str) -> Path:
     return path
 
 
-def figure_coefficients(coefs: pd.DataFrame, out: Path, trained_odor: str) -> Path:
+def figure_coefficients(coefs: pd.DataFrame, out: Path, trained_odor: str, *,
+                        cohorts: Sequence[str] = ()) -> Path:
     import matplotlib.pyplot as plt
 
     from scripts.analysis.pretest_vs_test_comparison import INK, _RC_CONTEXT
@@ -485,7 +507,8 @@ def figure_coefficients(coefs: pd.DataFrame, out: Path, trained_odor: str) -> Pa
     for _, r in coefs.iterrows():
         mat[targets.index(r["target"]), feats.index(r["feature"])] = r["coef"]
     v = float(np.nanmax(np.abs(mat))) or 1.0
-    label = [_target_label(*t.split("|")) for t in targets]
+    cohort = wording_cohort(cohorts)
+    label = [_target_label(*t.split("|"), cohort) for t in targets]
     with plt.rc_context(_RC_CONTEXT):
         fig, ax = plt.subplots(figsize=(10.5, 8.2))
         im = ax.imshow(mat, cmap=_diverging_cmap(), vmin=-v, vmax=v, aspect="auto")
@@ -540,22 +563,27 @@ def run_all(paired: pd.DataFrame, *, out_dir: Path, n_perm: int = 200, n_perm_po
     written += [out_dir / "input_fly_matrix.csv", out_dir / "input_batch_table.csv",
                 out_dir / "relationships_ridge_coefficients.csv"]
     if figures:
+        cohorts = paired["dataset_canon"].unique() if "dataset_canon" in paired else ()
         written.append(figure_overview(l1, l2, l3, out_dir, trained_odor))
-        written.append(figure_level1_heatmap(l1, out_dir, trained_odor))
-        written.append(figure_coefficients(coefs, out_dir, trained_odor))
+        written.append(figure_level1_heatmap(l1, out_dir, trained_odor, cohorts=cohorts))
+        written.append(figure_coefficients(coefs, out_dir, trained_odor, cohorts=cohorts))
     return written
 
 
-def figures_from_csv(out_dir: Path, *, trained_odor: str = "Isoamyl Acetate") -> list[Path]:
-    """Redraw the figures from the tables ``run_all`` saved; no refitting."""
+def figures_from_csv(out_dir: Path, *, trained_odor: str = "Isoamyl Acetate",
+                     cohorts: Sequence[str] = ()) -> list[Path]:
+    """Redraw the figures from the tables ``run_all`` saved; no refitting.
+
+    The tables don't name the datasets; ``cohorts`` (see :func:`comparison_cohorts`)
+    sets the pre/post wording."""
     out_dir = Path(out_dir)
     l1 = pd.read_csv(out_dir / "level1_individual_within_starvation.csv")
     l2 = pd.read_csv(out_dir / "level2_individual_pooled.csv")
     l3 = pd.read_csv(out_dir / "level3_population_batches.csv")
     coefs = pd.read_csv(out_dir / "relationships_ridge_coefficients.csv")
     return [figure_overview(l1, l2, l3, out_dir, trained_odor),
-            figure_level1_heatmap(l1, out_dir, trained_odor),
-            figure_coefficients(coefs, out_dir, trained_odor)]
+            figure_level1_heatmap(l1, out_dir, trained_odor, cohorts=cohorts),
+            figure_coefficients(coefs, out_dir, trained_odor, cohorts=cohorts)]
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -573,7 +601,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = ap.parse_args(argv)
     out = args.out_dir or args.comparison_dir.parent / "odor_holdout_regression"
     if args.figures_only:
-        for p in figures_from_csv(out, trained_odor=args.trained_odor):
+        for p in figures_from_csv(out, trained_odor=args.trained_odor,
+                                  cohorts=comparison_cohorts(args.comparison_dir)):
             print(f"[OK] {p}")
         return 0
     paired = pd.read_csv(args.comparison_dir / "paired_scores_per_fly.csv")

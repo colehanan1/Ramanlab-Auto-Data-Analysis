@@ -58,6 +58,7 @@ from fbpipe.odor_constants import (
 from fbpipe.plot_style import apply_lab_style
 from fbpipe.utils.tables import read_table
 from scripts.analysis import odor_bar_palette
+from scripts.analysis import phase_terms
 from scripts.analysis.per_axis_labels import PERCENT_Y_LABEL
 
 apply_lab_style()
@@ -589,8 +590,11 @@ def _trained_label(dataset_canon: str) -> str:
     # *-Sensitivity-* cohort fell through to the dataset NAME, so no CS+ odor
     # could be identified: no tick was bolded and the trained-odor figures
     # silently did not render.
+    # The optional middle token is the rig's ``experiment.cohort`` infix
+    # ("IAA-Odor10s-Training-24-1", "Hex-HexTest-Training-32-1"); without it
+    # those cohorts fell through to the dataset name the same way.
     m = re.match(
-        r"^([A-Za-z0-9]+)[-_](?:Training|Control|Sensitivity)",
+        r"^([A-Za-z0-9]+)[-_](?:[A-Za-z0-9]+[-_])?(?:Training|Control|Sensitivity)",
         dataset_canon,
         re.IGNORECASE,
     )
@@ -630,6 +634,11 @@ _DISPLAY_LABEL_LOWER.update({
     "citral": "Citral",
     "linalool": "Linalool",
     "lightonly": "Optogenetic Light Control",
+    # P = paraffin oil, the master valve alone (2026-11-04): the rig label
+    # "ParaffinOil" and the dataset prefix "Paraffin-Sensitivity-*" must name the
+    # same odor, or that cohort's sensitized odor never matches its trials.
+    "paraffinoil": "Paraffin Oil",
+    "paraffin": "Paraffin Oil",
 })
 
 
@@ -2312,9 +2321,37 @@ SUPPORTED_TRIAL_TYPES = frozenset({"testing", "training", "pretest"})
 _PHASE_LABELS = {"training": "Training", "testing": "Testing", "pretest": "Pre-Test"}
 
 
-def _phase_label(trial_type: str) -> str:
-    """Title-case phase name for the figure heading."""
-    return _PHASE_LABELS.get(str(trial_type).strip().lower(), "Testing")
+def _phase_label(trial_type: str, cohort: str | None = None) -> str:
+    """Title-case phase name for the figure heading.
+
+    For a ``*-Sensitivity-*`` ``cohort`` the two panels are Pre-Exposure
+    and Post-Exposure: nothing is paired with its odor.
+    """
+    phase = str(trial_type).strip().lower()
+    label = _PHASE_LABELS.get(phase, "Testing")
+    if phase == "pretest":
+        return phase_terms.pre_label(cohort, label, case="title")
+    if phase == "testing":
+        return phase_terms.post_label(cohort, label, case="title")
+    return label
+
+
+def _panel_odor_label(dataset_canon: str, odor_name: str, *, trained: bool = False) -> str:
+    """Drawn odor name for one trace panel; ``odor_name`` stays the matching key.
+
+    A ``*-Sensitivity-*`` cohort's odor reads ``"Linalool 1% (v/v)"``, not the
+    raw pins token (``"linalool-1"``). Every other cohort's label is drawn as
+    resolved. ``trained`` upper-cases the name, but not its unit.
+    """
+    text = str(odor_name)
+    if phase_terms.is_sensitivity(dataset_canon):
+        # Imported here: odor_conc_labels imports this module.
+        from scripts.analysis.odor_conc_labels import odor_conc_label
+
+        text = odor_conc_label(text)
+    if trained:
+        text = text.upper().replace("% (V/V)", "% (v/v)")
+    return text
 
 
 def generate_envelope_plots(cfg: EnvelopePlotConfig) -> None:
@@ -2786,12 +2823,13 @@ def generate_envelope_plots(cfg: EnvelopePlotConfig) -> None:
             )
             panel_title_y = float(cfg.panel_title_y)
             panel_title_va = str(cfg.panel_title_va)
+            panel_odor = _panel_odor_label(dataset_canon, odor_name, trained=is_trained)
 
             if is_trained:
                 ax.text(
                     float(cfg.panel_title_x),
                     panel_title_y,
-                    odor_name.upper(),
+                    panel_odor,
                     transform=panel_title_transform,
                     ha="left",
                     va=panel_title_va,
@@ -2804,7 +2842,7 @@ def generate_envelope_plots(cfg: EnvelopePlotConfig) -> None:
                 ax.text(
                     float(cfg.panel_title_x),
                     panel_title_y,
-                    odor_name,
+                    panel_odor,
                     transform=panel_title_transform,
                     ha="left",
                     va=panel_title_va,
@@ -2978,7 +3016,16 @@ def generate_envelope_plots(cfg: EnvelopePlotConfig) -> None:
             if cfg.figure_subtitle_y is not None
             else title_y - 0.035
         )
-        phase_label = _phase_label(trial_type)
+        # Named by the fly's cohort; rows spanning datasets keep the old
+        # wording unless every one is a sensitivity cohort.
+        phase_label = _phase_label(
+            trial_type,
+            cohort=(
+                dataset_candidates[0]
+                if phase_terms.all_sensitivity(dataset_candidates)
+                else None
+            ),
+        )
         if cfg.show_figure_title:
             fig.text(
                 float(cfg.figure_title_x),

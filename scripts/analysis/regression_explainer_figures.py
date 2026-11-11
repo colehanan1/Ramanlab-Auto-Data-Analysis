@@ -48,6 +48,7 @@ for _p in (REPO_ROOT, REPO_ROOT / "src"):
         sys.path.insert(0, str(_p))
 
 import scripts.analysis.odor_holdout_regression as ohr  # noqa: E402
+from scripts.analysis import phase_terms  # noqa: E402
 from scripts.analysis.pretest_vs_test_comparison import (  # noqa: E402
     INK,
     INK_MUTED,
@@ -74,6 +75,18 @@ def pct(q: float) -> str:
     return f"{round(100 * q) + 0:.0f}%"
 
 
+def _phase_names(cohort: str | None) -> tuple[str, str]:
+    """("pre-test", "post-training"), or pre-/post-exposure for a sensitivity cohort."""
+    return (phase_terms.pre_label(cohort, "pre-test", case="lower"),
+            phase_terms.post_label(cohort, "post-training", case="lower"))
+
+
+def _example_phase(phase: str, cohort: str | None) -> str:
+    """The worked example's phase as its text names it: "pre-test" / "post-test"."""
+    label = phase_terms.pre_label if phase == "pre" else phase_terms.post_label
+    return label(cohort, f"{phase}-test", case="lower")
+
+
 # ── data ─────────────────────────────────────────────────────────────────
 
 
@@ -84,6 +97,15 @@ def load(reg_dir: Path):
     l2 = pd.read_csv(reg_dir / "level2_individual_pooled.csv")
     l3 = pd.read_csv(reg_dir / "level3_population_batches.csv")
     return m, l1, l2, l3
+
+
+def regression_cohorts(reg_dir: Path) -> list[str]:
+    """The datasets behind a regression folder. Its tables don't name them, so they
+    come from the comparison it was fitted on: odor_holdout_regression writes to
+    <comparison-dir>/../odor_holdout_regression, a sibling. [] when none is found."""
+    parent = Path(reg_dir).resolve().parent
+    return sorted({c for p in parent.glob("*/paired_scores_per_fly.csv")
+                   for c in ohr.comparison_cohorts(p.parent)})
 
 
 def _sel(d: pd.DataFrame, *, model="Ridge", variant="odors", scheme="leave-one-batch-out"):
@@ -181,8 +203,9 @@ def _worse_zone(ax, lo):
     ax.axvline(0, color=INK_MUTED, linewidth=1.0, zorder=1)
 
 
-def fig_how_it_works(m: pd.DataFrame, ex: Example):
+def fig_how_it_works(m: pd.DataFrame, ex: Example, *, cohorts: Sequence[str] = ()):
     """Q1: one real target, start to finish."""
+    phase = _example_phase(ex.phase, ohr.wording_cohort(cohorts))
     cols = ohr.score_columns(m)
     order = np.argsort(ex.table["actual"].to_numpy(), kind="stable")
     pick = order[np.linspace(0, len(order) - 1, min(8, len(order))).round().astype(int)]
@@ -222,7 +245,7 @@ def fig_how_it_works(m: pd.DataFrame, ex: Example):
         for sp in a.spines.values():
             sp.set_visible(False)
         a.set_title(f"Step 1 — hide one odor. Each row is a fly (8 of {len(m)} shown); each number is a PER score.\n"
-                    f"The model sees the 12 coloured columns and must guess the '?' ({ex.odor}, {ex.phase}-test). "
+                    f"The model sees the 12 coloured columns and must guess the '?' ({ex.odor}, {phase}). "
                     f"Both {ex.odor} columns are hidden.",
                     loc="left", fontsize=9.5, color=INK, pad=62)
 
@@ -264,7 +287,7 @@ def fig_how_it_works(m: pd.DataFrame, ex: Example):
             c.spines[sp].set_visible(False)
         c.tick_params(axis="y", length=0)
         answer = (f"Hide one odor, guess it from the fly's other odors, compare with just guessing the average. "
-                  f"For {ex.odor} ({ex.phase}-test) the guess removes {pct(ex.q2)} of the squared error — "
+                  f"For {ex.odor} ({phase}) the guess removes {pct(ex.q2)} of the squared error — "
                   "that percentage is the 'Q²' (prediction skill) in every other figure. "
                   "The same thing is repeated for every odor, pre and post.")
         _finish(fig, "How does the hold-one-odor-out regression work?", answer)
@@ -296,8 +319,9 @@ def fig_is_it_luck(ex: Example, null: np.ndarray):
     return fig
 
 
-def fig_skill_by_odor(skill: pd.DataFrame):
+def fig_skill_by_odor(skill: pd.DataFrame, *, cohorts: Sequence[str] = ()):
     """Q3: how predictable is each odor, for a single fly and for a batch average?"""
+    cohort = ohr.wording_cohort(cohorts)
     odors = sorted(skill["odor"].unique(), key=str.casefold)[::-1]
     lo = max(CLIP, float(np.floor(100 * skill["q2"].min() / 10) * 10) - 5)
     hi = max(40.0, float(np.ceil(100 * skill["q2"].max() / 10) * 10) + 5)
@@ -324,9 +348,11 @@ def fig_skill_by_odor(skill: pd.DataFrame):
         axes[0].set_yticks(range(len(odors)))
         axes[0].set_yticklabels(odors)
         handles = [plt.Line2D([], [], linestyle="", marker="o", color=PRE_COLOR, markersize=8,
-                              label=PHASE_STYLE["pre"]["label"]),
+                              label=phase_terms.pre_label(cohort, PHASE_STYLE["pre"]["label"],
+                                                          case="lower")),
                    plt.Line2D([], [], linestyle="", marker="s", color=POST_COLOR, markersize=8,
-                              label=PHASE_STYLE["post"]["label"]),
+                              label=phase_terms.post_label(cohort, PHASE_STYLE["post"]["label"],
+                                                           case="lower")),
                    plt.Line2D([], [], linestyle="", marker="o", color=INK, markersize=8,
                               label="filled = p<0.05 (not luck)"),
                    plt.Line2D([], [], linestyle="", marker="o", markerfacecolor="white",
@@ -345,8 +371,9 @@ def fig_skill_by_odor(skill: pd.DataFrame):
     return fig
 
 
-def fig_within_group(l1: pd.DataFrame):
+def fig_within_group(l1: pd.DataFrame, *, cohorts: Sequence[str] = ()):
     """Q4: inside one starvation group the model is starved of data."""
+    pre, post = _phase_names(ohr.wording_cohort(cohorts))
     s = _sel(l1, scheme=None)
     groups = sorted(s["group"].unique(), key=hours_from_label)
     rng = np.random.default_rng(0)
@@ -374,21 +401,22 @@ def fig_within_group(l1: pd.DataFrame):
         ax.text(len(groups) - 0.5, CLIP + 3, "worse than guessing the group's average "
                 f"(values below {CLIP:.0f}% drawn at {CLIP:.0f}%)", ha="right", va="bottom",
                 fontsize=7.5, color=INK_MUTED)
-        handles = [plt.Line2D([], [], linestyle="", marker="o", color=PRE_COLOR, label="pre-test odor"),
-                   plt.Line2D([], [], linestyle="", marker="s", color=POST_COLOR, label="post-training odor"),
+        handles = [plt.Line2D([], [], linestyle="", marker="o", color=PRE_COLOR, label=f"{pre} odor"),
+                   plt.Line2D([], [], linestyle="", marker="s", color=POST_COLOR, label=f"{post} odor"),
                    plt.Line2D([], [], color=INK, linewidth=2.5, label="median")]
         ax.legend(handles=handles, loc="upper left", bbox_to_anchor=(1.0, 1.0), frameon=False)
         _recessive_grid(ax)
         n_lo, n_hi = int(s.groupby("group")["n"].max().min()), int(s.groupby("group")["n"].max().max())
-        answer = (f"Mostly not: the median skill is {min(meds):.0f}% to {max(meds):.0f}% across groups. "
-                  f"With only {n_lo}–{n_hi} flies per group the model can't learn the pattern reliably, so it guesses "
-                  "worse than the group average. Pooling all groups (fig 03) gives it enough flies.")
+        answer = (f"Mostly not: the median skill is {min(meds):.0f}% to {max(meds):.0f}% across groups "
+                  f"({n_lo}–{n_hi} flies each). Inside one group the model rarely beats that group's own "
+                  "average; pooling every group (fig 03) gives it more flies and more spread to learn from.")
         _finish(fig, "Does it work inside a single starvation group?", answer)
     return fig
 
 
-def fig_ridge_vs_lasso(coefs: pd.DataFrame, l1, l2, l3, ex: Example):
+def fig_ridge_vs_lasso(coefs: pd.DataFrame, l1, l2, l3, ex: Example, *, cohorts: Sequence[str] = ()):
     """Q5: the two methods, side by side."""
+    phase = _example_phase(ex.phase, ohr.wording_cohort(cohorts))
     c = coefs.sort_values("Ridge")
     labels = [f.replace("|", " ") for f in c["feature"]]
     key = ["level", "group", "odor", "phase", "target", "scheme"]
@@ -415,7 +443,7 @@ def fig_ridge_vs_lasso(coefs: pd.DataFrame, l1, l2, l3, ex: Example):
                                 color=INK_MUTED)
             ax.set_xlim(-lim, lim)
             ax.set_xlabel("Weight (standardised)")
-            ax.set_title(f"{name}: weight on each other odor\n(predicting {ex.odor} {ex.phase}-test, all flies)",
+            ax.set_title(f"{name}: weight on each other odor\n(predicting {ex.odor} {phase}, all flies)",
                          loc="left", fontsize=10, color=INK)
             _recessive_grid(ax)
         a.set_yticks(y)
@@ -447,8 +475,9 @@ def fig_ridge_vs_lasso(coefs: pd.DataFrame, l1, l2, l3, ex: Example):
     return fig
 
 
-def fig_odors_together(corr: pd.DataFrame):
+def fig_odors_together(corr: pd.DataFrame, *, cohorts: Sequence[str] = ()):
     """Q6: which odors does a fly respond to together (pre-test)?"""
+    pre = phase_terms.pre_label(ohr.wording_cohort(cohorts), "Pre-test")
     v = corr.to_numpy(float).copy()
     np.fill_diagonal(v, np.nan)
     vmax = max(0.5, float(np.nanmax(v)))
@@ -487,13 +516,14 @@ def fig_odors_together(corr: pd.DataFrame):
         sign = "positive" if np.nanmin(flat) > 0 else "mostly positive"
         answer = (f"Every pair is {sign} ({np.nanmin(flat):.2f} to {np.nanmax(flat):.2f}): a fly that responds "
                   f"to one odor tends to respond to the others. Strongest pair: {a_} and {b_}. "
-                  "This shared 'responsiveness' is what the regression picks up. Pre-test scores, every fly.")
+                  f"This shared 'responsiveness' is what the regression picks up. {pre} scores, every fly.")
         _finish(fig, "Which odors does a fly respond to together?", answer, tight=False)
     return fig
 
 
-def fig_starvation(l2: pd.DataFrame, l3: pd.DataFrame):
+def fig_starvation(l2: pd.DataFrame, l3: pd.DataFrame, *, cohorts: Sequence[str] = ()):
     """Q7: does knowing the starvation time help the prediction?"""
+    pre, post = _phase_names(ohr.wording_cohort(cohorts))
     variants = [("starvation only", "starvation time\nonly"), ("odors", "the other odors"),
                 ("odors + starvation", "other odors +\nstarvation time")]
     rng = np.random.default_rng(0)
@@ -523,8 +553,8 @@ def fig_starvation(l2: pd.DataFrame, l3: pd.DataFrame):
                                           for d in (l2, l3) for v, _l in variants])) - 5)
         axes[0].set_ylim(max(CLIP - 5, lo), max(60.0, axes[0].get_ylim()[1]))
         axes[0].set_ylabel("Prediction skill (Q², %)")
-        handles = [plt.Line2D([], [], linestyle="", marker="o", color=PRE_COLOR, label="pre-test odor"),
-                   plt.Line2D([], [], linestyle="", marker="s", color=POST_COLOR, label="post-training odor"),
+        handles = [plt.Line2D([], [], linestyle="", marker="o", color=PRE_COLOR, label=f"{pre} odor"),
+                   plt.Line2D([], [], linestyle="", marker="s", color=POST_COLOR, label=f"{post} odor"),
                    plt.Line2D([], [], color=INK, linewidth=2.5, label="median")]
         axes[1].legend(handles=handles, loc="upper right", frameon=False)
         f = "A single fly"
@@ -576,13 +606,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     odor, phase = args.example.split("|") if args.example else pick_example(l2)
     ex = worked_example(m, odor, phase)
     print(f"worked example: {odor} {phase}-test, Q2={ex.q2:.3f}")
-    figs = [("01_how_it_works.png", fig_how_it_works(m, ex)),
+    cohorts = regression_cohorts(args.regression_dir)
+    figs = [("01_how_it_works.png", fig_how_it_works(m, ex, cohorts=cohorts)),
             ("02_real_or_luck.png", fig_is_it_luck(ex, null_q2(m, odor, phase, n_perm=args.n_perm))),
-            ("03_how_predictable.png", fig_skill_by_odor(skill_table(l2, l3))),
-            ("04_within_one_group.png", fig_within_group(l1)),
-            ("05_ridge_vs_lasso.png", fig_ridge_vs_lasso(coefficients(m, odor, phase), l1, l2, l3, ex)),
-            ("06_odors_go_together.png", fig_odors_together(odor_correlations(m))),
-            ("07_starvation_time.png", fig_starvation(l2, l3))]
+            ("03_how_predictable.png", fig_skill_by_odor(skill_table(l2, l3), cohorts=cohorts)),
+            ("04_within_one_group.png", fig_within_group(l1, cohorts=cohorts)),
+            ("05_ridge_vs_lasso.png", fig_ridge_vs_lasso(coefficients(m, odor, phase), l1, l2, l3, ex,
+                                                         cohorts=cohorts)),
+            ("06_odors_go_together.png", fig_odors_together(odor_correlations(m), cohorts=cohorts)),
+            ("07_starvation_time.png", fig_starvation(l2, l3, cohorts=cohorts))]
     answers = [GLOSSARY]
     for name, fig in figs:
         with plt.rc_context(_RC_CONTEXT):

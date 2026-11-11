@@ -50,7 +50,9 @@ from scripts.analysis.envelope_visuals import (
     should_write,
 )
 from scripts.analysis import odor_bar_palette  # noqa: E402
+from scripts.analysis import phase_terms  # noqa: E402
 from scripts.analysis import significance_brackets  # noqa: E402
+from scripts.analysis.odor_conc_labels import odor_conc_label  # noqa: E402
 from scripts.analysis.per_axis_labels import SCORE_Y_LABEL  # noqa: E402
 
 _RC_CONTEXT = {
@@ -154,7 +156,7 @@ def _normalise_trial_label(label: str) -> str:
 
 
 def _load_scores(
-    csv_path: Path,
+    csv_path: "Path | pd.DataFrame",
     *,
     threshold: float | None = None,
     flagged_flies_csv: str = "",
@@ -167,9 +169,12 @@ def _load_scores(
     phase per call: the odor-occurrence numbering below groups by trial index
     within a fly, and ``pretest_1`` and ``testing_1`` share an index, so mixing
     the phases in one frame would merge them.
+
+    ``csv_path`` may also be an already-loaded predictions frame, for a caller
+    that has to relabel rows before odors are resolved; it is not modified.
     """
 
-    df = pd.read_csv(csv_path)
+    df = csv_path if isinstance(csv_path, pd.DataFrame) else pd.read_csv(csv_path)
     required = {"dataset", "fly", "fly_number", "trial_label", "score"}
     missing = required.difference(df.columns)
     if missing:
@@ -521,11 +526,26 @@ def _compute_training_vs_control_summary(df: pd.DataFrame) -> pd.DataFrame:
 # ---------------------------------------------------------------------------
 
 
+def _odor_text(odors: Sequence[object], sensitivity: bool) -> list[str]:
+    """Drawn odor names: ``<Odor> <c>% (v/v)`` on a sensitivity cohort's figure.
+
+    Display only: ``odor_col`` stays the key for grouping, colour and the
+    trained-odor match. Every other cohort's names are drawn as they are.
+    """
+    if not sensitivity:
+        return [str(o) for o in odors]
+    return [odor_conc_label(o) for o in odors]
+
+
 def _draw_score_matrix(
     fig, ax_m, cax, matrix: np.ndarray, n_col: int, x: np.ndarray,
     columns: Sequence[str], is_trained: pd.Series,
+    *, labels: Sequence[str] | None = None,
 ) -> None:
-    """Draw the per-fly score band + its discrete key."""
+    """Draw the per-fly score band + its discrete key.
+
+    ``labels`` is the drawn text for ``columns`` (default: the columns).
+    """
     cmap, norm = _score_cmap()
     n_fly = matrix.shape[0]
     ax_m.imshow(
@@ -555,7 +575,8 @@ def _draw_score_matrix(
     # Bold, not upper-cased: these ticks head the bar panel directly below, and
     # the two halves of one figure must say "trained" the same way.
     ax_lab.set_xticklabels(
-        [str(o) for o in columns], rotation=35, ha="right", fontsize=8,
+        [str(o) for o in (columns if labels is None else labels)],
+        rotation=35, ha="right", fontsize=8,
     )
     for tick, odor, t in zip(ax_lab.get_xticklabels(), columns, is_trained):
         if t:
@@ -626,6 +647,9 @@ def _plot_bar_charts(
             if is_v2 and "odor_col" in sub.columns
             else ["#b0b0b0"] * len(sub)
         )
+        odor_text = (
+            _odor_text(sub["odor_col"], phase_terms.is_sensitivity(odor)) if is_v2 else []
+        )
 
         matrix, fly_keys = (
             _per_fly_score_matrix(df, odor, sub["odor_col"].tolist())
@@ -656,7 +680,7 @@ def _plot_bar_charts(
                 cax = fig.add_subplot(gs[0, 2])
                 _draw_score_matrix(
                     fig, ax_m, cax, matrix, len(sub), x,
-                    sub["odor_col"].tolist(), is_trained,
+                    sub["odor_col"].tolist(), is_trained, labels=odor_text,
                 )
                 ax_m.set_title(f"Mean Ordinal Score - {label}", fontsize=13,
                                weight="bold", pad=10)
@@ -684,7 +708,7 @@ def _plot_bar_charts(
             ax.set_xticks(x)
             if is_v2:
                 ax.set_xticklabels(
-                    [f"{o}\n(n={int(n)})" for o, n in zip(sub["odor_col"],
+                    [f"{o}\n(n={int(n)})" for o, n in zip(odor_text,
                                                           sub["n_flies"])],
                     fontsize=8, rotation=35, ha="right",
                 )
@@ -939,7 +963,11 @@ def _plot_heatmap(
         )
         ax.set_xticks(range(len(pivot.columns)))
         if get_protocol() == "v2":
-            ax.set_xticklabels([str(c) for c in pivot.columns], fontsize=8, rotation=35, ha="right")
+            # Pooled: the odor names change only when every row is a sensitivity cohort.
+            ax.set_xticklabels(
+                _odor_text(pivot.columns, phase_terms.all_sensitivity(contributing)),
+                fontsize=8, rotation=35, ha="right",
+            )
         else:
             ax.set_xticklabels([f"T{int(c)}" for c in pivot.columns], fontsize=9)
         ax.set_yticks(range(len(display_idx)))

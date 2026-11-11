@@ -38,6 +38,7 @@ Usage
 from __future__ import annotations
 
 import argparse
+import re
 import sys
 from pathlib import Path
 from typing import Sequence
@@ -55,12 +56,13 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from scripts.analysis import odor_bar_palette, significance_brackets  # noqa: E402
+from scripts.analysis import odor_bar_palette, phase_terms, significance_brackets  # noqa: E402
 from scripts.analysis.envelope_visuals import (  # noqa: E402
     NON_REACTIVE_SPAN_PX,
     _safe_dirname,
     _trained_label,
 )
+from scripts.analysis.odor_conc_labels import VV, odor_conc_label  # noqa: E402
 from scripts.analysis.per_axis_labels import PERCENT_Y_LABEL, SCORE_Y_LABEL  # noqa: E402
 from scripts.analysis.score_summary import _load_scores, _score_cmap  # noqa: E402
 
@@ -81,6 +83,8 @@ MIN_WILCOXON_PAIRS = 6
 # has zero chroma so it reads as "no series", and gray is only 2.11:1 on white.
 PRE_COLOR = "#2a78d6"   # blue  — the naive panel, before training
 POST_COLOR = "#eb6834"  # orange — after training; the warmer hue carries the result
+# Conditioning wording, kept for Hex-HexTest-Training-*; a *-Sensitivity-* figure
+# names its panels through phase_terms instead (nothing is paired there).
 PRE_LABEL = "Pre-test (naive)"
 POST_LABEL = "Post-training"
 
@@ -358,6 +362,15 @@ def _n_label(summary: pd.DataFrame) -> str:
     return f"n={min(counts)}–{max(counts)} flies"
 
 
+def _odor_text(odor, cohort) -> str:
+    """An odor label as drawn: "Isoamyl Acetate 1% (v/v)" on a *-Sensitivity-* figure.
+
+    Display only: the loaded label stays the grouping key and the CSV value,
+    and every other cohort draws it exactly as loaded.
+    """
+    return odor_conc_label(odor) if phase_terms.is_sensitivity(cohort) else str(odor)
+
+
 def build_grouped_bars(summary, *, cohort, kind, p_key, test_note=""):
     """Pre vs post bars, one group per odor. Returns ``(fig, ax)`` unsaved.
 
@@ -375,10 +388,12 @@ def build_grouped_bars(summary, *, cohort, kind, p_key, test_note=""):
     # the separating, so the fills need no heavy stroke.
     gap = 0.012
 
+    pre_label = phase_terms.pre_label(cohort, PRE_LABEL)
+    post_label = phase_terms.post_label(cohort, POST_LABEL)
     fig, ax = plt.subplots(figsize=(1.35 * max(len(summary), 1) + 2.4, 4.2))
     for key, err_key, offset, color, label in (
-        (pre_key, err_keys[0] if err_keys else None, -(bar_w / 2 + gap), PRE_COLOR, PRE_LABEL),
-        (post_key, err_keys[1] if err_keys else None, +(bar_w / 2 + gap), POST_COLOR, POST_LABEL),
+        (pre_key, err_keys[0] if err_keys else None, -(bar_w / 2 + gap), PRE_COLOR, pre_label),
+        (post_key, err_keys[1] if err_keys else None, +(bar_w / 2 + gap), POST_COLOR, post_label),
     ):
         values = summary[key].to_numpy(dtype=float)
         ax.bar(
@@ -398,15 +413,18 @@ def build_grouped_bars(summary, *, cohort, kind, p_key, test_note=""):
                 )
 
     ax.set_xticks(x)
-    ax.set_xticklabels(summary["odor"], rotation=28, ha="right")
+    ax.set_xticklabels([_odor_text(odor, cohort) for odor in summary["odor"]],
+                       rotation=28, ha="right")
     ax.set_xlim(-0.6, len(summary) - 0.4)
     ax.set_xlabel("")
     _color_trained_tick(ax, cohort, summary["odor"])
     (_apply_score_axis if is_score else _apply_rate_axis)(ax)
 
     metric = "Mean PER score" if is_score else "PER response rate"
+    phases = (f"{phase_terms.pre_label(cohort, 'pre-test', case='lower')} vs "
+              f"{phase_terms.post_label(cohort, 'post-training', case='lower')}")
     ax.set_title(
-        f"{cohort} — {metric}, pre-test vs post-training\n"
+        f"{cohort} — {metric}, {phases}\n"
         f"{_n_label(summary)}, paired within fly{test_note}",
         loc="left", color=INK, pad=8,
     )
@@ -432,6 +450,31 @@ def _grouped_bars(summary, *, cohort, kind, p_key, path, test_note=""):
     return path
 
 
+#: The " <c>% (v/v)" odor_conc_label appends, so a label's bare name can be read back.
+_CONC_TAIL_RE = re.compile(r"\s+\S+" + re.escape(VV) + r"$")
+
+
+def _odor_name(odor) -> str:
+    """Display name without the concentration: "isoamylacetate-1" -> "Isoamyl Acetate"."""
+    return _CONC_TAIL_RE.sub("", odor_conc_label(odor))
+
+
+def _trained_matchers(trained: str):
+    """Tests for "this odor label is the cohort's odor", the original one first.
+
+    The prefix test on the label as loaded never matches a pins label
+    ("isoamylacetate-1" vs "Isoamyl Acetate"), so the second compares display
+    names with the concentration dropped. Tried in this order, a cohort the
+    first already matched (IAA-Sensitivity-24-1's old-label "Isoamyl Acetate")
+    keeps the row it always had.
+    """
+    key = str(trained).casefold()
+    return (
+        lambda odor: str(odor).casefold().startswith(key),
+        lambda odor: _odor_name(odor).casefold() == key,
+    )
+
+
 def _color_trained_tick(ax, cohort: str, odors: Sequence[str]) -> None:
     """Tint the CS+ odor's tick so the odor that should have changed stands out."""
     try:
@@ -440,8 +483,9 @@ def _color_trained_tick(ax, cohort: str, odors: Sequence[str]) -> None:
         return
     if not trained:
         return
+    matchers = _trained_matchers(trained)
     for label, odor in zip(ax.get_xticklabels(), odors):
-        if str(odor).casefold().startswith(str(trained).casefold()):
+        if any(matches(odor) for matches in matchers):
             label.set_color(odor_bar_palette.trained_tick_color(trained))
             label.set_fontweight("bold")
 
@@ -453,9 +497,10 @@ def _trained_odor_row(summary: pd.DataFrame, cohort: str) -> pd.Series | None:
         return None
     if not trained:
         return None
-    for _, row in summary.iterrows():
-        if str(row["odor"]).casefold().startswith(str(trained).casefold()):
-            return row
+    for matches in _trained_matchers(trained):
+        for _, row in summary.iterrows():
+            if matches(row["odor"]):
+                return row
     return None
 
 
@@ -467,6 +512,12 @@ def _spotlight(summary, *, cohort, path, test_note=""):
 
     with plt.rc_context(_RC_CONTEXT):
         fig, axes = plt.subplots(1, 2, figsize=(5.6, 4.0))
+        ticks = [phase_terms.pre_label(cohort, PRE_LABEL.replace(" (naive)", "")),
+                 phase_terms.post_label(cohort, "Post-training")]
+        if phase_terms.is_sensitivity(cohort):
+            # The bars sit ~1 in apart and the two sensitization names run
+            # together on one line, so each breaks after its hyphen.
+            ticks = [t.replace("-", "-\n", 1) for t in ticks]
         panels = (
             (axes[0], ("mean_pre", "mean_post"), ("sem_pre", "sem_post"),
              row["p_score"], _apply_score_axis),
@@ -481,13 +532,13 @@ def _spotlight(summary, *, cohort, path, test_note=""):
                               capthick=0.9),
             )
             ax.set_xticks([0, 1])
-            ax.set_xticklabels([PRE_LABEL.replace(" (naive)", ""), "Post-training"])
+            ax.set_xticklabels(ticks)
             ax.set_xlim(-0.6, 1.6)
             apply_axis(ax)
             significance_brackets.draw(ax, [0.5], 1.0, [p], expand=False)
 
         fig.suptitle(
-            f"{cohort} — {row['odor']} (CS+)\n"
+            f"{cohort} — {_odor_text(row['odor'], cohort)} ({phase_terms.odor_tag(cohort)})\n"
             f"n={int(row['n_flies'])} flies, paired within fly{test_note}",
             x=0.01, ha="left", color=INK,
         )
@@ -522,7 +573,7 @@ def slope_jitter(n: int) -> np.ndarray:
     return np.linspace(-SLOPE_JITTER, SLOPE_JITTER, n)
 
 
-def _slopes(paired, summary, *, cohort, path):
+def _slopes(paired, summary, *, cohort, path, note=""):
     """One line per fly, pre -> post on the CS+ odor.
 
     A mean hides which flies actually learned; at these n that is the whole
@@ -565,11 +616,19 @@ def _slopes(paired, summary, *, cohort, path):
                 clip_on=False)
 
         ax.set_xticks([0, 1])
-        ax.set_xticklabels(["Pre-test", "Post-training"])
+        ax.set_xticklabels([phase_terms.pre_label(cohort, "Pre-test"),
+                            phase_terms.post_label(cohort, "Post-training")])
         ax.set_xlim(-0.3, 1.3)
         _apply_score_axis(ax)
+        odor = f"{_odor_text(row['odor'], cohort)} ({phase_terms.odor_tag(cohort)})"
+        # "<Odor> <c>% (v/v) (sensitized odor)" is about as wide as this narrow
+        # panel on its own, so a sensitivity title gives it a line of its own.
+        head = (f"{cohort}\n{odor}" if phase_terms.is_sensitivity(cohort)
+                else f"{cohort} — {odor}")
         ax.set_title(
-            f"{cohort} — {row['odor']} (CS+)\nn={len(sub)} flies, one line per fly",
+            f"{head}\n"
+            f"n={len(sub)} flies, one line per fly"
+            + (f" · {note}" if note else ""),
             loc="left", color=INK, pad=8,
         )
         ax.legend(loc="upper left", handlelength=1.4, borderpad=0.2)
@@ -604,7 +663,7 @@ def heatmap_fly_order(paired: pd.DataFrame) -> list[str]:
     return sorted(_with_fly_id(paired)["fly_id"].unique(), key=sort_key)
 
 
-def _heatmap(paired, *, cohort, path):
+def _heatmap(paired, *, cohort, path, note=""):
     """Fly x odor scores, pre and post, on the pinned CVD-validated PRGn ramp.
 
     The ramp is repo-fixed (score_summary.SCORE_COLORS) and diverges at 1.5,
@@ -620,6 +679,9 @@ def _heatmap(paired, *, cohort, path):
     post = post.reindex(index=pre.index, columns=pre.columns)
 
     n_rows, n_cols = len(pre.index), len(pre.columns)
+    # At 28° the long "<Odor> <c>% (v/v)" ticks of adjacent half-inch cells
+    # nearly touch; 45° puts clear space between them.
+    tick_rotation = 45 if phase_terms.is_sensitivity(cohort) else 28
     with plt.rc_context(_RC_CONTEXT):
         fig = plt.figure(figsize=(1.9 + 0.62 * n_cols * 2, 1.9 + 0.34 * n_rows))
         # A dedicated colourbar column, NOT fig.colorbar(ax=...): passing ax=
@@ -627,11 +689,15 @@ def _heatmap(paired, *, cohort, path):
         gs = fig.add_gridspec(1, 3, width_ratios=[1, 1, 0.055], wspace=0.12)
         ax_pre, ax_post, cax = (fig.add_subplot(gs[0, i]) for i in range(3))
 
-        for ax, frame, title in ((ax_pre, pre, PRE_LABEL), (ax_post, post, POST_LABEL)):
+        for ax, frame, title in (
+            (ax_pre, pre, phase_terms.pre_label(cohort, PRE_LABEL)),
+            (ax_post, post, phase_terms.post_label(cohort, POST_LABEL)),
+        ):
             mesh = ax.imshow(frame.to_numpy(dtype=float), aspect="auto",
                              cmap=cmap, norm=norm, interpolation="nearest")
             ax.set_xticks(np.arange(n_cols))
-            ax.set_xticklabels(frame.columns, rotation=28, ha="right")
+            ax.set_xticklabels([_odor_text(odor, cohort) for odor in frame.columns],
+                               rotation=tick_rotation, ha="right")
             ax.set_title(title, loc="left", color=INK, pad=6)
             # 2 px surface gap between cells, per the mark spec.
             ax.set_xticks(np.arange(-0.5, n_cols, 1), minor=True)
@@ -647,7 +713,8 @@ def _heatmap(paired, *, cohort, path):
         cb = fig.colorbar(mesh, cax=cax, label="PER score")
         cb.outline.set_visible(False)
         cb.ax.tick_params(length=0)
-        fig.suptitle(f"{cohort} — per-fly PER score, {n_rows} flies",
+        fig.suptitle(f"{cohort} — per-fly PER score, {n_rows} flies"
+                     + (f" · {note}" if note else ""),
                      x=0.01, ha="left", color=INK)
         fig.subplots_adjust(left=0.24, right=0.93, top=0.84, bottom=0.26)
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -663,8 +730,13 @@ def render_cohort(
     out_dir: Path,
     binary_threshold: int = BINARY_THRESHOLD,
     rate_test: str = "mcnemar",
+    window_note: str = "",
 ) -> list[Path]:
-    """Write the whole pre-vs-post figure set for one cohort."""
+    """Write the whole pre-vs-post figure set for one cohort.
+
+    ``window_note`` (e.g. "scored on odor + 5 s after") is added to every title,
+    for sets rendered from a window-rescored predictions CSV.
+    """
 
     if paired.empty:
         print(f"[pre-vs-post] {cohort}: no paired trials — nothing to draw.")
@@ -681,20 +753,23 @@ def render_cohort(
         else f" · response rate: {RATE_TESTS[rate_test][1]} (unpaired)"
     )
 
+    window = f" · {window_note}" if window_note else ""
     written: list[Path] = []
     written.append(_grouped_bars(
         summary, cohort=cohort, kind="score", p_key="p_score",
-        path=out_dir / f"{stem}_score_bars.png",
+        path=out_dir / f"{stem}_score_bars.png", test_note=window,
     ))
     written.append(_grouped_bars(
         summary, cohort=cohort, kind="rate", p_key="p_rate",
-        path=out_dir / f"{stem}_rate_bars.png", test_note=rate_note,
+        path=out_dir / f"{stem}_rate_bars.png", test_note=rate_note + window,
     ))
     for maybe in (
         _spotlight(summary, cohort=cohort, path=out_dir / f"{stem}_trained_odor.png",
-                   test_note=rate_note),
-        _slopes(paired, summary, cohort=cohort, path=out_dir / f"{stem}_slopes.png"),
-        _heatmap(paired, cohort=cohort, path=out_dir / f"{stem}_heatmap.png"),
+                   test_note=rate_note + window),
+        _slopes(paired, summary, cohort=cohort, path=out_dir / f"{stem}_slopes.png",
+                note=window_note),
+        _heatmap(paired, cohort=cohort, path=out_dir / f"{stem}_heatmap.png",
+                 note=window_note),
     ):
         if maybe is not None:
             written.append(maybe)
@@ -722,6 +797,10 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--rate-test", choices=sorted(RATE_TESTS), default="mcnemar",
         help="Response-rate test: paired McNemar (default) or Fisher's exact.",
+    )
+    parser.add_argument(
+        "--window-note", default="",
+        help="Added to every title, e.g. 'scored on odor + 5 s after'.",
     )
     return parser.parse_args(argv)
 
@@ -757,6 +836,7 @@ def main(argv: Sequence[str] | None = None) -> None:
             out_dir=args.out_root / _safe_dirname(cohort),
             binary_threshold=args.binary_threshold,
             rate_test=args.rate_test,
+            window_note=args.window_note,
         )
         total += len(written)
         print(f"[pre-vs-post] {cohort}: wrote {len(written)} figure(s).")

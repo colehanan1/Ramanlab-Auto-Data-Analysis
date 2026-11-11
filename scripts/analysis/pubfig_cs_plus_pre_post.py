@@ -4,8 +4,8 @@
 Publication / grant style, matching ``pubfig_pre_vs_post_score_bars.py``: no
 title, black text, black-outlined bars, SEM drawn upward only, sized to stay
 legible when printed small. Each panel is one dataset's trained odor, headed by
-the odor and its vial concentration in bold ("Isoamyl Acetate 1%", read from
-the dataset name) with n underneath. Starvation time is not drawn; it goes to the .csv, taken from the
+the odor and its vial concentration in bold ("Isoamyl Acetate 1% (v/v)", read
+from the dataset name) with n underneath. Starvation time is not drawn; it goes to the .csv, taken from the
 dataset name unless the panel spec overrides it ("DATASET=ODOR=HOURS") -- the
 *-Sensitivity-1-* datasets are 0 h.
 
@@ -46,7 +46,7 @@ for p in (REPO_ROOT, REPO_ROOT / "src"):
     if str(p) not in sys.path:
         sys.path.insert(0, str(p))
 
-from scripts.analysis import significance_brackets  # noqa: E402
+from scripts.analysis import odor_conc_labels, phase_terms, significance_brackets  # noqa: E402
 from scripts.analysis.pretest_vs_test_comparison import _sem, load_paired_scores, wilcoxon_p  # noqa: E402
 
 CSV = Path("/home/ramanlab/Documents/cole/Data/CSVs-New-Opto-Flys")
@@ -63,6 +63,8 @@ FALLBACK = ("#a8a7a1", "#46453f")
 TICK_PT, LABEL_PT, HEAD_PT, SUB_PT, STAR_PT = 10.5, 12, 10, 8.5, 15
 EDGE_LW, BAR_W = 0.9, 0.62
 _HOURS_RE = re.compile(r"^(?P<odor>[A-Za-z0-9]+)-Sensitivity-(?P<h>[\d.]+)-(?P<c>[\d.]+)$")
+# Header only (the .csv keeps _HOURS_RE): "IAA-Sensitivity5s-1-1" names its 1% too.
+_HEAD_CONC_RE = re.compile(r"-Sensitivity[^-]*-[\d.]+-(?P<c>[\d.]+)$", re.IGNORECASE)
 DEFAULT_PANELS = ("IAA-Sensitivity-1-1=Isoamyl Acetate=0",
                   "3Oct-Sensitivity-1-0.1=3-Octanol=0")
 
@@ -104,6 +106,38 @@ class Panel:
     p: float | None
     hours: float | None
     conc: str | None
+
+
+def panel_header(p: Panel) -> str:
+    """The bold header: "Isoamyl Acetate 1% (v/v)" for a sensitivity dataset.
+
+    Any other dataset keeps its old "<odor> <conc>%" text. No concentration in
+    the dataset name, or a panel odor other than the sensitized one, none drawn.
+    """
+    if not phase_terms.is_sensitivity(p.dataset):
+        return f"{p.odor} {p.conc}%" if p.conc else p.odor
+    from scripts.analysis.envelope_visuals import _trained_label
+
+    # The name's concentration is the sensitized odor's; any other panel odor
+    # was diluted differently, so it gets none rather than the wrong one.
+    if p.odor.casefold() != _trained_label(p.dataset).casefold():
+        return odor_conc_labels.odor_conc_label(p.odor)
+    m = _HEAD_CONC_RE.search(p.dataset)
+    return odor_conc_labels.with_conc(p.odor, p.conc or (m["c"] if m else None))
+
+
+def _widen_to_fit(fig, texts, *, pad_in: float = 0.06) -> None:
+    """Widen ``fig`` until every text sits inside its own axes, ``pad_in`` clear of each side.
+
+    The axes are fractions of the figure and the text is sized in points, so
+    one rescale of the width is exact. A figure that already fits is untouched.
+    """
+    r = fig.canvas.get_renderer()
+    need = max((t.get_window_extent(r).width + 2 * pad_in * fig.dpi)
+               / t.axes.get_window_extent(r).width for t in texts)
+    if need > 1:
+        w, h = fig.get_size_inches()
+        fig.set_size_inches(w * need, h)
 
 
 def panel_summary(paired: pd.DataFrame, *, dataset: str, odor: str,
@@ -148,6 +182,7 @@ def build_figure(panels: Sequence[Panel], *, ymax: float | None = None):
                                  sharey=True, squeeze=False)
         axes = axes[0]
         x = np.array([0.0, 1.0])
+        heads = []
         for ax, p in zip(axes, panels):
             pre_c, post_c = odor_colors(p.odor)
             means, sems = [p.mean_pre, p.mean_post], [p.sem_pre, p.sem_post]
@@ -170,11 +205,11 @@ def build_figure(panels: Sequence[Panel], *, ymax: float | None = None):
                 line.set_color(BLACK)
             # Panel header INSIDE the axes, in the headroom above the bars (drawn
             # after the bracket, which would otherwise treat it as data to clear).
-            head = f"{p.odor} {p.conc}%" if p.conc else p.odor
-            ax.text(0.5, 0.955, head, transform=ax.transAxes, ha="center",
-                    va="top", fontsize=HEAD_PT, fontweight="bold", color=BLACK)
-            ax.text(0.5, 0.86, f"n = {p.n} flies", transform=ax.transAxes, ha="center",
-                    va="top", fontsize=SUB_PT, color=BLACK)
+            heads.append(ax.text(0.5, 0.955, panel_header(p), transform=ax.transAxes,
+                                 ha="center", va="top", fontsize=HEAD_PT, fontweight="bold",
+                                 color=BLACK))
+            heads.append(ax.text(0.5, 0.86, f"n = {p.n} flies", transform=ax.transAxes,
+                                 ha="center", va="top", fontsize=SUB_PT, color=BLACK))
         top_tick = float(np.floor(ymax))
         axes[0].set_yticks(np.arange(ymin, top_tick + 0.001, 1.0))
         for ax in axes:
@@ -183,6 +218,8 @@ def build_figure(panels: Sequence[Panel], *, ymax: float | None = None):
         for ax in axes[1:]:
             ax.tick_params(axis="y", labelleft=False)
         fig.subplots_adjust(wspace=0.3)
+        # "Isoamyl Acetate 1% (v/v)" overflows a default-width panel: widen, keep the type size.
+        _widen_to_fit(fig, heads)
     return fig
 
 

@@ -50,6 +50,7 @@ for _p in (REPO_ROOT, REPO_ROOT / "src"):
     if str(_p) not in sys.path:
         sys.path.insert(0, str(_p))
 
+from scripts.analysis import phase_terms  # noqa: E402
 from scripts.analysis.pretest_vs_test_comparison import (  # noqa: E402
     BINARY_THRESHOLD,
     INK,
@@ -58,6 +59,12 @@ from scripts.analysis.pretest_vs_test_comparison import (  # noqa: E402
     _RC_CONTEXT,
     _recessive_grid,
     wilcoxon_p,
+)
+from scripts.analysis.starvation_pre_post_comparison import (  # noqa: E402
+    PREDICTIONS_CSV,
+    _phase_cohort,
+    odor_concentrations,
+    odor_text,
 )
 from scripts.analysis.starvation_trend_figure import hours_from_label  # noqa: E402
 
@@ -99,6 +106,23 @@ def _with_delta(paired: pd.DataFrame) -> pd.DataFrame:
 
 def _fly_key(df):
     return [c for c in ("group", "dataset_canon", "fly", "fly_number") if c in df]
+
+
+def _cohort(paired: pd.DataFrame) -> str | None:
+    """The cohort the wording follows (None unless every dataset drawn is a sensitivity one)."""
+    return _phase_cohort(paired.get("dataset_canon", ()))
+
+
+def _pre_name(cohort: str | None, *, lower: bool = False) -> str:
+    """The first panel: "Pre-test", or "Pre-exposure" for a sensitivity cohort."""
+    if lower:
+        return phase_terms.pre_label(cohort, "pre-test", case="lower")
+    return phase_terms.pre_label(cohort, "Pre-test")
+
+
+def _block_name(cohort: str | None) -> str:
+    """What the post panel comes after: "training", or "exposure" for a sensitivity cohort."""
+    return phase_terms.block_label(cohort)
 
 
 # ── tables ───────────────────────────────────────────────────────────────
@@ -262,8 +286,14 @@ def _diverging_rows(ax, shares: pd.DataFrame, *, n_word: str) -> None:
         ax.spines[side].set_visible(False)
 
 
-def fig_direction(paired: pd.DataFrame, *, trained: str):
-    """Q1: did training raise PER to the trained odor? Up / same / down per group."""
+def fig_direction(paired: pd.DataFrame, *, trained: str, concentrations=None):
+    """Q1: did training raise PER to the trained odor? Up / same / down per group.
+
+    ``concentrations`` (``odor_concentrations``): the percent in each drawn odor name.
+    """
+    cohort = _cohort(paired)
+    role = phase_terms.odor_tag(cohort, "trained odor")
+    name = odor_text(trained, cohort, concentrations)
     others = sorted(o for o in paired["odor"].unique() if o != trained)
     cs = direction_shares(paired, odors=[trained])
     ot = direction_shares(paired, odors=others)
@@ -288,24 +318,28 @@ def fig_direction(paired: pd.DataFrame, *, trained: str):
                    fontweight="bold" if ps[g] is not None and ps[g] < 0.05 else "normal",
                    clip_on=False)
         _diverging_rows(b, ot, n_word="fly-odor pairs")
-        a.set_title(f"{trained} — the trained odor", loc="left", fontsize=10.5, color=INK,
+        a.set_title(f"{name} — the {role}", loc="left", fontsize=10.5, color=INK,
                     fontweight="bold")
         b.set_title(f"The other {len(others)} odors (not trained), every fly × odor",
                     loc="left", fontsize=10.5, color=INK)
         a.set_xlabel("← % of flies whose PER went down   |   went up →")
         b.set_xlabel("← % went down   |   went up →")
-        handles = [Patch(color=DOWN, label="PER went down after training"),
+        after = f"after {_block_name(cohort)}"
+        handles = [Patch(color=DOWN, label=f"PER went down {after}"),
                    Patch(color=SAME, label="no change"),
-                   Patch(color=UP, label="PER went up after training")]
+                   Patch(color=UP, label=f"PER went up {after}")]
         fig.legend(handles=handles, loc="lower center", ncol=3, frameon=False,
                    bbox_to_anchor=(0.5, -0.01))
-        _finish(fig, f"Did training raise the PER to the trained odor ({trained})?", answer,
+        _finish(fig, f"Did {_block_name(cohort)} raise the PER to the {role} ({name})?", answer,
                 bottom=0.06)
     return fig
 
 
-def fig_specificity(paired: pd.DataFrame, *, trained: str):
+def fig_specificity(paired: pd.DataFrame, *, trained: str, concentrations=None):
     """Q2: did PER rise MORE for the trained odor than for the others, in the same fly?"""
+    cohort = _cohort(paired)
+    role = phase_terms.odor_tag(cohort, "trained odor")
+    name = odor_text(trained, cohort, concentrations)
     s = specificity(paired, trained=trained)
     groups = group_order(s["group"])
     rng = np.random.default_rng(0)
@@ -334,11 +368,11 @@ def fig_specificity(paired: pd.DataFrame, *, trained: str):
         ax.set_xticks(range(len(groups)))
         ax.set_xticklabels([f"{g}\nn={n}" for g, _m, _p, n in stats])
         ax.set_xlabel("Starvation before the experiment")
-        ax.set_ylabel(f"{trained} change − average change\nof the other odors (score points)")
+        ax.set_ylabel(f"{name} change − average change\nof the other odors (score points)")
         lo_all, hi_all = float(s["index"].min()), float(s["index"].max())
         ax.set_ylim(lo_all - 0.4, hi_all + 1.1)  # headroom for the p-values
         side = ax.get_yaxis_transform()  # x in axes fraction, y in data
-        ax.text(1.01, 0.25, "↑ rose more for the trained odor", transform=side, ha="left",
+        ax.text(1.01, 0.25, f"↑ rose more for the {role}", transform=side, ha="left",
                 va="bottom", fontsize=8, color=INK_MUTED, clip_on=False)
         ax.text(1.01, -0.25, "↓ rose more for the other odors", transform=side, ha="left",
                 va="top", fontsize=8, color=INK_MUTED, clip_on=False)
@@ -348,16 +382,18 @@ def fig_specificity(paired: pd.DataFrame, *, trained: str):
                   plt.Line2D([], [], marker="o", color=EMPH, label="average, 95% CI")]
         ax.legend(handles=legend, loc="upper left", bbox_to_anchor=(1.0, 1.0), frameon=False)
         sig = [g for g, m, p, _n in stats if p is not None and p < 0.05 and m > 0]
-        answer = (f"Only at {', '.join(sig)} did PER rise more for {trained} than for the "
+        answer = (f"Only at {', '.join(sig)} did PER rise more for {name} than for the "
                   f"other odors in the same fly (one-sample Wilcoxon vs 0)." if sig else
-                  "In no group did PER rise significantly more for the trained odor than for the others.")
-        _finish(fig, "Was the rise specific to the trained odor?", answer)
+                  f"In no group did PER rise significantly more for the {role} than for the others.")
+        _finish(fig, f"Was the rise specific to the {role}?", answer)
     return fig
 
 
-def fig_change_map(paired: pd.DataFrame, *, trained: str):
+def fig_change_map(paired: pd.DataFrame, *, trained: str, concentrations=None):
     """Q3: odor x starvation map of the mean change; * = paired Wilcoxon p<0.05."""
+    cohort = _cohort(paired)
     mean, p = change_matrix(paired, trained=trained)
+    names = {o: odor_text(o, cohort, concentrations) for o in mean.index}
     n = paired.drop_duplicates(_fly_key(paired)).groupby("group").size()
     lim = max(1.0, float(np.ceil(np.nanmax(np.abs(mean.to_numpy(float))) * 2) / 2))
     norm = TwoSlopeNorm(vmin=-lim, vcenter=0.0, vmax=lim)
@@ -379,7 +415,9 @@ def fig_change_map(paired: pd.DataFrame, *, trained: str):
         ax.set_xticks(range(mean.shape[1]))
         ax.set_xticklabels([f"{g}\nn={int(n.get(g, 0))}" for g in mean.columns])
         ax.set_yticks(range(mean.shape[0]))
-        ax.set_yticklabels([f"{o}  (trained)" if o == trained else o for o in mean.index])
+        tag = phase_terms.odor_tag(cohort, "trained")
+        ax.set_yticklabels([f"{names[o]}  ({tag})" if o == trained else names[o]
+                            for o in mean.index])
         ax.get_yticklabels()[0].set_fontweight("bold")
         ax.set_xlabel("Starvation before the experiment")
         ax.tick_params(length=0)
@@ -395,18 +433,20 @@ def fig_change_map(paired: pd.DataFrame, *, trained: str):
         fig.subplots_adjust(left=0.2, right=0.9, bottom=0.14)
         sig = [(o, g) for o in mean.index for g in mean.columns
                if pd.notna(p.loc[o, g]) and p.loc[o, g] < 0.05]
-        ups = [f"{o} at {g}" for o, g in sig if mean.loc[o, g] > 0]
-        downs = [f"{o} at {g}" for o, g in sig if mean.loc[o, g] < 0]
-        answer = ("Each cell: average change per fly (green = PER went up after training, "
+        ups = [f"{names[o]} at {g}" for o, g in sig if mean.loc[o, g] > 0]
+        downs = [f"{names[o]} at {g}" for o, g in sig if mean.loc[o, g] < 0]
+        after = f"after {_block_name(cohort)}"
+        answer = (f"Each cell: average change per fly (green = PER went up {after}, "
                   "purple = went down). * = p<0.05, paired Wilcoxon, uncorrected.\n"
                   f"Significant rises: {', '.join(ups) or 'none'}. "
                   f"Significant drops: {', '.join(downs) or 'none'}.")
-        _finish(fig, "Where did PER change after training?", answer, tight=False)
+        _finish(fig, f"Where did PER change {after}?", answer, tight=False)
     return fig
 
 
 def fig_baseline(paired: pd.DataFrame):
     """Q4: before any training, does starvation change PER? Pre-test, all odors pooled."""
+    cohort = _cohort(paired)
     b = baseline(paired)
     key = _fly_key(paired)
     per_fly = paired.groupby(key)["score_pre"].mean().reset_index()
@@ -425,7 +465,7 @@ def fig_baseline(paired: pd.DataFrame):
         ax.set_xticks(x)
         ax.set_xticklabels([f"{g}\nn={n}" for g, n in zip(b["group"], b["n_flies"])])
         ax.set_xlabel("Starvation before the experiment")
-        ax.set_ylabel(f"Pre-test PER score, all odors\n({SCORE_HINT})")
+        ax.set_ylabel(f"{_pre_name(cohort)} PER score, all odors\n({SCORE_HINT})")
         ax.set_ylim(-0.3, max(3.0, float(per_fly["score_pre"].max()) + 0.3))
         _recessive_grid(ax)
         legend = [plt.Line2D([], [], marker="o", linestyle="", color=DOT,
@@ -435,14 +475,17 @@ def fig_baseline(paired: pd.DataFrame):
         ax.legend(handles=legend, loc="upper left", bbox_to_anchor=(1.0, 1.0), frameon=False)
         lo, hi = b["mean_pre"].min(), b["mean_pre"].max()
         verdict = "No" if p is None or p >= 0.05 else "Yes"
-        answer = (f"{verdict}: the average pre-test score is {lo:.2f}–{hi:.2f} in every group "
-                  f"(Kruskal-Wallis across groups {_fmt_p(p)}).")
-        _finish(fig, "Before training, does starvation change how much flies respond?", answer)
+        answer = (f"{verdict}: the average {_pre_name(cohort, lower=True)} score is "
+                  f"{lo:.2f}–{hi:.2f} in every group (Kruskal-Wallis across groups {_fmt_p(p)}).")
+        _finish(fig, f"Before {_block_name(cohort)}, does starvation change how much flies respond?",
+                answer)
     return fig
 
 
-def fig_responsiveness(paired: pd.DataFrame, *, regression: pd.DataFrame | None):
+def fig_responsiveness(paired: pd.DataFrame, *, regression: pd.DataFrame | None,
+                       concentrations=None):
     """Q5: does responding to some odors predict responding to others?"""
+    cohort = _cohort(paired)
     r = responsiveness(paired)
     r = r[r["n"] > 0]
     with plt.rc_context(_RC_CONTEXT):
@@ -459,9 +502,9 @@ def fig_responsiveness(paired: pd.DataFrame, *, regression: pd.DataFrame | None)
         a.set_xticks(x)
         a.set_xticklabels([f"{b_}\nn={n}" for b_, n in zip(r["bin"], r["n"])])
         a.set_ylim(0, 100)
-        a.set_xlabel("Fly's average pre-test score to the OTHER six odors")
+        a.set_xlabel(f"Fly's average {_pre_name(cohort, lower=True)} score to the OTHER six odors")
         a.set_ylabel("% responding to this odor (score ≥ 2)")
-        a.set_title("Pre-test, every fly × odor", loc="left", fontsize=10, color=INK)
+        a.set_title(f"{_pre_name(cohort)}, every fly × odor", loc="left", fontsize=10, color=INK)
         _recessive_grid(a)
         lo_pct, hi_pct = r["pct_responding"].iloc[0], r["pct_responding"].iloc[-1]
         answer = (f"Yes. A fly that responds to the other odors is far more likely to respond to "
@@ -481,14 +524,15 @@ def fig_responsiveness(paired: pd.DataFrame, *, regression: pd.DataFrame | None)
                        markeredgewidth=1.5 if st["marker"] != "x" else 2, label=series, zorder=3)
             b.axvline(0, color=INK_MUTED, linewidth=1.0, zorder=1)
             b.set_yticks(range(len(odors)))
-            b.set_yticklabels(odors)
+            b.set_yticklabels([odor_text(o, cohort, concentrations) for o in odors])
             top = float(np.nanmax(100 * pre["q2"].to_numpy(float)))
             b.set_xlim(-55, max(40.0, np.ceil((top + 10) / 10) * 10))
             b.set_xlabel("% of the differences predicted, beyond simply guessing the average\n"
                          "(0 = no better than the average; values below −50 drawn at −50)")
             n_fly = int(pre.loc[pre["series"] == "single fly, from its other odors", "n"].max())
             n_bat = int(pre.loc[pre["series"] == "batch average, from its other odors", "n"].max())
-            b.set_title(f"Predicting the pre-test score to each odor ({n_fly} flies, {n_bat} batches;\n"
+            b.set_title(f"Predicting the {_pre_name(cohort, lower=True)} score to each odor "
+                        f"({n_fly} flies, {n_bat} batches;\n"
                         "Ridge, each batch predicted by a model that never saw it)",
                         loc="left", fontsize=10, color=INK)
             b.legend(loc="lower left", frameon=False, fontsize=8)  # the left side is empty (Q2 < 0 is rare)
@@ -497,8 +541,8 @@ def fig_responsiveness(paired: pd.DataFrame, *, regression: pd.DataFrame | None)
             bat = pre[pre["series"] == "batch average, from its other odors"]["q2"].median()
             stv = pre[pre["series"] == "single fly, from starvation time only"]["q2"].median()
             pct = lambda q: f"{round(100 * q) + 0:.0f}%"  # noqa: E731  (+0 turns -0 into 0)
-            answer += (f"\nThe other odors predict about {pct(fly)} of a single fly's differences and "
-                       f"{pct(bat)} of a batch's (median over odors); starvation time alone "
+            answer += (f"\n{_pre_name(cohort)}: the other odors predict about {pct(fly)} of a single fly's differences "
+                       f"and {pct(bat)} of a batch's (median over odors); starvation time alone "
                        f"predicts {pct(stv)}.")
         _finish(fig, "Does responding to some odors predict responding to others?", answer)
     return fig
@@ -511,6 +555,7 @@ def fig_time_of_day(paired: pd.DataFrame, *, data_root: Path):
     p, _missing = attach_start_times(paired, data_root)
     if p.empty:
         return None
+    cohort = _cohort(paired)
     per_fly = (p.groupby(_fly_key(p)).agg(start=("start_time", "first"),
                                           pre=("score_pre", "mean")).reset_index())
     per_fly["clock"] = pd.to_datetime(per_fly["start"]).map(clock_hours)
@@ -537,14 +582,15 @@ def fig_time_of_day(paired: pd.DataFrame, *, data_root: Path):
         ax.set_xticklabels([f"{h}:00" for h in range(lo_h, hi_h + 1)])
         ax.set_xlim(lo_h - 0.3, hi_h + 0.3)
         ax.set_ylim(-0.5, max(3.0, float(per_fly["pre"].max()) + 0.3))
-        ax.set_xlabel("Time of day of the first pre-test trial")
-        ax.set_ylabel(f"Pre-test PER score, all odors\n({SCORE_HINT})")
+        ax.set_xlabel(f"Time of day of the first {_pre_name(cohort, lower=True)} trial")
+        ax.set_ylabel(f"{_pre_name(cohort)} PER score, all odors\n({SCORE_HINT})")
         ax.legend(loc="upper left", bbox_to_anchor=(1.0, 1.0), frameon=False)
         _recessive_grid(ax)
         verdict = "No" if res.pvalue >= 0.05 else "Possibly"
         answer = (f"{verdict}: no trend through the day (Spearman rho={res.statistic:.2f}, "
                   f"{_fmt_p(res.pvalue)}). Caveat: each starvation group was run at its own time of day.")
-        _finish(fig, "Before training, does the time of day change how much flies respond?", answer)
+        _finish(fig, f"Before {_block_name(cohort)}, does the time of day change how much flies "
+                "respond?", answer)
     return fig
 
 
@@ -563,6 +609,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     ap.add_argument("--trained-odor", default="Isoamyl Acetate")
     ap.add_argument("--out-dir", type=Path, default=None,
                     help="default: <comparison-dir>/../findings")
+    ap.add_argument("--labels-csv", type=Path, default=PREDICTIONS_CSV,
+                    help="predictions table with the trial labels as recorded: the concentrations "
+                         "in the odor names of a sensitivity figure (default: the live table; "
+                         "'' draws the names without one)")
     args = ap.parse_args(argv)
 
     paired = pd.read_csv(args.comparison_dir / "paired_scores_per_fly.csv")
@@ -570,11 +620,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     out.mkdir(parents=True, exist_ok=True)
     reg = regression_table(args.regression_dir) if args.regression_dir else None
     t = args.trained_odor
-    figs = [("01_did_training_raise_PER.png", fig_direction(paired, trained=t)),
-            ("02_was_it_specific_to_trained_odor.png", fig_specificity(paired, trained=t)),
-            ("03_where_did_PER_change.png", fig_change_map(paired, trained=t)),
+    # The folder's tables carry no concentration: the drawn flies' recorded labels do.
+    c = odor_concentrations(args.labels_csv, flies=paired)
+    figs = [("01_did_training_raise_PER.png", fig_direction(paired, trained=t, concentrations=c)),
+            ("02_was_it_specific_to_trained_odor.png",
+             fig_specificity(paired, trained=t, concentrations=c)),
+            ("03_where_did_PER_change.png", fig_change_map(paired, trained=t, concentrations=c)),
             ("04_starvation_before_training.png", fig_baseline(paired)),
-            ("05_general_responsiveness.png", fig_responsiveness(paired, regression=reg)),
+            ("05_general_responsiveness.png",
+             fig_responsiveness(paired, regression=reg, concentrations=c)),
             ("06_time_of_day_before_training.png", fig_time_of_day(paired, data_root=args.data_root))]
     answers = []
     for name, fig in figs:
