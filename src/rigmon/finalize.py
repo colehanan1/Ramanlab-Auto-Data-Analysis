@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import shutil
 import threading
 from pathlib import Path, PurePosixPath
@@ -64,6 +65,22 @@ def unlisted(manifest: list[dict], staging: Path) -> list[str]:
                   if f.is_file() and f.relative_to(staging).as_posix() not in allowed)
 
 
+_RSYNC_TEMP = re.compile(r"^\.(?P<name>.+)\.[A-Za-z0-9]{6}$")
+
+
+def rsync_temps(manifest: list[dict], staging: Path) -> list[str]:
+    """Staging files that are rsync's ``.<name>.XXXXXX`` temp of a manifest file.
+    A pull SIGKILLed when the rig starts recording leaves one behind; the retry
+    lands the real file, so these are garbage."""
+    listed = {item["path"] for item in manifest}
+    out = []
+    for f in staging.rglob(".*"):
+        m = _RSYNC_TEMP.match(f.name) if f.is_file() else None
+        if m and (f.parent.relative_to(staging) / m["name"]).as_posix() in listed:
+            out.append(f.relative_to(staging).as_posix())
+    return sorted(out)
+
+
 class Finalizer:
     def __init__(self, cfg, store, transfer,
                  disk_free=lambda p: shutil.disk_usage(p).free,
@@ -119,6 +136,9 @@ class Finalizer:
                 self.transfer.remux(h264)
         if self._state(rig.name, batch_dir) == "aborted":
             return "aborted"
+        for tmp in rsync_temps(manifest, staging):
+            log.info("finalize %s/%s: dropping rsync temp %s", rig.name, batch_dir, tmp)
+            (staging / tmp).unlink(missing_ok=True)
         strays = unlisted(manifest, staging)
         if strays:
             raise FinalizeError(f"{len(strays)} file(s) in staging not in the Pi manifest: {strays[:5]}")

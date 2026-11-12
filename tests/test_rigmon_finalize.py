@@ -228,3 +228,24 @@ def test_non_manifest_straggler_blocks_landing(tmp_path):
     assert fin.run(LOCAL, "b", str(pi), push_to, manifest) == "failed"
     assert "leftover.txt" in store.get_session("fake", "b")["error"]
     assert not (tmp_path / "Data" / "flys_New").exists()
+
+
+def test_rsync_temp_of_a_manifest_file_is_dropped_and_session_lands(tmp_path):
+    # a pull SIGKILLed when the rig starts recording leaves rsync's ".name.XXXXXX"
+    # temp behind; the retry lands the real file, so the temp is garbage
+    cfg, pi, manifest, store, tt, fin, push_to, _ = _setup(tmp_path)
+    stage = tt.staging_dir("fake", "b")
+    stage.mkdir(parents=True)
+    (stage / ".t1.h264.97bG2B").write_bytes(b"partial")
+    assert fin.run(LOCAL, "b", str(pi), push_to, manifest) == "landed"
+    dest = tmp_path / "Data" / "flys_New" / "Cohort" / "b"
+    assert not any(p.name.startswith(".") for p in dest.iterdir())
+
+
+def test_dotfile_that_is_not_a_manifest_temp_still_blocks(tmp_path):
+    cfg, pi, manifest, store, tt, fin, push_to, _ = _setup(tmp_path)
+    stage = tt.staging_dir("fake", "b")
+    stage.mkdir(parents=True)
+    (stage / ".other.h264.97bG2B").write_bytes(b"x")   # not a manifest file
+    assert fin.run(LOCAL, "b", str(pi), push_to, manifest) == "failed"
+    assert ".other.h264.97bG2B" in store.get_session("fake", "b")["error"]
