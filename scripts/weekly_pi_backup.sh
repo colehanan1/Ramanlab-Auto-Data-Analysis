@@ -31,7 +31,9 @@ SAFETY_MINUTES=30
 
 # Tag the backup folder with the ISO week the script ran in.
 # Format: 2026-W20-2026-05-18  (week tag + the Monday it ran on)
-WEEK_TAG="$(date +%Y-W%V)-$(date +%Y-%m-%d)"
+# ISO year (%G) + week, and the Monday of the current ISO week (matches pi_session_backup.py).
+WEEK_MONDAY="$(date -d "-$(( $(date +%u) - 1 )) days" +%F)"
+WEEK_TAG="$(date +%G-W%V)-$WEEK_MONDAY"
 DEST_WEEK="$DEST_BASE/$WEEK_TAG"
 
 mkdir -p "$DEST_WEEK" "$LOG_DIR"

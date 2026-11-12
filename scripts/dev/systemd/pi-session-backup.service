@@ -1,0 +1,6 @@
+[Unit]
+Description=Back up finished Pi experiment folders to secured storage
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /home/ramanlab/Documents/cole/VSCode/Ramanlab-Auto-Data-Analysis/scripts/dev/pi_session_backup.py --all-eligible
