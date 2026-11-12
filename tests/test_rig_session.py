@@ -104,6 +104,25 @@ def test_manifest_is_relative_sorted_and_skips_hidden(tmp_path):
         {"path": "b.csv", "bytes": 2}, {"path": "sub/a.txt", "bytes": 1}]
 
 
+def test_manifest_skips_continuous_between_trial_folder(tmp_path):
+    # The 20 fps between-trial footage must never reach the hub / flys_New.
+    (tmp_path / "trial.h264").write_bytes(b"123")
+    cont = tmp_path / "continuous"
+    cont.mkdir()
+    (cont / "between_01_after_pretest_1_20261112_190000.h264").write_bytes(b"1")
+    (cont / "between_01_after_pretest_1_20261112_190000.csv").write_bytes(b"1")
+    (cont / "deeper").mkdir()
+    (cont / "deeper" / "x.bin").write_bytes(b"1")
+    # only the top-level folder is reserved; a nested "continuous" is ordinary
+    (tmp_path / "sub" / "continuous").mkdir(parents=True)
+    (tmp_path / "sub" / "continuous" / "keep.txt").write_bytes(b"1")
+    (tmp_path / "continuous_notes.txt").write_bytes(b"12")
+    assert rs.build_manifest(tmp_path) == [
+        {"path": "continuous_notes.txt", "bytes": 2},
+        {"path": "sub/continuous/keep.txt", "bytes": 1},
+        {"path": "trial.h264", "bytes": 3}]
+
+
 # ── reminders ────────────────────────────────────────────────────────────────
 
 def test_reminders_fire_once_each_in_order():
