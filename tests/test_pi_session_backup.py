@@ -150,6 +150,34 @@ def test_run_dry_skips_running_batch(tmp_path):
     assert all(a[0] == "ssh" for a in r.calls)   # listing only, no rsync/rm
 
 
+def test_recording_pi_is_not_touched(tmp_path, monkeypatch):
+    # rsync + md5 load on a Pi competes with its software trial encoder:
+    # a Pi with a running session gets no backup at all, even of old batches.
+    done = []
+    monkeypatch.setattr(psb, "backup_batch", lambda pi, b, *a, **k: done.append(b) or True)
+    r = listing_runner([f"{NOW - 5 * H}|1000|old_landed", f"{NOW - 60}|2000|today"])
+    sess = lambda rig: {"old_landed": "landed"}  # noqa: E731
+    rc = psb.run([PI], r, lambda url: hub_json({"Flybehavior3": "today"}), False, now=NOW,
+                 dest_base=tmp_path, sessions_loader=sess)
+    assert rc == 0
+    assert done == []
+
+
+def test_session_starting_mid_backup_stops_that_pi(tmp_path, monkeypatch):
+    done = []
+    monkeypatch.setattr(psb, "backup_batch", lambda pi, b, *a, **k: done.append(b) or True)
+    r = listing_runner([f"{NOW - 5 * H}|1000|b1", f"{NOW - 5 * H}|1000|b2"])
+    sess = lambda rig: {"b1": "landed", "b2": "landed"}  # noqa: E731
+    calls = []
+
+    def hub(url):   # idle at the start and before b1; a session starts after b1
+        calls.append(url)
+        return hub_json({"Flybehavior3": None if len(calls) <= 2 else "new_batch"})
+    rc = psb.run([PI], r, hub, False, now=NOW, dest_base=tmp_path, sessions_loader=sess)
+    assert rc == 0
+    assert done == ["b1"]
+
+
 def test_hub_unreachable_backs_up_nothing(tmp_path):
     def boom(url):
         raise OSError("down")

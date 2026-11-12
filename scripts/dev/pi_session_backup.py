@@ -7,9 +7,11 @@ file on both sides, and only then deletes exactly those files from the Pi.
 Continuous *.h264 recordings are remuxed to .mp4 (the .h264 is kept).
 
 A batch is eligible when the rigmon hub says its session is "landed", or the
-hub has no record and nothing in it changed for 12 h.  Never the rig's running
-batch and never a batch with a file touched in the last 30 min.  If the hub is
-unreachable nothing is backed up.  No rsync delete flag is ever used.
+hub has no record and nothing in it changed for 12 h.  Never a batch with a file
+touched in the last 30 min.  A Pi with a running/waiting session is not touched
+at all (rsync + md5 load competes with its software trial encoder); the hub is
+re-checked before every batch so a session starting mid-backup stops it.  If
+the hub is unreachable nothing is backed up.  No rsync delete flag is ever used.
 
 Session states come from the hub's sqlite store (read-only): the hub's
 /api/sessions/.../status endpoint only answers to the rig's own address.
@@ -274,6 +276,10 @@ def run(pis, runner, http_get, dry_run: bool, now: float | None = None,
         if pi.rig not in running or running[pi.rig] == "?unknown":
             log.warning("%s: rig state unknown in hub - skipping", pi.name)
             continue
+        if running[pi.rig] is not None:
+            # rsync/md5 load competes with the rig's software trial encoder
+            log.info("%s: session %s is running - not touching this Pi", pi.name, running[pi.rig])
+            continue
         try:
             mtimes, sizes = list_pi_batches(pi, runner)
             sessions = sessions_loader(pi.rig)
@@ -285,6 +291,10 @@ def run(pis, runner, http_get, dry_run: bool, now: float | None = None,
         log.info("%s: %d batches on Pi, running=%s, eligible=%s", pi.name, len(mtimes),
                  running[pi.rig], todo)
         for b in todo:
+            now_running = hub_running_batches(http_get)
+            if now_running is None or now_running.get(pi.rig) is not None:
+                log.info("%s: a session started (or hub lost) - stopping before %s", pi.name, b)
+                break
             total += sizes.get(b, 0)
             if not backup_batch(pi, b, dest_root, runner, dry_run):
                 errors += 1
