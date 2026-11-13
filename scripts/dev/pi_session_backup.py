@@ -258,7 +258,7 @@ def backup_batch(pi: Pi, batch: str, dest_root: Path, runner, dry_run: bool = Fa
         if d.returncode != 0:
             log.error("%s/%s: Pi file removal returned rc=%s", pi.name, batch, d.returncode)
             return False
-        runner(ssh_argv(pi.name, f"find {shlex.quote(remote)} -depth -type d -empty -exec rmdir {{}} +"))
+        runner(ssh_argv(pi.name, f"find {shlex.quote(remote)} -depth -type d -empty -delete"))
         log.info("%s/%s: %d files verified and removed from Pi", pi.name, batch, len(pi_md5))
     return True
 

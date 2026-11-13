@@ -82,7 +82,7 @@ class FakeRunner:
 def test_md5_mismatch_no_delete(tmp_path):
     r = FakeRunner({"x.csv": "a" * 32, "y.mp4": "b" * 32}, {"x.csv": "a" * 32, "y.mp4": "c" * 32})
     assert psb.backup_batch(PI, "b1", tmp_path, r) is False
-    assert not r.cmds("rm -f") and not r.cmds("rmdir")
+    assert not r.cmds("rm -f") and not r.cmds("-empty")
 
 
 def test_missing_local_file_no_delete(tmp_path):
@@ -103,7 +103,7 @@ def test_match_deletes_exactly_listed_files(tmp_path):
     rm = [(a, i) for a, i in r.calls if "rm -f" in " ".join(a)]
     assert len(rm) == 1
     assert rm[0][1].splitlines() == ["/pi/root/b1/s/y.mp4", "/pi/root/b1/x.csv"]
-    assert any("rmdir" in " ".join(a) for a, _ in r.calls)
+    assert any("-empty -delete" in " ".join(a) for a, _ in r.calls)
 
 
 def test_no_delete_flag_in_rsync_argv(tmp_path):
@@ -204,4 +204,26 @@ def test_failed_remux_leaves_pi_untouched(tmp_path, monkeypatch):
     monkeypatch.setattr(m, "remux_continuous", lambda dest, runner: False)
     pi = m.PIS[0]
     assert m.backup_batch(pi, "b1", tmp_path, runner) is False
-    assert not any(a[0] == "ssh" and ("rm -f" in a[-1] or "rmdir" in a[-1]) for a in calls)
+    assert not any(a[0] == "ssh" and ("rm -f" in a[-1] or "-empty" in a[-1]) for a in calls)
+
+
+def test_verified_batch_with_subdir_leaves_no_empty_folder(tmp_path, monkeypatch):
+    # `-exec rmdir {} +` tests -empty before any removal, so a batch whose only
+    # subdir was continuous/ kept its empty top folder and was re-listed forever.
+    import subprocess
+    root = tmp_path / "pi"
+    (root / "b1" / "continuous").mkdir(parents=True)
+    pi = psb.Pi("flybehavior3", "Flybehavior3", str(root))
+
+    def runner(argv, input=None):
+        if argv[0] == "ssh" and "md5sum" in argv[-1]:
+            return SimpleNamespace(returncode=0, stdout=f"{'a' * 32}  {root}/b1/continuous/x.h264\n", stderr="")
+        if argv[0] == "find":
+            return SimpleNamespace(returncode=0, stdout=f"{'a' * 32}  {argv[1]}/continuous/x.h264\n", stderr="")
+        if argv[0] == "ssh" and "-empty" in argv[-1]:
+            return subprocess.run(["bash", "-c", argv[-1]], capture_output=True, text=True)
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(psb, "remux_continuous", lambda dest, runner: True)
+    assert psb.backup_batch(pi, "b1", tmp_path / "dest", runner) is True
+    assert not (root / "b1").exists()
