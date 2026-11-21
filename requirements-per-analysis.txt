@@ -1,0 +1,21 @@
+# PER analysis package (src/per_analysis, run_all.py): exact versions it was run with.
+# Pinned from the current `python3` (conda env yolo-env, Python 3.12.12) on 2026-11-18.
+#
+# This is NOT the production pipeline's requirements.txt (that one serves fbpipe and
+# keeps pandas < 3). Here, pandas 3.0.2 is the copy in ~/.local that plain `python3`
+# imports; with PYTHONNOUSERSITE=1 (as `make run` sets) the env's pandas 2.3.3 loads.
+#
+# Not used: pymer4, rpy2, mord (none are installed). statsmodels covers the mixed models
+# (MixedLM, BinomialBayesMixedGLM), the GEE logistic models and the ordinal model
+# (OrderedModel).
+#
+# Install: python3 -m pip install -r requirements-per-analysis.txt
+statsmodels==0.14.6
+scipy==1.12.0
+pandas==3.0.2
+numpy==1.26.4
+matplotlib==3.9.4
+pyarrow==14.0.2
+PyYAML==6.0.3
+# tests only
+pytest==9.0.2
