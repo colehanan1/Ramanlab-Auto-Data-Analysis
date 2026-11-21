@@ -1,0 +1,10 @@
+[Unit]
+Description=Saturday 12:00 GitHub sync of Ramanlab-Auto-Data-Analysis
+
+[Timer]
+OnCalendar=Sat *-*-* 12:00:00
+# Missed while the machine was off: run at the next boot.
+Persistent=true
+
+[Install]
+WantedBy=timers.target

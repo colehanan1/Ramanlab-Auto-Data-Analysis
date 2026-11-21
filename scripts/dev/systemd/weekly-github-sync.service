@@ -1,0 +1,18 @@
+[Unit]
+Description=Weekly commit/merge/test/push of Ramanlab-Auto-Data-Analysis main to GitHub (Claude Code)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/ramanlab/Documents/cole/VSCode/Ramanlab-Auto-Data-Analysis
+# yolo-env first: it is the interpreter with fbpipe + pandas that the tests need,
+# and the python3 Claude's targeted pytest runs resolve to.
+Environment=PATH=/home/ramanlab/anaconda3/envs/yolo-env/bin:/home/ramanlab/.local/bin:/usr/local/bin:/usr/bin:/bin
+Environment=PYTHONUNBUFFERED=1
+# Long-lived Claude sign-in for unattended runs: CLAUDE_CODE_OAUTH_TOKEN=... from
+# `claude setup-token` (chmod 600). Optional: without it the interactive sign-in is used.
+EnvironmentFile=-%h/.config/weekly-github-sync.env
+ExecStart=/home/ramanlab/anaconda3/envs/yolo-env/bin/python3 scripts/dev/weekly_github_sync.py
+TimeoutStartSec=8h
+Nice=10
