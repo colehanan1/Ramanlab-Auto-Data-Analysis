@@ -19,6 +19,7 @@ import pytest
 import yaml
 
 import scripts.analysis.sensitivity_window_results as swr
+from fbpipe.analysis import fly_stats as fs
 from scripts.pipeline.run_workflows import _sensitivity_window_command
 
 CONFIG = Path(__file__).resolve().parent.parent / "config" / "config_new.yaml"
@@ -344,13 +345,29 @@ def test_pre_baseline_folder_holds_figure_and_tables(tmp_path):
     long = _pre_long({("A", 1): [[3, 0], [0, 0]], ("B", 2): [[2, 2], [0, 3]]})
     written = swr.write_pre_baseline(tmp_path, long, ["A", "B"], window="10:40-15:20")
     d = tmp_path / "Pre-Exposure-Baseline"
-    assert [p.name for p in written] == ["pre_exposure_baseline.png"]
+    # % responding, then the same flies as mean score (user 2026-11-17)
+    assert [p.name for p in written] == ["pre_exposure_baseline.png",
+                                         "pre_exposure_baseline_score.png"]
     assert sorted(p.name for p in d.iterdir()) == [
-        "pre_exposure_baseline.png", "pre_exposure_by_cohort.csv",
-        "pre_exposure_by_cohort_x_rig.csv", "pre_exposure_by_rig.csv",
-        "pre_exposure_stats.csv"]
+        "pre_exposure_baseline.png", "pre_exposure_baseline_score.png",
+        "pre_exposure_by_cohort.csv", "pre_exposure_by_cohort_x_rig.csv",
+        "pre_exposure_by_rig.csv", "pre_exposure_stats.csv"]
     stats = pd.read_csv(d / "pre_exposure_stats.csv")
     assert set(stats["compared"]) == {"cohort", "rig"}
+
+
+def test_cohort_x_rig_cells_pool_trials_as_percent_or_mean_score():
+    long = _pre_long({("A", 1): [[3, 0], [0, 0]], ("B", 2): [[2, 2], [0, 3]]})
+    tables = {"pre_exposure_by_cohort.csv": swr.baseline_table(long, "cohort"),
+              "pre_exposure_by_cohort_x_rig.csv": swr.baseline_table(long, ["cohort", "rig"])}
+    vals, notes, cols = swr.cohort_rig_cells(tables, ["A", "B"], [1, 2], "score")
+    assert cols == ["Rig 1", "Rig 2", "All rigs"]
+    # A on rig 1: trials 3, 0, 0, 0 -> 0.75 (pooled, not a mean of fly means)
+    assert vals[0][0] == pytest.approx(0.75) and notes[0][0] == "0.75\n2 flies"
+    assert notes[0][1] == "no flies" and np.isnan(vals[0][1])
+    assert vals[1][2] == pytest.approx(1.75)              # B: 2, 2, 0, 3
+    vals, notes, _ = swr.cohort_rig_cells(tables, ["A", "B"], [1, 2], "pct")
+    assert vals[0][0] == 25.0 and notes[0][0] == "25%\n2 flies"
 
 
 def test_pre_baseline_skips_when_no_fly_is_in_the_window(tmp_path):
@@ -404,6 +421,45 @@ def test_date_split_compares_the_pre_exposure_of_all_flies_and_named_cohorts(tmp
     assert pooled["n_flies"].sum() == 4   # b1 + b2, both cohorts, one fly each
 
 
+def test_period_figure_shows_all_flies_as_percent_then_as_score(tmp_path, monkeypatch):
+    """User 2026-11-12: the bottom panel is every fly's mean pre-exposure score, not
+    the IAA cohort's %. IAA keeps its own pre-vs-post figure and CSV rows."""
+    import matplotlib.figure
+    saved = {}
+    real = matplotlib.figure.Figure.savefig
+
+    def grab(self, path, *a, **k):
+        saved[Path(path).name] = [(ax.get_ylabel(), ax.get_title(loc="left"),
+                                   [t.get_text() for t in ax.texts]) for ax in self.axes]
+        return real(self, path, *a, **k)
+
+    monkeypatch.setattr(matplotlib.figure.Figure, "savefig", grab)
+    long = _dated_long()
+    swr.write_date_split(tmp_path, long, ["IAA-Sensitivity-1-1", "Hex-Sensitivity-1-0.1"],
+                         split=SPLIT, window="10:40-15:20", panels=["IAA-Sensitivity-1-1"])
+    panels = saved["pre_exposure_by_period.png"]
+    assert len(panels) == 2
+    (y_top, t_top, _), (y_bot, t_bot, p_bot) = panels
+    assert "% of flies responding" in y_top and "score" in y_bot.lower()
+    assert t_top.startswith("All flies") and t_bot.startswith("All flies")
+    assert not any("IAA-Sensitivity-1-1" == t for _, t, _ in panels)
+    # the score panel's p values are the score test, not the rate test
+    stats = pd.read_csv(tmp_path / "Before-vs-From-2026-10-31"
+                        / "pre_exposure_by_period_stats.csv")
+    allc = stats[stats["cohort"] == swr.ALL_COHORTS].set_index("odor")
+    want = sorted(swr._p_text(p) for p in allc["p_score_kw"] if swr._p_text(p))
+    assert sorted(t for t in p_bot if t) == want
+
+
+def test_baseline_table_carries_a_score_interval():
+    long = _pre_long({("A", 1): [[3, 0], [0, 0]], ("B", 2): [[2, 2], [0, 3]]})
+    t = swr.baseline_table(long, "cohort")
+    assert {"score_ci95_lo", "score_ci95_hi"} <= set(t.columns)
+    ok = t.dropna(subset=["score_ci95_lo"])
+    assert (ok["score_ci95_lo"] <= ok["mean_score_pre"]).all()
+    assert (ok["mean_score_pre"] <= ok["score_ci95_hi"]).all()
+
+
 def test_a_moved_split_date_leaves_no_stale_folder(tmp_path):
     (tmp_path / "Before-vs-From-2026-10-01").mkdir()
     swr.write_date_split(tmp_path, _dated_long(), ["Hex-Sensitivity-1-0.1"], split=SPLIT,
@@ -425,6 +481,279 @@ def test_split_date_reaches_the_command_only_when_configured():
         python_exec="py")
     assert cmd[cmd.index("--split-date") + 1] == "2026-10-31"
     assert cmd[cmd.index("--split-cohort") + 1] == "IAA-Sensitivity-1-1"
+
+
+# ── change minus the Paraffin control's change (user 2026-11-13) ───────────
+
+
+PARA = "Paraffin-Sensitivity-1-100"
+
+
+def _fly_rows(cohort, sensitized, flies):
+    """flies: odor -> list of (score_pre, score_post), one per fly."""
+    rows = []
+    for odor, pairs in flies.items():
+        for i, (pre, post) in enumerate(pairs):
+            rows.append({"cohort": cohort, "odor": odor, "fly_id": f"{cohort}-{i}",
+                         "sensitized_odor": odor == sensitized, "in_window": True,
+                         "score_pre": pre, "score_post": post, "score_change": post - pre,
+                         "responded_pre": pre >= 2, "responded_post": post >= 2})
+    return rows
+
+
+def _controlled_long():
+    hex_ = {"Hexanol": [(0, 4), (0, 3), (1, 5), (0, 4)],     # +100 pts, +3.75
+            "Citral": [(0, 0), (3, 3), (0, 0), (2, 2)]}      # 0 pts, 0
+    para = {"Hexanol": [(0, 0), (0, 3), (1, 1), (0, 0)],     # +25 pts, +0.75
+            "Citral": [(0, 3), (3, 3), (0, 0), (2, 2)],      # +25 pts, +0.75
+            "Paraffin Oil": [(0, 1), (0, 0), (0, 0), (0, 0)]}
+    return pd.DataFrame(_fly_rows(HEX, "Hexanol", hex_) + _fly_rows(PARA, "Paraffin Oil", para))
+
+
+def test_control_subtraction_is_each_change_minus_the_controls_change():
+    long = _controlled_long()
+    t = swr.control_subtracted_table(long, PARA).set_index(["cohort", "odor"])
+    assert set(t.index.get_level_values("cohort")) == {HEX}       # the control is the baseline
+    assert ("Hex-Sensitivity-1-0.1", "Paraffin Oil") not in t.index  # needs both cohorts
+    hx = t.loc[(HEX, "Hexanol")]
+    assert hx["pct_change"] == 100.0 and hx["pct_change_control"] == 25.0
+    assert hx["pct_change_minus_control"] == 75.0
+    assert hx["mean_score_change_minus_control"] == pytest.approx(3.75 - 0.75)
+    assert hx["n_flies"] == 4 and hx["n_flies_control"] == 4
+    assert bool(hx["sensitized_odor"])
+    # the plotted difference matches the change table exactly (same flies, same pooling)
+    ch = swr.change_table(long).set_index(["cohort", "odor"])
+    assert hx["pct_change"] == ch.loc[(HEX, "Hexanol"), "pct_change"]
+    assert hx["pct_change_control"] == ch.loc[(PARA, "Hexanol"), "pct_change"]
+    # independent groups: the SEMs add in quadrature
+    want = np.hypot(ch.loc[(HEX, "Hexanol"), "sem_score_change"],
+                    ch.loc[(PARA, "Hexanol"), "sem_score_change"])
+    assert hx["sem_score_change_minus_control"] == pytest.approx(want, abs=1e-3)
+    ci = t.loc[(HEX, "Citral")]
+    assert ci["pct_change_minus_control"] == -25.0
+
+
+def test_control_subtraction_p_values_are_two_group_permutation_tests():
+    long = _controlled_long()
+    t = swr.control_subtracted_table(long, PARA).set_index(["cohort", "odor"])
+    for col in ("p_rate_perm", "p_score_perm"):
+        assert 0 < t.loc[(HEX, "Hexanol"), col] <= 1
+    # identical per-fly changes in both cohorts: no difference at all
+    same = long.copy()
+    para_rows = same[same["cohort"] == PARA].copy()
+    para_rows["cohort"] = HEX
+    para_rows["sensitized_odor"] = para_rows["odor"] == "Hexanol"
+    same = pd.concat([para_rows, same[same["cohort"] == PARA]], ignore_index=True)
+    s = swr.control_subtracted_table(same, PARA).set_index(["cohort", "odor"])
+    assert s.loc[(HEX, "Hexanol"), "p_score_perm"] == pytest.approx(1.0)
+    # deterministic: the same data gives the same p
+    again = swr.control_subtracted_table(long, PARA).set_index(["cohort", "odor"])
+    assert again.loc[(HEX, "Hexanol"), "p_score_perm"] == t.loc[(HEX, "Hexanol"), "p_score_perm"]
+
+
+def test_control_subtraction_is_empty_without_the_control():
+    long = _controlled_long()
+    assert swr.control_subtracted_table(long[long["cohort"] == HEX], PARA).empty
+    assert swr.control_subtracted_table(long, None).empty
+
+
+def test_cross_cohort_writes_the_control_subtracted_figure_when_asked(tmp_path):
+    long = _controlled_long()
+    written = swr.write_cross_cohort(tmp_path, long, [HEX, PARA], window="09:40-16:20",
+                                     control=PARA)
+    names = [p.name for p in written]
+    # one figure per cohort (user 2026-11-13), none for the control itself
+    assert f"change_minus_control_{HEX}_window.png" in names
+    assert not any(PARA in n and "minus_control" in n for n in names)
+    t = pd.read_csv(tmp_path / "Cross-Cohort" / "change_minus_control_window.csv")
+    assert set(t["cohort"]) == {HEX} and set(t["control"]) == {PARA}
+    swr.write_cross_cohort(tmp_path, long, [HEX, PARA], window="09:40-16:20")
+    assert not list((tmp_path / "Cross-Cohort").glob("change_minus_control*"))
+
+
+def test_control_cohort_reaches_the_command_only_when_configured():
+    assert "--control-cohort" not in _sensitivity_window_command(_cfg(), _Settings(),
+                                                                 python_exec="py")
+    cmd = _sensitivity_window_command(_cfg(control_cohort=PARA), _Settings(), python_exec="py")
+    assert cmd[cmd.index("--control-cohort") + 1] == PARA
+
+
+# ── window flies scored on odor + 5 s (user 2026-11-13) ────────────────────
+
+
+def _plus_paired(cohort):
+    """Rescored pairs: b1 (window) and b2 (outside it), different scores than ``_paired``."""
+    return pd.DataFrame({"dataset_canon": cohort, "fly": ["b1", "b1", "b2", "b2"],
+                         "fly_number": [1, 1, 1, 1],
+                         "odor": ["Hexanol", "Citral", "Hexanol", "Citral"],
+                         "score_pre": [0, 0, 5, 5], "score_post": [5, 1, 5, 5]})
+
+
+def test_rescored_scores_replace_the_window_flies_scores_only():
+    long = _long_two_cohorts()
+    hexc = "Hex-Sensitivity-1-0.1"
+    plus = swr.rescore_long(long, {hexc: _plus_paired(hexc)})
+    assert set(plus["cohort"]) == {hexc}                 # IAA had no rescored pairs given
+    assert set(plus["batch_folder"]) == {"b1"}           # window flies only (b2 at 17:30)
+    row = plus.set_index("odor").loc["Hexanol"]
+    assert (row["score_pre"], row["score_post"], row["score_change"]) == (0, 5, 5)
+    assert bool(row["responded_post"]) and not bool(row["responded_pre"])
+    assert bool(row["sensitized_odor"])
+    cit = plus.set_index("odor").loc["Citral"]
+    assert not bool(cit["responded_post"])               # score 1 < 2
+
+
+def test_plus_after_folder_renders_each_cohort_and_compares_them(tmp_path, monkeypatch):
+    long = _long_two_cohorts()
+    cohorts = ["IAA-Sensitivity-1-1", "Hex-Sensitivity-1-0.1"]
+    csv = tmp_path / "rescored.csv"
+    csv.write_text("x\n")
+    runs = []
+    monkeypatch.setattr(swr, "_run", lambda cmd, log: runs.append([str(c) for c in cmd]) or 0)
+    monkeypatch.setattr(swr, "rescored_pairs",
+                        lambda rescored, cohort, folders, flagged, path: _plus_paired(cohort))
+    monkeypatch.setattr(swr, "read_rescored", lambda path: pd.DataFrame({"dataset": []}))
+    written = swr.write_plus_after(tmp_path, long, cohorts, rescored_csv=csv, after_s=5,
+                                   window="09:40-16:20", flagged=tmp_path / "f.csv",
+                                   control=None, log=None)
+    d = tmp_path / "Pre-vs-Post-Sensitivity-Odor-Plus-5s"
+    assert d.is_dir()
+    # one render per cohort, on its own window predictions, titles naming the window
+    assert len(runs) == 2
+    for cmd in runs:
+        assert cmd[1].endswith("pretest_vs_test_comparison.py")
+        assert "odor + 5 s" in cmd[cmd.index("--window-note") + 1]
+        assert cmd[cmd.index("--rate-test") + 1] == "mcnemar"
+        assert cmd[cmd.index("--p-adjust") + 1] == "holm"     # exploratory: Holm (2026-11-18)
+    names = {p.name for p in written}
+    assert {"cross_cohort_change_plus_5s_window.png",
+            "cross_cohort_pre_post_plus_5s_window.png"} <= names
+    t = pd.read_csv(d / "cross_cohort_change_plus_5s_window.csv").set_index(["cohort", "odor"])
+    assert t.loc[("Hex-Sensitivity-1-0.1", "Hexanol"), "mean_score_change"] == 5.0
+    assert t.loc[("Hex-Sensitivity-1-0.1", "Hexanol"), "n_flies"] == 1
+    # without a rescored table the folder goes away
+    assert swr.write_plus_after(tmp_path, long, cohorts, rescored_csv=None, after_s=5,
+                                window="09:40-16:20", flagged=tmp_path / "f.csv",
+                                control=None, log=None) == []
+    assert not d.exists()
+
+
+def test_plus_after_reaches_the_command_from_the_rescore_block():
+    assert "--plus-after-csv" not in _sensitivity_window_command(_cfg(), _Settings(),
+                                                                 python_exec="py")
+    analysis = {"sensitivity_window_results": _cfg()["sensitivity_window_results"],
+                "pretest_vs_test_plus_after": {"rescored_csv": "/x/odor_plus_5s.csv",
+                                               "after_s": 5}}
+    cmd = _sensitivity_window_command(analysis, _Settings(), python_exec="py")
+    assert cmd[cmd.index("--plus-after-csv") + 1] == "/x/odor_plus_5s.csv"
+    assert cmd[cmd.index("--plus-after-s") + 1] == "5"
+    off = {**analysis, "pretest_vs_test_plus_after": {**analysis["pretest_vs_test_plus_after"],
+                                                      "enabled": False}}
+    assert "--plus-after-csv" not in _sensitivity_window_command(off, _Settings(),
+                                                                 python_exec="py")
+
+
+def test_first_odor_reaches_the_command_from_the_rescore_block():
+    assert "--first-odor-csv" not in _sensitivity_window_command(_cfg(), _Settings(),
+                                                                 python_exec="py")
+    analysis = {"sensitivity_window_results": _cfg()["sensitivity_window_results"],
+                "pretest_vs_test_first_odor": {"rescored_csv": "/x/first_10s.csv",
+                                               "odor_s": 10}}
+    cmd = _sensitivity_window_command(analysis, _Settings(), python_exec="py")
+    assert cmd[cmd.index("--first-odor-csv") + 1] == "/x/first_10s.csv"
+    assert cmd[cmd.index("--first-odor-s") + 1] == "10"
+    off = {**analysis, "pretest_vs_test_first_odor": {**analysis["pretest_vs_test_first_odor"],
+                                                      "enabled": False}}
+    assert "--first-odor-csv" not in _sensitivity_window_command(off, _Settings(),
+                                                                 python_exec="py")
+
+
+# ── window flies scored on the first 10 s of the odor (user 2026-11-17) ───
+
+
+def test_first_odor_folder_renders_each_cohort_and_compares_them(tmp_path, monkeypatch):
+    long = _long_two_cohorts()
+    cohorts = ["IAA-Sensitivity-1-1", "Hex-Sensitivity-1-0.1"]
+    csv = tmp_path / "first.csv"
+    csv.write_text("x\n")
+    runs = []
+    monkeypatch.setattr(swr, "_run", lambda cmd, log: runs.append([str(c) for c in cmd]) or 0)
+    monkeypatch.setattr(swr, "rescored_pairs",
+                        lambda rescored, cohort, folders, flagged, path: _plus_paired(cohort))
+    monkeypatch.setattr(swr, "read_rescored", lambda path: pd.DataFrame({"dataset": []}))
+    written = swr.write_first_odor(tmp_path, long, cohorts, rescored_csv=csv, odor_s=10,
+                                   window="09:40-16:20", flagged=tmp_path / "f.csv",
+                                   control="Hex-Sensitivity-1-0.1", log=None)
+    d = tmp_path / "Pre-vs-Post-Sensitivity-Odor-First-10s"
+    assert d.is_dir() and not (tmp_path / "Pre-vs-Post-Sensitivity-Odor-Plus-10s").exists()
+    assert len(runs) == 2
+    for cmd in runs:
+        assert "first 10 s of the odor" in cmd[cmd.index("--window-note") + 1]
+        assert cmd[cmd.index("--p-adjust") + 1] == "holm"
+    names = {p.name for p in written}
+    assert {"cross_cohort_change_first_10s_odor_window.png",
+            "cross_cohort_pre_post_first_10s_odor_window.png",
+            "change_minus_control_IAA-Sensitivity-1-1_first_10s_odor_window.png"} <= names
+    t = pd.read_csv(d / "cross_cohort_pre_post_first_10s_odor_window.csv")
+    t = t.set_index(["cohort", "odor"])
+    assert t.loc[("Hex-Sensitivity-1-0.1", "Hexanol"), "mean_score_post"] == 5.0
+    assert swr.write_first_odor(tmp_path, long, cohorts, rescored_csv=None, odor_s=10,
+                                window="09:40-16:20", flagged=tmp_path / "f.csv",
+                                control=None, log=None) == []
+    assert not d.exists()
+
+
+# ── one cohort split at a moment (user 2026-11-12: new paraffin flies) ─────
+
+
+HEX = "Hex-Sensitivity-1-0.1"
+HEX_SPLIT = (HEX, pd.Timestamp("2026-10-25 12:00"))
+
+
+def test_cohort_split_argument_parses_cohort_and_moment():
+    assert swr.parse_cohort_split("Paraffin-Sensitivity-1-100@2026-11-10T12:00") == (
+        "Paraffin-Sensitivity-1-100", pd.Timestamp("2026-11-10 12:00"))
+    with pytest.raises(Exception):
+        swr.parse_cohort_split("Paraffin-Sensitivity-1-100")
+
+
+def test_cohort_split_uses_every_fly_of_that_cohort_window_or_not(tmp_path):
+    long = _dated_long()
+    long.loc[long["batch_folder"] == "b2", "in_window"] = False   # all flies, not the window
+    written = swr.write_cohort_split(tmp_path, long, [HEX_SPLIT])
+    d = tmp_path / "Cohort-Split"
+    stem = f"{HEX}_from_2026-10-25_1200"
+    assert [p.name for p in written] == [f"{stem}.png", f"{stem}_pre_vs_post.png"]
+    t = pd.read_csv(d / f"{stem}_by_group.csv")
+    assert set(t["comparison"]) == {"all flies", "same rig(s) as the later group"}
+    t = t[t["comparison"] == "all flies"]
+    assert set(t["phase"]) == {"Pre-exposure", "Post-exposure"}
+    assert set(t["period"]) == {"Before Oct 25 12:00", "Oct 25 12:00 onward"}
+    allo = t[(t["odor"] == swr.ALL_ODORS) & (t["phase"] == "Pre-exposure")]
+    assert allo["n_flies"].tolist() == [1, 1]       # one Hex fly per batch, IAA excluded
+    # post-exposure numbers are the post columns, not the pre ones copied
+    hexpost = t[(t["odor"] == "Hexanol") & (t["phase"] == "Post-exposure")]
+    hexpre = t[(t["odor"] == "Hexanol") & (t["phase"] == "Pre-exposure")]
+    assert hexpost["pct_responding"].tolist() == [100.0, 100.0]
+    assert hexpre["pct_responding"].tolist() == [0.0, 0.0]
+    stats = pd.read_csv(d / f"{stem}_stats.csv")
+    assert {"phase", "p_rate_ffh", "p_score_kw", "rigs"} <= set(stats.columns)
+    assert set(stats["comparison"]) == {"all flies", "same rig(s) as the later group"}
+
+
+def test_cohort_split_folder_goes_away_when_unconfigured(tmp_path):
+    swr.write_cohort_split(tmp_path, _dated_long(), [HEX_SPLIT])
+    assert swr.write_cohort_split(tmp_path, _dated_long(), []) == []
+    assert not (tmp_path / "Cohort-Split").exists()
+
+
+def test_cohort_split_reaches_the_command_only_when_configured():
+    assert "--cohort-split" not in _sensitivity_window_command(_cfg(), _Settings(),
+                                                               python_exec="py")
+    cmd = _sensitivity_window_command(
+        _cfg(cohort_splits=[{"cohort": "Paraffin-Sensitivity-1-100",
+                             "from": "2026-11-10 12:00"}]), _Settings(), python_exec="py")
+    assert cmd[cmd.index("--cohort-split") + 1] == "Paraffin-Sensitivity-1-100@2026-11-10 12:00"
 
 
 # ── one odor across the whole session: pre, each exposure trial, post ──────
@@ -1150,10 +1479,18 @@ def test_cohort_traces_compare_every_cohort_per_odor_and_phase(tmp_path):
     _trace_inputs(tmp_path, short=True)
     written = swr.write_cohort_traces(tmp_path, TRACE_COHORTS, window="09:40-16:20")
     d = tmp_path / "Mean-Traces-By-Cohort"
-    assert sorted(p.name for p in written) == ["odor_window_means_by_cohort.png",
-                                               "post_exposure_mean_traces_by_cohort.png",
-                                               "pre_exposure_mean_traces_by_cohort.png"]
+    # every mean figure has a median twin and a mean-vs-median figure (user 2026-11-13)
+    assert sorted(p.name for p in written) == sorted([
+        "odor_window_means_by_cohort.png", "odor_window_medians_by_cohort.png",
+        "post_exposure_mean_traces_by_cohort.png", "pre_exposure_mean_traces_by_cohort.png",
+        "post_exposure_median_traces_by_cohort.png", "pre_exposure_median_traces_by_cohort.png",
+        "post_exposure_mean_vs_median_traces_by_cohort.png",
+        "pre_exposure_mean_vs_median_traces_by_cohort.png"])
+    assert all((d / p.name).is_file() for p in written)
     stats = pd.read_csv(d / "cohort_trace_stats.csv")
+    assert {"odor_window_median", "odor_window_q25", "odor_window_q75"} <= set(stats.columns)
+    row = stats.dropna(subset=["odor_window_median"]).iloc[0]
+    assert row["odor_window_q25"] <= row["odor_window_median"] <= row["odor_window_q75"]
     assert set(stats["odor"]) == {"Hexanol", "Citral"}          # the light probe is no odor
     assert set(stats["phase"]) == {"pre", "post"}
     one = stats.set_index(["phase", "odor", "cohort"])
@@ -1192,6 +1529,76 @@ def test_frame_mean_sem_blanks_thin_frames_and_uses_the_finite_count():
     assert np.isnan(mean[2]) and np.isnan(sem[2])                       # 1 of 3 < 60 %
 
 
+def test_frame_median_iqr_blanks_thin_frames_and_resists_an_outlier():
+    arr = np.array([[1.0, 2.0, 3.0], [3.0, np.nan, np.nan], [500.0, 4.0, np.nan]])
+    med, q25, q75 = swr.frame_median_iqr(arr, min_frac=0.6)
+    assert med[0] == pytest.approx(3.0)                  # the mean would be 168
+    assert q25[0] == pytest.approx(np.percentile([1, 3, 500], 25))
+    assert q75[0] == pytest.approx(np.percentile([1, 3, 500], 75))
+    assert med[1] == pytest.approx(3.0)                  # 2 of 3 flies: median of 2 and 4
+    assert np.isnan(med[2]) and np.isnan(q25[2]) and np.isnan(q75[2])   # 1 of 3 < 60 %
+
+
+# ── post − pre traces by response transition (user 2026-11-13) ────────────
+
+
+def _transition_setup():
+    """4 IAA flies on Isoamyl Acetate: one per transition; fly 4 has no post trace."""
+    n = int(swr.TRACE_END_S * swr.TRACE_FPS)
+    on = int(swr.TRACE_ON_S * swr.TRACE_FPS)
+    flies = {"b1_fly1": (False, True), "b1_fly2": (True, True), "b1_fly3": (True, False),
+             "b1_fly4": (False, False), "b1_fly5": (False, False)}
+    long = pd.DataFrame([{"cohort": IAA, "odor": "Isoamyl Acetate", "fly_id": f,
+                          "in_window": True, "responded_pre": a, "responded_post": b}
+                         for f, (a, b) in flies.items()])
+    pre, post = {}, {}
+    for i, f in enumerate(flies, start=1):
+        base = np.zeros(n)
+        pre[f] = base.copy()
+        pre[f][on:] = float(i)                   # pre: step of i during the odor
+        if f != "b1_fly4":
+            post[f] = base.copy()
+            post[f][on:] = 3.0 * i               # post: step of 3i -> difference 2i
+    data = {("pre", "Isoamyl Acetate", IAA): pre, ("post", "Isoamyl Acetate", IAA): post}
+    return long, data
+
+
+def test_transitions_group_flies_and_take_post_minus_pre_per_fly():
+    long, data = _transition_setup()
+    groups = swr.transition_groups(long, data, IAA, "Isoamyl Acetate")
+    assert {g: sorted(v) for g, v in groups.items()} == {
+        "new": ["b1_fly1"], "both": ["b1_fly2"], "lost": ["b1_fly3"], "never": ["b1_fly5"]}
+    on = int(swr.TRACE_ON_S * swr.TRACE_FPS)
+    pre, post, diff = groups["lost"]["b1_fly3"]
+    assert diff[on + 5] == pytest.approx(6.0) and diff[0] == 0.0     # 9 - 3
+    np.testing.assert_allclose(diff, post - pre)
+
+
+def test_transition_folder_holds_a_figure_and_the_numbers(tmp_path, monkeypatch):
+    long, data = _transition_setup()
+    monkeypatch.setattr(swr, "cohort_traces", lambda out, cohorts, config=None: (data, pd.DataFrame()))
+    written = swr.write_transitions(tmp_path, long, [IAA], window="09:40-16:20")
+    d = tmp_path / "Response-Transitions"
+    assert [p.name for p in written] == [f"{IAA}_Isoamyl_Acetate_post_minus_pre_by_transition.png"]
+    t = pd.read_csv(d / f"{IAA}_Isoamyl_Acetate_post_minus_pre_by_transition.csv")
+    assert list(t["transition"]) == ["new", "both", "lost", "never"]
+    row = t.set_index("transition").loc["lost"]
+    assert row["n_flies"] == 1 and row["diff_odor_mean"] == pytest.approx(6.0)
+    assert row["diff_odor_median"] == pytest.approx(6.0)
+    assert row["diff_baseline_mean"] == pytest.approx(0.0)
+    assert t.set_index("transition").loc["never", "n_flies"] == 1      # fly 4 had no post trace
+    assert swr.write_transitions(tmp_path, long, [], window="09:40-16:20") == []
+    assert not d.exists()
+
+
+def test_transition_cohorts_reach_the_command_only_when_configured():
+    assert "--transition-cohort" not in _sensitivity_window_command(_cfg(), _Settings(),
+                                                                    python_exec="py")
+    cmd = _sensitivity_window_command(_cfg(transition_cohorts=[IAA]), _Settings(),
+                                      python_exec="py")
+    assert cmd[cmd.index("--transition-cohort") + 1] == IAA
+
+
 def test_cohort_traces_need_two_cohorts(tmp_path):
     _trace_inputs(tmp_path)
     (tmp_path / "Mean-Traces-By-Cohort").mkdir()
@@ -1224,7 +1631,14 @@ def test_path_arguments_are_made_absolute_before_children_see_them(tmp_path, mon
          "--flagged-flies-csv", "flags.csv"]))
     assert args.out_dir == tmp_path / "out"
     assert args.flagged_flies_csv == tmp_path / "flags.csv"
-    assert all(Path(getattr(args, a)).is_absolute() for a in swr.PATH_ARGS)
+    assert args.plus_after_csv is None                  # optional: left unset
+    assert all(Path(getattr(args, a)).is_absolute() for a in swr.PATH_ARGS
+               if getattr(args, a) is not None)
+    args = swr.resolve_path_args(swr.build_parser().parse_args(
+        ["--out-dir", "out", "--start", "10:40", "--end", "15:20", "--dataset", "A",
+         "--plus-after-csv", "plus.csv", "--first-odor-csv", "first.csv"]))
+    assert args.plus_after_csv == tmp_path / "plus.csv"
+    assert args.first_odor_csv == tmp_path / "first.csv"
 
 
 # ── run_workflows wiring ──────────────────────────────────────────────────
@@ -1328,8 +1742,6 @@ def _peakz_csv(out, cohort, rows):
 def test_peakz_change_takes_each_flys_own_post_minus_pre(tmp_path):
     """User 2026-11-11: the signed pre-to-post change of the peak-z during/before ratio,
     every cohort side by side per odor."""
-    from scripts.analysis.auc_before_during import _wilcoxon
-
     _peakz_csv(tmp_path, "Hex-Sensitivity-1-0.1", [
         ("b1", 1, "Hexanol", -1.0, 2.0, 1.0, 2.0),
         ("b1", 2, "Hexanol", 0.5, 1.5, 0.5, 1.5),
@@ -1350,9 +1762,21 @@ def test_peakz_change_takes_each_flys_own_post_minus_pre(tmp_path):
     assert citral["unsigned_ratio_change"] == pytest.approx(0.5)
     # the sensitized odor is the cohort's own, not the blank "trained" column
     assert bool(hexanol["sensitized_odor"]) and not bool(citral["sensitized_odor"])
-    # the p each cohort's own PeakZ figure prints
+    # the shared exact, tie-aware signed-rank p of each fly's own post − pre
     assert hexanol["p_signed_ratio_wilcoxon"] == pytest.approx(
-        _wilcoxon(np.array([2.0, 1.5]), np.array([-1.0, 0.5])), nan_ok=True)
+        fs.wilcoxon_signed_rank_p(np.array([2.0, 1.5]) - np.array([-1.0, 0.5])))
+
+
+def test_peakz_change_p_is_exact_with_tied_changes(tmp_path):
+    """2026-11-18: one tie-aware Wilcoxon everywhere. scipy 1.12 reads these changes
+    as p = 0.047; with the ties counted the exact p is 0.0625."""
+    changes = [-2, -2, -2, -2, -1, -1, 1]
+    _peakz_csv(tmp_path, "Hex-Sensitivity-1-0.1",
+               [("b1", i, "Hexanol", 0.0, float(c), 0.0, float(c))
+                for i, c in enumerate(changes, 1)])
+    row = swr.peakz_change_table(tmp_path, ["Hex-Sensitivity-1-0.1"]).iloc[0]
+    assert row["p_signed_ratio_wilcoxon"] == pytest.approx(0.0625)
+    assert row["p_unsigned_ratio_wilcoxon"] == pytest.approx(0.0625)
 
 
 def test_cross_cohort_draws_the_peakz_ratio_change(tmp_path, monkeypatch):
@@ -1527,3 +1951,359 @@ def test_cross_cohort_draws_the_peakz_change_during_the_odor_alone(tmp_path):
     name = "cross_cohort_peakz_during_change_window"
     assert (tmp_path / "Cross-Cohort" / f"{name}.csv").is_file()
     assert tmp_path / "Cross-Cohort" / f"{name}.png" in written
+
+
+# ── the pre-specified primary endpoint (user 2026-11-18) ──────────────────
+
+
+def test_primary_endpoint_is_pinned():
+    """Registered 2026-11-18. Changing any of it is a new registration, not an edit."""
+    assert swr.PRIMARY_ENDPOINT == {
+        "registered": "2026-11-18",
+        "metric": "responded (score >= 2)",
+        "window": "production scorer window (whole odor; model_predictions.csv)",
+        "odor": "each exposed cohort's sensitized odor",
+        "contrast": "exposed flies' post - pre change minus control flies' change on the "
+                    "same odor",
+        "test": "two-sided permutation, whole batches (batch_folder) swapped between the "
+                "two cohorts",
+        "ci": "95 % percentile bootstrap over batches within each cohort",
+    }
+    assert swr.THRESHOLD == 2            # the metric's "score >= 2" is the code's threshold
+
+
+def _pe_fly(cohort, batch, n, odor, sensitized, pre, post, start, inside=True):
+    s_pre, s_post = (3 if pre else 0), (3 if post else 0)
+    return {"cohort": cohort, "batch_folder": batch, "fly_number": n,
+            "fly_id": f"{batch}_fly{n}", "rig": 2, "start_time": start,
+            "start_bin": "10:00-12:00", "in_window": inside, "odor": odor,
+            "sensitized_odor": odor == sensitized, "score_pre": s_pre, "score_post": s_post,
+            "score_change": s_post - s_pre, "responded_pre": bool(pre),
+            "responded_post": bool(post)}
+
+
+#: (batch, first pre-exposure trial, in the window, [(responded pre, post) per fly])
+PE_HEX = [("hb1", "2026-10-01 11:00", True, [(0, 1), (0, 1), (1, 1)]),
+          ("hb2", "2026-10-02 12:00", True, [(0, 0), (0, 1)]),
+          ("hb3", "2026-10-03 13:00", True, [(1, 0), (0, 1)]),
+          ("hb4", "2026-10-03 18:00", False, [(0, 1), (0, 1)])]    # outside the window
+PE_PARA = [("pb1", "2026-11-05 11:00", True, [(0, 0), (1, 0), (0, 1)]),
+           ("pb2", "2026-11-06 12:00", True, [(0, 0), (0, 0)])]
+
+
+def _primary_long(para=PE_PARA, exposed=((HEX, "Hexanol"),)):
+    """Exposed cohorts on their own odor (plus Citral, which is not the endpoint), the
+    control on each of those odors and its own, and IAA, whose odor the control never met."""
+    rows = []
+    for cohort, odor in exposed:
+        for batch, start, inside, flies in PE_HEX:
+            for n, (pre, post) in enumerate(flies, 1):
+                b = f"{cohort[:3]}-{batch}"
+                rows.append(_pe_fly(cohort, b, n, odor, odor, pre, post, start, inside))
+                rows.append(_pe_fly(cohort, b, n, "Citral", odor, 1, 0, start, inside))
+    for batch, start, inside, flies in para:
+        for n, (pre, post) in enumerate(flies, 1):
+            for _, odor in exposed:
+                rows.append(_pe_fly(PARA, batch, n, odor, "Paraffin Oil", pre, post, start,
+                                    inside))
+            rows.append(_pe_fly(PARA, batch, n, "Paraffin Oil", "Paraffin Oil", 0, 1, start,
+                                inside))
+    rows.append(_pe_fly(IAA, "ib1", 1, "Isoamyl Acetate", "Isoamyl Acetate", 0, 1,
+                        "2026-11-05 13:00"))
+    return pd.DataFrame(rows)
+
+
+def _endpoint_flies(long, cohort, odor):
+    g = long[long["in_window"] & (long["cohort"] == cohort) & (long["odor"] == odor)]
+    return pd.DataFrame({"batch_folder": g["batch_folder"],
+                         "change": g["responded_post"].astype(int)
+                         - g["responded_pre"].astype(int)})
+
+
+def test_primary_endpoint_is_the_batch_permutation_test_on_each_exposed_odor():
+    long = _primary_long()
+    t = swr.primary_endpoint_table(long, [IAA, HEX, PARA], PARA)
+    # IAA: the control flies never met its odor; the control itself is the baseline
+    assert list(t["cohort"]) == [HEX]
+    r = t.iloc[0]
+    assert (r["odor"], r["control"]) == ("Hexanol", PARA)
+    want = fs.controlled_change_test(_endpoint_flies(long, HEX, "Hexanol"),
+                                     _endpoint_flies(long, PARA, "Hexanol"),
+                                     value="change", batch="batch_folder", seed=0)
+    # (4 gained - 1 lost) / 7 exposed flies, minus (1 - 1) / 5 control flies
+    assert r["estimate_pp"] == pytest.approx(100 * 3 / 7, abs=1e-3)
+    assert r["estimate_pp"] == pytest.approx(100 * want["estimate"], abs=1e-4)
+    assert r["change_pp_exposed"] == pytest.approx(100 * want["exposed_change"], abs=1e-4)
+    assert r["change_pp_control"] == pytest.approx(100 * want["control_change"], abs=1e-4)
+    for col in ("ci_lo", "ci_hi"):
+        assert r[f"{col}_pp"] == pytest.approx(100 * want[col], abs=1e-4)
+    for col in ("p_batch", "p_fly"):
+        assert r[col] == pytest.approx(want[col], abs=1e-6)
+    assert bool(r["perm_exact"]) and want["perm_exact"]        # 5 batches: every split
+    # hb4 started outside the window and does not count
+    assert (r["n_flies_exposed"], r["n_flies_control"]) == (7, 5)
+    assert (r["n_batches_exposed"], r["n_batches_control"]) == (3, 2)
+    # secondary: each group's own pre -> post and its own paired McNemar
+    assert r["secondary_pct_pre_exposed"] == pytest.approx(100 * 2 / 7, abs=1e-3)
+    assert r["secondary_pct_post_exposed"] == pytest.approx(100 * 5 / 7, abs=1e-3)
+    assert r["secondary_p_mcnemar_exposed"] == pytest.approx(0.375)      # 4 gained, 1 lost
+    assert r["secondary_pct_pre_control"] == pytest.approx(20.0)
+    assert r["secondary_pct_post_control"] == pytest.approx(20.0)
+    assert r["secondary_p_mcnemar_control"] == pytest.approx(1.0)        # 1 gained, 1 lost
+    # when each group's flies ran, and whether the control covered the same days
+    assert (r["first_start_exposed"], r["last_start_exposed"]) == ("2026-10-01", "2026-10-03")
+    assert (r["first_start_control"], r["last_start_control"]) == ("2026-11-05", "2026-11-06")
+    assert not bool(r["concurrent"])
+
+
+def test_primary_endpoint_reads_the_saved_window_table_the_same(tmp_path):
+    """The real check runs on Data/window_per_fly_per_odor.csv: read back, same answer."""
+    long = _primary_long()
+    path = tmp_path / "window_per_fly_per_odor.csv"
+    long[long["in_window"]].to_csv(path, index=False)
+    a = swr.primary_endpoint_table(long, [IAA, HEX, PARA], PARA)
+    b = swr.primary_endpoint_table(pd.read_csv(path), [IAA, HEX, PARA], PARA)
+    pd.testing.assert_frame_equal(a, b, check_dtype=False)
+
+
+def test_primary_endpoint_knows_a_control_run_in_the_same_days():
+    para = [(b, "2026-10-02 10:00", inside, flies) for b, _, inside, flies in PE_PARA]
+    t = swr.primary_endpoint_table(_primary_long(para), [HEX, PARA], PARA)
+    assert bool(t.iloc[0]["concurrent"])
+    assert swr.primary_concurrency_notes(t) == []
+
+
+def test_primary_endpoint_needs_the_control_flies_on_the_exposed_odor():
+    long = _primary_long()
+    assert swr.primary_endpoint_table(long, [HEX, PARA], None).empty
+    assert swr.primary_endpoint_table(long[long["cohort"] != PARA], [HEX, PARA], PARA).empty
+    no_hexanol = long[~((long["cohort"] == PARA) & (long["odor"] == "Hexanol"))]
+    empty = swr.primary_endpoint_table(no_hexanol, [HEX, PARA], PARA)
+    assert empty.empty and "estimate_pp" in empty.columns
+
+
+def test_primary_row_text_reads_as_registered():
+    r = {"estimate_pp": 6.6406, "ci_lo_pp": -14.71, "ci_hi_pp": 27.89, "p_batch": 0.6138,
+         "n_flies_exposed": 54, "n_flies_control": 51, "n_batches_exposed": 14,
+         "n_batches_control": 14}
+    assert swr.primary_row_text(r) == ("Δ = +6.6 pp [−14.7, +27.9] · p = 0.61 (whole batches "
+                                       "shuffled) · 54 vs 51 flies, 14 vs 14 batches")
+    assert swr.primary_row_text({**r, "estimate_pp": -0.01, "p_batch": 0.0004}).startswith(
+        "Δ = 0.0 pp [−14.7, +27.9] · p < 0.001")
+
+
+OCT = "3Oct-Sensitivity-1-0.1"
+
+
+def test_primary_endpoint_figure_leads_with_the_controlled_difference(tmp_path, monkeypatch):
+    import matplotlib.text
+    from matplotlib.colors import to_hex
+    from matplotlib.figure import Figure
+
+    figs = []
+    monkeypatch.setattr(Figure, "savefig", lambda self, *a, **k: figs.append(self))
+    cohorts = [IAA, HEX, OCT, PARA]
+    t = swr.primary_endpoint_table(
+        _primary_long(exposed=((HEX, "Hexanol"), (OCT, "3-Octanol"))), cohorts, PARA)
+    assert list(t["cohort"]) == [HEX, OCT]
+    swr.plot_primary_endpoint(t, cohorts, "title", tmp_path / "p.png", window="09:40–16:20")
+    fig = figs[0]
+    a = [ax for ax in fig.axes if ax.get_label() == "primary_A"]
+    b = [ax for ax in fig.axes if ax.get_label().startswith("primary_B")]
+    assert len(a) == 1 and len(b) == len(t)
+    a = a[0]
+    # A, the headline: each cohort's 95 % interval, at the table's numbers, and zero
+    spans = [tuple(np.round(line.get_xdata(), 3)) for line in a.lines]
+    for r in t.itertuples():
+        assert (round(r.ci_lo_pp, 3), round(r.ci_hi_pp, 3)) in spans
+    assert (0.0, 0.0) in spans
+    texts = [x for x in fig.findobj(matplotlib.text.Text) if x.get_text().strip()]
+    words = "\n".join(x.get_text() for x in texts)
+    for _, r in t.iterrows():
+        assert swr.primary_effect_text(r) in words and swr.primary_n_text(r) in words
+    assert "not controlled for time or re-testing" in words          # B reads as secondary
+    assert "Not run concurrently" in words                            # Oct flies, Nov control
+    # B is the smaller panel; text is ink, never a series colour
+    assert max(ax.get_position().height for ax in b) < a.get_position().height
+    assert {to_hex(x.get_color()) for x in texts} <= {to_hex(swr.INK), to_hex(swr.INK_2)}
+
+
+def test_primary_endpoint_folder_holds_figure_table_and_readme(tmp_path):
+    import io
+
+    long = _primary_long()
+    log = io.StringIO()
+    t = swr.write_primary_endpoint(tmp_path, long, [IAA, HEX, PARA], PARA, log,
+                                   window="09:40–16:20")
+    d = tmp_path / swr.PRIMARY_DIR
+    assert swr.PRIMARY_DIR == "00_Primary-Endpoint"
+    assert sorted(p.name for p in d.iterdir()) == ["README.md", "primary_endpoint.csv",
+                                                   "primary_endpoint.png"]
+    assert not list(tmp_path.glob(".building-*"))
+    saved = pd.read_csv(d / "primary_endpoint.csv")
+    assert list(saved["cohort"]) == [HEX]
+    assert saved.iloc[0]["estimate_pp"] == pytest.approx(t.iloc[0]["estimate_pp"])
+    readme = (d / "README.md").read_text()
+    assert readme.startswith("# Primary endpoint (pre-specified 2026-11-18)")
+    for value in swr.PRIMARY_ENDPOINT.values():                # the registration, verbatim
+        assert value in readme
+    assert "+42.9" in readme and "Not run concurrently" in readme
+    assert HEX in log.getvalue()
+    # nothing to compute any more: the folder goes, so no stale headline stays
+    assert swr.write_primary_endpoint(tmp_path, long, [HEX, PARA], None, log).empty
+    assert not d.exists()
+
+
+def _readme_args(tmp_path, *extra):
+    return swr.build_parser().parse_args(
+        ["--out-dir", str(tmp_path), "--start", "09:40", "--end", "16:20",
+         "--dataset", HEX, "--dataset", PARA, *extra])
+
+
+def _readme_tables(long):
+    return {"window_summary_per_odor.csv": swr.summarise(long[long["in_window"]],
+                                                         ["cohort", "odor"]),
+            "by_2h": swr.summarise(long, ["cohort", "odor", "start_bin"])}
+
+
+def test_readme_opens_with_the_primary_endpoint(tmp_path):
+    long = _primary_long()
+    long = long[long["cohort"].isin([HEX, PARA])]
+    primary = swr.primary_endpoint_table(long, [HEX, PARA], PARA)
+    swr.write_readme(tmp_path, _readme_args(tmp_path, "--control-cohort", PARA),
+                     {HEX: swr.OK, PARA: swr.OK}, _readme_tables(long), primary=primary)
+    lines = (tmp_path / "README.md").read_text().splitlines()
+    assert lines[0].startswith("# Sensitivity results")
+    body = [line for line in lines[1:] if line.strip()]
+    assert body[0] == "## Primary endpoint (pre-specified 2026-11-18)"
+    head = "\n".join(lines).split("Updated by the pipeline")[0]
+    r = primary.iloc[0]
+    assert "+42.9" in head and swr._p(r["p_batch"]) in head
+    assert "7 vs 5" in head and "3 vs 2" in head and "Not run concurrently" in head
+    rest = head.split("Everything after this section is exploratory")
+    assert len(rest) == 2 and "Holm-adjusted within each figure" in rest[1]
+    # the rest of the README is still there
+    text = "\n".join(lines)
+    assert "## Cohorts" in text and "p (rate, McNemar)" in text and "## Layout" in text
+
+
+def test_readme_says_why_the_primary_endpoint_is_missing(tmp_path):
+    long = _primary_long()
+    for extra, why in (((), "no control cohort"),
+                       (("--control-cohort", PARA), "Not computed this run")):
+        swr.write_readme(tmp_path, _readme_args(tmp_path, *extra),
+                         {HEX: swr.OK, PARA: swr.OK}, _readme_tables(long), primary=None)
+        lines = (tmp_path / "README.md").read_text().splitlines()
+        body = [line for line in lines[1:] if line.strip()]
+        assert body[0] == "## Primary endpoint (pre-specified 2026-11-18)"
+        assert why in body[1]
+
+
+def test_summaries_test_rates_with_the_paired_mcnemar_only():
+    """2026-11-18: no Fisher test for pre vs post of the same flies."""
+    long = _long_two_cohorts()
+    s = swr.summarise(long, ["cohort", "odor"]).set_index(["cohort", "odor"])
+    assert "p_rate_fisher" not in s.columns
+    g = long[(long["cohort"] == HEX) & (long["odor"] == "Hexanol")]
+    assert s.loc[(HEX, "Hexanol"), "p_rate_mcnemar_paired"] == pytest.approx(
+        fs.mcnemar_exact_p(g["responded_pre"], g["responded_post"]))
+    assert "p_rate_fisher" not in swr.change_table(long).columns
+    assert "p_rate_fisher" not in swr.pre_post_table(long).columns
+    assert "p_rate_fisher" not in swr.DATA_README
+
+
+def _parser_with(*flags):
+    import argparse
+
+    p = argparse.ArgumentParser()
+    for flag in flags:
+        p.add_argument(flag)
+    return p
+
+
+def test_the_cohort_sets_ask_for_holm_when_the_report_can_pass_it_on(tmp_path, monkeypatch):
+    """start_window_report hands --p-adjust to pretest_vs_test_comparison; a copy that does
+    not know the flag yet would reject the whole build over it, so it is not forced."""
+    calls = []
+    monkeypatch.setattr(swr, "_run", lambda cmd, log: calls.append([str(c) for c in cmd]) or 1)
+    args = _report_args(tmp_path)
+    real = swr.swr.build_parser
+    monkeypatch.setattr(swr.swr, "build_parser", lambda: _parser_with("--p-adjust"))
+    swr.build_cohort(tmp_path, "A", args, log=None)
+    assert calls[-1][calls[-1].index("--p-adjust") + 1] == "holm"
+    monkeypatch.setattr(swr.swr, "build_parser", lambda: _parser_with("--rate-test"))
+    swr.build_cohort(tmp_path, "A", args, log=None)
+    assert "--p-adjust" not in calls[-1]
+    # with the real report: whatever is passed, it takes
+    monkeypatch.setattr(swr.swr, "build_parser", real)
+    swr.build_cohort(tmp_path, "A", args, log=None)
+    real().parse_args(calls[-1][2:])
+
+
+def test_the_rescored_sets_command_is_one_pretest_vs_test_comparison_takes(tmp_path,
+                                                                           monkeypatch):
+    runs = []
+    monkeypatch.setattr(swr, "_run", lambda cmd, log: runs.append([str(c) for c in cmd]) or 0)
+    monkeypatch.setattr(swr, "rescored_pairs",
+                        lambda rescored, cohort, folders, flagged, path: _plus_paired(cohort))
+    monkeypatch.setattr(swr, "read_rescored", lambda path: pd.DataFrame({"dataset": []}))
+    csv = tmp_path / "rescored.csv"
+    csv.write_text("x\n")
+    swr.write_plus_after(tmp_path, _long_two_cohorts(), [HEX], rescored_csv=csv, after_s=5,
+                         window="09:40-16:20", flagged=tmp_path / "f.csv", control=None,
+                         log=None)
+    args = swr.pvt._parse_args(runs[0][2:])
+    assert (args.rate_test, args.p_adjust) == ("mcnemar", "holm")
+
+
+def test_main_draws_the_primary_endpoint_first_on_every_run(tmp_path, monkeypatch):
+    long = _primary_long()
+    cohorts = [HEX, PARA]
+    long = long[long["cohort"].isin(cohorts)]
+    csv = tmp_path / "csv"
+    csv.mkdir()
+    pd.DataFrame({"dataset": cohorts, "fly": ["b1", "b1"], "fly_number": [1, 1],
+                  "trial_label": ["t", "t"], "score": [1, 1]}).to_csv(
+        csv / "model_predictions.csv", index=False)
+    flagged = tmp_path / "flagged.csv"
+    flagged.write_text("dataset,fly,fly_number,FLY-State\n")
+    out = tmp_path / "out"
+    _spy_builds(monkeypatch)
+    monkeypatch.setattr(swr, "settings_digest", lambda args: "settings")
+    monkeypatch.setattr(swr, "dataset_status", lambda *a: (swr.OK, ["b1"]))
+    monkeypatch.setattr(swr, "start_table", lambda *a: pd.DataFrame({"folder": ["b1"]}))
+    monkeypatch.setattr(swr, "read_wide_for_fingerprints", lambda *a: [])
+    monkeypatch.setattr(swr, "cohort_pairs",
+                        lambda ds, *a, **k: long[long["cohort"] == ds].reset_index(drop=True))
+    monkeypatch.setattr(swr, "check_matches_figures", lambda *a: None)
+    order = []
+    real = swr.write_primary_endpoint
+    monkeypatch.setattr(swr, "write_primary_endpoint",
+                        lambda *a, **k: order.append("primary") or real(*a, **k))
+    for name in ("write_cross_cohort", "write_pre_baseline", "write_cohort_split",
+                 "write_cohort_traces", "write_transitions", "write_plus_after",
+                 "write_first_odor"):
+        monkeypatch.setattr(swr, name, lambda *a, _n=name, **k: order.append(_n) or [])
+    argv = ["--out-dir", str(out), "--start", "09:40", "--end", "16:20", "--dataset", HEX,
+            "--dataset", PARA, "--csv-dir", str(csv), "--flagged-flies-csv", str(flagged),
+            "--data-root", str(tmp_path), "--control-cohort", PARA]
+    assert swr.main(argv) == 0
+    assert order[0] == "primary" and "write_cross_cohort" in order
+    d = out / swr.PRIMARY_DIR
+    assert {p.name for p in d.iterdir()} == {"primary_endpoint.png", "primary_endpoint.csv",
+                                            "README.md"}
+    readme = (out / "README.md").read_text().splitlines()
+    assert next(line for line in readme if line.startswith("## ")) == \
+        "## Primary endpoint (pre-specified 2026-11-18)"
+    links = sorted(p.name for p in (out / "00_Highlights").iterdir())
+    assert links[0] == "00_00_primary_endpoint.png"
+    assert (out / "00_Highlights" / links[0]).resolve() == (d / "primary_endpoint.png").resolve()
+    # the next run keeps both cohorts' figures, and still redraws the endpoint
+    order.clear()
+    assert swr.main(argv) == 0
+    assert order[0] == "primary" and (d / "primary_endpoint.png").is_file()
+    # no control cohort any more: no endpoint, and no stale one left behind
+    order.clear()
+    assert swr.main(argv[:-2]) == 0
+    assert "primary" not in order and not d.exists()
+    assert not (out / "00_Highlights" / "00_00_primary_endpoint.png").exists()

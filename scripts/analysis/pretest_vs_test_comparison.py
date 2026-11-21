@@ -11,10 +11,10 @@ design than a separate control cohort, and it demands paired statistics:
   * response rate (responded / did not) -> **McNemar's exact test**;
   * ordinal PER score                   -> **Wilcoxon signed-rank**.
 
-``--rate-test fisher`` swaps McNemar for Fisher's exact test on the 2x2
-(phase x responded) table, for figure sets that want the response rate tested
-as two independent proportions. The pipeline never passes it, so its figures
-keep McNemar.
+Fisher's exact test is deliberately not offered: pre and post are the same
+flies, so a 2x2 phase x responded table treats paired data as independent.
+``--rate-test fisher`` / ``rate_test="fisher"`` raises an error naming the paired
+McNemar as the required test.
 
 Both are paired per (fly, odor), so **n counts flies** — the fly is the unit
 that is paired. This is not the "never average an average" trial-pooling case
@@ -26,7 +26,11 @@ Odor order is randomised between the two panels, so pairing is on the ODOR, not
 the trial index — ``pretest_1`` is very often a different odor than
 ``testing_1``.
 
-p-values are uncorrected, matching the convention in ``score_summary.py``.
+The summary CSV always carries the raw ``p_score`` / ``p_rate`` and their
+Holm-adjusted ``p_score_holm`` / ``p_rate_holm`` (across the odors of one summary
+that have a p-value, each test separately). The figures' stars use the raw p by
+default; ``--p-adjust holm`` (exploratory use) draws them from the Holm columns
+and each caption names its family ("Holm-adjusted across N odors").
 
 Usage
 -----
@@ -50,12 +54,14 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-from scipy.stats import binomtest, fisher_exact, wilcoxon
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
+if str(REPO_ROOT / "src") not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT / "src"))
 
+from fbpipe.analysis import fly_stats as fs  # noqa: E402
 from scripts.analysis import odor_bar_palette, phase_terms, significance_brackets  # noqa: E402
 from scripts.analysis.envelope_visuals import (  # noqa: E402
     NON_REACTIVE_SPAN_PX,
@@ -248,35 +254,58 @@ def mcnemar_p(pre: Sequence[bool], post: Sequence[bool]) -> float | None:
     post_arr = np.asarray(post, dtype=bool)
     if pre_arr.size == 0 or pre_arr.size != post_arr.size:
         return None
-
-    b = int(np.sum(~pre_arr & post_arr))
-    c = int(np.sum(pre_arr & ~post_arr))
-    if b + c == 0:
-        return None
-    return float(binomtest(b, b + c, 0.5, alternative="two-sided").pvalue)
-
-
-def fisher_p(pre: Sequence[bool], post: Sequence[bool]) -> float | None:
-    """Two-sided Fisher's exact p on the phase x responded table.
-
-    Treats the two phases as independent samples, so it ignores the pairing
-    McNemar uses. None on empty input, matching :func:`mcnemar_p`.
-    """
-
-    pre_arr = np.asarray(pre, dtype=bool)
-    post_arr = np.asarray(post, dtype=bool)
-    if pre_arr.size == 0 or post_arr.size == 0:
-        return None
-    a, b = int(pre_arr.sum()), int(post_arr.sum())
-    table = [[a, pre_arr.size - a], [b, post_arr.size - b]]
-    return float(fisher_exact(table).pvalue)
+    return fs.mcnemar_exact_p(pre_arr, post_arr)
 
 
 #: ``--rate-test`` choices -> (p-value function, name shown on the figure).
 RATE_TESTS = {
     "mcnemar": (mcnemar_p, "exact McNemar"),
-    "fisher": (fisher_p, "Fisher's exact"),
 }
+
+P_ADJUSTS = ("none", "holm")
+
+_FISHER_REFUSAL = (
+    "Fisher's exact is not available for pre vs post: pre and post are the same "
+    "flies, so the paired exact McNemar test is required."
+)
+
+
+def _check_rate_test(rate_test: str) -> None:
+    if rate_test == "fisher":
+        raise ValueError(_FISHER_REFUSAL)
+    if rate_test not in RATE_TESTS:
+        raise ValueError(f"rate_test must be one of {sorted(RATE_TESTS)}: {rate_test!r}")
+
+
+def _check_p_adjust(p_adjust: str) -> None:
+    if p_adjust not in P_ADJUSTS:
+        raise ValueError(f"p_adjust must be one of {list(P_ADJUSTS)}: {p_adjust!r}")
+
+
+def _odors(n: int) -> str:
+    n = int(n)
+    return f"{n} odor{'' if n == 1 else 's'}"
+
+
+def holm_note(n_odors: int, n_rate: int | None = None) -> str:
+    """Caption fragment for figures whose stars use the Holm-adjusted p.
+
+    ``n_odors`` is the size of the Holm family: the odors that HAVE a p-value
+    (an odor whose test cannot run adds no hypothesis; :func:`n_tested`). A
+    figure showing both tests passes the rate family as ``n_rate`` when the two
+    differ.
+    """
+
+    if n_rate is None or int(n_rate) == int(n_odors):
+        return f"Holm-adjusted across {_odors(n_odors)} (exploratory)"
+    return (f"Holm-adjusted across {_odors(n_odors)} (score) / "
+            f"{_odors(n_rate)} (rate) (exploratory)")
+
+
+def n_tested(summary: pd.DataFrame, column: str) -> int:
+    """How many odors carry a p-value in ``column``: the Holm family size."""
+
+    return int(pd.to_numeric(summary[column], errors="coerce").notna().sum())
 
 
 def wilcoxon_p(pre: Sequence[float], post: Sequence[float]) -> float | None:
@@ -286,16 +315,8 @@ def wilcoxon_p(pre: Sequence[float], post: Sequence[float]) -> float | None:
     post_arr = np.asarray(post, dtype=float)
     if pre_arr.size == 0 or pre_arr.size != post_arr.size:
         return None
-
-    diff = post_arr - pre_arr
-    diff = diff[np.isfinite(diff)]
-    non_zero = diff[diff != 0]
-    if non_zero.size < MIN_WILCOXON_PAIRS:
-        return None
-    try:
-        return float(wilcoxon(non_zero, alternative="two-sided").pvalue)
-    except ValueError:
-        return None
+    # Tie-aware exact signed-rank (midranks); zeros and NaN pairs are dropped.
+    return fs.wilcoxon_signed_rank_p(post_arr - pre_arr, min_pairs=MIN_WILCOXON_PAIRS)
 
 
 # ---------------------------------------------------------------------------
@@ -313,14 +334,14 @@ def per_odor_summary(
 
     ``rate_test`` picks the response-rate test from :data:`RATE_TESTS`.
     """
-    if rate_test not in RATE_TESTS:
-        raise ValueError(f"rate_test must be one of {sorted(RATE_TESTS)}: {rate_test!r}")
+    _check_rate_test(rate_test)
     rate_p = RATE_TESTS[rate_test][0]
 
     if paired.empty:
         return pd.DataFrame(columns=[
             "odor", "n_flies", "mean_pre", "sem_pre", "mean_post", "sem_post",
             "pct_pre", "pct_post", "p_score", "p_rate",
+            "p_score_holm", "p_rate_holm",
         ])
 
     rows = []
@@ -341,7 +362,11 @@ def per_odor_summary(
             "p_score": wilcoxon_p(pre, post),
             "p_rate": rate_p(resp_pre, resp_post),
         })
-    return pd.DataFrame(rows)
+    out = pd.DataFrame(rows)
+    # Exploratory family = the odors of this summary, each test on its own.
+    out["p_score_holm"] = fs.holm_adjust(list(out["p_score"]))
+    out["p_rate_holm"] = fs.holm_adjust(list(out["p_rate"]))
+    return out
 
 
 def _sem(values: np.ndarray) -> float:
@@ -504,7 +529,7 @@ def _trained_odor_row(summary: pd.DataFrame, cohort: str) -> pd.Series | None:
     return None
 
 
-def _spotlight(summary, *, cohort, path, test_note=""):
+def _spotlight(summary, *, cohort, path, test_note="", p_suffix=""):
     """The CS+ odor alone: score and response rate, side by side."""
     row = _trained_odor_row(summary, cohort)
     if row is None:
@@ -520,8 +545,8 @@ def _spotlight(summary, *, cohort, path, test_note=""):
             ticks = [t.replace("-", "-\n", 1) for t in ticks]
         panels = (
             (axes[0], ("mean_pre", "mean_post"), ("sem_pre", "sem_post"),
-             row["p_score"], _apply_score_axis),
-            (axes[1], ("pct_pre", "pct_post"), None, row["p_rate"], _apply_rate_axis),
+             row["p_score" + p_suffix], _apply_score_axis),
+            (axes[1], ("pct_pre", "pct_post"), None, row["p_rate" + p_suffix], _apply_rate_axis),
         )
         for ax, (pre_k, post_k), err_k, p, apply_axis in panels:
             errs = [row[err_k[0]], row[err_k[1]]] if err_k else None
@@ -731,6 +756,7 @@ def render_cohort(
     binary_threshold: int = BINARY_THRESHOLD,
     rate_test: str = "mcnemar",
     window_note: str = "",
+    p_adjust: str = "none",
 ) -> list[Path]:
     """Write the whole pre-vs-post figure set for one cohort.
 
@@ -738,6 +764,8 @@ def render_cohort(
     for sets rendered from a window-rescored predictions CSV.
     """
 
+    _check_rate_test(rate_test)
+    _check_p_adjust(p_adjust)
     if paired.empty:
         print(f"[pre-vs-post] {cohort}: no paired trials — nothing to draw.")
         return []
@@ -754,18 +782,27 @@ def render_cohort(
     )
 
     window = f" · {window_note}" if window_note else ""
+    holm = p_adjust == "holm"
+    suffix = "_holm" if holm else ""
+    # Each caption names its own Holm family: the odors whose test ran, which
+    # can differ between the score and the rate test (and from len(summary)).
+    n_score, n_rate = n_tested(summary, "p_score"), n_tested(summary, "p_rate")
+    score_note = window + (f" · {holm_note(n_score)}" if holm else "")
+    rate_window = window + (f" · {holm_note(n_rate)}" if holm else "")
+    both_note = window + (f" · {holm_note(n_score, n_rate)}" if holm else "")
     written: list[Path] = []
     written.append(_grouped_bars(
-        summary, cohort=cohort, kind="score", p_key="p_score",
-        path=out_dir / f"{stem}_score_bars.png", test_note=window,
+        summary, cohort=cohort, kind="score", p_key="p_score" + suffix,
+        path=out_dir / f"{stem}_score_bars.png", test_note=score_note,
     ))
     written.append(_grouped_bars(
-        summary, cohort=cohort, kind="rate", p_key="p_rate",
-        path=out_dir / f"{stem}_rate_bars.png", test_note=rate_note + window,
+        summary, cohort=cohort, kind="rate", p_key="p_rate" + suffix,
+        path=out_dir / f"{stem}_rate_bars.png", test_note=rate_note + rate_window,
     ))
     for maybe in (
         _spotlight(summary, cohort=cohort, path=out_dir / f"{stem}_trained_odor.png",
-                   test_note=rate_note + window),
+                   p_suffix=suffix,
+                   test_note=rate_note + both_note),
         _slopes(paired, summary, cohort=cohort, path=out_dir / f"{stem}_slopes.png",
                 note=window_note),
         _heatmap(paired, cohort=cohort, path=out_dir / f"{stem}_heatmap.png",
@@ -783,6 +820,14 @@ def render_cohort(
 # ---------------------------------------------------------------------------
 
 
+def _rate_test_arg(value: str) -> str:
+    try:
+        _check_rate_test(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from None
+    return value
+
+
 def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--predictions-csv", required=True, type=Path)
@@ -795,8 +840,14 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--flagged-flies-csv", default="")
     parser.add_argument("--threshold", type=float, default=None)
     parser.add_argument(
-        "--rate-test", choices=sorted(RATE_TESTS), default="mcnemar",
-        help="Response-rate test: paired McNemar (default) or Fisher's exact.",
+        "--rate-test", type=_rate_test_arg, default="mcnemar",
+        help="Response-rate test: paired exact McNemar (the only one; Fisher's "
+             "exact is refused because pre and post are the same flies).",
+    )
+    parser.add_argument(
+        "--p-adjust", choices=P_ADJUSTS, default="none",
+        help="holm: stars/brackets use Holm-adjusted p across the odors that "
+             "have a test, each test separately (exploratory). none: raw p (default).",
     )
     parser.add_argument(
         "--window-note", default="",
@@ -837,6 +888,7 @@ def main(argv: Sequence[str] | None = None) -> None:
             binary_threshold=args.binary_threshold,
             rate_test=args.rate_test,
             window_note=args.window_note,
+            p_adjust=args.p_adjust,
         )
         total += len(written)
         print(f"[pre-vs-post] {cohort}: wrote {len(written)} figure(s).")

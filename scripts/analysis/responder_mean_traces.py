@@ -23,6 +23,11 @@ Outputs (``--out-dir``)::
     responder_mean_traces_summary.csv    per odor x phase x group: flies, and the mean
                                          trace's average before / during / after the odor
 
+With ``--with-median`` each PNG also gets ``<stem>_median.png`` (same figure, per-frame
+median over the same per-fly traces, band = interquartile range) and
+``<stem>_mean_vs_median.png`` (mean solid, median dashed, no bands); the summary gains
+``median_*`` columns after the existing ones. Without the flag nothing changes.
+
 Usage::
 
     python3 scripts/analysis/responder_mean_traces.py --dataset IAA-Sensitivity-1-1 \\
@@ -37,6 +42,7 @@ from __future__ import annotations
 import argparse
 import math
 import sys
+import warnings
 from pathlib import Path
 from typing import Mapping, Sequence
 
@@ -67,6 +73,7 @@ from scripts.analysis.cumulative_responders import (  # noqa: E402
 from scripts.analysis.dataset_means_specific_flies import (  # noqa: E402
     MAX_TIME_S,
     _mean_sem_trace,
+    nan_pad_stack,
 )
 
 #: The folder start_window_report draws this into, beside Mean-Traces_Pre-Test_vs_Post-Training.
@@ -150,9 +157,38 @@ def group_curves(traces: Mapping[tuple, np.ndarray], responding: Mapping[tuple, 
     return out
 
 
+def group_bands(traces: Mapping[tuple, np.ndarray], responding: Mapping[tuple, bool], *,
+                max_frames: int, stat: str = "mean"
+                ) -> dict[str, tuple[np.ndarray, np.ndarray, np.ndarray, int]]:
+    """``{group: (centre, lower, upper, n flies)}`` for ``stat`` = ``"mean"`` (mean, mean -/+ SEM:
+    exactly ``group_curves``) or ``"median"`` (per-frame ``nanmedian``, the 25th and 75th
+    percentiles) over the same per-fly traces, padded and cut the same way."""
+    if stat == "mean":
+        return {g: (m, m - e, m + e, n)
+                for g, (m, e, n) in group_curves(traces, responding,
+                                                 max_frames=max_frames).items()}
+    if stat != "median":
+        raise ValueError(f"stat must be 'mean' or 'median', not {stat!r}")
+    out = {}
+    for group, want, _ in GROUPS:
+        per_fly = {k: v for k, v in traces.items() if responding.get(k) is want}
+        if per_fly:
+            stacked = nan_pad_stack(list(per_fly.values()))[:, :max_frames]
+            with np.errstate(all="ignore"), warnings.catch_warnings():
+                warnings.simplefilter("ignore", RuntimeWarning)   # all-NaN frames
+                centre = np.nanmedian(stacked, axis=0)
+                lo, hi = np.nanpercentile(stacked, [25, 75], axis=0)
+        else:
+            centre = lo = hi = np.full(max_frames, np.nan)
+        out[group] = tuple(_fit(a, max_frames, np.nan) for a in (centre, lo, hi)) + (len(per_fly),)
+    return out
+
+
 def summary_rows(odor: str, curves: Mapping[str, Mapping[str, tuple]], *, sensitized: bool,
                  labels: Mapping[str, str], fps: float, odor_on_s: float,
-                 odor_off_s: float) -> list[dict]:
+                 odor_off_s: float, median_curves: Mapping | None = None) -> list[dict]:
+    """``median_curves`` (``group_bands(stat="median")`` per phase) adds the same four window
+    statistics of the median curve as ``median_*`` columns, after the existing ones."""
     on, off = int(round(odor_on_s * fps)), int(round(odor_off_s * fps))
 
     def avg(a: np.ndarray) -> float:
@@ -167,6 +203,13 @@ def summary_rows(odor: str, curves: Mapping[str, Mapping[str, tuple]], *, sensit
                          "mean_during": avg(mean[on:off]), "mean_after": avg(mean[off:]),
                          "peak_during": (float(np.nanmax(mean[on:off]))
                                          if np.isfinite(mean[on:off]).any() else float("nan"))})
+            if median_curves is not None:
+                med = median_curves[key][group][0]
+                rows[-1].update({"median_before": avg(med[:on]), "median_during": avg(med[on:off]),
+                                 "median_after": avg(med[off:]),
+                                 "median_peak_during": (float(np.nanmax(med[on:off]))
+                                                        if np.isfinite(med[on:off]).any()
+                                                        else float("nan"))})
     return rows
 
 
@@ -175,31 +218,52 @@ def summary_rows(odor: str, curves: Mapping[str, Mapping[str, tuple]], *, sensit
 # ---------------------------------------------------------------------------
 
 
+def as_bands(curves: Mapping[str, Mapping[str, tuple]]) -> dict:
+    """``(mean, sem, n)`` curves as ``(centre, lower, upper, n)`` bands."""
+    return {k: {g: (m, m - e, m + e, n) for g, (m, e, n) in groups.items()}
+            for k, groups in curves.items()}
+
+
+def _lines_only(*band_sets: Mapping) -> dict:
+    """The centre lines of several band sets, as bands of zero width (no band drawn)."""
+    return {f"{i}{k}": {g: (c, c, c, n) for g, (c, _, _, n) in groups.items()}
+            for i, bands in enumerate(band_sets) for k, groups in bands.items()}
+
+
 def y_range(curves: Mapping[str, Mapping[str, tuple]]) -> tuple[float, float]:
-    """One range for both panels of an odor, so responders and the rest compare."""
+    """One range for both panels of an odor, so responders and the rest compare.
+    ``curves`` are ``(centre, lower, upper, n)`` bands."""
     lo, hi = -1.0, 1.0
     for groups in curves.values():
-        for mean, sem, n in groups.values():
-            if n and np.isfinite(mean).any():
-                lo = min(lo, float(np.nanmin(mean - sem)))
-                hi = max(hi, float(np.nanmax(mean + sem)))
+        for centre, lower, upper, n in groups.values():
+            if n and np.isfinite(centre).any():
+                lo = min(lo, float(np.nanmin(lower)))
+                hi = max(hi, float(np.nanmax(upper)))
     pad = 0.06 * (hi - lo)
     return lo - pad, hi + pad
 
 
 def draw_group(ax, curves: Mapping[str, Mapping[str, tuple]], group: str, *,
                labels: Mapping[str, str], fps: float, odor_on_s: float, odor_off_s: float,
-               ylim: tuple[float, float], legend_size: float = 8.5) -> None:
+               ylim: tuple[float, float], legend_size: float = 8.5,
+               other: Mapping[str, Mapping[str, tuple]] | None = None,
+               phases: Sequence[str] = ("pre", "post")) -> None:
+    """``curves`` are ``(centre, lower, upper, n)`` bands, drawn as a line with a band. With
+    ``other`` (the median bands) it is the mean-vs-median panel instead: ``curves`` solid in
+    the phase colour, ``other`` black dashed, no bands; give it one phase per panel so the
+    dashed line is never hidden under the other phase's lines."""
     ax.axvspan(odor_on_s, odor_off_s, color=ODOR_BG, zorder=0, lw=0)
     ax.axhline(0, color=INK_2, lw=0.8, ls=(0, (2, 2)), zorder=1)
-    for key in ("pre", "post"):
-        mean, sem, n = curves[key][group]
+    for key in phases:
+        mean, lower, upper, n = curves[key][group]
         t = np.arange(mean.size) / fps
         if n:
-            ax.fill_between(t, mean - sem, mean + sem, color=COLORS[key], alpha=0.18, lw=0,
-                            zorder=2)
+            if other is None:
+                ax.fill_between(t, lower, upper, color=COLORS[key], alpha=0.18, lw=0, zorder=2)
             ax.plot(t, mean, color=COLORS[key], lw=1.6, zorder=3,
                     label=f"{labels[key]} (n={n})")
+            if other is not None:
+                ax.plot(t, other[key][group][0], color=INK, lw=1.2, ls="--", zorder=4)
         else:                                   # keep the count in the legend
             ax.plot([], [], color=COLORS[key], lw=1.6, label=f"{labels[key]} (n=0)")
     ax.set_xlim(0, MAX_TIME_S)
@@ -207,7 +271,11 @@ def draw_group(ax, curves: Mapping[str, Mapping[str, tuple]], group: str, *,
     ax.set_ylim(*ylim)
     ax.yaxis.grid(True, color=GRID, lw=0.8)
     ax.set_axisbelow(True)
-    ax.legend(loc="upper left", fontsize=legend_size)
+    handles, names = ax.get_legend_handles_labels()
+    if other is not None:                        # say which line style is which statistic
+        handles += [plt.Line2D([], [], color=INK, lw=1.2, ls="--")]
+        names += ["median (black dashed)"]
+    ax.legend(handles, names, loc="upper left", fontsize=legend_size)
     ax.text((odor_on_s + odor_off_s) / 2, 0.985, "odor", ha="center", va="top", color=INK_2,
             fontsize=8.5, transform=ax.get_xaxis_transform())
 
@@ -222,28 +290,51 @@ def _caveat(threshold: int) -> str:
             "whether there are more of them: see Cumulative-Responders for that.")
 
 
+STATS = {  # figure kind -> (title word, what the band/lines are)
+    "mean": ("mean", "Mean ± SEM over flies, one trial each."),
+    "median": ("median", "Median and interquartile range (25th–75th percentile) over flies, "
+                         "one trial each."),
+    "both": ("mean vs median", "Solid line = mean, black dashed line = median, over the same "
+                               "flies, one trial each; no bands; one phase per panel."),
+}
+
+
 def _odor_title(odor: str, sensitized: bool, dataset: str) -> str:
     return f"{odor} ({phase_terms.odor_tag(dataset)})" if sensitized else odor
 
 
 def plot_odor(path: Path, curves: Mapping, *, odor: str, sensitized: bool, dataset: str,
               label: str, labels: Mapping[str, str], fps: float, odor_on_s: float,
-              odor_off_s: float, threshold: int) -> None:
-    ylim = y_range(curves)
+              odor_off_s: float, threshold: int, stat: str = "mean",
+              other: Mapping | None = None) -> None:
+    """``curves`` are bands (``as_bands`` / ``group_bands``). ``stat`` "mean" or "median"
+    draws that statistic with its band; "both" draws ``curves`` (mean) solid and ``other``
+    (median) dashed."""
+    word, note = STATS[stat]
+    ylim = y_range(_lines_only(curves, other) if stat == "both" else curves)
+    rows = (("pre",), ("post",)) if stat == "both" else (("pre", "post"),)
     with plt.rc_context(_RC):
-        fig, axes = plt.subplots(1, 2, figsize=(12.5, 5.6))
-        for ax, (group, _, title) in zip(axes, GROUPS):
-            draw_group(ax, curves, group, labels=labels, fps=fps, odor_on_s=odor_on_s,
-                       odor_off_s=odor_off_s, ylim=ylim)
-            ax.set_title(title, loc="left", color=INK, fontsize=10.5, pad=8)
-            ax.set_xlabel("Time (s)")
-            ax.set_ylabel(_y_label(odor_on_s))
+        fig, axes = plt.subplots(len(rows), 2, figsize=(12.5, 5.6 if len(rows) == 1 else 9.4),
+                                 squeeze=False)
+        for r, phases in enumerate(rows):
+            for ax, (group, _, title) in zip(axes[r], GROUPS):
+                draw_group(ax, curves, group, labels=labels, fps=fps, odor_on_s=odor_on_s,
+                           odor_off_s=odor_off_s, ylim=ylim, other=other, phases=phases)
+                head = title if len(rows) == 1 else f"{title} · {labels[phases[0]]}"
+                ax.set_title(head, loc="left", color=INK, fontsize=10.5, pad=8)
+                if r == len(rows) - 1:
+                    ax.set_xlabel("Time (s)")
+                ax.set_ylabel(_y_label(odor_on_s))
         where = f"{dataset}, {label}" if label else dataset
-        fig.text(0.06, 0.985, f"{_odor_title(odor, sensitized, dataset)}: mean PER trace, "
-                 "responders vs the rest", fontweight="bold", fontsize=12, color=INK, va="top")
-        fig.text(0.06, 0.935, f"{where}. Mean ± SEM over flies, one trial each.\n"
+        top_in = 1.25                            # inches kept for the title and caption
+        h = fig.get_figheight()
+        fig.text(0.06, 1 - 0.08 / h, f"{_odor_title(odor, sensitized, dataset)}: {word} PER "
+                 "trace, responders vs the rest", fontweight="bold", fontsize=12, color=INK,
+                 va="top")
+        fig.text(0.06, 1 - 0.36 / h, f"{where}. {note}\n"
                  + _caveat(threshold), fontsize=8.6, color=INK_2, va="top")
-        fig.subplots_adjust(left=0.06, right=0.99, wspace=0.22, top=0.77, bottom=0.1)
+        fig.subplots_adjust(left=0.06, right=0.99, wspace=0.22, hspace=0.35,
+                            top=1 - top_in / h, bottom=0.55 / h)
         fig.savefig(path, dpi=DPI, bbox_inches="tight")
         plt.close(fig)
 
@@ -251,25 +342,33 @@ def plot_odor(path: Path, curves: Mapping, *, odor: str, sensitized: bool, datas
 def plot_all(path: Path, by_odor: Mapping[str, Mapping], order: Sequence[str],
              sensitized: str | None, *, dataset: str, label: str,
              labels: Mapping[str, str], fps: float, odor_on_s: float, odor_off_s: float,
-             threshold: int) -> None:
-    """Every odor, one row each: responders left, the rest right, shared within a row."""
-    pw, ph = 4.6, 1.9                       # panel
+             threshold: int, stat: str = "mean", others: Mapping | None = None) -> None:
+    """Every odor, one row each: responders left, the rest right, shared within a row.
+    ``by_odor`` holds bands; ``stat`` and ``others`` as in ``plot_odor``."""
+    word, note = STATS[stat]
+    # mean vs median: a column per group and phase, so each panel holds one mean and its median
+    cols = ([(g, gt if p == "pre" else "", (p,), f"{gt.replace('Flies scored as ', '')}"
+              f" · {labels[p]}") for g, _, gt in GROUPS for p in ("pre", "post")]
+            if stat == "both" else [(g, gt, ("pre", "post"), gt) for g, _, gt in GROUPS])
+    pw, ph = (3.6, 1.9) if stat == "both" else (4.6, 1.9)       # panel
     left, wgap, right = 0.95, 0.55, 0.2
     head, title, hgap, bottom = 1.15, 0.38, 0.3, 0.6
     n = len(order)
-    fw = left + 2 * pw + wgap + right
+    fw = left + len(cols) * pw + (len(cols) - 1) * wgap + right
     fh = head + n * (title + ph) + (n - 1) * hgap + bottom
     with plt.rc_context(_RC):
         fig = plt.figure(figsize=(fw, fh))
         for r, odor in enumerate(order):
             curves = by_odor[odor]
-            ylim = y_range(curves)
+            other = others[odor] if others is not None else None
+            ylim = y_range(_lines_only(curves, other) if stat == "both" else curves)
             top = fh - head - r * (title + ph + hgap) - title
-            for c, (group, _, gtitle) in enumerate(GROUPS):
+            for c, (group, _, phases, _) in enumerate(cols):
                 ax = fig.add_axes(((left + c * (pw + wgap)) / fw, (top - ph) / fh, pw / fw,
                                    ph / fh))
                 draw_group(ax, curves, group, labels=labels, fps=fps, odor_on_s=odor_on_s,
-                           odor_off_s=odor_off_s, ylim=ylim, legend_size=7.5)
+                           odor_off_s=odor_off_s, ylim=ylim, legend_size=7.5,
+                           other=other, phases=phases)
                 ax.tick_params(labelsize=8)
                 if c == 0:
                     ax.set_title(_odor_title(odor, odor == sensitized, dataset), loc="left",
@@ -278,14 +377,14 @@ def plot_all(path: Path, by_odor: Mapping[str, Mapping], order: Sequence[str],
                                   else _y_label(odor_on_s), fontsize=8)
                 if r == n - 1:
                     ax.set_xlabel("Time (s)", fontsize=9)
-        for c, (_, _, gtitle) in enumerate(GROUPS):
-            fig.text((left + c * (pw + wgap)) / fw, 1 - (head - 0.12) / fh, gtitle,
-                     fontsize=10.5, color=INK, va="bottom")
+        for c, (_, _, _, ctitle) in enumerate(cols):
+            fig.text((left + c * (pw + wgap)) / fw, 1 - (head - 0.12) / fh, ctitle,
+                     fontsize=10.5 if stat != "both" else 9.5, color=INK, va="bottom")
         where = f"{dataset}, {label}" if label else dataset
-        fig.text(left / fw, 1 - 0.15 / fh, f"{where}: mean PER trace, responders vs the rest, "
+        fig.text(left / fw, 1 - 0.15 / fh, f"{where}: {word} PER trace, responders vs the rest, "
                  "every odor", fontweight="bold", fontsize=12, color=INK, va="top")
-        fig.text(left / fw, 1 - 0.42 / fh, _caveat(threshold) + " Mean ± SEM over flies, one "
-                 "trial each; each row has its own y-scale.", fontsize=8.2, color=INK_2,
+        fig.text(left / fw, 1 - 0.42 / fh, _caveat(threshold) + f" {note} Each row has its "
+                 "own y-scale.", fontsize=8.2, color=INK_2,
                  va="top")
         fig.savefig(path, dpi=DPI, bbox_inches="tight")
         plt.close(fig)
@@ -304,10 +403,17 @@ def _read_wide(path: Path) -> pd.DataFrame:
     return pd.read_parquet(path) if Path(path).suffix == ".parquet" else pd.read_csv(path)
 
 
+def sibling(path: Path, kind: str) -> Path:
+    """``<stem>_median.png`` / ``<stem>_mean_vs_median.png`` beside ``path``."""
+    return path.with_name(f"{path.stem}_{kind}.png")
+
+
 def _clear(out: Path) -> None:
-    """This script's own files from an earlier run: an odor gone from the data must not
-    leave its old figure behind."""
-    for old in [*out.glob(f"*_{TAG}.png"), out / f"{TAG}_summary.csv"]:
+    """This script's own files from an earlier run, the ``--with-median`` ones included (a run
+    without the flag must not leave them beside fresh mean figures): an odor gone from the
+    data must not leave its old figure behind."""
+    for old in [*out.glob(f"*_{TAG}.png"), *out.glob(f"*_{TAG}_median.png"),
+                *out.glob(f"*_{TAG}_mean_vs_median.png"), out / f"{TAG}_summary.csv"]:
         old.unlink(missing_ok=True)
 
 
@@ -325,6 +431,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--odor-on-s", type=float, default=30.0,
                    help="each trial loses the mean of its first this many seconds")
     p.add_argument("--odor-off-s", type=float, default=60.0)
+    p.add_argument("--with-median", action="store_true",
+                   help="also write a _median twin (median, IQR band) and a _mean_vs_median "
+                        "figure for every PNG, and median_* summary columns")
     p.add_argument("--label", default="", help="which flies, for the titles, e.g. "
                                                "'start 9:40am-4:20pm'")
     return p
@@ -347,6 +456,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     order = odor_order(odors, sensitized)
 
     by_odor: dict[str, dict[str, dict]] = {odor: {} for odor in order}
+    by_median: dict[str, dict[str, dict]] = {odor: {} for odor in order}
     missing = 0
     for key, _, _, score_col in PHASES:
         traces = phase_traces(_read_wide(args.pretest_wide_csv if key == "pre"
@@ -360,23 +470,39 @@ def main(argv: Sequence[str] | None = None) -> int:
         for odor in order:
             mine = {k: v for k, v in traces.items() if k[2] == odor}
             by_odor[odor][key] = group_curves(mine, responding, max_frames=max_frames)
+            if args.with_median:
+                by_median[odor][key] = group_bands(mine, responding, max_frames=max_frames,
+                                                   stat="median")
     if missing:
         print(f"[responder-traces] {args.dataset}: {missing} scored trials have no trace; "
               "left out")
 
     common = dict(labels=labels, fps=args.fps, odor_on_s=args.odor_on_s,
                   odor_off_s=args.odor_off_s)
-    rows = [r for odor in order for r in summary_rows(odor, by_odor[odor],
-                                                      sensitized=odor == sensitized, **common)]
+    rows = [r for odor in order for r in summary_rows(
+        odor, by_odor[odor], sensitized=odor == sensitized,
+        median_curves=by_median[odor] if args.with_median else None, **common)]
     out.mkdir(parents=True, exist_ok=True)
     _clear(out)
     pd.DataFrame(rows).to_csv(out / f"{TAG}_summary.csv", index=False)
+    mean_bands = {odor: as_bands(by_odor[odor]) for odor in order}
     for odor in order:
-        plot_odor(out / odor_file(odor), by_odor[odor], odor=odor,
-                  sensitized=odor == sensitized, dataset=args.dataset, label=args.label,
-                  threshold=args.binary_threshold, **common)
-    plot_all(out / f"All_odors_{TAG}.png", by_odor, order, sensitized, dataset=args.dataset,
-             label=args.label, threshold=args.binary_threshold, **common)
+        path = out / odor_file(odor)
+        one = dict(odor=odor, sensitized=odor == sensitized, dataset=args.dataset,
+                   label=args.label, threshold=args.binary_threshold, **common)
+        plot_odor(path, mean_bands[odor], **one)
+        if args.with_median:
+            plot_odor(sibling(path, "median"), by_median[odor], stat="median", **one)
+            plot_odor(sibling(path, "mean_vs_median"), mean_bands[odor], stat="both",
+                      other=by_median[odor], **one)
+    path = out / f"All_odors_{TAG}.png"
+    every = dict(dataset=args.dataset, label=args.label, threshold=args.binary_threshold,
+                 **common)
+    plot_all(path, mean_bands, order, sensitized, **every)
+    if args.with_median:
+        plot_all(sibling(path, "median"), by_median, order, sensitized, stat="median", **every)
+        plot_all(sibling(path, "mean_vs_median"), mean_bands, order, sensitized, stat="both",
+                 others=by_median, **every)
     print(f"[responder-traces] {args.dataset}: {len(order)} odors -> {out}")
     return 0
 

@@ -258,3 +258,52 @@ def test_odor_concentrations_reads_the_pins_suffix_back_per_display_odor():
 ])
 def test_odor_text_adds_the_concentration_on_sensitivity_figures_only(odor, cohort, concs, drawn):
     assert dvd.odor_text(odor, cohort, concs) == drawn
+
+
+def test_build_day_asks_for_paired_mcnemar_and_holm(monkeypatch, tmp_path):
+    cmds = []
+
+    class _Stop(Exception):
+        """Raised by the first command: every later step reads the real tables."""
+
+    def fake_run(cmd, log):
+        cmds.append([str(c) for c in cmd])
+        raise _Stop
+
+    monkeypatch.setattr(dvd, "_write_inputs", lambda group, d: {"predictions": "p.csv", "testing": "t.csv", "pretest": "pt.csv"})
+    monkeypatch.setattr(dvd, "_model_path", lambda: "m")
+    monkeypatch.setattr(dvd, "_run", fake_run)
+    group = dvd.spc.Group("g", "IAA-Sensitivity-1-1", "october_06")
+    with pytest.raises(_Stop):
+        dvd._build_day(tmp_path / "day", group, None, pubfig=False)
+    cmd = cmds[0]
+    assert cmd[cmd.index("--rate-test") + 1] == "mcnemar"
+    assert cmd[cmd.index("--p-adjust") + 1] == "holm"
+    assert "fisher" not in cmd
+
+
+def test_readme_p_note_claims_no_holm_without_per_unit_figures():
+    text = dvd.p_value_note("day", per_unit=False, pubfig=False)
+    assert "uncorrected" in text
+    assert "Holm" not in text
+
+
+@pytest.mark.parametrize("unit", ["day", "batch"])
+def test_readme_p_note_names_the_unit_and_the_holm_family(unit):
+    """The per-unit figure sets are per DAY by default, not per batch."""
+    text = dvd.p_value_note(unit, per_unit=True, pubfig=False)
+    assert f"Each {unit}'s" in text
+    assert "Holm-adjusted" in text and "odors with a test" in text
+    assert "_score_bars_pub" not in text
+
+
+def test_readme_p_note_says_the_pubfig_draws_the_raw_p():
+    """pubfig_pre_vs_post_score_bars reads the raw p_score column."""
+    text = dvd.p_value_note("day", per_unit=True, pubfig=True)
+    assert "_score_bars_pub" in text and "raw" in text
+
+
+def test_readme_template_takes_the_p_note_and_names_the_paired_test():
+    assert "{p_note}" in dvd._README
+    assert "per-batch pre-vs-post" not in dvd._README
+    assert "exact McNemar paired within fly" in dvd._README

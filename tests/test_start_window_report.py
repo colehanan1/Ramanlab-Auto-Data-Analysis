@@ -110,23 +110,73 @@ def test_findings_count_only_per_odor_tests(tmp_path):
 # ── rate test ─────────────────────────────────────────────────────────────
 
 
-def test_rate_test_defaults_to_fisher_and_accepts_mcnemar():
+def test_rate_test_defaults_to_mcnemar_and_rejects_fisher():
     base = ["--dataset", DS, "--start", "13:00", "--end", "14:00", "--out-dir", "/x"]
-    assert swr.build_parser().parse_args(base).rate_test == "fisher"
-    assert swr.build_parser().parse_args(base + ["--rate-test", "mcnemar"]).rate_test == "mcnemar"
-    with pytest.raises(SystemExit):
-        swr.build_parser().parse_args(base + ["--rate-test", "chi2"])
+    assert swr.build_parser().parse_args(base).rate_test == "mcnemar"
+    for bad in ("fisher", "chi2"):
+        with pytest.raises(SystemExit):
+            swr.build_parser().parse_args(base + ["--rate-test", bad])
 
 
-@pytest.mark.parametrize("rate_test", ["fisher", "mcnemar"])
-def test_the_score_figures_get_the_chosen_rate_test(monkeypatch, tmp_path, rate_test):
+def test_the_score_figures_get_mcnemar_and_holm(monkeypatch, tmp_path):
     seen = {}
     monkeypatch.setattr(swr, "_run", lambda cmd, log: seen.setdefault(str(cmd[1]), cmd) and 0)
     p = {k: tmp_path / k for k in ("predictions", "testing", "pretest", "training")}
-    swr.run_figures(tmp_path, p, DS, config=tmp_path / "c.yaml", label="start x", log=None,
-                    rate_test=rate_test)
+    swr.run_figures(tmp_path, p, DS, config=tmp_path / "c.yaml", label="start x", log=None)
     cmd = next(c for k, c in seen.items() if k.endswith("pretest_vs_test_comparison.py"))
-    assert cmd[cmd.index("--rate-test") + 1] == rate_test
+    assert cmd[cmd.index("--rate-test") + 1] == "mcnemar"
+    assert cmd[cmd.index("--p-adjust") + 1] == "holm"
+
+
+def test_count_significant_uses_the_holm_column_when_asked():
+    summary = pd.DataFrame({
+        "phase": ["Pre-test"] * 2, "odor": ["A", "B"], "measure": ["delta_signed"] * 2,
+        "p_pre_vs_post": [0.03, 0.04], "p_pre_vs_post_holm": [0.06, 0.06]})
+    assert swr.count_significant(summary) == (2, 2)
+    assert swr.count_significant(summary, column="p_pre_vs_post_holm") == (0, 2)
+
+
+def test_the_findings_do_not_claim_a_no_change_value_for_the_biased_measures():
+    assert "No fixed no-change value" in swr.NO_NULL_NOTE
+    assert "Unsigned AUC" in swr.NO_NULL_NOTE
+
+
+def _findings_with(tmp_path, tests):
+    """FINDINGS.md from an AUC summary whose sensitized-odor rows carry ``tests``:
+    measure -> (raw p, Holm p)."""
+    d = tmp_path / "AUC-Before-vs-During"
+    d.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame({"odor": ["Hexanol", "Citral"], "trained": [True, False]}).to_csv(
+        d / "auc_per_trial.csv", index=False)
+    pd.DataFrame([dict(phase=ph, odor="Hexanol", measure=m, mean=1.0, median=1.0,
+                       p_pre_vs_post=raw, p_pre_vs_post_holm=holm)
+                  for m, (raw, holm) in tests.items() for ph in ("Pre-test", "Post-training")]
+                 ).to_csv(d / "auc_summary.csv", index=False)
+    flies = pd.DataFrame([{"folder": "b", "start": dt.datetime(2026, 10, 27, 13, 0),
+                           "flies": 3, "flagged_dropped": 0}])
+    return swr.write_findings(tmp_path, DS, "1pm-2pm", flies, {}).read_text()
+
+
+def test_findings_bold_only_the_holm_adjusted_p(tmp_path):
+    text = _findings_with(tmp_path, {"delta_signed": (0.03, 0.09),
+                                     "ratio_raw": (0.004, 0.012)})
+    rows = {line.split(" | ")[0]: line for line in text.splitlines() if line.startswith("| ")}
+    assert rows["| Signed AUC Δ (% × s)"].endswith("| 0.030 | 0.09 |")   # raw p never bold
+    assert rows["| Raw-area ratio"].endswith("| 0.004 | **0.012** |")
+    assert "**2 of 2** per-odor comparisons have raw p < 0.05 (**1** after Holm" in text
+    assert swr.NO_NULL_NOTE in text
+
+
+def test_findings_do_not_count_holm_from_a_table_without_it(tmp_path):
+    """A summary CSV from before the Holm column (a stale folder) must not read as
+    '0 significant after Holm'."""
+    _findings_with(tmp_path, {"delta_signed": (0.03, 0.04)})
+    csv = tmp_path / "AUC-Before-vs-During" / "auc_summary.csv"
+    pd.read_csv(csv).drop(columns="p_pre_vs_post_holm").to_csv(csv, index=False)
+    flies = pd.DataFrame([{"folder": "b", "start": dt.datetime(2026, 10, 27, 13, 0),
+                           "flies": 3, "flagged_dropped": 0}])
+    text = swr.write_findings(tmp_path, DS, "1pm-2pm", flies, {}).read_text()
+    assert "(**–** after Holm" in text
 
 
 # ── flagged flies: the table given on the command line, in every step ─────
@@ -144,6 +194,18 @@ def test_every_figure_step_that_drops_flagged_flies_gets_the_given_table(monkeyp
     for cmd in takers.values():
         assert cmd[cmd.index("--flagged-flies-csv") + 1] == mine
     assert all(str(swr.FLAGGED) not in map(str, cmd) for cmd in seen.values())
+
+
+def test_every_mean_trace_step_also_draws_medians(monkeypatch, tmp_path):
+    """User 2026-11-13: every mean trace in the cohort folders gets a median twin and a
+    mean-vs-median figure."""
+    seen = {}
+    monkeypatch.setattr(swr, "_run", lambda cmd, log: seen.setdefault(str(cmd[1]), cmd) and 0)
+    p = {k: tmp_path / k for k in ("predictions", "testing", "pretest", "training")}
+    swr.run_figures(tmp_path, p, DS, config=tmp_path / "c.yaml", label="start x", log=None)
+    by_name = {Path(k).name: c for k, c in seen.items()}
+    for script in ("dataset_mean_traces_tvc.py", "responder_mean_traces.py"):
+        assert "--with-median" in by_name[script], script
 
 
 # ── exit codes: "nothing to plot" is not a crash ──────────────────────────

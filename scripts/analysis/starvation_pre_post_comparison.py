@@ -5,15 +5,21 @@ Each group is one ``*-Sensitivity-*`` cohort, optionally narrowed to the flies
 whose folder starts with a prefix (``24 h=IAA-Sensitivity-24-1:october_06`` is
 only the october_06 batches of the 24 h cohort). Within a group the comparison
 is paired per fly, exactly as in ``pretest_vs_test_comparison.py``; between the
-groups it is unpaired, because they are different flies. The response rate is
-the exception: pre vs post within a group is ALSO Fisher's exact (the 2x2 phase
-x responded table), at the user's request, rather than the paired McNemar.
+groups it is unpaired, because they are different flies.
 
-* score: Mann-Whitney U (two-sided) on the per-fly scores, pre and post
-  separately, and on the per-fly change (post - pre);
-* response rate (score >= ``binary_threshold``): Fisher's exact test.
+* within a group, pre vs post (same flies): score = Wilcoxon signed-rank
+  (tie-aware exact), response rate = paired exact McNemar. Fisher's exact is NOT
+  used there (2026-11-18: pre and post are the same flies);
+* between groups (different flies), per odor: score = Mann-Whitney U
+  (two-sided) on the per-fly scores, pre and post separately, and on the per-fly
+  change (post - pre); response rate (score >= ``binary_threshold``) = Fisher's
+  exact test. Every fly contributes ONE trial per odor per phase, so each test
+  uses one value per fly; there is no pooled multi-trial row.
 
-p-values are uncorrected, matching the score_summary and pre-vs-post figures.
+The figures' p-values are uncorrected (and say so). ``summary_by_group.csv`` also
+carries ``p_score_holm`` / ``p_rate_holm``: Holm across each group's odors with a
+test, score and rate separately (``per_odor_summary``); the between-group and
+omnibus tables are uncorrected.
 Each fly meets each odor once per phase, so n counts flies and a group mean is
 the mean over its flies' trials -- there is no average of averages anywhere.
 
@@ -266,12 +272,13 @@ def group_summary(
 ) -> pd.DataFrame:
     """Per (group, odor): n flies, pre/post means and rates, and p-values.
 
-    Score: Wilcoxon signed-rank (paired). Response rate: Fisher's exact.
+    Score: Wilcoxon signed-rank (paired). Response rate: exact McNemar (paired;
+    the same flies are measured pre and post, so no Fisher here).
     """
     parts = []
     for g in groups:
         s = per_odor_summary(paired[paired["group"] == g], binary_threshold=binary_threshold,
-                             rate_test="fisher")
+                             rate_test="mcnemar")
         s.insert(0, "group", g)
         parts.append(s)
     return pd.concat(parts, ignore_index=True) if parts else pd.DataFrame()
@@ -353,7 +360,16 @@ def _ffh(responded: list[np.ndarray]) -> float | None:
         return None
     cats = np.concatenate([r.astype(int) for r in responded])
     labels = np.concatenate([np.full(r.size, i) for i, r in enumerate(responded)])
-    return float(fisher_freeman_halton_mc(cats, labels, n_iter=20_000))
+    n_iter = 20_000
+    p = float(fisher_freeman_halton_mc(cats, labels, n_iter=n_iter))
+    if not np.isfinite(p):
+        return None
+    if len(responded) == 2 and cats.max() <= 1:
+        return p  # 2x2 -> exact Fisher inside the helper, not a Monte-Carlo estimate
+    # The helper returns hits / n_iter, which can be exactly 0; a Monte-Carlo p
+    # is never 0: (hits + 1) / (n_iter + 1).
+    hits = int(round(p * n_iter))
+    return (hits + 1) / (n_iter + 1)
 
 
 def omnibus_stats(
@@ -579,7 +595,7 @@ def build_pre_post_bars(summary, *, groups, kind, trained_odor, title, compariso
     _tint_trained(ax, odors, trained_odor)
     metric = "Mean PER score" if is_score else "PER response rate"
     test = ("paired within fly (Wilcoxon signed-rank, uncorrected)" if is_score
-            else "pre vs post: Fisher's exact (uncorrected)")
+            else "pre vs post: exact McNemar, paired (uncorrected)")
     phases = (f"{phase_terms.pre_label(cohort, 'pre-test', case='lower')} vs "
               f"{phase_terms.post_label(cohort, 'post-training', case='lower')}")
     ax.set_title(f"{title} — {metric}, {phases}, {_comparison(groups, comparison)}\n"

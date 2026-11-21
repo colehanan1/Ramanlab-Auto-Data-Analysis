@@ -197,3 +197,30 @@ def test_conditioning_cohorts_keep_trained_odor_and_pre_test(monkeypatch, datase
     assert "Predicting the pre-test score" in t["responsiveness"]
     assert "first pre-test trial" in t["time_of_day"]
     assert not any(w in text.lower() for w in ("sensitiz", "exposure") for text in t.values())
+
+
+def test_findings_wilcoxon_is_tie_aware_and_one_value_per_fly():
+    """scipy's exact Wilcoxon ignores ties and reads 0.047 here; truly 0.0625."""
+    from fbpipe.analysis import fly_stats as fs
+    v = np.array([-2, -2, -2, -2, -1, -1, 1], dtype=float)
+    assert fs.wilcoxon_signed_rank_p(v, min_pairs=1) == pytest.approx(0.0625)
+    assert not hasattr(sf, "wilcoxon")        # no direct scipy call left in the module
+
+
+def test_specificity_figure_prints_the_tie_aware_signed_rank_p():
+    """One value per fly (IAA change minus that fly's other-odor change), tested
+    against 0. These seven tie: scipy's exact Wilcoxon reads p=0.047, the
+    tie-correct p is 0.0625."""
+    rows = []
+    for i, (pre, post) in enumerate(zip([3, 3, 3, 3, 2, 2, 0], [1] * 7)):
+        rows.append(("24 h", f"f{i}", IAA, pre, post))
+        rows.append(("24 h", f"f{i}", "Hexanol", 1, 1))
+    df = pd.DataFrame(rows, columns=["group", "fly", "odor", "score_pre", "score_post"])
+    df["dataset_canon"] = "D"
+    df["fly_number"] = 1
+    assert sf.specificity(df, trained=IAA)["index"].tolist() == [-2, -2, -2, -2, -1, -1, 1]
+    fig = sf.fig_specificity(df, trained=IAA)
+    texts = [t.get_text() for t in fig.axes[0].texts]
+    plt.close(fig)
+    assert "p=0.062" in texts
+    assert "p=0.047" not in texts

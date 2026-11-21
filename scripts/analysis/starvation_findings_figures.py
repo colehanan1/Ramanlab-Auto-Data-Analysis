@@ -43,13 +43,14 @@ import numpy as np  # noqa: E402
 import pandas as pd  # noqa: E402
 from matplotlib.colors import LinearSegmentedColormap, TwoSlopeNorm  # noqa: E402
 from matplotlib.patches import Patch  # noqa: E402
-from scipy.stats import kruskal, spearmanr, wilcoxon  # noqa: E402
+from scipy.stats import kruskal, spearmanr  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 for _p in (REPO_ROOT, REPO_ROOT / "src"):
     if str(_p) not in sys.path:
         sys.path.insert(0, str(_p))
 
+from fbpipe.analysis import fly_stats as fs  # noqa: E402
 from scripts.analysis import phase_terms  # noqa: E402
 from scripts.analysis.pretest_vs_test_comparison import (  # noqa: E402
     BINARY_THRESHOLD,
@@ -355,12 +356,9 @@ def fig_specificity(paired: pd.DataFrame, *, trained: str, concentrations=None):
             ax.plot([i, i], [lo, hi], color=EMPH, linewidth=2, zorder=3, solid_capstyle="round")
             ax.plot(i, v.mean(), "o", color=EMPH, markersize=9, markeredgecolor="white",
                     markeredgewidth=2, zorder=4)
-            p = None
-            if (v != 0).sum() >= 1:
-                try:
-                    p = float(wilcoxon(v).pvalue)
-                except ValueError:
-                    p = None
+            # One value per fly (change minus the fly's other-odor change): a
+            # one-sample signed-rank vs 0, tie-aware and exact.
+            p = fs.wilcoxon_signed_rank_p(v, min_pairs=1)
             stats.append((g, v.mean(), p, v.size))
             ax.text(i, 0.985, _fmt_p(p), transform=ax.get_xaxis_transform(), ha="center",
                     va="top", fontsize=8.5, color=INK,

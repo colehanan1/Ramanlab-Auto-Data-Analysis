@@ -191,7 +191,8 @@ def test_signed_ratio_keeps_the_odor_peaks_sign_over_the_baseline_peaks_size():
     dip = _z(trace=_trace(_alt(30, 2.0), 10.0))
     assert rise["zpeak_ratio_signed"] == pytest.approx(5.0, rel=1e-3)
     assert dip["zpeak_ratio_signed"] == pytest.approx(-5.0, rel=1e-3)
-    assert abd.null_value("zpeak_ratio_signed") == 0.0
+    # No fixed no-change value: sham windows read about +0.23..+0.34 with no odor.
+    assert abd.null_value("zpeak_ratio_signed") is None
     assert "zpeak_ratio_signed" in abd.PEAKZ.measures
 
 
@@ -270,7 +271,6 @@ def test_log_ratio_needs_eps_and_the_threshold_columns(tables):
 
 def test_null_line_is_one_for_ratios_and_zero_for_the_log_ratio():
     assert abd.null_value("ratio_raw") == 1.0
-    assert abd.null_value("zpeak_ratio_unsigned") == 1.0
     assert abd.null_value("thr_auc_log_ratio") == 0.0
     assert abd.null_value("delta_signed") == 0.0
 
@@ -521,3 +521,204 @@ def test_main_titles_name_the_phases_by_cohort(tables, tmp_path, monkeypatch, da
                      "--out-dir", str(tmp_path / "out")]) == 0
     assert len(titles) == 5
     assert all(s.endswith(f", {phases} (2 flies)") for s in titles), titles
+
+
+# ── no fixed null for the five biased measures; exact Wilcoxon; Holm ──────
+
+NO_NULL = ("delta_unsigned", "ratio_unsigned", "zpeak_delta_unsigned",
+           "zpeak_ratio_unsigned", "zpeak_ratio_signed")
+KEEP_NULL = {"delta_signed": 0.0, "ratio_raw": 1.0, "zpeak_delta_signed": 0.0,
+             "thr_auc_log_ratio": 0.0}
+
+
+@pytest.mark.parametrize("measure", NO_NULL)
+def test_biased_measures_have_no_fixed_null(measure):
+    assert abd.null_value(measure) is None
+    metric = next(m for m in abd.METRICS.values() if measure in m.measures)
+    assert measure not in metric.tested
+    rows = [r for r in (*metric.rows("delta"), *metric.ratios) if r.measure == measure]
+    assert rows and all(r.null is None for r in rows)
+
+
+@pytest.mark.parametrize("measure,null", KEEP_NULL.items())
+def test_unbiased_measures_keep_their_null_and_test(measure, null):
+    assert abd.null_value(measure) == null
+    metric = next(m for m in abd.METRICS.values() if measure in m.measures)
+    assert measure in metric.tested
+
+
+def test_summary_has_no_p_vs_null_for_the_biased_measures(tables):
+    t = abd.build_auc_table(*tables)
+    s = abd.summarise(t)
+    for m in NO_NULL[:2]:
+        assert s.loc[s["measure"] == m, "p_vs_null"].isna().all()
+    assert "p_pre_vs_post" in s.columns
+
+
+def test_wilcoxon_is_exact_with_ties():
+    d = np.array([-2, -2, -2, -2, -1, -1, 1], float)
+    assert abd._wilcoxon(d) == pytest.approx(0.0625)
+    # paired form: x - y
+    assert abd._wilcoxon(d + 5, np.full(7, 5.0)) == pytest.approx(0.0625)
+    assert np.isnan(abd._wilcoxon(np.zeros(4)))
+    assert np.isnan(abd._wilcoxon(np.array([np.nan])))
+
+
+def test_summary_holm_columns_and_all_odors_per_fly(tables):
+    t = abd.build_auc_table(*tables)
+    s = abd.summarise(t)
+    assert "p_pre_vs_post_holm" in s.columns
+    from fbpipe.analysis import fly_stats as fs
+    one = s.loc[(s["measure"] == "delta_signed") & (s["phase"] == "Pre-test")
+                & (s["odor"] != abd.ALL_ODORS)]
+    raw = one["p_pre_vs_post"].to_numpy(float)
+    np.testing.assert_allclose(one["p_pre_vs_post_holm"].to_numpy(float),
+                               fs.holm_adjust(raw), equal_nan=True)
+    allrow = s.loc[(s["odor"] == abd.ALL_ODORS) & (s["measure"] == "delta_signed")]
+    assert allrow["p_pre_vs_post_holm"].isna().all()
+
+
+def test_all_odors_test_uses_one_value_per_fly():
+    rows = []
+    # 6 flies x 7 odors, every fly x odor pair shifts by +1 but ONE fly-level
+    # change per fly: the test must see 6 values, not 42.
+    for fl in range(6):
+        for o in range(7):
+            for ph, base in (("Pre-test", 0.0), ("Post-training", 1.0 + 0.1 * fl)):
+                rows.append(dict(dataset="D", fly="b", fly_number=str(fl), odor=f"o{o}",
+                                 phase=ph, trained=o == 0, delta_signed=base))
+    t = pd.DataFrame(rows)
+    p = abd.all_odors_pre_vs_post_p(t, "delta_signed")
+    # six positive fly changes: exact two-sided p = 2/2**6
+    assert p == pytest.approx(2 / 64)
+
+
+def test_paired_plot_captions_name_the_sham_bias_and_holm(tables):
+    t = abd.build_auc_table(*tables)
+    rows = (abd.AUC.rows("delta")[1],)
+    fig = abd.plot_paired_dataset(t, rows, "x", metric=abd.AUC)
+    text = " ".join(x.get_text() for x in fig.findobj(Text))
+    assert "No fixed no-change value" in text
+    assert "Holm-adjusted across" in text and "exploratory" in text
+    # no horizontal reference line is drawn for the biased measure
+    ax = fig.axes[0]
+    assert not any(list(l.get_xdata()) == [0, 1] and set(l.get_ydata()) == {0.0}
+                   for l in ax.lines)      # axhline spans axes coords 0..1
+    plt.close(fig)
+
+
+# ── review: pooled unit, pooled error bars, Holm on the figure, lines ──────
+
+
+def _fly_rows(values, measure="delta_signed"):
+    """``values``: odor -> [(pre, post), ...] one pair per fly (None = trial missing)."""
+    rows = []
+    for odor, pairs in values.items():
+        for fl, pair in enumerate(pairs):
+            for phase, v in zip(abd.PHASES, pair):
+                if v is not None:
+                    rows.append(dict(dataset=DS, fly="oct_09_batch_1", fly_number=str(fl + 1),
+                                     odor=odor, phase=phase, trained=odor == "Hexanol",
+                                     **{measure: float(v)}))
+    return pd.DataFrame(rows)
+
+
+def _hlines(ax):
+    """The axhline reference lines of an axes (x spans axes coords 0..1)."""
+    return [l for l in ax.lines if list(l.get_xdata()) == [0, 1]]
+
+
+def test_all_odors_test_uses_only_odors_a_fly_has_in_both_phases():
+    # Every fly rises on Hexanol. Flies 1-3 also gave a large Citral pre-test trial
+    # but none after training: pooling each phase separately would leave that 10 in
+    # the pre mean and turn their change negative. Paired per odor first, every
+    # fly's change is positive -> exact two-sided p = 2 / 2**6.
+    t = _fly_rows({
+        "Hexanol": [(0.0, 1.0 + 0.1 * f) for f in range(6)],
+        "Citral": [(10.0, None)] * 3 + [(0.0, 0.5)] * 3,
+    })
+    assert abd.all_odors_pre_vs_post_p(t, "delta_signed") == pytest.approx(2 / 64)
+
+
+def test_pooled_sem_counts_flies_not_trials():
+    from scipy.stats import t as student_t
+
+    from fbpipe.analysis import fly_stats as fs
+    rng = np.random.default_rng(3)
+    levels = rng.normal(0.0, 10.0, size=5)            # each fly's own level, all odors
+    t = _fly_rows({f"o{o}": [(lv + rng.normal(), lv + rng.normal()) for lv in levels]
+                   for o in range(4)})
+    for m in abd.AUC.measures:
+        if m not in t:
+            t[m] = t["delta_signed"]
+    s = abd.summarise(t).set_index(["phase", "odor", "measure"])
+    pre = t.loc[t["phase"] == "Pre-test"]
+    _, lo, hi = fs.fly_cluster_mean_ci(pre["delta_signed"], pre["fly_number"])
+    want = (hi - lo) / 2 / student_t.ppf(0.975, 5 - 1)
+    got = s.loc[("Pre-test", abd.ALL_ODORS, "delta_signed"), "sem"]
+    assert got == pytest.approx(want)
+    trial_sem = pre["delta_signed"].std(ddof=1) / np.sqrt(len(pre))
+    assert got > 1.5 * trial_sem                       # 20 trials are not 20 flies
+    one = pre.loc[pre["odor"] == "o1", "delta_signed"]  # one trial per fly: plain SEM
+    assert s.loc[("Pre-test", "o1", "delta_signed"), "sem"] == pytest.approx(
+        one.std(ddof=1) / np.sqrt(len(one)))
+    # the figure's pooled error bar is that SEM too
+    fig = abd.plot_paired_dataset(t, (abd.Row("delta_signed", "y", "t"),), "x")
+    x_pre = abd._group_x(abd._odor_order(t) + [abd.ALL_ODORS])[-1] - 0.2
+    halves = [abs(seg[1][1] - seg[0][1]) / 2 for c in fig.axes[0].containers
+              if hasattr(c, "has_yerr") and c.has_yerr
+              for seg in c.lines[2][0].get_segments() if abs(seg[0][0] - x_pre) < 1e-9]
+    assert halves == [pytest.approx(want)]
+    plt.close(fig)
+
+
+def test_paired_plot_prints_the_holm_p_and_takes_its_stars_from_it():
+    # 6 flies all up on Hexanol: raw p = 2/64 = 0.031, Holm over 3 odors = 0.094.
+    t = _fly_rows({"Hexanol": [(0.0, c) for c in (1, 2, 3, 4, 5, 6)],
+                   "Citral": [(0.0, c) for c in (1, -1, 2, -2, 3, -3)],
+                   "Linalool": [(0.0, c) for c in (1, -2, 3, -4, 5, -6)]})
+    fig = abd.plot_paired_dataset(t, (abd.Row("delta_signed", "y", "t"),), "x")
+    labels = [x.get_text() for x in fig.axes[0].texts]
+    plt.close(fig)
+    assert "p=0.094" in labels and not any("*" in s for s in labels)
+    # 8 flies all up: raw 2/256 = 0.0078 -> Holm x3 = 0.023, one star
+    t = _fly_rows({"Hexanol": [(0.0, c) for c in range(1, 9)],
+                   "Citral": [(0.0, c) for c in (1, -1, 2, -2, 3, -3, 4, -4)],
+                   "Linalool": [(0.0, c) for c in (1, -2, 3, -4, 5, -6, 7, -8)]})
+    fig = abd.plot_paired_dataset(t, (abd.Row("delta_signed", "y", "t"),), "x")
+    labels = [x.get_text() for x in fig.axes[0].texts]
+    plt.close(fig)
+    assert "p=0.023 *" in labels
+
+
+def test_only_the_measures_with_a_fixed_null_get_a_reference_line(tables):
+    t = abd.build_auc_table(*tables)
+    fig = abd.plot_paired_dataset(t, abd.AUC.ratios, "x", metric=abd.AUC)
+    raw_ax, unsigned_ax = fig.axes[:2]
+    assert [set(l.get_ydata()) for l in _hlines(raw_ax)] == [{1.0}]
+    assert _hlines(unsigned_ax) == []
+    assert {p.get_y() for p in unsigned_ax.patches} == {0.0}    # bars rise from 0, not 1
+    plt.close(fig)
+    pz = _fly_rows({"Hexanol": [(1.0, 2.0), (0.5, 1.5), (0.2, 0.9)]}, "zpeak_ratio_signed")
+    pz["zpeak_ratio_unsigned"] = pz["zpeak_ratio_signed"] + 1.0
+    fig = abd.plot_paired_dataset(pz, abd.PEAKZ.ratios, "x", metric=abd.PEAKZ)
+    assert all(_hlines(ax) == [] for ax in fig.axes[:2])
+    plt.close(fig)
+
+
+def test_p_vs_null_only_for_the_measures_with_a_fixed_null():
+    rng = np.random.default_rng(7)
+    cols = set(abd.AUC.measures) | set(abd.PEAKZ.measures)
+    t = _fly_rows({o: [(0.0, 0.0)] * 7 for o in ("Hexanol", "Citral")})
+    for m in cols:
+        t[m] = rng.normal(0.5, 1.0, size=len(t))
+    for metric in (abd.AUC, abd.PEAKZ):
+        s = abd.summarise(t, metric)
+        s = s.loc[s["odor"] != abd.ALL_ODORS]
+        for m in metric.measures:
+            p = s.loc[s["measure"] == m, "p_vs_null"]
+            if m in NO_NULL or m not in metric.deltas + abd.RATIOS + tuple(
+                    r.measure for r in metric.ratios):
+                assert p.isna().all(), m
+            else:
+                assert p.notna().all(), m

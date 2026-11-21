@@ -16,11 +16,18 @@ Writes ``Results/Figures/IAA-Rig-Comparison/`` (hand-run analysis).
 """
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 from scipy import stats
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(REPO_ROOT / "src") not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT / "src"))
+
+from fbpipe.analysis import fly_stats as fs  # noqa: E402
 
 COLE = Path("/home/ramanlab/Documents/cole")
 PROD = COLE / "Results" / "Sensitiviy-Results(11-15)" / "Data"
@@ -37,14 +44,16 @@ POP_FILES = {"window": "window_per_fly_per_odor.csv", "whole cohort": "whole-coh
 
 
 def mcnemar_exact(pre: pd.Series, post: pd.Series) -> float:
-    b = int((~pre & post).sum())
-    c = int((pre & ~post).sum())
-    return float(stats.binomtest(b, b + c, 0.5).pvalue) if b + c else 1.0
+    # No discordant pair -> no evidence of a change -> p = 1.0 (kept: a table cell,
+    # not a drawn bracket).
+    p = fs.mcnemar_exact_p(pre.to_numpy(bool), post.to_numpy(bool))
+    return 1.0 if p is None else float(p)
 
 
 def wilcoxon_p(change: pd.Series) -> float:
-    d = change[change != 0]
-    return float(stats.wilcoxon(d).pvalue) if len(d) else 1.0
+    # Tie-aware exact signed-rank; all-zero / empty -> 1.0 as before.
+    p = fs.wilcoxon_signed_rank_p(change.to_numpy(float), min_pairs=1)
+    return 1.0 if p is None else float(p)
 
 
 def per_rig(df: pd.DataFrame) -> pd.DataFrame:

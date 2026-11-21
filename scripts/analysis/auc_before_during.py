@@ -54,8 +54,18 @@ There is no signed ratio for AUC or peak z: the signed before value sits near
 
 Each fly contributes one trial per odor per phase, so a per-odor mean is a
 mean over trials and flies alike. The "All odors" group pools every trial
-(never a mean of odor means) and its n counts trials; it carries no p-value
-because those trials are not independent (each fly gives seven).
+(never a mean of odor means) and its n counts trials; its SEM still counts flies
+(cluster-robust over flies, so a fly's seven trials are not seven flies). Its figure
+carries no p-value (each fly gives seven non-independent trials); the summary
+table's pooled p uses one value per fly (that fly's change pooled over the odors it
+has in both phases).
+
+Five measures have no fixed no-change value (delta_unsigned, ratio_unsigned and the
+peak-z unsigned delta, unsigned ratio and signed ratio): the before window is where
+the baseline is fit, so with no odor at all they already read off 0 / 1 (sham windows
+on odor-free real traces). They get no null line and no test against a null; only
+pre vs post is tested. Per-odor pre-vs-post p-values are Holm-adjusted within each
+measure (exploratory); stars come from the adjusted p.
 
 With ``--predictions-csv`` every trial also gets its model score, and the
 metric is plotted against it (pre-test, post-training and both pooled), with a
@@ -120,6 +130,7 @@ for _p in (REPO_ROOT, REPO_ROOT / "src"):
     if str(_p) not in sys.path:
         sys.path.insert(0, str(_p))
 
+from fbpipe.analysis import fly_stats as fs  # noqa: E402
 from fbpipe.utils.tables import read_table  # noqa: E402
 from scripts.analysis import binarized_per_rasters as bpr  # noqa: E402
 from scripts.analysis import envelope_visuals as ev  # noqa: E402
@@ -152,6 +163,26 @@ INK_MUTED = pvt.INK_MUTED
 # ---------------------------------------------------------------------------
 
 
+# Measures whose no-odor value is NOT the drawn null. The before window is also where
+# the baseline is fit, so |deviation| is smallest there by construction and the
+# largest excursion is usually upward: with a sham window on an odor-free stretch of
+# real traces these read about the values below (median), not 0 / 1. Only pre vs post
+# is tested for them (the bias cancels). The signed delta, the raw ratio and the
+# signed peak-z delta sit on their nulls (sham ~0.0 / ~1.00 / ~0.0) and keep them.
+NO_FIXED_NULL = {
+    "delta_unsigned": "+5.1 to +5.4 % x s",
+    "ratio_unsigned": "1.29 to 1.45",
+    "zpeak_delta_unsigned": "+0.17 to +0.32 SD",
+    "zpeak_ratio_unsigned": "1.06 to 1.13",
+    "zpeak_ratio_signed": "+0.23 to +0.34",
+}
+
+
+def no_null_sentence(measure: str) -> str:
+    return (f"No fixed no-change value: with no odor this measure already reads about "
+            f"{NO_FIXED_NULL[measure]} (sham windows), so only pre vs post is tested.")
+
+
 @dataclass(frozen=True)
 class Row:
     """One row of panels: which column it plots, how it is labelled, its null."""
@@ -159,7 +190,7 @@ class Row:
     measure: str
     ylabel: str
     title: str
-    null: float = 0.0
+    null: float | None = 0.0    # None: no fixed no-change value (see NO_FIXED_NULL)
     short: str = ""             # heatmap panel label; default: ylabel minus its unit
 
     @property
@@ -203,14 +234,17 @@ class Metric:
 
     @property
     def tested(self) -> tuple[str, ...]:
-        """Measures with a null to test against: the deltas and the ratios."""
-        return self.deltas + tuple(r.measure for r in self.ratios)
+        """Measures with a valid fixed null to test against (NO_FIXED_NULL excluded)."""
+        return tuple(m for m in self.deltas + tuple(r.measure for r in self.ratios)
+                     if m not in NO_FIXED_NULL)
 
     def rows(self, window: str) -> tuple[Row, ...]:
         what = "during - before" if window == "delta" else "during odor"
         return tuple(
             Row(self.col(window, k), f"{self.label(k)}, {what} ({self.unit})",
-                self.kind_title[k])
+                self.kind_title[k],
+                null=None if (window == "delta" and self.col(window, k) in NO_FIXED_NULL)
+                else 0.0)
             for k in self.kinds
         )
 
@@ -234,7 +268,7 @@ AUC = Metric(
             "Raw-area ratio: area under the trace during / before "
             "(auc_ratio of the raster CSVs)", null=1.0),
         Row("ratio_unsigned", "During / before (unsigned AUC)",
-            "Unsigned ratio: |deviation from baseline| during / before", null=1.0),
+            "Unsigned ratio: |deviation from baseline| during / before", null=None),
     ),
     extra_columns=("baseline", "auc_before_raw", "auc_during_raw"),
     definition=(
@@ -246,7 +280,7 @@ AUC = Metric(
         "Raw ratio = area under the raw trace in the odor window / the window "
         "before it, the auc_ratio in Graded-PER-Rasters/*_binarized_trials.csv "
         "(a before-area of exactly 0 is replaced by 1). Unsigned ratio = unsigned "
-        "AUC during / before. 1 = no change. No signed ratio: the signed "
+        "AUC during / before. No fixed no-change value (see below). No signed ratio: the signed "
         "before-area sits near 0 and flips sign, so the quotient is meaningless."
     ),
 )
@@ -260,9 +294,9 @@ PEAKZ = Metric(
     },
     ratios=(
         Row("zpeak_ratio_signed", "Signed during / |before| (peak z)",
-            "Signed ratio: peak z during (sign kept) / |peak z| before", null=0.0),
+            "Signed ratio: peak z during (sign kept) / |peak z| before", null=None),
         Row("zpeak_ratio_unsigned", "During / before (unsigned peak z)",
-            "Unsigned ratio: |peak z| during / |peak z| before", null=1.0),
+            "Unsigned ratio: |peak z| during / |peak z| before", null=None),
     ),
     extra_columns=("z_baseline_mean", "z_baseline_sd"),
     definition=(
@@ -276,10 +310,11 @@ PEAKZ = Metric(
     ratio_note=(
         "Signed ratio = peak z during, sign kept / |peak z| before: the odor peak in "
         "units of the baseline's own largest excursion, + for a rise, - for a dip; "
-        "pure noise lands near +/-1. The denominator is the before-peak's SIZE: its "
+        "the no-odor value is not 0 (see the caption). The denominator is the before-peak's SIZE: its "
         "sign flips between trials, so dividing by it would scramble the direction. "
-        "Unsigned ratio = |peak z| during / |peak z| before; 1 = the odor window's "
-        "biggest excursion is no bigger than the baseline's own."
+        "Unsigned ratio = |peak z| during / |peak z| before. 1 is not the no-odor "
+        "value: the baseline is fit on the before window, so its excursions are "
+        "smaller there by construction."
     ),
 )
 
@@ -311,7 +346,8 @@ LOGRATIO = Metric(
 )
 
 METRICS = {m.key: m for m in (AUC, PEAKZ, LOGRATIO)}
-_NULL_BY_MEASURE = {r.measure: r.null for m in METRICS.values() for r in m.ratios}
+_NULL_BY_MEASURE = {r.measure: r.null for m in METRICS.values() for r in m.ratios
+                    if r.measure not in NO_FIXED_NULL}
 
 # Back-compatible names for the AUC family.
 MEASURES = AUC.measures[:6]
@@ -321,8 +357,11 @@ ALL_MEASURES = AUC.measures
 KIND_TITLE = AUC.kind_title
 
 
-def null_value(measure: str) -> float:
-    """What "no odor effect" reads as: 1 for a plain ratio, 0 for the rest."""
+def null_value(measure: str) -> float | None:
+    """What "no odor effect" reads as: 1 for a plain ratio, 0 for the rest, or None
+    for the NO_FIXED_NULL measures (no single correct value)."""
+    if measure in NO_FIXED_NULL:
+        return None
     return _NULL_BY_MEASURE.get(measure, 0.0)
 
 
@@ -577,19 +616,43 @@ def _sem(v: np.ndarray) -> float:
     return float(v.std(ddof=1) / math.sqrt(v.size)) if v.size > 1 else float("nan")
 
 
-def _wilcoxon(x: np.ndarray, y: np.ndarray | None = None) -> float:
-    from scipy.stats import wilcoxon
+def _fly_ids(sub: pd.DataFrame) -> np.ndarray:
+    return (sub["dataset"].astype(str) + "|" + sub["fly"].astype(str) + "|"
+            + sub["fly_number"].astype(str)).to_numpy()
 
-    d = x if y is None else x - y
-    d = d[np.isfinite(d)]
-    if d.size < 2 or not np.any(d):
+
+def _fly_sem(values: np.ndarray, flies: np.ndarray) -> float:
+    """SEM of a trial-pooled mean with the FLY as the unit: the cluster-robust standard
+    error ``fs.fly_cluster_mean_ci`` builds its interval from (that interval's half
+    width / t(flies - 1)). With one trial per fly it is the ordinary SEM; when a fly
+    gives several trials ('All odors', a score bin) they count as one fly, not as
+    independent trials. NaN below two flies."""
+    from scipy.stats import t as student_t
+
+    v = np.asarray(values, dtype=float)
+    ids = np.asarray(flies, dtype=object)
+    ok = np.isfinite(v)
+    g = len(set(ids[ok]))
+    if g < 2:
         return float("nan")
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
-        try:
-            return float(wilcoxon(d).pvalue)
-        except ValueError:
-            return float("nan")
+    _, lo, hi = fs.fly_cluster_mean_ci(v[ok], ids[ok])
+    return float((hi - lo) / 2.0 / student_t.ppf(0.975, g - 1))
+
+
+def _group_sem(t: pd.DataFrame, phase: str, odor: str, measure: str) -> float:
+    """The error bar of :func:`_values`' mean: :func:`_fly_sem` over its flies."""
+    sub = t.loc[t["phase"] == phase]
+    if odor != ALL_ODORS:
+        sub = sub.loc[sub["odor"] == odor]
+    return _fly_sem(sub[measure].to_numpy(dtype=float), _fly_ids(sub))
+
+
+def _wilcoxon(x: np.ndarray, y: np.ndarray | None = None) -> float:
+    d = x if y is None else x - y
+    if np.isfinite(d).sum() < 2:
+        return float("nan")
+    p = fs.wilcoxon_signed_rank_p(d, min_pairs=1)
+    return float("nan") if p is None else float(p)
 
 
 _KEY = ["dataset", "fly", "fly_number", "odor"]
@@ -618,22 +681,46 @@ def per_fly_change_table(t: pd.DataFrame, metric: Metric = AUC) -> pd.DataFrame:
     return trained.merge(out, on=_KEY, how="right")
 
 
+def all_odors_pre_vs_post_p(t: pd.DataFrame, measure: str) -> float:
+    """Paired Wilcoxon for the pooled group, one value per FLY: that fly's own
+    post - pre change pooled over the odors it has in BOTH phases (never fly x odor
+    pairs as separate units, and never an odor seen in one phase only, which would
+    leave its value in one phase's mean and not the other's)."""
+    pc = paired_change(t, measure)
+    fly = pc.groupby(["dataset", "fly", "fly_number"])["change"].mean()
+    return _wilcoxon(fly.to_numpy(float))
+
+
 def summarise(t: pd.DataFrame, metric: Metric = AUC) -> pd.DataFrame:
     """Mean / SEM / n per phase x odor x measure, plus the pooled group.
 
+    ``mean`` pools trials (sum / trials); ``sem`` counts flies (:func:`_fly_sem`:
+    the plain SEM per odor, cluster-robust over flies for the pooled group).
     ``p_vs_null``: one-sample Wilcoxon of a delta or log ratio against 0, or a
     plain ratio against 1 (did the odor change the trace at all?).
-    ``p_pre_vs_post``: Wilcoxon of the same measure paired by fly across
-    phases. Both uncorrected, per odor only.
+    ``p_vs_null`` is NaN for the NO_FIXED_NULL measures (no valid null).
+    ``p_pre_vs_post``: exact tie-aware Wilcoxon of the same measure paired by fly
+    across phases, raw; ``p_pre_vs_post_holm`` is Holm-adjusted across the odors of
+    that measure (exploratory family). The pooled group's p uses one value per fly
+    (its change pooled over its odors) and is not part of the Holm family.
     """
     rows = []
-    for odor in _odor_order(t) + [ALL_ODORS]:
+    odors = _odor_order(t)
+    p_raw: dict = {}
+    p_holm: dict = {}
+    for measure in metric.measures:
+        raw = []
+        for odor in odors:
+            pc = paired_change(t.loc[t["odor"] == odor], measure)
+            raw.append(_wilcoxon(pc["Post-training"].to_numpy(float),
+                                 pc["Pre-test"].to_numpy(float)))
+        for odor, r, h in zip(odors, raw, fs.holm_adjust(raw)):
+            p_raw[(odor, measure)], p_holm[(odor, measure)] = r, float(h)
+        p_raw[(ALL_ODORS, measure)] = all_odors_pre_vs_post_p(t, measure)
+        p_holm[(ALL_ODORS, measure)] = float("nan")
+    for odor in odors + [ALL_ODORS]:
         for measure in metric.measures:
-            p_pair = float("nan")
-            if odor != ALL_ODORS:
-                pc = paired_change(t.loc[t["odor"] == odor], measure)
-                p_pair = _wilcoxon(pc["Post-training"].to_numpy(float),
-                                   pc["Pre-test"].to_numpy(float))
+            p_pair = p_raw[(odor, measure)]
             has_null = measure in metric.tested and odor != ALL_ODORS
             for phase in PHASES:
                 v = _values(t, phase, odor, measure)
@@ -643,11 +730,12 @@ def summarise(t: pd.DataFrame, metric: Metric = AUC) -> pd.DataFrame:
                     "measure": measure,
                     "n_trials": int(v.size),
                     "mean": float(v.mean()) if v.size else float("nan"),
-                    "sem": _sem(v),
+                    "sem": _group_sem(t, phase, odor, measure),
                     "median": float(np.median(v)) if v.size else float("nan"),
                     "p_vs_null": (_wilcoxon(v - null_value(measure)) if has_null
                                   else float("nan")),
                     "p_pre_vs_post": p_pair,
+                    "p_pre_vs_post_holm": p_holm[(odor, measure)],
                 })
     return pd.DataFrame(rows)
 
@@ -689,13 +777,15 @@ def score_summary_table(t: pd.DataFrame, metric: Metric = AUC) -> pd.DataFrame:
         score = pd.to_numeric(sub["score"], errors="coerce")
         for measure in metric.measures:
             for s in ss.SCORES:
-                v = sub.loc[score == s, measure].to_numpy(float)
+                at = sub.loc[score == s]
+                v, flies = at[measure].to_numpy(float), _fly_ids(at)
+                sem = _fly_sem(v, flies)        # a fly can give several trials per score
                 v = v[np.isfinite(v)]
                 rows.append({
                     "phase": panel, "measure": measure, "score": s,
                     "n_trials": int(v.size),
                     "mean": float(v.mean()) if v.size else float("nan"),
-                    "sem": _sem(v),
+                    "sem": sem,
                     "median": float(np.median(v)) if v.size else float("nan"),
                 })
     return pd.DataFrame(rows)
@@ -765,16 +855,18 @@ def _style_xaxis(ax, t: pd.DataFrame, groups: list[str], x: np.ndarray,
     ax.set_xlim(x[0] - 0.6, x[-1] + 0.6)
 
 
-def _style_axes(ax, null: float = 0.0) -> None:
+def _style_axes(ax, null: float | None = 0.0) -> None:
     for side in ("top", "right"):
         ax.spines[side].set_visible(False)
-    ax.axhline(null, color=INK_MUTED, lw=0.8, zorder=1)
+    if null is not None:                       # None: no fixed no-change value
+        ax.axhline(null, color=INK_MUTED, lw=0.8, zorder=1)
     ax.grid(axis="y", color="#e6e6e3", lw=0.6, zorder=0)
     ax.set_axisbelow(True)
 
 
-_BAR_NOTE = ("One trial per fly per odor per phase; bars = mean +/- SEM over trials; "
-             "'All odors' pools every trial.")
+_BAR_NOTE = ("One trial per fly per odor per phase; bars = mean +/- SEM over flies. "
+             "'All odors' pools every trial (sum / trials); its SEM still counts flies, "
+             "not trials (cluster-robust: each fly gives one trial per odor).")
 
 
 def _footnote(fig, metric: Metric, extra: str) -> None:
@@ -817,8 +909,9 @@ def plot_before_vs_during(t: pd.DataFrame, title: str, metric: Metric = AUC):
                 color = PHASE_COLOR[phase]
                 ax.bar(x0 + off, v.mean(), width, color=color if window == "during" else "white",
                        edgecolor=color, linewidth=1.6, zorder=2)
-                ax.errorbar(x0 + off, v.mean(), yerr=_sem(v), color=INK, lw=1.1,
-                            capsize=2.5, zorder=4)
+                ax.errorbar(x0 + off, v.mean(),
+                            yerr=_group_sem(t, phase, odor, metric.col(window, kind)),
+                            color=INK, lw=1.1, capsize=2.5, zorder=4)
                 ax.scatter(x0 + off + _jitter(v.size, gi * 10 + si, width * 0.3), v,
                            s=7, color=INK, alpha=0.3 if odor != ALL_ODORS else 0.15,
                            edgecolors="none", zorder=3)
@@ -846,11 +939,18 @@ def _p_text(p: float) -> str:
     return "p<0.001" if p < 0.001 else f"p={p:.3f}"
 
 
+def _no_null_text(rows: Sequence[Row]) -> str:
+    return "".join(" " + no_null_sentence(r.measure) for r in rows
+                   if r.measure in NO_FIXED_NULL)
+
+
 def plot_paired_dataset(t: pd.DataFrame, rows: Sequence[Row], title: str, note: str = "",
                         metric: Metric = AUC):
     """Per odor: pre-test vs post-training, each fly's two trials joined.
 
-    Bars rise from the measure's null (0 for a delta, 1 for a ratio).
+    Bars rise from the measure's null (0 for a delta, 1 for a plain ratio) and from 0
+    when the measure has no fixed null. Per-odor p-values are Holm-adjusted across
+    the odors of each panel; the stars come from the adjusted p.
     """
     groups = _odor_order(t) + [ALL_ODORS]
     x = _group_x(groups)
@@ -859,7 +959,13 @@ def plot_paired_dataset(t: pd.DataFrame, rows: Sequence[Row], title: str, note: 
                              figsize=(max(9.0, 1.3 * len(groups) + 2.5),
                                       4.75 * len(rows) + (1.0 if len(rows) == 1 else 0)))
     for ax, row in zip(axes[:, 0], rows):
-        null = row.null
+        null = 0.0 if row.null is None else row.null
+        pair_p = {}
+        for g in groups[:-1]:
+            pcg = paired_change(t.loc[t["odor"] == g], row.measure)
+            pair_p[g] = _wilcoxon(pcg["Post-training"].to_numpy(float),
+                                  pcg["Pre-test"].to_numpy(float))
+        holm = dict(zip(pair_p, fs.holm_adjust(list(pair_p.values()))))
         trans = blended_transform_factory(ax.transData, ax.transAxes)
         for gi, (odor, x0) in enumerate(zip(groups, x)):
             pooled = odor == ALL_ODORS
@@ -882,15 +988,17 @@ def plot_paired_dataset(t: pd.DataFrame, rows: Sequence[Row], title: str, note: 
                 ax.scatter(xs, v, s=6 if pooled else 12,
                            color=color, alpha=0.35 if pooled else 0.9,
                            edgecolors="white", linewidths=0.4, zorder=3)
-                ax.errorbar(xc, v.mean(), yerr=_sem(v), color=INK, lw=1.3, capsize=3,
-                            zorder=4)
+                ax.errorbar(xc, v.mean(), yerr=_group_sem(t, phase, odor, row.measure),
+                            color=INK, lw=1.3, capsize=3, zorder=4)
                 ax.plot([xc - half + 0.04, xc + half - 0.04], [v.mean()] * 2, color=color,
                         lw=2.2, zorder=4)
             if not pooled:
-                p = _wilcoxon(pc["Post-training"].to_numpy(float), pc["Pre-test"].to_numpy(float))
-                ax.text(x0, 0.985, _p_text(p), transform=trans, ha="center", va="top",
+                padj = float(holm[odor])
+                star = fs.stars(padj)
+                label = _p_text(padj) + (f" {star}" if star not in ("", "n.s.") else "")
+                ax.text(x0, 0.985, label, transform=trans, ha="center", va="top",
                         fontsize=8.5, color=INK)
-        _style_axes(ax, null)
+        _style_axes(ax, row.null)
         ax.set_ylabel(row.ylabel)
         ax.set_title(row.title, fontsize=10.5, loc="left", color=INK, pad=14)
         _style_xaxis(ax, t, groups, x, row.measure)
@@ -903,9 +1011,12 @@ def plot_paired_dataset(t: pd.DataFrame, rows: Sequence[Row], title: str, note: 
     pre_name, post_name = _phase_words(cohort)
     _footnote(fig, metric, (note + " " if note else "") + _BAR_NOTE
               + " Dots = individual flies (one trial each); lines join a fly's "
-                f"{pre_name} and {post_name} trial. p = Wilcoxon signed-rank, "
-                "post vs pre paired by fly, uncorrected; none for the pooled group "
-                "(seven trials per fly are not independent).")
+                f"{pre_name} and {post_name} trial. p = exact Wilcoxon signed-rank "
+                "(ties handled), post vs pre paired by fly, exploratory - "
+                f"Holm-adjusted across {len(groups) - 1} odors (stars from the "
+                "adjusted p: * <0.05, ** <0.01, *** <0.001); none for the pooled "
+                "group (seven trials per fly are not independent)."
+              + _no_null_text(rows))
     _layout(fig, len(rows), note=bool(note))
     return fig
 
@@ -944,14 +1055,18 @@ def plot_per_fly_matrix(t: pd.DataFrame, title: str, metric: Metric = AUC, note:
                 m[row_index[(ds, fly, num)], col_index[odor]] = v
             mats[phase] = m
         mats["Post - Pre"] = mats["Post-training"] - mats["Pre-test"]
-        allv = np.concatenate([m[np.isfinite(m)] - (row.null if k in PHASES else 0.0)
+        # No fixed null: centre the phase panels on their pooled median instead.
+        pooled = np.concatenate([mats[k][np.isfinite(mats[k])] for k in PHASES])
+        phase_centre = (row.null if row.null is not None
+                        else float(np.median(pooled)) if pooled.size else 0.0)
+        allv = np.concatenate([m[np.isfinite(m)] - (phase_centre if k in PHASES else 0.0)
                                for k, m in mats.items()])
         vmax = float(np.nanpercentile(np.abs(allv), 98)) if allv.size else 1.0
         vmax = max(vmax, 1e-9)
         short = row.short_label
         for c, col in enumerate(columns):
             ax = fig.add_subplot(gs[r, c])
-            centre = row.null if col in PHASES else 0.0
+            centre = phase_centre if col in PHASES else 0.0
             m = mats[col]
             im = ax.imshow(m - centre, cmap="RdBu_r", vmin=-vmax, vmax=vmax, aspect="auto",
                            interpolation="nearest")
@@ -980,15 +1095,17 @@ def plot_per_fly_matrix(t: pd.DataFrame, title: str, metric: Metric = AUC, note:
             ax.set_title(f"{short}: {head}", fontsize=9.5, color=INK, loc="left")
         cax = fig.add_subplot(gs[r, 3])
         cb = fig.colorbar(im, cax=cax)
-        cb.set_label(f"{short} (relative to {row.null:g})" if row.null else short,
-                     fontsize=8)
+        cb.set_label(f"{short} (relative to {row.null:g})" if row.null
+                     else f"{short} (relative to the pooled median)" if row.null is None
+                     else short, fontsize=8)
         cb.ax.tick_params(labelsize=7)
     fig.suptitle(title, x=0.01, y=0.985, ha="left", fontsize=12)
     pre_name, post_name = _phase_words(cohort)
     _footnote(fig, metric, (note + " " if note else "")
               + f"Each cell is one trial's value (Post - Pre: the {post_name} value "
                 f"minus the {pre_name} value). Colour scale clipped at the 98th percentile "
-                "of |value| per row.")
+                "of |value| per row."
+              + _no_null_text(rows))
     return fig
 
 
@@ -1065,7 +1182,7 @@ def plot_auc_vs_score(t: pd.DataFrame, rows: Sequence[Row], title: str, note: st
               + "Each dot is one trial; whiskers 1.5 IQR. rho = Spearman rank correlation "
                 "of the measure with the model score over trials; its p treats trials as "
                 "independent although a fly gives up to 7 per phase (14 pooled), so read "
-                "it as descriptive.")
+                "it as descriptive." + _no_null_text(rows))
     single = len(rows) == 1
     fig.tight_layout(rect=(0, 0.11 if single else 0.06, 1, 0.88 if single else 0.925))
     if not single:

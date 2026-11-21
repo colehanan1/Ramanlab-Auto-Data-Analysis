@@ -91,6 +91,113 @@ def build_table(results: Path) -> pd.DataFrame:
     return df
 
 
+# ---------------------------------------------------------------- rigs
+def rig_rates(df: pd.DataFrame) -> pd.DataFrame:
+    """Pre/post PER rate per cohort x rig x odor set, trials pooled, with an exact
+    McNemar test on the discordant pre->post pairs (gain vs loss)."""
+    from scipy.stats import binomtest
+    rows = []
+    sets = {"sensitized": lambda d: d[d["sensitized_odor"].astype(bool)],
+            "other odors": lambda d: d[~d["sensitized_odor"].astype(bool)],
+            "all odors": lambda d: d}
+    for (c, rig), d0 in df.groupby(["cohort", "rig"]):
+        for name, f in sets.items():
+            d = f(d0)
+            if d.empty:
+                continue
+            pre, post = d["responded_pre"].astype(bool), d["responded_post"].astype(bool)
+            gain, loss = int((~pre & post).sum()), int((pre & ~post).sum())
+            p = binomtest(gain, gain + loss, 0.5).pvalue if gain + loss else 1.0
+            rows.append({"cohort": c, "rig": rig, "odor_set": name, "n_trials": len(d),
+                         "n_flies": d["fly_id"].nunique() if "fly_id" in d else np.nan,
+                         "pre_rate": float(pre.mean()), "post_rate": float(post.mean()),
+                         "gain": gain, "loss": loss, "mcnemar_p": float(p)})
+    return pd.DataFrame(rows)
+
+
+def rig_odor_rates(df: pd.DataFrame) -> pd.DataFrame:
+    """Pre/post PER rate per cohort x rig x odor (trials pooled), exact McNemar."""
+    from scipy.stats import binomtest
+    rows = []
+    for (c, rig, odor), d in df.groupby(["cohort", "rig", "odor"]):
+        pre, post = d["responded_pre"].astype(bool), d["responded_post"].astype(bool)
+        gain, loss = int((~pre & post).sum()), int((pre & ~post).sum())
+        p = binomtest(gain, gain + loss, 0.5).pvalue if gain + loss else 1.0
+        rows.append({"cohort": c, "rig": rig, "odor": odor,
+                     "sensitized": bool(d["sensitized_odor"].astype(bool).any()),
+                     "n_trials": len(d), "pre_rate": float(pre.mean()),
+                     "post_rate": float(post.mean()), "gain": gain, "loss": loss,
+                     "mcnemar_p": float(p)})
+    return pd.DataFrame(rows)
+
+
+def fig_rig_odors(ro: pd.DataFrame, out):
+    cohorts = [c for c in SHORT if c in set(ro["cohort"])]
+    odors = sorted(ro["odor"].unique(), key=lambda o: (o == "Paraffin Oil", o))
+    fig, axes = plt.subplots(len(cohorts), len(odors), figsize=(2.3 * len(odors), 2.6 * len(cohorts)),
+                             sharey=True, squeeze=False)
+    for i, c in enumerate(cohorts):
+        for j, o in enumerate(odors):
+            ax = axes[i, j]
+            d = ro[(ro.cohort == c) & (ro.odor == o)].sort_values("rig")
+            ax.spines[["top", "right"]].set_visible(False)
+            if i == 0:
+                ax.set_title(o, fontsize=9)
+            if j == 0:
+                ax.set_ylabel(f"{SHORT[c]}\n% trials with PER", fontsize=8)
+            if d.empty:
+                ax.text(0.5, 0.5, "not tested", ha="center", va="center", transform=ax.transAxes,
+                        fontsize=7, color="grey")
+                ax.set_xticks([])
+                continue
+            if d["sensitized"].any():
+                ax.set_facecolor("#eef6ee")
+            x = np.arange(len(d))
+            ax.bar(x - 0.2, d.pre_rate * 100, 0.4, color="#bdbdbd", label="pre")
+            ax.bar(x + 0.2, d.post_rate * 100, 0.4, color="#1b7837", label="post")
+            for xi, r in zip(x, d.itertuples()):
+                if r.mcnemar_p < 0.05:
+                    ax.text(xi, max(r.pre_rate, r.post_rate) * 100 + 3, f"p={r.mcnemar_p:.2g}",
+                            ha="center", fontsize=6)
+            ax.set_xticks(x, [f"R{r.rig}\nn={r.n_trials}" for r in d.itertuples()], fontsize=6)
+            ax.set_ylim(0, 105)
+    axes[0, 0].legend(frameon=False, fontsize=6)
+    fig.suptitle("Pre vs post PER by odor and rig, every experiment (shaded = sensitized odor; "
+                 "n = flies; p shown only if exact McNemar < 0.05, uncorrected)", fontsize=10)
+    fig.tight_layout()
+    _save(fig, out, "fig7_pre_post_by_odor_and_rig")
+
+
+def fig_rigs(rr: pd.DataFrame, out):
+    cohorts = [c for c in SHORT if c in set(rr["cohort"])]
+    sets = ["sensitized", "other odors"]
+    fig, axes = plt.subplots(len(sets), len(cohorts), figsize=(3.2 * len(cohorts), 7),
+                             sharey=True, squeeze=False)
+    for j, c in enumerate(cohorts):
+        for i, sname in enumerate(sets):
+            ax = axes[i, j]
+            d = rr[(rr.cohort == c) & (rr.odor_set == sname)].sort_values("rig")
+            x = np.arange(len(d))
+            ax.bar(x - 0.2, d.pre_rate * 100, 0.4, color="#bdbdbd", label="pre-exposure")
+            ax.bar(x + 0.2, d.post_rate * 100, 0.4, color="#1b7837", label="post-exposure")
+            for xi, r in zip(x, d.itertuples()):
+                top = max(r.pre_rate, r.post_rate) * 100
+                star = "*" if r.mcnemar_p < 0.05 else ""
+                ax.text(xi, top + 3, f"p={r.mcnemar_p:.2g}{star}", ha="center", fontsize=7)
+            ax.set_xticks(x, [f"rig {r.rig}\n{r.n_flies} flies\n{r.n_trials} trials"
+                              for r in d.itertuples()], fontsize=7)
+            ax.set_ylim(0, 105)
+            ax.spines[["top", "right"]].set_visible(False)
+            if j == 0:
+                ax.set_ylabel(f"{sname}\n% trials with PER")
+            if i == 0:
+                ax.set_title(SHORT[c])
+    axes[0, 0].legend(frameon=False, fontsize=7)
+    fig.suptitle("Pre vs post PER rate by rig (n = fly × odor trials; p = exact McNemar)")
+    fig.tight_layout()
+    _save(fig, out, "fig6_pre_post_by_rig")
+
+
 # ---------------------------------------------------------------- models
 def gee(formula: str, df: pd.DataFrame):
     return smf.gee(formula, groups="fly_id", data=df, family=sm.families.Binomial(),
@@ -309,10 +416,24 @@ def main(argv=None):
     fig_cv(cv, out)
     fig_responsiveness(model_df, out)
 
+    rr = rig_rates(df)
+    rr.to_csv(out / "rig_pre_post_rates.csv", index=False)
+    fig_rigs(rr, out)
+    ro = rig_odor_rates(df)
+    ro.to_csv(out / "rig_odor_pre_post_rates.csv", index=False)
+    fig_rig_odors(ro, out)
+    try:
+        rig_gee = or_table(gee("y ~ pre * sens + pre_rate_other_odors + log_train_auc"
+                               " + C(cohort_s) + C(rig)", model_df), "pooled+rig")
+        rig_gee.to_csv(out / "gee_pooled_with_rig.csv", index=False)
+    except Exception as e:  # noqa: BLE001
+        print(f"rig GEE failed: {e}")
+        rig_gee = None
+
     het = heterogeneity_perm(df, n=a.n_perm)
     (out / "heterogeneity_permutation.json").write_text(json.dumps(het, indent=2))
 
-    write_findings(out, df, model_df, tr, pooled, per, cv, het)
+    write_findings(out, df, model_df, tr, pooled, per, cv, het, rr, rig_gee)
     print(f"wrote {out}")
 
 
@@ -321,7 +442,7 @@ def _fmt(t, term):
     return f"OR {r.odds_ratio:.2f} (95% CI {r.ci_low:.2f}–{r.ci_high:.2f}), p={r.p:.3g}"
 
 
-def write_findings(out, df, model_df, tr, pooled, per, cv, het):
+def write_findings(out, df, model_df, tr, pooled, per, cv, het, rr, rig_gee):
     L = ["# Predicting post-exposure PER from pre-exposure behaviour and training", "",
          "Built by `scripts/analysis/per_prediction_model.py` from "
          "`Data/window_per_fly_per_odor.csv` (window flies, flagged removed). "
@@ -357,7 +478,34 @@ def write_findings(out, df, model_df, tr, pooled, per, cv, het):
     L += ["", "## 5. Responsiveness vs sensitization (fig5)", "",
           "Post-exposure PER rate binned by the fly's pre-exposure PER rate on its other odors, "
           "split by whether the fly responded to this odor before exposure.", "",
-          "## Caveats", "",
+          ]
+    if rr is not None:
+        L += ["## 6. Pre vs post by rig, per experiment (fig6)", "",
+              "Rates pool fly × odor trials; p = exact McNemar on gain vs loss.", "",
+              "| Cohort | Rig | Odor set | flies | trials | pre PER | post PER | gain | loss | p |",
+              "|---|---|---|---|---|---|---|---|---|---|"]
+        for r in rr[rr.odor_set != "all odors"].itertuples():
+            L.append(f"| {SHORT.get(r.cohort, r.cohort)} | {r.rig} | {r.odor_set} | {r.n_flies} | "
+                     f"{r.n_trials} | {r.pre_rate * 100:.0f}% | {r.post_rate * 100:.0f}% | "
+                     f"{r.gain} | {r.loss} | {r.mcnemar_p:.3g} |")
+        if rig_gee is not None:
+            L += ["", "Rig added to the pooled GEE (vs rig 1 baseline, adjusted for cohort, pre PER, "
+                  "responsiveness, training):", ""]
+            for r in rig_gee[rig_gee.term.str.startswith("C(rig)")].itertuples():
+                L.append(f"- {r.term}: OR {r.odds_ratio:.2f} ({r.ci_low:.2f}–{r.ci_high:.2f}), p={r.p:.3g}")
+        L += [""]
+    L += ["## 7. Every odor × rig × experiment (fig7, `rig_odor_pre_post_rates.csv`)", "",
+          "Each fly contributes one trial per odor, so n = flies. Cells with p < 0.05 "
+          "(exact McNemar, uncorrected across all cells):", ""]
+    ro = pd.read_csv(out / "rig_odor_pre_post_rates.csv") if (out / "rig_odor_pre_post_rates.csv").exists() else None
+    if ro is not None:
+        sig = ro[ro.mcnemar_p < 0.05]
+        for r in sig.itertuples():
+            L.append(f"- {SHORT.get(r.cohort, r.cohort)}, rig {r.rig}, {r.odor}"
+                     f"{' (sensitized)' if r.sensitized else ''}: {r.pre_rate * 100:.0f}% → "
+                     f"{r.post_rate * 100:.0f}% (n={r.n_trials}, +{r.gain}/−{r.loss}, p={r.mcnemar_p:.3g})")
+        L += ["", f"{len(sig)} of {len(ro)} cells at p < 0.05; ~{0.05 * len(ro):.0f} expected by chance.", ""]
+    L += ["## Caveats", "",
           "- Batch is nested in cohort, so cohort contrasts can carry day/rig/batch effects; "
           "the permutation test above is the honest cross-cohort test.",
           "- One pre and one post trial per odor; per-fly predictions are noisy by construction.",

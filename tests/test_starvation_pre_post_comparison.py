@@ -171,12 +171,37 @@ def test_figures_render(tmp_path):
     assert written and all(p.exists() and p.stat().st_size > 0 for p in written)
 
 
-def test_group_summary_tests_response_rate_with_fisher_exact():
-    """Pre vs post response %, per group: Fisher's exact on the 2x2 table."""
+def test_group_summary_tests_response_rate_with_paired_mcnemar():
+    """Pre vs post response %, per group: same flies, so exact McNemar."""
+    from scipy.stats import binomtest
     paired = _paired("12 h", [0, 0, 0, 0, 3], [3, 3, 3, 0, 3])
     summary = spc.group_summary(paired, ["12 h"], binary_threshold=2)
-    # pre 1/5 responders, post 4/5.
-    assert summary["p_rate"].iloc[0] == pytest.approx(fisher_exact([[1, 4], [4, 1]]).pvalue)
+    # Flies 1-3 gained a response and none lost one (fly 5 stayed a responder):
+    # McNemar = binomial, 3 of 3 discordant flies one way = 0.25. Fisher on the
+    # [[1, 4], [4, 1]] phase x responded table would read 0.206.
+    b = int(((paired.score_pre < 2) & (paired.score_post >= 2)).sum())
+    c = int(((paired.score_pre >= 2) & (paired.score_post < 2)).sum())
+    assert (b, c) == (3, 0)
+    assert summary["p_rate"].iloc[0] == pytest.approx(binomtest(b, b + c, 0.5).pvalue)
+    assert summary["p_rate"].iloc[0] == pytest.approx(0.25)
+    assert summary["p_rate"].iloc[0] != pytest.approx(fisher_exact([[1, 4], [4, 1]]).pvalue)
+
+
+def test_ffh_never_returns_exactly_zero():
+    # Three clearly different groups: no permuted table is as extreme, so the
+    # Monte-Carlo p is (0 + 1) / (20000 + 1) -- never the old hits / n = 0.
+    resp = [np.zeros(30, bool), np.ones(30, bool), np.array([True, False] * 15)]
+    assert spc._ffh(resp) == pytest.approx(1 / 20_001)
+
+
+def test_ffh_with_two_groups_stays_the_exact_fisher():
+    a = np.array([True] * 6 + [False] * 2)
+    b = np.array([True] + [False] * 7)
+    assert spc._ffh([a, b]) == pytest.approx(fisher_exact([[6, 2], [1, 7]]).pvalue)
+
+
+def test_ffh_without_any_spread_is_one():
+    assert spc._ffh([np.zeros(5, bool)] * 3) == pytest.approx(1.0)
 
 
 def _two_group_inputs():

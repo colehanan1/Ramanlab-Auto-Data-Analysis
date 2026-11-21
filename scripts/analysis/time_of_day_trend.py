@@ -26,9 +26,23 @@ in each bin, and the trained-odor figure colours each fly by starvation group.
 To look at time of day with starvation held fixed, run it on one dataset
 (``--dataset IAA-Sensitivity-24-1``, recorded from 9:41 to 19:09).
 
-Stats (uncorrected): Kruskal-Wallis across bins on the change, Fisher-Freeman-
-Halton (Monte Carlo) across bins on the post-training rate, and -- bin-free --
-Spearman's rho between start clock time and each fly's pre, post and change.
+Stats (exploratory, Holm-adjusted across odors). Start time is a property of the
+BATCH: every fly of a batch folder starts at the folder's first pre-test trial, so
+flies are not independent draws of a start time and a fly-level test counts one
+start time 4-10 times over (b2b PairFirst: p = 0.024 with flies as the unit, 0.19
+with batches). So:
+
+* across bins -- Kruskal-Wallis (scores, change) and Fisher-Freeman-Halton (rates)
+  on the flies, but p from permuting WHOLE BATCHES between the bins (every fly of a
+  batch moves together; same statistic; (hits + 1) / (n + 1), fixed seed):
+  ``*_batch`` columns of ``stats_omnibus.csv`` / ``pretest_stats.csv``;
+* bin-free -- Spearman's rho between the batch start clock time and ONE pooled
+  value per batch (its flies' trials pooled: sum / trials): ``rho_batch`` /
+  ``p_batch`` in ``spearman_start_time_vs_score.csv``;
+* Holm across the odors, per test (``*_holm``); the figures draw these, with stars.
+
+The fly-level p-values (flies as independent units) stay in the CSVs, unsuffixed
+as before, as secondary columns.
 
 Usage
 -----
@@ -54,7 +68,8 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 import numpy as np  # noqa: E402
 import pandas as pd  # noqa: E402
-from scipy.stats import spearmanr  # noqa: E402
+from scipy.special import gammaln  # noqa: E402
+from scipy.stats import rankdata, spearmanr  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 for p in (REPO_ROOT, REPO_ROOT / "src"):
@@ -62,6 +77,7 @@ for p in (REPO_ROOT, REPO_ROOT / "src"):
         sys.path.insert(0, str(p))
 
 import scripts.analysis.starvation_pre_post_comparison as spc  # noqa: E402
+from fbpipe.analysis import fly_stats as fs  # noqa: E402
 from scripts.analysis import phase_terms  # noqa: E402
 from scripts.analysis.day_vs_day_report import (  # noqa: E402
     folder_date,
@@ -92,7 +108,6 @@ from scripts.analysis.starvation_trend_figure import (  # noqa: E402
     ZERO_LINE,
     _is_cs,
     _omnibus,
-    _p_text,
 )
 
 CSV = Path("/home/ramanlab/Documents/cole/Data/CSVs-New-Opto-Flys")
@@ -106,6 +121,14 @@ _PRETEST_RE = re.compile(r"^output_.*_pretest_\d+_.*_(\d{8}_\d{6})\.csv$")
 #: gray), so it never reads as an odor or a phase. Validated with the dataviz
 #: validator: --ordinal, light mode, all checks pass (light end 2.02:1).
 STARVATION_RAMP = ("#b5b4ae", "#97968f", "#7a7973", "#5e5d58", "#42413d", "#262522")
+#: Batch-level permutation tests: Monte Carlo draws and a fixed seed, so a re-run
+#: draws the same p. Drawn in chunks to bound memory (draws x batches x bins).
+N_PERM = 20_000
+PERM_SEED = 0
+_PERM_CHUNK = 2_000
+#: Figure captions: what every p drawn on a time-of-day figure is.
+CAPTION = "exploratory · Holm-adjusted"
+P_NOTE = "p: whole batches permuted between bins (KW, FFH); Spearman on one value per batch"
 
 
 # ── start time and bins ──────────────────────────────────────────────────
@@ -195,6 +218,121 @@ def attach_start_times(paired: pd.DataFrame, data_root: Path) -> tuple[pd.DataFr
     return out.dropna(subset=["start_time"]).reset_index(drop=True), missing
 
 
+# ── the batch: the unit of start time ────────────────────────────────────
+
+
+def batch_keys(frame: pd.DataFrame, *, warn: bool = True) -> pd.Series | None:
+    """The batch each row belongs to, or None (after a one-line warning).
+
+    An explicit ``batch`` / ``batch_folder`` column wins. Otherwise ``fly``, which in
+    these tables (and b2b's) is the batch FOLDER (``october_09_batch_2_rig_3``;
+    ``fly_number`` is the fly in it), prefixed by ``dataset_canon`` when present.
+    Every fly of a folder starts at the folder's first pre-test trial, so the batch,
+    not the fly, is the independent unit of start time.
+    """
+    for col in ("batch", "batch_folder"):
+        if col in frame.columns:
+            return frame[col].astype("string")
+    if "fly" in frame.columns:
+        key = frame["fly"].astype("string")
+        if "dataset_canon" in frame.columns:
+            key = frame["dataset_canon"].astype("string") + "/" + key
+        return key
+    if warn:
+        print("[time-of-day][WARN] no batch column (batch, batch_folder or fly): the "
+              "batch-level tests are left blank", flush=True)
+    return None
+
+
+def _batch_array(batch: pd.Series | None, index: pd.Index) -> np.ndarray | None:
+    return None if batch is None else batch.loc[index].to_numpy(dtype=object)
+
+
+def batch_permutation_p(values: Sequence[float], bins: Sequence, batches: Sequence, *,
+                        statistic: str = "kw", n_perm: int = N_PERM,
+                        seed: int = PERM_SEED) -> float:
+    """p for "the start bins differ", with the BATCH as the unit.
+
+    The statistic is computed on the flies' values exactly as the fly-level test
+    computes it; the null shuffles the bin labels across BATCHES (each bin keeps its
+    number of batches, every fly of a batch moves with it) and recomputes it.
+    p = (hits + 1) / (n_perm + 1), fixed seed.
+
+    ``statistic``: "kw" -- Kruskal-Wallis H (the ranks never change, so H moves only
+    through each bin's rank sum; sum(R^2 / n) is used, which orders draws as H
+    does). "ffh" -- Fisher-Freeman-Halton on 0/1 values: the hypergeometric
+    probability of the bins x responded table given its margins; a draw at least as
+    improbable is a hit.
+
+    NaN (no test) with fewer than two bins, nothing varying, or a batch whose flies
+    sit in different bins (it could not move as one).
+    """
+    v = np.asarray(values, dtype=float).ravel()
+    lab = pd.Series(np.asarray(bins, dtype=object).ravel())
+    bat = pd.Series(np.asarray(batches, dtype=object).ravel())
+    if not v.size == lab.size == bat.size:
+        raise ValueError(f"{v.size} values, {lab.size} bins, {bat.size} batches")
+    ok = np.isfinite(v) & lab.notna().to_numpy() & bat.notna().to_numpy()
+    df = pd.DataFrame({"v": v[ok], "bin": lab[ok].to_numpy(), "batch": bat[ok].to_numpy()})
+    if df.empty or np.unique(df["v"]).size < 2:
+        return float("nan")
+    by = df.groupby("batch", sort=True)
+    if (by["bin"].nunique() > 1).any():
+        return float("nan")
+    codes, uniq = pd.factorize(by["bin"].first(), sort=True)
+    n_bins = len(uniq)
+    if n_bins < 2:
+        return float("nan")
+    size = by.size().to_numpy(dtype=float)
+    if statistic == "kw":
+        weight = (df.assign(r=rankdata(df["v"].to_numpy()))
+                  .groupby("batch", sort=True)["r"].sum().to_numpy(dtype=float))
+
+        def stat(rank_sum, n):
+            return np.sum(rank_sum ** 2 / n, axis=-1)
+    elif statistic == "ffh":
+        weight = (df.assign(y=(df["v"] != 0).astype(float))
+                  .groupby("batch", sort=True)["y"].sum().to_numpy(dtype=float))
+
+        def stat(k, n):  # -log P(table | its margins), up to the fixed N, K term
+            return -np.sum(gammaln(n + 1) - gammaln(k + 1) - gammaln(n - k + 1), axis=-1)
+    else:
+        raise ValueError(f"statistic must be 'kw' or 'ffh', not {statistic!r}")
+    onehot = (codes[:, None] == np.arange(n_bins)).astype(float)
+    obs = float(stat(weight @ onehot, size @ onehot))
+    tol = 1e-9 * max(1.0, abs(obs))
+    rng = np.random.default_rng(seed)
+    hits = done = 0
+    while done < n_perm:
+        m = min(_PERM_CHUNK, int(n_perm) - done)
+        draws = rng.permuted(np.tile(codes, (m, 1)), axis=1)
+        hot = (draws[:, :, None] == np.arange(n_bins)).astype(float)   # draw x batch x bin
+        s = stat(np.einsum("dbg,b->dg", hot, weight), np.einsum("dbg,b->dg", hot, size))
+        hits += int(np.sum(s >= obs - tol))
+        done += m
+    return (hits + 1) / (int(n_perm) + 1)
+
+
+def batch_spearman(clock: Sequence[float], values: Sequence[float],
+                   batches: Sequence) -> tuple[float, float, int]:
+    """(rho, p, n batches): Spearman of start clock time vs ONE value per batch.
+
+    A batch's value pools its rows (sum / rows: every trial of every fly, never a
+    mean of fly means); its clock time is its start (every fly of it shares one).
+    """
+    df = pd.DataFrame({"clock": np.asarray(clock, dtype=float),
+                       "v": np.asarray(values, dtype=float),
+                       "batch": np.asarray(batches, dtype=object)})
+    df = df[np.isfinite(df["v"]) & np.isfinite(df["clock"]) & df["batch"].notna()]
+    if df.empty:
+        return float("nan"), float("nan"), 0
+    g = df.groupby("batch", sort=True).agg(clock=("clock", "min"), total=("v", "sum"),
+                                            n=("v", "size"))
+    rho, p = _spearman(g["clock"].to_numpy(dtype=float),
+                       (g["total"] / g["n"]).to_numpy(dtype=float))
+    return rho, p, int(len(g))
+
+
 # ── tables and stats ─────────────────────────────────────────────────────
 
 
@@ -239,16 +377,35 @@ def _spearman(clock: np.ndarray, value: np.ndarray) -> tuple[float, float]:
 
 
 def spearman_by_odor(paired: pd.DataFrame, *, measure: str = "delta") -> pd.DataFrame:
-    """Spearman rho, start clock time vs a per-fly score, per odor (bin-free).
+    """Spearman rho, start clock time vs a score, per odor (bin-free).
 
     ``measure``: "delta" (post - pre), "pre" (naive pre-test) or "post".
+
+    ``rho_batch`` / ``p_batch`` (``n_batches``): one pooled value per batch
+    (:func:`batch_spearman`) -- the test the figures draw; ``p_batch_holm``: Holm
+    across the odors. ``rho`` / ``p`` (``n_flies``): every fly as its own point, kept
+    as a secondary column -- flies of a batch share one start time, so it
+    overstates the evidence.
     """
+    paired = paired.reset_index(drop=True)
+    return _spearman_table(paired, measure, batch_keys(paired))
+
+
+def _spearman_table(paired: pd.DataFrame, measure: str,
+                    batch: pd.Series | None) -> pd.DataFrame:
     rows = []
     for odor, g in paired.groupby("odor"):
         clock = pd.to_datetime(g["start_time"]).map(clock_hours).to_numpy(dtype=float)
-        rho, p = _spearman(clock, _MEASURES[measure](g).to_numpy(dtype=float))
-        rows.append({"odor": odor, "n_flies": len(g), "rho": rho, "p": p})
-    return pd.DataFrame(rows)
+        value = _MEASURES[measure](g).to_numpy(dtype=float)
+        rho, p = _spearman(clock, value)
+        rb, pb, nb = (batch_spearman(clock, value, _batch_array(batch, g.index))
+                      if batch is not None else (np.nan, np.nan, np.nan))
+        rows.append({"odor": odor, "n_flies": len(g), "rho": rho, "p": p,
+                     "n_batches": nb, "rho_batch": rb, "p_batch": pb})
+    out = pd.DataFrame(rows, columns=["odor", "n_flies", "rho", "p", "n_batches",
+                                      "rho_batch", "p_batch"])
+    out["p_batch_holm"] = fs.holm_adjust(out["p_batch"].to_numpy(dtype=float))
+    return out
 
 
 # ── pre-test (naive) by time of day ──────────────────────────────────────
@@ -274,13 +431,23 @@ def pooled_pretest(binned: pd.DataFrame, *,
     return pd.DataFrame(rows).sort_values("bin_start").reset_index(drop=True)
 
 
-def _fly_pretest(binned: pd.DataFrame, binary_threshold: int) -> pd.DataFrame:
-    """One row per fly: its own pre-test mean across odors and any-odor response."""
-    return (binned.groupby(["dataset_canon", "fly", "fly_number"])
-            .agg(bin_label=("bin_label", "first"), bin_start=("bin_start", "first"),
-                 start_time=("start_time", "first"), pre_mean=("score_pre", "mean"),
-                 responded=("score_pre", lambda s: bool((s >= binary_threshold).any())))
+def _fly_pretest(binned: pd.DataFrame, binary_threshold: int,
+                 batch: pd.Series | None = None) -> pd.DataFrame:
+    """One row per fly: its own pre-test mean across odors and any-odor response
+    (and, given ``batch``, its batch)."""
+    agg = dict(bin_label=("bin_label", "first"), bin_start=("bin_start", "first"),
+               start_time=("start_time", "first"), pre_mean=("score_pre", "mean"),
+               responded=("score_pre", lambda s: bool((s >= binary_threshold).any())))
+    frame = binned
+    if batch is not None:
+        frame = binned.assign(_batch=batch.to_numpy(dtype=object))
+        agg["batch"] = ("_batch", "first")
+    return (frame.groupby(["dataset_canon", "fly", "fly_number"]).agg(**agg)
             .reset_index().sort_values("bin_start"))
+
+
+#: The pre-test tests of :func:`pretest_stats`, each with a batch-level twin.
+PRETEST_TESTS = ("p_kw_pre_score", "p_ffh_pre_rate", "p_spearman_pre")
 
 
 def pretest_stats(binned: pd.DataFrame, *,
@@ -291,35 +458,127 @@ def pretest_stats(binned: pd.DataFrame, *,
     pre-test response % across bins, Spearman of start clock time vs pre score.
     All-odor row: same tests on one value per fly (its pre-test mean across
     odors; responded = score >= threshold to ANY odor), so no fly counts 7 times.
+
+    Those are the fly-level columns (``p_kw_pre_score``, ``p_ffh_pre_rate``,
+    ``rho_pre``, ``p_spearman_pre``), kept as before. Their batch-level twins
+    (``*_batch``, ``rho_pre_batch``, ``n_batches``) are what the figure draws:
+    whole batches permuted between the bins (:func:`batch_permutation_p`), and the
+    trend on one pooled value per batch (all odors: every pre trial of the batch,
+    sum / trials). ``*_batch_holm``: per odor, Holm across the odors, per test; the
+    all-odor row, Holm over its own three tests.
     """
+    binned = binned.reset_index(drop=True)
     labels = list(binned.sort_values("bin_start")["bin_label"].unique())
+    batch = batch_keys(binned)
     rows = []
-    flies = _fly_pretest(binned, binary_threshold)
+    flies = _fly_pretest(binned, binary_threshold, batch)
     by = [flies.loc[flies["bin_label"] == b] for b in labels]
     clock = pd.to_datetime(flies["start_time"]).map(clock_hours).to_numpy(dtype=float)
     rho, p = _spearman(clock, flies["pre_mean"].to_numpy(dtype=float))
-    rows.append({"odor": ALL_ODORS, "n_flies": len(flies),
-                 "p_kw_pre_score": spc._kw([f["pre_mean"].to_numpy(dtype=float) for f in by])
-                 if len(labels) > 1 else None,
-                 "p_ffh_pre_rate": spc._ffh([f["responded"].to_numpy() for f in by])
-                 if len(labels) > 1 else None,
-                 "rho_pre": rho, "p_spearman_pre": p})
-    om = omnibus(binned, binary_threshold=binary_threshold)
-    sp = spearman_by_odor(binned, measure="pre").set_index("odor")
+    every = {"odor": ALL_ODORS, "n_flies": len(flies),
+             "p_kw_pre_score": spc._kw([f["pre_mean"].to_numpy(dtype=float) for f in by])
+             if len(labels) > 1 else None,
+             "p_ffh_pre_rate": spc._ffh([f["responded"].to_numpy() for f in by])
+             if len(labels) > 1 else None,
+             "rho_pre": rho, "p_spearman_pre": p}
+    if batch is not None:
+        fb, fl = flies["batch"].to_numpy(dtype=object), flies["bin_label"].to_numpy(dtype=object)
+        row_clock = pd.to_datetime(binned["start_time"]).map(clock_hours).to_numpy(dtype=float)
+        rb, pb, nb = batch_spearman(row_clock, binned["score_pre"].to_numpy(dtype=float),
+                                    batch.to_numpy(dtype=object))
+        every.update(n_batches=nb,
+                     p_kw_pre_score_batch=batch_permutation_p(
+                         flies["pre_mean"].to_numpy(dtype=float), fl, fb, statistic="kw"),
+                     p_ffh_pre_rate_batch=batch_permutation_p(
+                         flies["responded"].to_numpy(dtype=float), fl, fb, statistic="ffh"),
+                     rho_pre_batch=rb, p_spearman_pre_batch=pb)
+    rows.append(every)
+    om = _omnibus_table(binned, binary_threshold, batch)
+    sp = _spearman_table(binned, "pre", batch).set_index("odor")
     for odor in sorted(binned["odor"].unique(), key=str.casefold):
         o = om[om["odor"] == odor] if len(om) else om
         rows.append({"odor": odor, "n_flies": int(sp.loc[odor, "n_flies"]),
                      "p_kw_pre_score": o["p_kw_pre_score"].iloc[0] if len(o) else None,
                      "p_ffh_pre_rate": o["p_ffh_pre_rate"].iloc[0] if len(o) else None,
-                     "rho_pre": sp.loc[odor, "rho"], "p_spearman_pre": sp.loc[odor, "p"]})
-    return pd.DataFrame(rows)
+                     "rho_pre": sp.loc[odor, "rho"], "p_spearman_pre": sp.loc[odor, "p"],
+                     "n_batches": sp.loc[odor, "n_batches"],
+                     "p_kw_pre_score_batch":
+                         o["p_kw_pre_score_batch"].iloc[0] if len(o) else np.nan,
+                     "p_ffh_pre_rate_batch":
+                         o["p_ffh_pre_rate_batch"].iloc[0] if len(o) else np.nan,
+                     "rho_pre_batch": sp.loc[odor, "rho_batch"],
+                     "p_spearman_pre_batch": sp.loc[odor, "p_batch"]})
+    out = pd.DataFrame(rows)
+    for col in ("n_batches", "rho_pre_batch", *(f"{t}_batch" for t in PRETEST_TESTS)):
+        if col not in out:
+            out[col] = np.nan
+    single = out["odor"] != ALL_ODORS
+    for t in PRETEST_TESTS:
+        out[f"{t}_batch_holm"] = np.nan
+        out.loc[single, f"{t}_batch_holm"] = fs.holm_adjust(
+            out.loc[single, f"{t}_batch"].to_numpy(dtype=float))
+    own = [f"{t}_batch" for t in PRETEST_TESTS]
+    out.loc[~single, [f"{c}_holm" for c in own]] = fs.holm_adjust(
+        out.loc[~single, own].to_numpy(dtype=float).ravel())
+    return out
+
+
+#: spc.omnibus_stats' per-odor bin comparisons: p column -> (measure, statistic).
+OMNIBUS_TESTS = {
+    "p_kw_pre_score": ("pre", "kw"),
+    "p_kw_post_score": ("post", "kw"),
+    "p_kw_delta_score": ("delta", "kw"),
+    "p_ffh_pre_rate": ("pre", "ffh"),
+    "p_ffh_post_rate": ("post", "ffh"),
+}
 
 
 def omnibus(binned: pd.DataFrame, *, binary_threshold: int = BINARY_THRESHOLD) -> pd.DataFrame:
+    """Per odor, every start bin at once: Kruskal-Wallis (scores, change) and
+    Fisher-Freeman-Halton (rates).
+
+    The unsuffixed p columns treat flies as independent (secondary). ``*_batch``:
+    the same statistic with whole batches permuted between the bins
+    (:func:`batch_permutation_p`); ``*_batch_holm``: Holm across the odors, per
+    test -- what the figures draw. ``n_batches``: batches holding the odor.
+    """
     labels = list(binned.sort_values("bin_start")["bin_label"].unique())
     if len(labels) < 2:
         return pd.DataFrame()
-    return spc.omnibus_stats(binned, labels, binary_threshold=binary_threshold)
+    binned = binned.reset_index(drop=True)
+    return _omnibus_table(binned, binary_threshold, batch_keys(binned))
+
+
+def _omnibus_table(binned: pd.DataFrame, binary_threshold: int,
+                   batch: pd.Series | None) -> pd.DataFrame:
+    labels = list(binned.sort_values("bin_start")["bin_label"].unique())
+    if len(labels) < 2:
+        return pd.DataFrame()
+    om = spc.omnibus_stats(binned, labels, binary_threshold=binary_threshold)
+    if om.empty:
+        return om
+    cols: dict[str, list] = {c: [] for c in OMNIBUS_TESTS}
+    n_batches = []
+    for odor in om["odor"]:
+        g = binned[binned["odor"] == odor]
+        b = _batch_array(batch, g.index)
+        n_batches.append(np.nan if b is None else int(pd.Series(b).dropna().nunique()))
+        for col, (measure, statistic) in OMNIBUS_TESTS.items():
+            if b is None:
+                cols[col].append(np.nan)
+                continue
+            v = _MEASURES[measure](g).to_numpy(dtype=float)
+            if statistic == "ffh":
+                v = np.where(np.isfinite(v), (v >= binary_threshold).astype(float), np.nan)
+            cols[col].append(batch_permutation_p(v, g["bin_label"].to_numpy(dtype=object), b,
+                                                 statistic=statistic))
+    om = om.copy()
+    om["n_batches"] = n_batches
+    for col, ps in cols.items():
+        om[f"{col}_batch"] = ps
+    for col in cols:
+        om[f"{col}_batch_holm"] = fs.holm_adjust(om[f"{col}_batch"].to_numpy(dtype=float))
+    return om
 
 
 def starvation_colors(hours: Sequence[float]) -> dict[float, str]:
@@ -414,6 +673,49 @@ def _delta_line(ax, t, width, *, color=DELTA_COLOR) -> None:
     ax.plot(t["x"], t["mean_delta"], "o", color=color, zorder=4, **MARKER)
 
 
+# What the figures draw: each test's batch-level, Holm-adjusted p and its stars;
+# the fly-level p stays in the CSVs only.
+_OMNI_SHOWN = "_batch_holm"
+
+
+def _fmt_p(p) -> str:
+    return "p<0.001" if p < 0.001 else f"p={p:.3f}"
+
+
+def _finite(v) -> bool:
+    try:
+        return v is not None and bool(np.isfinite(float(v)))
+    except (TypeError, ValueError):
+        return False
+
+
+def _p_note(ax, label: str, p, *, y: float = 0.97) -> None:
+    """``<label> p=0.123 n.s.``: bold when p < 0.05; nothing for no test."""
+    if not _finite(p):
+        return
+    p = float(p)
+    ax.text(0.03, y, f"{label} {_fmt_p(p)} {fs.stars(p)}", transform=ax.transAxes,
+            ha="left", va="top", fontsize=7.5, color=INK,
+            fontweight="bold" if p < 0.05 else "normal")
+
+
+def _trend_note(ax, spearman: pd.DataFrame | None, odor: str, label: str, *,
+                y: float) -> None:
+    """The batch-level Spearman of ``odor``: rho, n batches, Holm-adjusted p, stars."""
+    if spearman is None or "rho_batch" not in spearman:
+        return
+    hit = spearman[spearman["odor"] == odor]
+    if not len(hit):
+        return
+    r = hit.iloc[0]
+    if not (_finite(r["rho_batch"]) and _finite(r.get("p_batch_holm"))):
+        return
+    p = float(r["p_batch_holm"])
+    ax.text(0.03, y, f"{label}, {int(r['n_batches'])} batches: rho={r['rho_batch']:.2f}, "
+            f"{_fmt_p(p)} {fs.stars(p)}", transform=ax.transAxes, ha="left", va="top",
+            fontsize=7.5, color=INK, fontweight="bold" if p < 0.05 else "normal")
+
+
 def build_emphasis(table: pd.DataFrame, comp: pd.DataFrame, *, omnibus, trained_odor: str,
                    title: str, width: float, spearman: pd.DataFrame | None = None,
                    cohort: str | None = None, odor_conc: Mapping[str, str] | None = None):
@@ -450,18 +752,12 @@ def build_emphasis(table: pd.DataFrame, comp: pd.DataFrame, *, omnibus, trained_
         a2.set_ylim(-80, 80)
         a2.set_yticks(range(-80, 81, 40))
         if cs is not None:
-            _p_text(a1, f"{cs_text}: Kruskal-Wallis across bins",
-                    _omnibus(omnibus, cs, "p_kw_delta_score"))
-            if spearman is not None and len(spearman[spearman["odor"] == cs]):
-                r = spearman[spearman["odor"] == cs].iloc[0]
-                if pd.notna(r["rho"]):
-                    a1.text(0.03, 0.85, f"Spearman (start time vs change): rho={r['rho']:.2f}, "
-                            f"p={r['p']:.3f}", transform=a1.transAxes, ha="left", va="top",
-                            fontsize=7.5, color=INK,
-                            fontweight="bold" if r["p"] < 0.05 else "normal")
-            _p_text(a2, f"{cs_text}: "
+            _p_note(a1, f"{cs_text}: Kruskal-Wallis across bins",
+                    _omnibus(omnibus, cs, "p_kw_delta_score" + _OMNI_SHOWN))
+            _trend_note(a1, spearman, cs, "Spearman (start time vs batch change)", y=0.85)
+            _p_note(a2, f"{cs_text}: "
                     f"{phase_terms.post_label(cohort, 'post-training', case='lower')} "
-                    "FFH across bins", _omnibus(omnibus, cs, "p_ffh_post_rate"))
+                    "FFH across bins", _omnibus(omnibus, cs, "p_ffh_post_rate" + _OMNI_SHOWN))
         handles = [plt.Line2D([], [], color=EMPHASIS_COLOR, linewidth=LINE_W, marker="o",
                               label=f"{cs_text} ({phase_terms.odor_tag(cohort, 'trained, CS+')})"),
                    plt.Line2D([], [], color=CONTEXT_COLOR, linewidth=1.2, marker="o",
@@ -478,7 +774,8 @@ def build_emphasis(table: pd.DataFrame, comp: pd.DataFrame, *, omnibus, trained_
         fig.suptitle(f"{title} — how time of day changes the effect of {effect}\n"
                      f"{phase_terms.odor_tag(cohort, 'CS+', capital=True)} mean ± SEM per bin; "
                      "bottom: flies per bin by starvation group "
-                     "(time of day and starvation are confounded) · uncorrected",
+                     "(time of day and starvation are confounded)\n"
+                     f"{CAPTION} across odors · {P_NOTE}",
                      x=0.01, ha="left", fontsize=10, color=INK)
         fig.tight_layout()
     return fig
@@ -512,19 +809,14 @@ def build_spotlight(table: pd.DataFrame, paired: pd.DataFrame, comp: pd.DataFram
         left.set_ylabel("Change in PER score (post − pre)")
         left.set_title("PER score change per fly (dot colour = starvation group)", loc="left",
                        color=INK, fontsize=9.5)
-        _p_text(left, "Kruskal-Wallis", _omnibus(omnibus, odor, "p_kw_delta_score"))
-        if spearman is not None and len(spearman[spearman["odor"] == odor]):
-            r = spearman[spearman["odor"] == odor].iloc[0]
-            if pd.notna(r["rho"]):
-                left.text(0.03, 0.87, f"Spearman rho={r['rho']:.2f}, p={r['p']:.3f}",
-                          transform=left.transAxes, ha="left", va="top", fontsize=7.5,
-                          color=INK, fontweight="bold" if r["p"] < 0.05 else "normal")
+        _p_note(left, "Kruskal-Wallis", _omnibus(omnibus, odor, "p_kw_delta_score" + _OMNI_SHOWN))
+        _trend_note(left, spearman, odor, "Spearman (start time vs batch change)", y=0.87)
         _rate_lines(right, t, width, cohort=cohort)
         right.set_ylabel("PER response % (score ≥ 2)")
         right.set_title("Flies responding", loc="left", color=INK, fontsize=9.5)
         right.legend(loc="upper right", frameon=False, fontsize=8)
-        _p_text(right, f"{phase_terms.post_label(cohort, 'post-training', case='lower')} FFH",
-                _omnibus(omnibus, odor, "p_ffh_post_rate"))
+        _p_note(right, f"{phase_terms.post_label(cohort, 'post-training', case='lower')} FFH",
+                _omnibus(omnibus, odor, "p_ffh_post_rate" + _OMNI_SHOWN))
         for ax in (left, right):
             _recessive_grid(ax)
         first = phase_terms.pre_label(cohort, "first pre-test", case="lower")
@@ -533,7 +825,8 @@ def build_spotlight(table: pd.DataFrame, paired: pd.DataFrame, comp: pd.DataFram
             _clock_axis(ax, starts, width, n=t.set_index("bin_start")["n_flies"])
             ax.set_xlabel(f"Start of {first} ({width:g} h bins; n = flies)")
         fig.suptitle(f"{title} — {odor_text(odor, cohort, odor_conc)} "
-                     f"({phase_terms.odor_tag(cohort, 'trained odor, CS+')}) by time of day",
+                     f"({phase_terms.odor_tag(cohort, 'trained odor, CS+')}) by time of day\n"
+                     f"{CAPTION} across odors · {P_NOTE}",
                      x=0.01, ha="left", fontsize=10.5, color=INK)
         fig.tight_layout()
     return fig
@@ -558,12 +851,12 @@ def build_grid(table: pd.DataFrame, *, omnibus, trained_odor: str, title: str, w
             score, top, bottom = axes[0, c], axes[1, c], axes[2, c]
             _score_lines(score, t, width, labels=(c == 0), cohort=cohort)
             score.set_ylim(0, smax)
-            _p_text(score, "pre KW", _omnibus(omnibus, odor, "p_kw_pre_score"))
+            _p_note(score, "pre KW", _omnibus(omnibus, odor, "p_kw_pre_score" + _OMNI_SHOWN))
             _delta_line(top, t, width)
             top.set_ylim(*ylim)
-            _p_text(top, "KW", _omnibus(omnibus, odor, "p_kw_delta_score"))
+            _p_note(top, "KW", _omnibus(omnibus, odor, "p_kw_delta_score" + _OMNI_SHOWN))
             _rate_lines(bottom, t, width, labels=(c == 0), cohort=cohort)
-            _p_text(bottom, "post FFH", _omnibus(omnibus, odor, "p_ffh_post_rate"))
+            _p_note(bottom, "post FFH", _omnibus(omnibus, odor, "p_ffh_post_rate" + _OMNI_SHOWN))
             cs = _is_cs(odor, trained_odor)
             name = odor_text(odor, cohort, odor_conc)
             if cs:  # with its concentration the name fills the column: the tag wraps under it
@@ -594,8 +887,8 @@ def build_grid(table: pd.DataFrame, *, omnibus, trained_odor: str, title: str, w
         fig.suptitle(f"{title} — PER change and response rate by time of day ({width:g} h bins)\n"
                      f"top: mean score, {pre} and {post} (pre KW = {pre} across bins) · "
                      "middle: mean ± SEM change per fly (KW = Kruskal-Wallis across bins)\n"
-                     "bottom: % flies responding (score ≥ 2), FFH = Fisher-Freeman-Halton · "
-                     "uncorrected",
+                     "bottom: % flies responding (score ≥ 2), FFH = Fisher-Freeman-Halton\n"
+                     f"{CAPTION} across odors · {P_NOTE}",
                      x=0.01, ha="left", fontsize=10, color=INK)
         fig.tight_layout()
     return fig
@@ -612,15 +905,20 @@ def _score_lines(ax, t, width, *, labels: bool = True, cohort: str | None = None
 
 
 def _stat_line(row: pd.Series) -> tuple[str, bool]:
+    """One pretest_stats row as drawn: each test's batch-level, Holm-adjusted p and its
+    stars ("n/a": no test, or no batch column); significant if any of them < 0.05."""
+    def shown(test):
+        p = row.get(f"{test}_batch_holm", np.nan)
+        return float(p) if _finite(p) else np.nan
+
     def fmt(p):
-        return "n/a" if p is None or pd.isna(p) else (f"{p:.3f}" if p >= 0.001 else "<0.001")
-    sig = any(pd.notna(row[k]) and row[k] < 0.05
-              for k in ("p_kw_pre_score", "p_ffh_pre_rate", "p_spearman_pre"))
-    return (f"score KW p={fmt(row['p_kw_pre_score'])} · response FFH "
-            f"p={fmt(row['p_ffh_pre_rate'])} · Spearman rho={row['rho_pre']:.2f} "
-            f"p={fmt(row['p_spearman_pre'])}" if pd.notna(row["rho_pre"]) else
-            f"score KW p={fmt(row['p_kw_pre_score'])} · response FFH "
-            f"p={fmt(row['p_ffh_pre_rate'])}"), sig
+        return "n/a" if not np.isfinite(p) else f"{_fmt_p(p)} {fs.stars(p)}"
+    kw, ffh, sp = (shown(t) for t in PRETEST_TESTS)
+    sig = any(np.isfinite(p) and p < 0.05 for p in (kw, ffh, sp))
+    rho, nb = row.get("rho_pre_batch", np.nan), row.get("n_batches", np.nan)
+    trend = (f" · Spearman, {int(nb)} batches: rho={float(rho):.2f} {fmt(sp)}"
+             if _finite(rho) and _finite(nb) else "")
+    return f"score KW {fmt(kw)} · response FFH {fmt(ffh)}{trend}", sig
 
 
 def build_pretest(table: pd.DataFrame, pooled: pd.DataFrame, comp: pd.DataFrame, *,
@@ -657,14 +955,14 @@ def build_pretest(table: pd.DataFrame, pooled: pd.DataFrame, comp: pd.DataFrame,
         a2.set_yticks([0, 25, 50, 75, 100])
         # Stats: the all-odor (per-fly) row first, then every odor that reaches p<0.05.
         line, sig = _stat_line(st.loc[ALL_ODORS])
-        a1.text(0.02, 0.97, f"All odors (one value per fly):\n{line}", transform=a1.transAxes,
-                ha="left", va="top", fontsize=7.5, color=INK,
+        a1.text(0.02, 0.97, f"All odors (one value per fly; Holm over these 3):\n{line}",
+                transform=a1.transAxes, ha="left", va="top", fontsize=7.5, color=INK,
                 fontweight="bold" if sig else "normal")
         hits = [odor_text(o, cohort, odor_conc)
                 for o in odors if o in st.index and _stat_line(st.loc[o])[1]]
-        a1.text(0.02, 0.84, ("Single odors with any p<0.05: " + ", ".join(hits)) if hits
-                else "No single odor reaches p<0.05", transform=a1.transAxes, ha="left",
-                va="top", fontsize=7.5, color=INK)
+        a1.text(0.02, 0.84, ("Single odors with any Holm-adjusted p<0.05: " + ", ".join(hits))
+                if hits else "No single odor reaches Holm-adjusted p<0.05",
+                transform=a1.transAxes, ha="left", va="top", fontsize=7.5, color=INK)
         handles = [plt.Line2D([], [], color=EMPHASIS_COLOR, linewidth=LINE_W, marker="o",
                               label="all odors pooled\n(mean ± SEM over flies)"),
                    plt.Line2D([], [], color=CONTEXT_COLOR, linewidth=1.2, marker="o",
@@ -678,7 +976,7 @@ def build_pretest(table: pd.DataFrame, pooled: pd.DataFrame, comp: pd.DataFrame,
         naive = f"{pre.lower()} PER" if sens else "the naive pre-test"
         fig.suptitle(f"{title} — is {naive} different by time of day?\n"
                      f"per-odor detail: time_of_day_all_odors.png (top row) and "
-                     f"pretest_stats.csv · uncorrected",
+                     f"pretest_stats.csv\n{CAPTION} (single odors: across odors) · {P_NOTE}",
                      x=0.01, ha="left", fontsize=10, color=INK)
         fig.tight_layout()
     return fig

@@ -361,3 +361,314 @@ def test_render_width_min_flies_drops_the_bin_from_tables_and_stats(monkeypatch,
     assert comp["bin_start"].tolist() == [9.0]
     pooled = pd.read_csv(tmp_path / "pretest_pooled_by_bin.csv")
     assert set(pooled["bin_start"]) == {9.0}
+
+
+# ── batch-aware tests (2026-11-18): start time is a property of the batch ──────
+# Every fly of a batch folder starts together, so a fly-level trend or bin test counts
+# one start time 4-10 times over. The trend is tested on one pooled value per batch;
+# the bin comparisons get a p from permuting whole batches between the bins.
+
+import itertools  # noqa: E402
+import math  # noqa: E402
+
+import numpy as np  # noqa: E402
+from scipy.stats import kruskal, spearmanr  # noqa: E402
+
+from fbpipe.analysis import fly_stats as fs  # noqa: E402
+
+IAA = "Isoamyl Acetate"
+#: Six batches of ten flies, one batch a day, starting 8:05, 9:05 ... 13:05, so 2 h bins
+#: hold two batches each. The batch (its day) shifts every fly's IAA change together:
+#: by bin 8:00 (0, 0.5), 10:00 (2, 3), 12:00 (1, 1.5). Within a batch flies barely differ.
+_EFFECTS = (0.0, 0.5, 2.0, 3.0, 1.0, 1.5)
+
+
+def _batch_folder(b):
+    return f"october_{b + 1:02d}_batch_1"
+
+
+def _batched(effects=_EFFECTS, flies=10, seed=1):
+    rng = np.random.default_rng(seed)
+    rows = []
+    for b, eff in enumerate(effects):
+        start = dt.datetime(2026, 10, 1 + b, 8 + b, 5)
+        for n in range(1, flies + 1):
+            pre = float(rng.integers(0, 2))
+            for odor, shift in ((IAA, eff), ("Hexanol", 0.0)):
+                rows.append({"dataset_canon": "IAA-Sensitivity-1-1", "fly": _batch_folder(b),
+                             "fly_number": n, "odor": odor, "score_pre": pre,
+                             "score_post": pre + shift + rng.normal(0, 0.05),
+                             "start_time": start, "starvation_h": 1.0})
+    return pd.DataFrame(rows)
+
+
+def _clock_of_batches(n=6):
+    return [8 + b + 5 / 60 for b in range(n)]
+
+
+def test_trend_is_tested_on_one_pooled_value_per_batch():
+    p = _batched()
+    r = tod.spearman_by_odor(p).set_index("odor").loc[IAA]
+    assert r["p"] < 1e-4                       # 60 flies, but only 6 start times
+    assert r["n_batches"] == 6
+    iaa = p[p["odor"] == IAA]
+    means = [float((g["score_post"] - g["score_pre"]).sum() / len(g))
+             for _, g in iaa.groupby("fly", sort=True)]
+    rho, pv = spearmanr(_clock_of_batches(), means)
+    assert r["rho_batch"] == pytest.approx(rho) and r["p_batch"] == pytest.approx(pv)
+    assert r["rho_batch"] == pytest.approx(1 - 6 * 16 / (6 * 35))   # ranks 1 2 5 6 3 4
+    assert r["p_batch"] > 0.05                 # the fly-level "trend" is six batches
+
+
+def test_trend_pools_trials_within_a_batch_not_fly_means():
+    # batch b's flies: one with two IAA rows (0 and 3), one with a single row (3):
+    # pooled (0 + 3 + 3) / 3 = 2, never the mean of fly means (1.5 + 3) / 2 = 2.25
+    rows = []
+    for b, values in enumerate(([0.0, 3.0, 3.0], [1.0], [2.5], [4.0])):
+        for i, v in enumerate(values):
+            rows.append({"dataset_canon": "D", "fly": _batch_folder(b),
+                         "fly_number": 1 if (b == 0 and i < 2) else 2 + i,
+                         "odor": IAA, "score_pre": 0.0, "score_post": v,
+                         "start_time": dt.datetime(2026, 10, 1, 9 + b, 0)})
+    rho, p, n = tod.batch_spearman(
+        [9.0, 9.0, 9.0, 10.0, 11.0, 12.0], [0.0, 3.0, 3.0, 1.0, 2.5, 4.0],
+        ["b0", "b0", "b0", "b1", "b2", "b3"])
+    assert n == 4
+    expected = spearmanr([9.0, 10.0, 11.0, 12.0], [2.0, 1.0, 2.5, 4.0])
+    assert rho == pytest.approx(expected.statistic) and p == pytest.approx(expected.pvalue)
+    r = tod.spearman_by_odor(pd.DataFrame(rows)).iloc[0]
+    assert r["rho_batch"] == pytest.approx(expected.statistic)
+
+
+def _exact_batch_kw_p(values, bins, batches):
+    """Every way of dealing the batches into the bins (bin sizes in batches kept),
+    scipy's Kruskal-Wallis H on the flies each time: the exact batch-permutation p."""
+    df = pd.DataFrame({"v": values, "bin": bins, "batch": batches})
+    batch_bin = df.groupby("batch")["bin"].first()
+    ids = list(batch_bin.index)
+    h_obs = kruskal(*[g["v"].to_numpy() for _, g in df.groupby("bin")]).statistic
+    deals = set(itertools.permutations(batch_bin.to_list()))
+    hits = 0
+    for deal in deals:
+        relabel = dict(zip(ids, deal))
+        new = df["batch"].map(relabel)
+        h = kruskal(*[df.loc[new == lab, "v"].to_numpy() for lab in sorted(set(deal))]).statistic
+        hits += h >= h_obs - 1e-9
+    return hits / len(deals)
+
+
+def test_batch_permutation_p_moves_every_fly_of_a_batch_together():
+    # 4 batches x 3 flies, every fly of a batch alike; bins {b1, b2} vs {b3, b4}.
+    values = np.repeat([1.0, 2.0, 3.0, 4.0], 3)
+    batches = np.repeat(["b1", "b2", "b3", "b4"], 3)
+    bins = np.repeat(["early", "early", "late", "late"], 3)
+    p_batch = tod.batch_permutation_p(values, bins, batches)
+    # 6 ways to split 4 batches 2 + 2; this split and its mirror are the most extreme
+    assert p_batch == pytest.approx(2 / 6, abs=0.01)
+    assert p_batch == pytest.approx(_exact_batch_kw_p(values, bins, batches), abs=0.01)
+    # each fly its own batch: 924 ways, 2 as extreme -- the fly-level p is far smaller
+    alone = tod.batch_permutation_p(values, bins, np.arange(12))
+    assert alone == pytest.approx(2 / 924, abs=0.002)
+    # fixed seed: the same p every run; (hits + 1) / (n + 1) is never 0
+    assert tod.batch_permutation_p(values, bins, batches) == p_batch
+    assert tod.batch_permutation_p(values, bins, np.arange(12), n_perm=50) >= 1 / 51
+
+
+def test_batch_permutation_p_is_nan_when_nothing_can_be_compared():
+    assert np.isnan(tod.batch_permutation_p([1.0, 2.0], ["a", "a"], ["b1", "b2"]))  # one bin
+    assert np.isnan(tod.batch_permutation_p([2.0] * 4, ["a", "a", "b", "b"],
+                                            ["b1", "b2", "b3", "b4"]))              # no spread
+    assert np.isnan(tod.batch_permutation_p([0, 0, 0, 0], ["a", "a", "b", "b"],
+                                            ["b1", "b2", "b3", "b4"], statistic="ffh"))
+    # a batch whose flies sit in two bins cannot be moved as one
+    assert np.isnan(tod.batch_permutation_p([1.0, 2.0, 3.0], ["a", "b", "b"],
+                                            ["b1", "b1", "b2"]))
+
+
+def test_bin_comparison_p_permutes_whole_batches():
+    binned = tod.assign_bins(_batched(), 2)
+    om = tod.omnibus(binned).set_index("odor")
+    iaa = om.loc[IAA]
+    assert iaa["p_kw_delta_score"] < 1e-6      # flies as the unit
+    assert iaa["n_batches"] == 6
+    # 90 ways to deal 6 batches 2 + 2 + 2; the observed split is the most extreme and
+    # every relabelling of the three bins gives the same H: exactly 6 / 90
+    assert iaa["p_kw_delta_score_batch"] == pytest.approx(6 / 90, abs=0.01)
+    sub = binned[binned["odor"] == IAA]
+    exact = _exact_batch_kw_p((sub["score_post"] - sub["score_pre"]).to_numpy(),
+                              sub["bin_label"].to_numpy(), sub["fly"].to_numpy())
+    assert iaa["p_kw_delta_score_batch"] == pytest.approx(exact, abs=0.01)
+    assert iaa["p_kw_delta_score_batch"] > 0.05
+
+
+def _rate_batches(post_responders=(0, 1, 9, 10, 5, 4), flies=10):
+    """Six batches of ten, two per 2 h bin; batch b has ``post_responders[b]`` flies
+    responding post (score 3), the rest 0; nobody responds pre."""
+    rows = []
+    for b, k in enumerate(post_responders):
+        for n in range(flies):
+            rows.append({"dataset_canon": "D", "fly": _batch_folder(b), "fly_number": n + 1,
+                         "odor": IAA, "score_pre": 0.0, "score_post": 3.0 if n < k else 0.0,
+                         "start_time": dt.datetime(2026, 10, 1 + b, 8 + b, 5),
+                         "starvation_h": 1.0})
+    return pd.DataFrame(rows)
+
+
+def _exact_batch_ffh_p(responders, n_per_batch, deal_bins):
+    """Exact: every deal of the batches into bins (two per bin), the bins x responded
+    table's hypergeometric probability given ITS margins; p = P(as improbable)."""
+    def prob(ks, ns):
+        return math.prod(math.comb(n, k) for k, n in zip(ks, ns))
+    def table(deal):
+        lab = sorted(set(deal))
+        return ([sum(r for r, d in zip(responders, deal) if d == g) for g in lab],
+                [sum(n for n, d in zip(n_per_batch, deal) if d == g) for g in lab])
+    p_obs = prob(*table(deal_bins))
+    deals = set(itertools.permutations(deal_bins))
+    return sum(prob(*table(d)) <= p_obs * (1 + 1e-12) for d in deals) / len(deals)
+
+
+def test_rate_comparison_p_permutes_whole_batches_with_the_ffh_statistic():
+    binned = tod.assign_bins(_rate_batches(), 2)
+    iaa = tod.omnibus(binned).set_index("odor").loc[IAA]
+    assert iaa["p_ffh_post_rate"] < 0.001      # flies as the unit
+    exact = _exact_batch_ffh_p((0, 1, 9, 10, 5, 4), (10,) * 6, (8, 8, 10, 10, 12, 12))
+    assert exact == pytest.approx(6 / 90)
+    assert iaa["p_ffh_post_rate_batch"] == pytest.approx(exact, abs=0.01)
+    assert np.isnan(iaa["p_ffh_pre_rate_batch"])   # nobody responds pre: nothing to test
+
+
+def test_per_odor_bin_tests_and_trends_are_holm_adjusted_across_odors():
+    binned = tod.assign_bins(_batched(), 2)
+    om = tod.omnibus(binned)
+    assert len(om) == 2
+    for col in ("p_kw_pre_score", "p_kw_post_score", "p_kw_delta_score",
+                "p_ffh_pre_rate", "p_ffh_post_rate"):
+        np.testing.assert_allclose(om[f"{col}_batch_holm"], fs.holm_adjust(om[f"{col}_batch"]),
+                                   equal_nan=True)
+    sp = tod.spearman_by_odor(binned)
+    np.testing.assert_allclose(sp["p_batch_holm"], fs.holm_adjust(sp["p_batch"]), equal_nan=True)
+
+
+def test_pretest_stats_carry_batch_level_columns_and_holm():
+    binned = tod.assign_bins(_batched(), 2)
+    st = tod.pretest_stats(binned).set_index("odor")
+    for col in ("n_batches", "p_kw_pre_score_batch", "p_ffh_pre_rate_batch", "rho_pre_batch",
+                "p_spearman_pre_batch", "p_kw_pre_score_batch_holm",
+                "p_ffh_pre_rate_batch_holm", "p_spearman_pre_batch_holm"):
+        assert col in st
+    # the fly-level values stay, as before
+    for col in ("p_kw_pre_score", "p_ffh_pre_rate", "rho_pre", "p_spearman_pre"):
+        assert col in st
+    allrow = st.loc[tod.ALL_ODORS]
+    assert allrow["n_batches"] == 6
+    # all odors: each batch's every pre trial pooled (sum / trials), against its start time
+    pooled = [float(g["score_pre"].sum() / len(g)) for _, g in binned.groupby("fly", sort=True)]
+    exp = spearmanr(_clock_of_batches(), pooled)
+    assert allrow["rho_pre_batch"] == pytest.approx(exp.statistic)
+    assert allrow["p_spearman_pre_batch"] == pytest.approx(exp.pvalue)
+    # per odor: Holm across the odors; the all-odor row: Holm over its own three tests
+    odors = st.drop(index=tod.ALL_ODORS)
+    for col in ("p_kw_pre_score_batch", "p_ffh_pre_rate_batch", "p_spearman_pre_batch"):
+        np.testing.assert_allclose(odors[f"{col}_holm"], fs.holm_adjust(odors[col]),
+                                   equal_nan=True)
+    three = ["p_kw_pre_score_batch", "p_ffh_pre_rate_batch", "p_spearman_pre_batch"]
+    np.testing.assert_allclose(allrow[[f"{c}_holm" for c in three]].to_numpy(dtype=float),
+                               fs.holm_adjust(allrow[three].to_numpy(dtype=float)),
+                               equal_nan=True)
+
+
+def test_without_a_batch_column_the_batch_columns_are_blank_and_one_warning_prints(capsys):
+    p = _batched().drop(columns=["fly", "dataset_canon"])
+    sp = tod.spearman_by_odor(p)
+    assert sp["p"].notna().all()               # the fly-level values are still there
+    assert sp["p_batch"].isna().all() and sp["rho_batch"].isna().all()
+    out = capsys.readouterr().out
+    assert out.count("[WARN]") == 1 and "batch" in out
+    om = tod.omnibus(tod.assign_bins(p, 2))
+    assert om["p_kw_delta_score"].notna().all()
+    assert om["p_kw_delta_score_batch"].isna().all()
+    assert capsys.readouterr().out.count("[WARN]") == 1
+
+
+def test_spearman_helper_keeps_its_plain_two_array_signature():
+    """b2b_baseline_time_of_day calls ``tod._spearman(clock, change)`` directly."""
+    import inspect
+
+    assert list(inspect.signature(tod._spearman).parameters) == ["clock", "value"]
+    x, y = np.array([9.0, 10.0, 11.0, 12.0]), np.array([1.0, 3.0, 2.0, 4.0])
+    exp = spearmanr(x, y)
+    assert tod._spearman(x, y) == pytest.approx((exp.statistic, exp.pvalue))
+    assert all(np.isnan(tod._spearman(np.array([9.0, 9.0, 10.0]), np.array([1.0, 2.0, 3.0]))))
+
+
+def test_b2b_still_imports_and_its_pretest_frame_gets_batch_level_stats():
+    """The b2b scripts belong to another session: what they import must keep working."""
+    from scripts.analysis import b2b_baseline_time_of_day as bt
+
+    pre = pd.DataFrame([
+        {"dataset": "PairFirst", "fly": _batch_folder(b), "fly_number": n, "odor": odor,
+         "score": float((b + n) % 3)}
+        for b in range(4) for n in (1, 2) for odor in (IAA, "Hexanol")])
+    start_of = {("PairFirst", _batch_folder(b)): pd.Timestamp(2026, 11, 13 + b, 9 + 2 * b, 0)
+                for b in range(4)}
+    starv = {k: 1.0 for k in start_of}
+    frame = bt.pretest_frame(pre, start_of, starv)
+    binned = tod.assign_bins(frame, 2.0)
+    st = tod.pretest_stats(binned, binary_threshold=2)
+    assert st.set_index("odor").loc[tod.ALL_ODORS, "n_batches"] == 4
+    assert np.isfinite(st["p_spearman_pre_batch"].iloc[0])
+    tod.bin_table(binned, binary_threshold=2)
+    tod.pooled_pretest(binned, binary_threshold=2)
+
+
+def _crafted_tables():
+    """Fly-level p tiny, batch-level p large: a figure must draw the batch-level one."""
+    p = tod.assign_bins(_paired(), 1)
+    table, comp, pooled = tod.bin_table(p), tod.composition(p), tod.pooled_pretest(p)
+    om = pd.DataFrame({"odor": ["Isoamyl Acetate", "Hexanol"]})
+    for col in ("p_kw_pre_score", "p_kw_post_score", "p_kw_delta_score",
+                "p_ffh_pre_rate", "p_ffh_post_rate"):
+        om[col] = 0.0001
+        om[f"{col}_batch"] = 0.31
+        om[f"{col}_batch_holm"] = 0.62
+    sp = pd.DataFrame({"odor": ["Isoamyl Acetate", "Hexanol"], "n_flies": 3, "rho": 0.99,
+                       "p": 0.0001, "n_batches": 3, "rho_batch": 0.5, "p_batch": 0.33,
+                       "p_batch_holm": 0.66})
+    st = tod.pretest_stats(p)
+    for c in ("p_kw_pre_score", "p_ffh_pre_rate", "p_spearman_pre"):
+        st[c] = 0.0001
+        st[f"{c}_batch"] = 0.35
+        st[f"{c}_batch_holm"] = 0.7
+    st["rho_pre_batch"] = 0.25
+    return p, table, comp, pooled, om, sp, st
+
+
+def test_figures_draw_the_batch_level_holm_adjusted_p():
+    p, table, comp, pooled, om, sp, st = _crafted_tables()
+    kw = dict(omnibus=om, trained_odor="Isoamyl Acetate", title="T", width=1,
+              cohort="IAA-Sensitivity-1-1")
+    figs = [tod.build_emphasis(table, comp, spearman=sp, **kw),
+            tod.build_spotlight(table, p, comp, spearman=sp, **kw),
+            tod.build_grid(table, **kw),
+            tod.build_pretest(table, pooled, comp, stats=st, title="T", width=1,
+                              cohort="IAA-Sensitivity-1-1")]
+    text = _drawn_text(figs)
+    assert "p=0.620" in text and "p=0.660" in text and "p=0.700" in text
+    assert "p<0.001" not in text and "p=0.000" not in text
+    assert "3 batches" in text                 # the trend's n is batches, not flies
+    assert text.count("exploratory · Holm-adjusted") >= 4
+    assert "uncorrected" not in text
+
+
+def test_render_width_writes_the_batch_level_columns(monkeypatch, tmp_path):
+    monkeypatch.setattr(tod, "_save", lambda fig, path: path)
+    p = _batched()
+    tod.render_width(p, 2, out_dir=tmp_path, trained=IAA, title="T",
+                     spearman=tod.spearman_by_odor(p))
+    om = pd.read_csv(tmp_path / "stats_omnibus.csv")
+    for col in ("n_batches", "p_kw_delta_score_batch", "p_kw_delta_score_batch_holm",
+                "p_ffh_post_rate_batch_holm", "p_kw_delta_score"):
+        assert col in om
+    st = pd.read_csv(tmp_path / "pretest_stats.csv")
+    assert {"p_spearman_pre_batch_holm", "rho_pre_batch", "n_batches"} <= set(st.columns)

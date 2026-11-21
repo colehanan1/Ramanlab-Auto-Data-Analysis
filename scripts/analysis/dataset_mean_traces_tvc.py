@@ -52,13 +52,20 @@ for _p in (str(ROOT), str(ROOT / "src")):
         sys.path.insert(0, _p)
 
 from fbpipe.analysis.traces import baseline_correct, read_wide_table  # noqa: E402
+from fbpipe.utils.nanstats import nan_pad_stack  # noqa: E402
 from scripts.analysis.dataset_means_specific_flies import (  # noqa: E402
+    CTRL_BAND_COLOR,
+    CTRL_LINE_COLOR,
     DPI,
     MAX_TIME_S,
+    Y_LABEL,
+    _mean_sem_trace,
     _mean_trace,
     _plot_training_vs_control_for_odor,
     _safe_odor_filename,
     _shared_ylim_from_means,
+    _trace_odor_color,
+    default_arm_title,
 )
 from scripts.analysis.rig_batch_breakdowns import batch_of, rig_of  # noqa: E402
 from scripts.analysis.mean_trace_score import (  # noqa: E402
@@ -432,6 +439,180 @@ def filter_by_genotype(
     return wide_df.loc[keep].copy()
 
 
+# ---------------------------------------------------------------------------
+# --with-median: a median twin and a mean-vs-median figure per two-arm figure
+# ---------------------------------------------------------------------------
+
+#: Filename tails of the two ``--with-median`` siblings of ``<odor>_<tag>.png``.
+MEDIAN_SUFFIX = "_median"
+MEAN_VS_MEDIAN_SUFFIX = "_mean_vs_median"
+
+#: "Mean PER response %" -> "Median PER response %" / "Mean / median PER ...".
+MEDIAN_Y_LABEL = (
+    re.sub(r"\bMean\b", "Median", Y_LABEL) if re.search(r"\bMean\b", Y_LABEL)
+    else f"Median {Y_LABEL}"
+)
+MEAN_VS_MEDIAN_Y_LABEL = (
+    re.sub(r"\bMean\b", "Mean / median", Y_LABEL) if re.search(r"\bMean\b", Y_LABEL)
+    else f"Mean / median {Y_LABEL}"
+)
+
+
+def median_iqr_trace(
+    per_fly: dict[str, np.ndarray], max_frames: int
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """``(median, q25, q75)`` per frame over the same traces ``_mean_sem_trace`` uses.
+
+    One trace per fly (per presentation), NaN-padded to the longest and clipped
+    to ``max_frames`` exactly as the mean is, so the two statistics describe the
+    same units frame for frame.
+    """
+    if not per_fly:
+        empty = np.full(max_frames, np.nan)
+        return empty, empty.copy(), empty.copy()
+    stacked = nan_pad_stack(list(per_fly.values()))[:, :max_frames]
+    import warnings as _w
+
+    with _w.catch_warnings():
+        _w.simplefilter("ignore", RuntimeWarning)  # columns that are all-NaN
+        median = np.nanmedian(stacked, axis=0)
+        q25, q75 = np.nanpercentile(stacked, [25, 75], axis=0)
+    return median, q25, q75
+
+
+def median_ylim(
+    per_fly_groups: Sequence[dict[str, np.ndarray]], *, fps: float
+) -> tuple[float, float]:
+    """The mean figures' shared-ylim rule applied to median AND IQR edges."""
+    max_frames = int(MAX_TIME_S * fps)
+    traces: list[np.ndarray] = []
+    for per_fly in per_fly_groups:
+        traces.extend(median_iqr_trace(per_fly, max_frames))
+    return _shared_ylim_from_means(traces, fps=fps)
+
+
+def mean_vs_median_ylim(
+    per_fly_groups: Sequence[dict[str, np.ndarray]], *, fps: float
+) -> tuple[float, float]:
+    """The shared-ylim rule over both the mean and the median lines."""
+    max_frames = int(MAX_TIME_S * fps)
+    traces: list[np.ndarray] = []
+    for per_fly in per_fly_groups:
+        traces.append(_mean_trace(per_fly, max_frames))
+        traces.append(median_iqr_trace(per_fly, max_frames)[0])
+    return _shared_ylim_from_means(traces, fps=fps)
+
+
+def _finish_two_arm_axes(
+    fig, ax, *, odor_on_s: float, odor_off_s: float,
+    ylim: tuple[float, float] | None, ylabel: str, title: str,
+    legend_kw: Optional[dict] = None,
+) -> None:
+    """The decorations ``_plot_training_vs_control_for_odor`` gives its axes."""
+    ax.axvline(odor_on_s, color="black", linestyle="--", linewidth=0.8)
+    ax.axvline(odor_off_s, color="black", linestyle="--", linewidth=0.8)
+    ax.axvspan(odor_on_s, odor_off_s, alpha=0.10, color="grey")
+    ax.axhline(0.0, color="0.35", linestyle=":", linewidth=0.8)
+    ax.set_xlim(0, MAX_TIME_S)
+    if ylim is not None:
+        ax.set_ylim(*ylim)
+    ax.set_xlabel("Time (s)")
+    ax.set_ylabel(ylabel)
+    ax.set_title(title, fontsize=12)
+    ax.legend(**{"loc": "upper right", "fontsize": 10, "framealpha": 0.9,
+                 **(legend_kw or {})})
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    ax.grid(axis="y", alpha=0.3, linewidth=0.5)
+    fig.tight_layout()
+
+
+def _plot_tvc_median_for_odor(
+    *,
+    odor: str,
+    train_per_fly: dict[str, np.ndarray],
+    ctrl_per_fly: dict[str, np.ndarray],
+    fps: float,
+    odor_on_s: float,
+    odor_off_s: float,
+    ylim: tuple[float, float] | None,
+    color_key: str | None = None,
+    train_label: str = "Trained",
+    ctrl_label: str = "Control",
+    title: str | None = None,
+) -> plt.Figure:
+    """``_plot_training_vs_control_for_odor`` with median lines and IQR bands."""
+    from matplotlib.patches import Patch
+
+    dark = _trace_odor_color(color_key or odor)
+    fig, ax = plt.subplots(figsize=(8, 5))
+    max_frames = int(MAX_TIME_S * fps)
+    for per_fly, line_color, band_color, label in (
+        (ctrl_per_fly, CTRL_LINE_COLOR, CTRL_BAND_COLOR, ctrl_label),
+        (train_per_fly, dark, dark, train_label),
+    ):
+        med, q25, q75 = median_iqr_trace(per_fly, max_frames)
+        time = np.arange(len(med)) / fps
+        ax.fill_between(time, q25, q75, color=band_color, alpha=0.22, linewidth=0)
+        ax.plot(time, med, color=line_color, linewidth=2.2,
+                label=f"{label} median (n={len(per_fly)})")
+    base = title if title is not None else default_arm_title(
+        odor, train_label, ctrl_label
+    )
+    handles, labels = ax.get_legend_handles_labels()
+    handles.append(Patch(facecolor="0.6", alpha=0.35, linewidth=0))
+    labels.append("Band: IQR (25th–75th pct)")
+    _finish_two_arm_axes(
+        fig, ax, odor_on_s=odor_on_s, odor_off_s=odor_off_s, ylim=ylim,
+        ylabel=MEDIAN_Y_LABEL, title=f"{base}\nMedian across flies, IQR band",
+        legend_kw={"handles": handles, "labels": labels},
+    )
+    return fig
+
+
+def _plot_tvc_mean_vs_median_for_odor(
+    *,
+    odor: str,
+    train_per_fly: dict[str, np.ndarray],
+    ctrl_per_fly: dict[str, np.ndarray],
+    fps: float,
+    odor_on_s: float,
+    odor_off_s: float,
+    ylim: tuple[float, float] | None,
+    color_key: str | None = None,
+    train_label: str = "Trained",
+    ctrl_label: str = "Control",
+    title: str | None = None,
+) -> plt.Figure:
+    """A panel per arm (control left, trained right, shared y): the arm's mean (solid,
+    its colour) and median (dashed, black) over the same flies, no bands. Two arms on
+    one axis hid the dashed lines under the other arm's (user 2026-11-13)."""
+    dark = _trace_odor_color(color_key or odor)
+    fig, axes = plt.subplots(1, 2, figsize=(13, 5), sharey=True)
+    max_frames = int(MAX_TIME_S * fps)
+    base = title if title is not None else default_arm_title(
+        odor, train_label, ctrl_label
+    )
+    for ax, (per_fly, color, label) in zip(axes, (
+        (ctrl_per_fly, CTRL_LINE_COLOR, ctrl_label),
+        (train_per_fly, dark, train_label),
+    )):
+        mean, _ = _mean_sem_trace(per_fly, max_frames)
+        med = median_iqr_trace(per_fly, max_frames)[0]
+        ax.plot(np.arange(len(mean)) / fps, mean, color=color, linewidth=2.0,
+                linestyle="-", label=f"{label} mean (n={len(per_fly)})")
+        ax.plot(np.arange(len(med)) / fps, med, color="black", linewidth=1.4,
+                linestyle="--", label=f"{label} median")
+        _finish_two_arm_axes(
+            fig, ax, odor_on_s=odor_on_s, odor_off_s=odor_off_s, ylim=ylim,
+            ylabel=MEAN_VS_MEDIAN_Y_LABEL if ax is axes[0] else "",
+            title=label,
+        )
+    fig.suptitle(f"{base}\nMean (solid) vs median (dashed), same flies", fontsize=12)
+    fig.tight_layout()
+    return fig
+
+
 def prune_stale_figures(
     out_dir: Path, written: Sequence[Path], *, pattern: str
 ) -> list[Path]:
@@ -503,6 +684,13 @@ def build_parser(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
                         f"second copy of each figure under {NAIVE_SUBDIR}/. An "
                         "odor whose label carries no concentration has no naive "
                         "panel and is skipped rather than matched to another dose.")
+    p.add_argument("--with-median", action="store_true", default=False,
+                   help="Beside every two-arm <odor>_<tag>.png also write "
+                        f"<odor>_<tag>{MEDIAN_SUFFIX}.png (per-frame median over "
+                        "the same per-fly traces, IQR band) and "
+                        f"<odor>_<tag>{MEAN_VS_MEDIAN_SUFFIX}.png (mean solid, "
+                        "median dashed, no bands). Not drawn for the naive "
+                        "three-arm figure or the model-score annotation.")
     p.add_argument("--protocol", default="v2", choices=["v2", "legacy"])
     p.add_argument("--overwrite", action="store_true", default=True)
     p.add_argument("--score-mean-trace", action="store_true", default=False,
@@ -691,11 +879,21 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         fps=args.fps,
     )
     LOGGER.info("Shared mean ylim: %s", shared_ylim)
+    with_median = bool(getattr(args, "with_median", False))
+    if with_median:
+        # Same shared-across-odors rule as the mean figures, recomputed from
+        # what each figure draws so neither the IQR nor either line clips.
+        all_groups = [*train.values(), *control.values()]
+        shared_median_ylim = median_ylim(all_groups, fps=args.fps)
+        shared_mvm_ylim = mean_vs_median_ylim(all_groups, fps=args.fps)
+        LOGGER.info("Shared median ylim: %s; mean-vs-median ylim: %s",
+                    shared_median_ylim, shared_mvm_ylim)
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
     per_odor_meta: dict[str, dict[str, int]] = {}
     skipped: list[str] = []
     written: list[Path] = []
+    median_written: list[Path] = []
     naive_written: list[Path] = []
     wanted_odors = {str(o).casefold() for o in args.odor}
     matched_odors: set[str] = set()
@@ -720,6 +918,11 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             )
             skipped.append(odor)
             continue
+        title_override = (
+            f"{odor_text} - "
+            f"{'Training' if args.split_arm == 'train' else 'Control'}: "
+            f"{label_a} vs {label_b}"
+        ) if args.rig_split else None
         fig = _plot_training_vs_control_for_odor(
             odor=odor_text,
             train_per_fly=train_per_fly,
@@ -731,11 +934,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             color_key=base_odor_key(odor),
             train_label=label_a,
             ctrl_label=label_b,
-            title=(
-                f"{odor_text} - "
-                f"{'Training' if args.split_arm == 'train' else 'Control'}: "
-                f"{label_a} vs {label_b}"
-            ) if args.rig_split else None,
+            title=title_override,
         )
         if args.rig_split:
             entry = {
@@ -762,6 +961,35 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             fig.savefig(out_png, dpi=DPI, bbox_inches="tight")
             LOGGER.info("Saved %s", out_png)
         plt.close(fig)
+
+        # --with-median: the same two arms, the same per-fly traces, drawn as a
+        # median/IQR twin and as a mean-vs-median overlay. No score annotation:
+        # the model scored the mean trace, not the median.
+        if with_median:
+            for suffix, plot_fn, ylim in (
+                (MEDIAN_SUFFIX, _plot_tvc_median_for_odor, shared_median_ylim),
+                (MEAN_VS_MEDIAN_SUFFIX, _plot_tvc_mean_vs_median_for_odor,
+                 shared_mvm_ylim),
+            ):
+                twin = plot_fn(
+                    odor=odor_text,
+                    train_per_fly=train_per_fly,
+                    ctrl_per_fly=ctrl_per_fly,
+                    fps=args.fps,
+                    odor_on_s=args.odor_on_s,
+                    odor_off_s=args.odor_off_s,
+                    ylim=ylim,
+                    color_key=base_odor_key(odor),
+                    train_label=label_a,
+                    ctrl_label=label_b,
+                    title=title_override,
+                )
+                twin_png = out_png.with_name(f"{out_png.stem}{suffix}.png")
+                median_written.append(twin_png)
+                if args.overwrite or not twin_png.exists():
+                    twin.savefig(twin_png, dpi=DPI, bbox_inches="tight")
+                    LOGGER.info("Saved %s", twin_png)
+                plt.close(twin)
 
         # A SECOND figure with the naive arm, in its own subfolder. Written
         # separately rather than replacing the two-arm figure so the existing
@@ -822,6 +1050,14 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         )
 
     prune_stale_figures(args.out_dir, written, pattern=f"*_{tag}.png")
+    # The twins' tails ("..._<tag>_median.png") never match "*_<tag>.png", so
+    # they get their own prune. Run with or without the flag: without it the
+    # keep-list is empty and an earlier run's twins go, as any figure this run
+    # did not draw would.
+    for suffix in (MEDIAN_SUFFIX, MEAN_VS_MEDIAN_SUFFIX):
+        prune_stale_figures(
+            args.out_dir, median_written, pattern=f"*_{tag}{suffix}.png"
+        )
     if getattr(args, "with_naive", False) and not args.rig_split:
         prune_stale_figures(
             args.out_dir / NAIVE_SUBDIR, naive_written,
@@ -839,6 +1075,9 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         "per_odor": per_odor_meta,
         "skipped_odors": skipped,
     }
+    if with_median:
+        sidecar["shared_median_ylim"] = list(shared_median_ylim)
+        sidecar["shared_mean_vs_median_ylim"] = list(shared_mvm_ylim)
     if args.rig_split:
         rigs_a, rigs_b = _parse_rig_split(args.rig_split)
         sidecar.update({

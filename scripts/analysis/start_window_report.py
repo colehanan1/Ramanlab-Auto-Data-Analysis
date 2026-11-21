@@ -208,7 +208,7 @@ def _run(cmd: list, log) -> int:
 
 
 def run_figures(out: Path, p: dict[str, Path], dataset: str, *, config: Path,
-                label: str, log, rate_test: str = "fisher",
+                label: str, log, rate_test: str = "mcnemar",
                 flagged: Path = FLAGGED) -> dict[str, int]:
     """Every figure script on the filtered tables; returns exit code per step.
 
@@ -219,12 +219,13 @@ def run_figures(out: Path, p: dict[str, Path], dataset: str, *, config: Path,
         "score figures": [PY, a + "pretest_vs_test_comparison.py",
                           "--predictions-csv", p["predictions"], "--out-root", out,
                           "--binary-threshold", RESPONDING_SCORE, "--rate-test", rate_test,
-                          "--flagged-flies-csv", flagged],
+                          "--p-adjust", "holm", "--flagged-flies-csv", flagged],
         "mean traces": [PY, a + "dataset_mean_traces_tvc.py", "--wide-csv", p["testing"],
                         "--pretest-wide-csv", p["pretest"], "--train-dataset", dataset,
                         "--out-dir", out / "Mean-Traces_Pre-Test_vs_Post-Training",
                         "--fps", TRACE_FPS, "--odor-on-s", ODOR_ON_S,
-                        "--flagged-flies-csv", flagged, "--config", config],
+                        "--flagged-flies-csv", flagged, "--config", config,
+                        "--with-median"],   # median twins + mean vs median (user 2026-11-13)
         "cumulative responders": [
             PY, a + "cumulative_responders.py", "--pretest-wide-csv", p["pretest"],
             "--testing-wide-csv", p["testing"], "--predictions-csv", p["predictions"],
@@ -236,7 +237,7 @@ def run_figures(out: Path, p: dict[str, Path], dataset: str, *, config: Path,
             "--testing-wide-csv", p["testing"], "--predictions-csv", p["predictions"],
             "--dataset", dataset, "--flagged-flies-csv", flagged,
             "--binary-threshold", RESPONDING_SCORE, "--fps", TRACE_FPS,
-            "--odor-on-s", ODOR_ON_S, "--label", label,
+            "--odor-on-s", ODOR_ON_S, "--label", label, "--with-median",
             "--out-dir", out / "Responder-Mean-Traces_Pre-Test_vs_Post-Training"],
         "every-fly heatmaps": [
             PY, a + "every_fly_heatmaps.py", "--pretest-wide-csv", p["pretest"],
@@ -275,6 +276,14 @@ def run_figures(out: Path, p: dict[str, Path], dataset: str, *, config: Path,
                                       *common, "--out-dir", out / folder]
     steps["model drivers"] = [PY, a + "model_feature_drivers.py", *common,
                               "--out-dir", out / "Model-Feature-Drivers"]
+    if "training_predictions" in p:   # pre, exposure 1-6, post (user 2026-11-17)
+        steps["sensitized odor by trial"] = [
+            PY, a + "sensitized_odor_by_trial.py", "--pretest-wide-csv", p["pretest"],
+            "--training-wide-csv", p["training"], "--testing-wide-csv", p["testing"],
+            "--predictions-csv", p["predictions"],
+            "--training-predictions-csv", p["training_predictions"],
+            "--dataset", dataset, "--label", label,
+            "--out-dir", out / "Sensitized-Odor-By-Trial"]
     return {name: _run(cmd, log) for name, cmd in steps.items()}
 
 
@@ -300,14 +309,25 @@ KEY_MEASURES = (
 )
 _PRE, _POST = "Pre-test", "Post-training"
 
+#: The measures above that have no fixed no-change value (auc_before_during.NO_FIXED_NULL)
+NO_NULL_NOTE = (
+    "No fixed no-change value: with no odor, Unsigned AUC Δ already reads about +5 "
+    "% × s, and the signed peak-z ratio about +0.3, on sham windows over odor-free "
+    "real traces (the before window is where the baseline is fit, so |deviation| is "
+    "smallest there by construction). These two, like every unsigned AUC / peak-z delta "
+    "and ratio, are therefore compared only pre vs post, never against 0 or 1."
+)
 
-def count_significant(summary: pd.DataFrame, alpha: float = 0.05) -> tuple[int, int]:
+
+def count_significant(summary: pd.DataFrame, alpha: float = 0.05,
+                      column: str = "p_pre_vs_post") -> tuple[int, int]:
     """``(p < alpha, tests)`` over the per-odor pre-vs-post tests of a summary CSV.
 
-    Each test sits on two rows (one per phase); the pooled group has none.
+    Each test sits on two rows (one per phase); the pooled group is not counted.
+    ``column="p_pre_vs_post_holm"`` counts the Holm-adjusted p instead.
     """
     rows = summary.loc[(summary["phase"] == _PRE) & (summary["odor"] != "All odors")]
-    p = rows["p_pre_vs_post"].to_numpy(dtype=float)
+    p = rows[column].to_numpy(dtype=float)
     p = p[np.isfinite(p)]
     return int((p < alpha).sum()), int(p.size)
 
@@ -316,10 +336,13 @@ def _fmt(v: float, digits: int) -> str:
     return "–" if not np.isfinite(v) else f"{v:.{digits}f}"
 
 
-def _p(v: float) -> str:
+def _p(v: float, *, bold: bool = True) -> str:
+    """A p for the findings tables; bold marks p < 0.05 only where ``bold`` (the
+    Holm-adjusted column: a raw p of an exploratory family never reads as a finding)."""
     if not np.isfinite(v):
         return "–"
-    return "**<0.001**" if v < 0.001 else (f"**{v:.3f}**" if v < 0.05 else f"{v:.2f}")
+    text = "<0.001" if v < 0.001 else (f"{v:.3f}" if v < 0.05 else f"{v:.2f}")
+    return f"**{text}**" if bold and v < 0.05 else text
 
 
 def _read(out: Path, folder: str, name: str) -> pd.DataFrame | None:
@@ -366,8 +389,8 @@ def write_findings(out: Path, dataset: str, label: str, flies: pd.DataFrame,
              for _, folder, key, _ in KEY_MEASURES}
 
     lines += ["", f"## 1. {pre} vs {post}: the {tag} ({trained})", "",
-              f"| Measure | {pre} mean (median) | {post} mean (median) | Paired p |",
-              "|---|---|---|---|"]
+              f"| Measure | {pre} mean (median) | {post} mean (median) | Paired p (raw) "
+              "| Holm p |", "|---|---|---|---|---|"]
     for row_label, _folder, key, measure in KEY_MEASURES:
         s = summaries.get(key)
         if s is None:
@@ -378,17 +401,26 @@ def write_findings(out: Path, dataset: str, label: str, flies: pd.DataFrame,
         digits = 2 if "ratio" in measure else 1
         cells = [f"{_fmt(s.loc[ph, 'mean'], digits)} ({_fmt(s.loc[ph, 'median'], digits)})"
                  for ph in (_PRE, _POST)]
+        holm = float(s.loc[_PRE, "p_pre_vs_post_holm"]) \
+            if "p_pre_vs_post_holm" in s.columns else float("nan")
         lines.append(f"| {row_label} | {cells[0]} | {cells[1]} | "
-                     f"{_p(float(s.loc[_PRE, 'p_pre_vs_post']))} |")
-    n_sig = n_tests = 0
+                     f"{_p(float(s.loc[_PRE, 'p_pre_vs_post']), bold=False)} | {_p(holm)} |")
+    n_sig = n_tests = n_holm = 0
+    holm_known = True                             # False: a table predates the column
     for s in summaries.values():                  # one summary per metric family
         if s is not None:
             k, n = count_significant(s)
             n_sig, n_tests = n_sig + k, n_tests + n
-    lines += ["", f"Wilcoxon signed-rank, {post.lower()} vs {pre.lower()} paired by fly, "
-              f"uncorrected. Across every odor and measure, **{n_sig} of {n_tests}** "
-              f"per-odor comparisons have p < 0.05; about {0.05 * n_tests:.0f} would by "
-              "chance."]
+            if "p_pre_vs_post_holm" in s.columns:
+                n_holm += count_significant(s, column="p_pre_vs_post_holm")[0]
+            else:
+                holm_known = False
+    lines += ["", f"Exact Wilcoxon signed-rank (ties handled), {post.lower()} vs "
+              f"{pre.lower()} paired by fly; all exploratory. The Holm p is adjusted "
+              "across the odors of that measure. Across every odor and measure, "
+              f"**{n_sig} of {n_tests}** per-odor comparisons have raw p < 0.05 "
+              f"(**{n_holm if holm_known else '–'}** after Holm within measure); about "
+              f"{0.05 * n_tests:.0f} raw would by chance.", "", NO_NULL_NOTE]
 
     lines += ["", "## 2. How each measure tracks the model score (Spearman ρ, per trial)", "",
               f"| Measure | {pre} | {post} | Combined |", "|---|---|---|---|"]
@@ -461,9 +493,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--flagged-flies-csv", type=Path, default=FLAGGED)
     p.add_argument("--exclude-folder", action="append", default=[],
                    help="leave this folder out by exact name (repeatable)")
-    p.add_argument("--rate-test", choices=("fisher", "mcnemar"), default="fisher",
-                   help="pre-vs-post response-rate test on the score figures; mcnemar "
-                        "pairs each fly with itself, as the pipeline's figures do")
+    p.add_argument("--rate-test", choices=("mcnemar",), default="mcnemar",
+                   help="pre-vs-post response-rate test on the score figures: McNemar, "
+                        "which pairs each fly with itself (Fisher is not offered: the "
+                        "same flies are in both phases)")
     return p
 
 

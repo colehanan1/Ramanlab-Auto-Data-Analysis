@@ -151,6 +151,130 @@ def test_nothing_paired_is_nothing_to_draw(cohort, tmp_path):
     assert not list(out.glob("*.png"))
 
 
+# ── --with-median: median twins and the mean-vs-median comparison ─────────
+
+
+def _skewed_traces():
+    """Five flies, one group; four rest at 0 and one outlier jumps to 100 from 30 s."""
+    traces = {("b1", i, "Hexanol"): _trace(rest=0.0, during=(100.0 if i == 5 else 2.0 * i))
+              for i in range(1, 6)}
+    return traces, {k: True for k in traces}
+
+
+def test_the_median_curve_is_nanmedian_over_the_same_per_fly_traces():
+    traces, responding = _skewed_traces()
+    traces[("b1", 2, "Hexanol")] = traces[("b1", 2, "Hexanol")][:3000]   # a shorter fly
+    bands = rmt.group_bands(traces, responding, max_frames=N, stat="median")
+    centre, lo, hi, n = bands["responding"]
+    stack = np.vstack([rmt._fit(v, N, np.nan) for v in traces.values()])
+    assert n == 5
+    assert np.allclose(centre, np.nanmedian(stack, axis=0), equal_nan=True)
+    assert np.allclose(lo, np.nanpercentile(stack, 25, axis=0), equal_nan=True)
+    assert np.allclose(hi, np.nanpercentile(stack, 75, axis=0), equal_nan=True)
+    assert bands["not responding"][3] == 0 and np.isnan(bands["not responding"][0]).all()
+
+
+def test_median_differs_from_mean_when_one_fly_is_an_outlier():
+    traces, responding = _skewed_traces()
+    mean = rmt.group_bands(traces, responding, max_frames=N, stat="mean")["responding"]
+    med = rmt.group_bands(traces, responding, max_frames=N, stat="median")["responding"]
+    t = 45 * int(FPS)
+    assert med[0][t] == pytest.approx(6.0)                  # 2,4,6,8,100 -> 6
+    assert mean[0][t] == pytest.approx(24.0)
+    assert (med[2][t], med[1][t]) == (pytest.approx(8.0), pytest.approx(4.0))   # IQR 4..8
+    curves = rmt.group_curves(traces, responding, max_frames=N)["responding"]
+    assert np.allclose(mean[0], curves[0]) and np.allclose(mean[1], curves[0] - curves[1])
+    assert np.allclose(mean[2], curves[0] + curves[1])      # mean band is mean +/- SEM
+
+
+def test_mean_vs_median_gives_each_phase_its_own_panel(tmp_path, monkeypatch):
+    """User 2026-11-13: with pre and post on one axis the dashed medians hid under the
+    other phase's lines; each panel now holds one phase: its mean solid, median black dashed."""
+    from matplotlib.figure import Figure
+
+    figs = []
+    monkeypatch.setattr(Figure, "savefig", lambda self, *a, **k: figs.append(self))
+    traces, responding = _skewed_traces()
+    mean = {k: rmt.group_bands(traces, responding, max_frames=N, stat="mean") for k in ("pre", "post")}
+    med = {k: rmt.group_bands(traces, responding, max_frames=N, stat="median") for k in ("pre", "post")}
+    kw = dict(odor="Hexanol", sensitized=True, dataset="Hex-Sensitivity-1-0.1", label="",
+              labels={"pre": "Pre-exposure", "post": "Post-exposure"}, fps=FPS,
+              odor_on_s=30.0, odor_off_s=60.0, threshold=2)
+    rmt.plot_odor(tmp_path / "x.png", mean, stat="both", other=med, **kw)
+    rmt.plot_all(tmp_path / "y.png", {"Hexanol": mean}, ["Hexanol"], "Hexanol", stat="both",
+                 others={"Hexanol": med}, **{k: v for k, v in kw.items()
+                                             if k not in ("odor", "sensitized")})
+    for fig, n_axes in zip(figs, (4, 4)):
+        assert len(fig.axes) == n_axes
+        for ax in fig.axes:
+            lines = [ln for ln in ax.get_lines() if len(ln.get_xdata()) > 2]
+            solid = [ln for ln in lines if ln.get_linestyle() == "-"]
+            dashed = [ln for ln in lines if ln.get_linestyle() == "--"]
+            if not solid:                      # an empty group (no flies) draws nothing
+                continue
+            assert len(solid) == 1 and len(dashed) == 1
+            assert dashed[0].get_color() == rmt.INK
+
+
+def test_y_range_covers_the_iqr_band():
+    band = {"pre": {"responding": (np.zeros(10), np.full(10, -50.0), np.full(10, 80.0), 3)}}
+    lo, hi = rmt.y_range(band)
+    assert lo < -50.0 and hi > 80.0
+
+
+SIBLINGS = ("_median", "_mean_vs_median")
+
+
+def test_without_the_flag_no_median_files_are_written(cohort, tmp_path):
+    out = tmp_path / "out"
+    _main(cohort, out)
+    assert not [f for f in out.iterdir() if "median" in f.name]
+    cols = pd.read_csv(out / "responder_mean_traces_summary.csv").columns
+    assert not [c for c in cols if "median" in c]
+
+
+def test_with_the_flag_each_figure_gets_both_siblings(cohort, tmp_path):
+    out = tmp_path / "out"
+    _main(cohort, out, "--with-median")
+    for stem in ("Hexanol_responder_mean_traces", "Citral_responder_mean_traces",
+                 "All_odors_responder_mean_traces"):
+        assert (out / f"{stem}.png").is_file()
+        for sib in SIBLINGS:
+            assert (out / f"{stem}{sib}.png").is_file()
+
+
+def test_the_flag_leaves_the_mean_figures_and_summary_columns_alone(cohort, tmp_path):
+    a, b = tmp_path / "a", tmp_path / "b"
+    _main(cohort, a)
+    _main(cohort, b, "--with-median")
+    base = pd.read_csv(a / "responder_mean_traces_summary.csv")
+    both = pd.read_csv(b / "responder_mean_traces_summary.csv")
+    pd.testing.assert_frame_equal(both[list(base.columns)], base)
+    assert list(both.columns[:len(base.columns)]) == list(base.columns)
+    assert list(both.columns[len(base.columns):]) == [
+        "median_before", "median_during", "median_after", "median_peak_during"]
+    assert (a / "Hexanol_responder_mean_traces.png").read_bytes() == \
+        (b / "Hexanol_responder_mean_traces.png").read_bytes()
+
+
+def test_summary_median_columns_are_the_window_average_of_the_median_curve(cohort, tmp_path):
+    out = tmp_path / "out"
+    _main(cohort, out, "--with-median")
+    s = pd.read_csv(out / "responder_mean_traces_summary.csv")
+    row = s[(s["odor"] == "Hexanol") & (s["phase"] == "Post-exposure")
+            & (s["group"] == "responding")].iloc[0]
+    assert row["median_during"] == pytest.approx(25.0)      # median of 20 and 30
+    assert row["median_before"] == pytest.approx(0.0)
+
+
+def test_a_run_without_the_flag_clears_the_median_files_of_an_earlier_run(cohort, tmp_path):
+    out = tmp_path / "out"
+    _main(cohort, out, "--with-median")
+    _main(cohort, out)
+    assert not [f for f in out.iterdir() if "median" in f.name]
+    assert (out / "Hexanol_responder_mean_traces.png").is_file()
+
+
 # ── wired into the window figure set ──────────────────────────────────────
 
 

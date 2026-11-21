@@ -354,7 +354,8 @@ def _build_day(out: Path, group: spc.Group, log, *, pubfig: bool) -> None:
 
     _run([PY, "scripts/analysis/pretest_vs_test_comparison.py", "--predictions-csv", p["predictions"],
           "--out-root", out / "Pre-vs-Post-Sensitivity", "--binary-threshold", 2,
-          "--rate-test", "fisher", "--flagged-flies-csv", FLAGGED], log)
+          "--rate-test", "mcnemar", "--p-adjust", "holm",
+          "--flagged-flies-csv", FLAGGED], log)
     if pubfig:
         summary = out / "Pre-vs-Post-Sensitivity" / ds / f"{ds}_summary.csv"
         if summary.exists():
@@ -456,15 +457,34 @@ The exact command is the first line of `_build_log.txt`.
 
 {unit_dirs_line}
 - `{out_dir}/`: the direct comparison (score: Wilcoxon paired within fly / Mann-Whitney
-  between {unit_lower}s; response %: Fisher's exact throughout). CSVs: `summary_by_group`,
+  between {unit_lower}s; response %: exact McNemar paired within fly /
+  Fisher's exact between {unit_lower}s). CSVs: `summary_by_group`,
   `stats_between_groups`, `paired_scores_per_fly`{omnibus}.
 
 Colors: blue = {pre}, orange = {post}; lighter = earlier {unit_lower}
 ({order}).
-n counts flies; p-values are uncorrected. Trial labels since 2026-10-01 carry the vial
+{p_note} Trial labels since 2026-10-01 carry the vial
 concentration (`<Odor>-<conc>`); inputs are filtered copies with that suffix stripped so
 odor names and the CS+ resolve.
 """
+
+
+def p_value_note(unit_lower: str, *, per_unit: bool, pubfig: bool) -> str:
+    """The README's p-value sentence: which figures are Holm-adjusted and which are not.
+
+    The comparison folder is uncorrected. Only a ``--per-unit`` build has each
+    unit's own pre-vs-post bar figures (``--p-adjust holm``), and the ``--pubfig``
+    score bars redraw that folder's RAW ``p_score``.
+    """
+    text = "n counts flies; the comparison's p-values are uncorrected."
+    if per_unit:
+        text += (f" Each {unit_lower}'s `Pre-vs-Post-Sensitivity` bar figures draw "
+                 "Holm-adjusted stars (across the odors with a test, score and rate "
+                 "separately; exploratory); its `_summary.csv` keeps the raw and the "
+                 "Holm p.")
+        if pubfig:
+            text += " The publication score bars (`*_score_bars_pub`) draw the raw, uncorrected p."
+    return text
 
 
 def run_dataset(dataset: str, *, out_root: Path, explicit: Sequence[str] | None,
@@ -521,7 +541,8 @@ def run_dataset(dataset: str, *, out_root: Path, explicit: Sequence[str] | None,
             "own figure set (traces, rasters, reaction matrix, ...)."),
         out_dir=out_dir_name(*chosen),
         omnibus=", `stats_omnibus` (all groups at once)" if len(chosen) > 2 else "",
-        order=" → ".join(u.label for u in chosen)))
+        order=" → ".join(u.label for u in chosen),
+        p_note=p_value_note(unit_word.lower(), per_unit=per_unit, pubfig=pubfig)))
     text = (out / "_build_log.txt").read_text().splitlines()
     ok = sum(1 for line in text if "[exit 0]" in line)
     bad = sum(1 for line in text if "[exit " in line) - ok

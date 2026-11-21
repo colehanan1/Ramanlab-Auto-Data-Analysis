@@ -530,7 +530,7 @@ def test_flagging_lowers_the_reported_n(tmp_path):
     assert set(trimmed["n_flies"]) == {2}
 
 
-# ── response-rate test: McNemar by default, Fisher's exact on request ──────
+# ── response-rate test: paired McNemar only (Fisher's exact is refused) ────
 
 
 def _rate_preds(tmp_path):
@@ -551,18 +551,12 @@ def test_rate_test_defaults_to_mcnemar(tmp_path):
     assert summary["p_rate"].iloc[0] == pytest.approx(expected)
 
 
-def test_fisher_rate_test_compares_the_two_phases_as_a_2x2_table(tmp_path):
-    from scipy.stats import fisher_exact
-
+def test_fisher_rate_test_is_refused_because_pre_and_post_are_the_same_flies(tmp_path):
     paired = pvt.load_paired_scores(_rate_preds(tmp_path))
-    summary = pvt.per_odor_summary(paired, binary_threshold=2, rate_test="fisher")
-    # pre 1/6 responders, post 5/6.
-    expected = fisher_exact([[1, 5], [5, 1]]).pvalue
-    assert summary["p_rate"].tolist() == pytest.approx([expected] * 3)
-
-
-def test_fisher_p_is_none_on_empty_input():
-    assert pvt.fisher_p([], []) is None
+    with pytest.raises(ValueError, match="same flies"):
+        pvt.per_odor_summary(paired, binary_threshold=2, rate_test="fisher")
+    assert not hasattr(pvt, "fisher_p")
+    assert list(pvt.RATE_TESTS) == ["mcnemar"]
 
 
 def test_unknown_rate_test_is_rejected(tmp_path):
@@ -570,20 +564,146 @@ def test_unknown_rate_test_is_rejected(tmp_path):
         pvt.per_odor_summary(pvt.load_paired_scores(_simple(tmp_path)), rate_test="chi2")
 
 
-def test_rate_test_flag_defaults_to_mcnemar_and_accepts_fisher():
+def test_rate_test_flag_defaults_to_mcnemar_and_refuses_fisher():
     base = ["--predictions-csv", "p.csv", "--out-root", "o"]
     assert pvt._parse_args(base).rate_test == "mcnemar"
-    assert pvt._parse_args(base + ["--rate-test", "fisher"]).rate_test == "fisher"
+    with pytest.raises(SystemExit):
+        pvt._parse_args(base + ["--rate-test", "fisher"])
 
 
-def test_render_cohort_with_fisher_writes_the_same_set(tmp_path):
+def test_wilcoxon_p_is_tie_aware():
+    # scipy's exact Wilcoxon ignores ties and reads 0.047 here; truly 0.0625
+    pre = np.zeros(7)
+    post = np.array([-2, -2, -2, -2, -1, -1, 1], dtype=float)
+    assert pvt.wilcoxon_p(pre, post) == pytest.approx(0.0625)
+
+
+def test_mcnemar_p_delegates_to_the_shared_helper():
+    from fbpipe.analysis import fly_stats as fs
+    pre = [True, False, False, False, False, False, True]
+    post = [False, True, True, True, True, True, True]
+    assert pvt.mcnemar_p(pre, post) == fs.mcnemar_exact_p(pre, post)
+    assert pvt.mcnemar_p([True, False], [True, False]) is None
+
+
+def test_summary_carries_holm_columns_across_odors(tmp_path):
+    from fbpipe.analysis import fly_stats as fs
+    summary = pvt.per_odor_summary(pvt.load_paired_scores(_rate_preds(tmp_path)),
+                                   binary_threshold=2)
+    assert {"p_score_holm", "p_rate_holm"} <= set(summary.columns)
+    expect = fs.holm_adjust(list(summary["p_rate"]))
+    np.testing.assert_allclose(summary["p_rate_holm"].to_numpy(float), expect)
+    # raw column untouched
+    assert (summary["p_rate_holm"].dropna() >= summary["p_rate"].dropna()).all()
+
+
+def test_p_adjust_flag_defaults_to_none_and_accepts_holm():
+    base = ["--predictions-csv", "p.csv", "--out-root", "o"]
+    assert pvt._parse_args(base).p_adjust == "none"
+    assert pvt._parse_args(base + ["--p-adjust", "holm"]).p_adjust == "holm"
+    with pytest.raises(SystemExit):
+        pvt._parse_args(base + ["--p-adjust", "bonferroni"])
+
+
+def test_holm_caption_and_figures(tmp_path):
+    figs = tmp_path / "figs"
     written = pvt.render_cohort(
         pvt.load_paired_scores(_rate_preds(tmp_path)),
-        cohort="Hex-Sensitivity-24-0.1", out_dir=tmp_path / "figs", rate_test="fisher",
+        cohort="Hex-Sensitivity-24-0.1", out_dir=figs, p_adjust="holm",
     )
     stems = " ".join(p.stem for p in written)
     for expected in ("score_bars", "rate_bars", "trained_odor"):
         assert expected in stems, expected
+    assert "Holm-adjusted across 3 odors (exploratory)" == pvt.holm_note(3)
+    with pytest.raises(ValueError):
+        pvt.render_cohort(pvt.load_paired_scores(_rate_preds(tmp_path)),
+                          cohort="X", out_dir=figs, p_adjust="bonf")
+
+
+@pytest.fixture
+def figure_calls(monkeypatch):
+    """Each figure builder's kwargs, in call order; nothing is drawn."""
+    seen = []
+
+    def record(name):
+        def fake(*args, **kwargs):
+            seen.append((name, kwargs))
+            path = kwargs.get("path")
+            if path is not None:
+                path.parent.mkdir(parents=True, exist_ok=True)
+            return path
+        return fake
+
+    for name in ("_grouped_bars", "_spotlight", "_slopes", "_heatmap"):
+        monkeypatch.setattr(pvt, name, record(name))
+    return seen
+
+
+def _calls(seen, name):
+    return [kwargs for n, kwargs in seen if n == name]
+
+
+def _uneven_testability():
+    """3 odors x 6 flies. A: every fly 0 -> 3, so both tests run. B: only fly 1
+    changes, so Wilcoxon cannot run (1 non-zero pair < 6) but McNemar can (one
+    discordant fly). C: nobody changes, so neither test runs."""
+    rows = []
+    for fly in range(1, 7):
+        scores = {"A": (0, 3), "B": (0, 3) if fly == 1 else (0, 0), "C": (1, 1)}
+        for odor, (pre, post) in scores.items():
+            rows.append({"dataset_canon": "Hex-Sensitivity-24-0.1", "fly": "b1",
+                         "fly_number": str(fly), "odor": odor,
+                         "score_pre": pre, "score_post": post})
+    return pd.DataFrame(rows)
+
+
+def test_holm_stars_come_from_the_adjusted_columns(figure_calls, tmp_path):
+    pvt.render_cohort(pvt.load_paired_scores(_rate_preds(tmp_path)),
+                      cohort="Hex-Sensitivity-24-0.1", out_dir=tmp_path / "figs",
+                      p_adjust="holm")
+    bars = _calls(figure_calls, "_grouped_bars")
+    assert [kw["p_key"] for kw in bars] == ["p_score_holm", "p_rate_holm"]
+    assert _calls(figure_calls, "_spotlight")[0]["p_suffix"] == "_holm"
+
+
+def test_raw_stars_and_no_holm_caption_by_default(figure_calls, tmp_path):
+    pvt.render_cohort(pvt.load_paired_scores(_rate_preds(tmp_path)),
+                      cohort="Hex-Sensitivity-24-0.1", out_dir=tmp_path / "figs")
+    bars = _calls(figure_calls, "_grouped_bars")
+    assert [kw["p_key"] for kw in bars] == ["p_score", "p_rate"]
+    assert _calls(figure_calls, "_spotlight")[0].get("p_suffix", "") == ""
+    assert not any("Holm" in kw.get("test_note", "") for _name, kw in figure_calls)
+
+
+def test_holm_caption_counts_the_odors_each_test_actually_ran_on(figure_calls, tmp_path):
+    """Holm's family is the odors WITH a p-value: an odor whose test cannot run
+    adds no hypothesis, so the caption must not claim every odor drawn."""
+    paired = _uneven_testability()
+    summary = pvt.per_odor_summary(paired)
+    assert int(summary["p_score"].notna().sum()) == 1
+    assert int(summary["p_rate"].notna().sum()) == 2
+    pvt.render_cohort(paired, cohort="Hex-Sensitivity-24-0.1", out_dir=tmp_path / "figs",
+                      p_adjust="holm")
+    notes = {kw["p_key"]: kw["test_note"] for kw in _calls(figure_calls, "_grouped_bars")}
+    assert "Holm-adjusted across 1 odor (exploratory)" in notes["p_score_holm"]
+    assert "Holm-adjusted across 2 odors (exploratory)" in notes["p_rate_holm"]
+    spot = _calls(figure_calls, "_spotlight")[0]["test_note"]
+    assert "Holm-adjusted across 1 odor (score) / 2 odors (rate) (exploratory)" in spot
+    assert not any("3 odors" in kw.get("test_note", "") for _name, kw in figure_calls)
+
+
+def test_holm_note_wording():
+    assert pvt.holm_note(3) == "Holm-adjusted across 3 odors (exploratory)"
+    assert pvt.holm_note(1) == "Holm-adjusted across 1 odor (exploratory)"
+    assert pvt.holm_note(4, 4) == "Holm-adjusted across 4 odors (exploratory)"
+    assert pvt.holm_note(1, 2) == (
+        "Holm-adjusted across 1 odor (score) / 2 odors (rate) (exploratory)")
+
+
+def test_render_cohort_refuses_fisher_even_with_nothing_to_draw(tmp_path):
+    empty = pvt.load_paired_scores(_simple(tmp_path)).iloc[0:0]
+    with pytest.raises(ValueError, match="same flies"):
+        pvt.render_cohort(empty, cohort="X", out_dir=tmp_path / "figs", rate_test="fisher")
 
 
 # ── figure wording: sensitization vs conditioning ─────────────────────────
