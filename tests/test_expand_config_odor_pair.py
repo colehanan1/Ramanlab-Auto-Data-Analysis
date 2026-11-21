@@ -33,9 +33,10 @@ def _cfg(order="iaa_first", **exp):
     return {"format": "v2", "experiment": e}
 
 
-def _trials(cycle):
+def _trials(cycle, light=False):
     """Split a cycle's steps into trials: list of dicts with start index, steps,
-    and the gap step that follows (or None)."""
+    and the gap step that follows (or None). The trailing light-only probe
+    (odor_label LightOnly) is left out unless ``light=True``."""
     steps = cycle["steps"]
     out, i = [], 0
     while i < len(steps):
@@ -44,12 +45,20 @@ def _trials(cycle):
         while steps[j]["name"] != "Stop Recording":
             j += 1
         gap = None
-        if j + 1 < len(steps):
+        if j + 1 < len(steps) and steps[j + 1]["name"] != "Start Recording":
             gap = steps[j + 1]
             assert gap["name"] == "Inter-Trial Gap"
         out.append({"steps": steps[i:j + 1], "gap": gap, "start": i})
         i = j + (2 if gap else 1)
+    if not light:
+        out = [t for t in out if t["steps"][0].get("odor_label") != "LightOnly"]
     return out
+
+
+def _probe(cycle):
+    """The light-only trial(s) of a cycle."""
+    return [t for t in _trials(cycle, light=True)
+            if t["steps"][0].get("odor_label") == "LightOnly"]
 
 
 def _odor_steps(trial):
@@ -133,7 +142,10 @@ def test_gap_durations():
 def test_no_trailing_gap_and_session_ends_with_stop():
     _, _, pair = _expand(seed=3)
     assert pair["steps"][-1]["name"] == "Stop Recording"
+    # user 2026-11-17: no wait before the light probe -- test 16 runs straight into it
     assert _trials(pair)[-1]["gap"] is None
+    assert _trials(pair, light=True)[-1]["gap"] is None
+    assert _trials(pair, light=True)[-1]["steps"][0]["odor_label"] == "LightOnly"
 
 
 def test_every_gap_flagged_continuous_gap_and_only_those():
@@ -176,11 +188,32 @@ def test_onset_to_onset_300_and_1800_by_summing():
     assert d[8:] == [300] * 15
 
 
+def test_light_probe_starts_right_after_test_16():
+    _, pre, pair = _expand(seed=4)
+    last = _trials(pair)[-1]
+    stop = last["start"] + len(last["steps"]) - 1
+    assert pair["steps"][stop]["name"] == "Stop Recording"
+    assert pair["steps"][stop + 1] == {"name": "Start Recording", "duration": 0,
+                                       "odor_label": "LightOnly"}
+    t, last_odor_onset, light_onset, first = 0.0, None, None, True
+    for s in pre["steps"] + pair["steps"]:
+        if s["name"] == "Start Recording":
+            first = True
+        if s.get("actions") and first:
+            last_odor_onset, first = t, False
+        if s.get("light_schedule") is not None:
+            light_onset = t
+        t += s["duration"]
+    # rest of test 16 (81 - 30 s) + the probe's 10 s baseline
+    assert light_onset - last_odor_onset == 61
+
+
 def test_session_span():
     _, pre, pair = _expand(seed=4)
     total = sum(s["duration"] for s in pre["steps"] + pair["steps"])
-    # 30 s before the first onset ... last onset at 8400 s, + 51 s
-    assert total == 30 + 8400 + 51
+    # 30 s before the first onset ... last pair onset at 8400 s, + 51 s, then
+    # the 30 s light probe (10 s + 10 s light + 10 s) with no gap
+    assert total == 30 + 8400 + 51 + 30
 
 
 # ── ordering ──────────────────────────────────────────────────────────
@@ -255,12 +288,62 @@ def test_pre_labels_single_odor():
     assert _trials(pre)[0]["steps"][0]["odor_label"] == "ParaffinOil"
 
 
-def test_no_light_anywhere():
-    r, _, _ = _expand(seed=9)
+def _has_light(s):
+    return (any(k.startswith("light") for k in s)
+            or any(a.get("device") == "light" for a in s.get("actions", [])))
+
+
+def test_light_only_in_the_final_probe():
+    r, pre, pair = _expand(seed=9)
     for c in r["cycles"]:
-        for s in c["steps"]:
-            assert not any(k.startswith("light") for k in s), s
-            assert all(a.get("device") != "light" for a in s.get("actions", []))
+        for t in _trials(c):
+            assert not any(_has_light(s) for s in t["steps"]), t
+    assert not any(_has_light(s) for s in pre["steps"])
+    lit = [s for s in pair["steps"] if _has_light(s)]
+    assert len(lit) == 1 and lit[0] in _probe(pair)[0]["steps"]
+
+
+def test_light_probe_is_last_recording_of_cycle_7():
+    # one recording in the pair cycle -> the rig tags it testing_<n_pairs+1>_LightOnly
+    # (cycle 8 would tag it testing_9 and collide with pair 9)
+    r, pre, pair = _expand(seed=9)
+    assert [c["cycle"] for c in r["cycles"]] == [5, 7]
+    allt = _trials(pair, light=True)
+    assert len(allt) == 17 and len(_probe(pair)) == 1
+    assert allt[-1] is not None and allt[-1]["steps"][0]["odor_label"] == "LightOnly"
+    assert not _probe(pre)
+
+
+def test_light_probe_shape_10_10_10_solid_no_odor():
+    _, _, pair = _expand(seed=9)
+    t = _probe(pair)[0]
+    assert [s["name"] for s in t["steps"]] == [
+        "Start Recording", "Baseline Period", "Testing Light Only (No Odor)",
+        "Post-Stimulus Period", "Stop Recording"]
+    # user 2026-11-17: "10s pre 10s light 10 post"
+    assert _clip_len(t) == 30
+    light = t["steps"][2]
+    assert light["duration"] == 10 and light["actions"] == []
+    assert light["light_schedule"] == [{"start": 0, "end": 10}]
+    assert light["light_hertz"] == 1.0 and light["light_duty"] == 100.0
+    assert t["steps"][1]["duration"] == 10 and t["steps"][3]["duration"] == 10
+    assert not _odor_steps(t)
+
+
+def test_light_probe_duration_override_and_opt_out():
+    _, _, pair = _expand(seed=9, light_only={"duration": 25})
+    assert _probe(pair)[0]["steps"][2]["duration"] == 25
+    _, _, pair = _expand(seed=9, light_only=False)
+    assert not _probe(pair)
+    assert pair["steps"][-1]["name"] == "Stop Recording"
+    assert _trials(pair)[-1]["gap"] is None
+    assert not any(_has_light(s) for s in pair["steps"])
+
+
+def test_light_probe_fires_in_control_mode():
+    r = expand_config(_cfg(seed=9), control=True)
+    pair = {c["cycle"]: c for c in r["cycles"]}[7]
+    assert _probe(pair)
 
 
 def test_tags_pretest_testing():
@@ -295,7 +378,8 @@ def test_smoke_overrides():
     assert pre_t[0]["gap"]["duration"] == 120 - 70
     assert pre_t[1]["gap"]["duration"] == 240 - 70
     assert pair_t[0]["gap"]["duration"] == 120 - 81
-    assert pair_t[1]["gap"] is None
+    assert pair_t[1]["gap"] is None                      # straight into the probe
+    assert len(_probe(pair)) == 1
 
 
 def test_spacing_shorter_than_clip_rejected():
@@ -334,6 +418,8 @@ def test_real_configs(name):
     assert r["continuous"]["bitrate"] == 1000000
     cyc = {c["cycle"]: c for c in r["cycles"]}
     n_pre, n_pair = len(_trials(cyc[5])), len(_trials(cyc[7]))
+    probe = _probe(cyc[7])
+    assert len(probe) == 1 and probe[0]["steps"][2]["duration"] == 10
     if name == "config_v2_pair_smoke_A.yaml":
         assert (n_pre, n_pair) == (2, 2)
         assert _trials(cyc[5])[0]["gap"]["duration"] == 50

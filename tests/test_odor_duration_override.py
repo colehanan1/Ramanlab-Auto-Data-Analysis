@@ -216,12 +216,12 @@ def test_pretest_odor_duration_beats_odor_duration():
 
 
 @needs_picode
-def test_a_10s_config_light_on_t4_to_odor_off():
-    """config_v2_A_10s.yaml: 10 s odor in training + post-test, light t=4->10."""
+def test_a_10s_config_light_on_t3_to_odor_off():
+    """config_v2_A_10s.yaml: 10 s odor in training + post-test, light t=3->10."""
     cyc = _by_num(expand_config(_load("config_v2_A_10s.yaml"), control=False))
     train = [s for s in cyc[1]["steps"] if s["name"] == "Odor + Light Pattern"]
     assert train and all(s["duration"] == 10 for s in train)
-    assert all(s["light_schedule"] == [{"start": 4, "end": 10}] for s in train)
+    assert all(s["light_schedule"] == [{"start": 3, "end": 10}] for s in train)
     test = _odor_steps(cyc[2])
     assert test and {s["duration"] for s in test} == {10}
     assert not any("light_schedule" in s for s in test)
