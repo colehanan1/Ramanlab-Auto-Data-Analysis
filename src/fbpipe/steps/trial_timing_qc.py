@@ -15,6 +15,11 @@ Reads each live trial's rig per-frame log (``output_<batch>_<cycle>_<odor>_<ts>.
   (first valve-open frame -> the frame after the last) by more than
   ``WINDOW_TOLERANCE_S`` at either end. That is a valve pattern the parser does
   not understand, as the paraffin master valve's 50 ms clicks were on 2026-11-05.
+  **Odor-pair trials** (``..._testing_<N>_<odor1>_then_<odor2>_...``, 2026-11-13:
+  odor 1 for 10 s, 1 s nothing, odor 2 for 10 s) are compared against the FIRST
+  odor only, which is the window the pipeline scores, and are flagged when the
+  second odor is missing, does not start ~1 s after the first, or runs a
+  different length.
 
 Report-only -- nothing is excluded. Every trial is upserted into
 ``<report_dir>/trial_timing_qc.csv``; flagged trials are rewritten into
@@ -37,14 +42,15 @@ import pandas as pd
 from ..config import Settings, get_main_directories
 from ..utils.frozen_folders import iter_live_batch_dirs
 from ..utils.notify import ntfy_notify
-from ..utils.trial_metadata import parse_active_ofm
+from ..utils.odor_pairs import pair_deliveries
+from ..utils.trial_metadata import parse_active_ofm, parse_paraffin_window_from_sensors
 
 DEFAULT_REPORT_DIR = Path(
     "/home/ramanlab/Documents/cole/Results/New-Opto-Fly-Figures/Trial-Timing-QC"
 )
 REPORT_FILENAME = "trial_timing_qc.csv"
 FLAGGED_FILENAME = "trial_timing_qc_flagged.csv"
-QC_VERSION = 1
+QC_VERSION = 3   # 2: odor-pair trials compared against their first odor; 3: paraffin windows cross-checked against the sensors log
 #: A camera-clock gap longer than this between two frames is a stall (frames
 #: are 25 ms apart at 40 fps; the paraffin valve clicks are 50 ms).
 STALL_GAP_S = 0.5
@@ -53,7 +59,10 @@ WINDOW_TOLERANCE_S = 1.0
 NOMINAL_FPS = 40.0
 NTFY_MAX_LINES = 20
 
-_CYCLE_RE = re.compile(r"((?:pretest|training|testing)_\d+_[^_]+)", re.IGNORECASE)
+_CYCLE_RE = re.compile(r"((?:pretest|training|testing)_\d+_[^_]+(?:_then_[^_]+)?)",
+                       re.IGNORECASE)
+#: The gap between the two odors of a pair trial (both valves closed).
+PAIR_GAP_S = 1.0
 
 REPORT_COLUMNS = (
     "dataset", "batch", "trial", "frames_csv", "csv_mtime", "qc_version", "status",
@@ -68,8 +77,14 @@ FIX_STALL_OUTSIDE = ("The odor window is intact (the pipeline keeps the valve's 
                      "trace after the stall is compressed in time. Usually keep; check the score.")
 FIX_CLOCK = ("The camera timestamps in this log are unusable: check the video's length; no time "
              "read from this log can be trusted.")
+FIX_PAIR = ("The pair's second odor did not run as planned (1 s after the first, same "
+            "length): check the rig's sensors CSV and video; the first-odor score is unaffected.")
 FIX_WINDOW = ("A valve pattern fbpipe.utils.trial_metadata.parse_active_ofm does not understand: "
               "teach it the pattern, bump _CACHE_SCHEMA_VERSION there, and re-run the pipeline.")
+FIX_PARAFFIN_SENSORS = ("The frame log missed a paraffin master-valve click (the rig labels a frame from "
+                        "one GPIO read, so a 50 ms click can fall between reads). The pipeline takes "
+                        "this window from the sensors log's OFM_P_ON/OFF; check that the odor window "
+                        "it reads is the sensors-log one.")
 
 
 def _trial_name(path: Path) -> str:
@@ -86,6 +101,8 @@ def _blank(path: Path) -> dict:
     except OSError:
         pass
     return row
+
+
 
 
 def assess_frames_csv(path: Path | str) -> dict:
@@ -125,6 +142,26 @@ def assess_frames_csv(path: Path | str) -> dict:
         first = int(np.argmax(on))
         last = len(on) - 1 - int(np.argmax(on[::-1]))
         valve = (float(t[first]), float(t[min(last + 1, len(t) - 1)]))
+        if "_then_" in path.name.lower():
+            odors = pair_deliveries(states, on)
+            a1, b1 = odors[0]
+            valve = (float(t[a1]), float(t[min(b1, len(t) - 1)]))
+            if len(odors) < 2:
+                reasons.append("odor-pair trial: second odor never delivered")
+                fixes.append(FIX_PAIR)
+            else:
+                a2, b2 = odors[1]
+                gap = float(t[a2]) - valve[1]
+                d1 = valve[1] - valve[0]
+                d2 = float(t[min(b2, len(t) - 1)]) - float(t[a2])
+                if abs(gap - PAIR_GAP_S) > WINDOW_TOLERANCE_S or abs(d2 - d1) > WINDOW_TOLERANCE_S:
+                    reasons.append(f"odor-pair trial: second odor {float(t[a2]):.2f}-"
+                                   f"{float(t[a2]) + d2:.2f} s ({gap:.2f} s after the first, "
+                                   f"{d2:.2f} s long; expected {PAIR_GAP_S:g} s after, {d1:.2f} s)")
+                    fixes.append(FIX_PAIR)
+                if len(odors) > 2:
+                    reasons.append(f"odor-pair trial: {len(odors)} odor deliveries, expected 2")
+                    fixes.append(FIX_PAIR)
         row.update(valve_on_s=round(valve[0], 3), valve_off_s=round(valve[1], 3))
         frame_t = dict(zip(df["FrameNumber"].astype(int), t))
         on_f, off_f, _ = parse_active_ofm(path)
@@ -132,8 +169,30 @@ def assess_frames_csv(path: Path | str) -> dict:
         p_off = frame_t.get(int(off_f)) if off_f is not None else float(t[-1])
         row.update(pipeline_on_s=None if p_on is None else round(float(p_on), 3),
                    pipeline_off_s=None if p_off is None else round(float(p_off), 3))
+        sens = None
+        if not backwards.size and states[on].iloc[0].upper() == "OFM_P" and "_then_" not in path.name.lower():
+            sens = parse_paraffin_window_from_sensors(path)
+            if sens is not None and sens[1] is None:
+                sens = None
         if backwards.size:
             pass  # the clock itself is broken; the reason above says so
+        elif sens is not None:
+            # Paraffin: the sensors log logs both master-valve clicks, the
+            # frame log (one GPIO read per frame) can miss one.
+            s_on, s_off = sens
+            shown = "none" if p_on is None else f"{p_on:.2f}-{p_off:.2f} s"
+            if (p_on is None or p_off is None
+                    or abs(p_on - s_on) > WINDOW_TOLERANCE_S
+                    or abs(p_off - s_off) > WINDOW_TOLERANCE_S):
+                reasons.append(f"pipeline paraffin window {shown} != sensors log "
+                               f"{s_on:.2f}-{s_off:.2f} s")
+                fixes.append(FIX_WINDOW)
+            elif (abs(valve[0] - s_on) > WINDOW_TOLERANCE_S
+                    or abs(valve[1] - s_off) > WINDOW_TOLERANCE_S):
+                reasons.append(f"frame log shows paraffin valve {valve[0]:.2f}-{valve[1]:.2f} s "
+                               f"but the sensors log has {s_on:.2f}-{s_off:.2f} s (missed click; "
+                               "window taken from the sensors log)")
+                fixes.append(FIX_PARAFFIN_SENSORS)
         elif (p_on is None or p_off is None
                 or abs(p_on - valve[0]) > WINDOW_TOLERANCE_S
                 or abs(p_off - valve[1]) > WINDOW_TOLERANCE_S):
@@ -262,7 +321,10 @@ def run(cfg: Settings, *, report_dir: Optional[Path] = None, notify: bool = True
 def main(cfg: Settings) -> None:
     """Pipeline entry point. Never raises: a QC failure must not stop the run."""
     try:
-        run(cfg)
+        # A second config (e.g. config_caleb.yaml) sets trial_timing_qc.report_dir
+        # so its trials never merge into the production table.
+        configured = str(getattr(cfg, "trial_timing_qc_report_dir", "") or "").strip()
+        run(cfg, report_dir=Path(configured) if configured else None)
     except Exception as exc:
         print(f"[TRIAL-TIMING] ERROR: trial timing QC failed ({type(exc).__name__}: {exc}); "
               "the pipeline continues without it.")

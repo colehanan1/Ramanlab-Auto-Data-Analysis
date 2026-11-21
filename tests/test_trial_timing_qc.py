@@ -190,3 +190,139 @@ def test_registered_after_eye_drift_qc_in_both_import_branches():
 def test_the_report_lives_with_the_pipeline_figures():
     assert "New-Opto-Fly-Figures" in str(qc.DEFAULT_REPORT_DIR)
     assert "Results/Figures" not in str(qc.DEFAULT_REPORT_DIR)
+
+
+def test_main_writes_to_the_configured_report_dir(dataset, tmp_path, monkeypatch):
+    # A second config (config_caleb.yaml, 2026-11-19) must not merge its trials
+    # into the production QC table: main() honours trial_timing_qc.report_dir.
+    root, _batch, _sent = dataset
+    monkeypatch.setattr(qc, "DEFAULT_REPORT_DIR", tmp_path / "PRODUCTION")
+    cfg = _cfg(root)
+    cfg.trial_timing_qc_report_dir = str(tmp_path / "own")
+    qc.main(cfg)
+    assert (tmp_path / "own" / qc.REPORT_FILENAME).exists()
+    assert not (tmp_path / "PRODUCTION").exists()
+
+
+def test_report_dir_key_is_loaded_from_config(tmp_path):
+    from fbpipe.config import load_settings
+    p = tmp_path / "c.yaml"
+    p.write_text("trial_timing_qc:\n  report_dir: /tmp/x/Trial-Timing-QC\n")
+    assert load_settings(p).trial_timing_qc_report_dir == "/tmp/x/Trial-Timing-QC"
+    p.write_text("fps_default: 40\n")
+    assert load_settings(p).trial_timing_qc_report_dir == ""
+
+
+# ── IAA odor-pair trials (2026-11-13): odor 1 10 s -> 1 s nothing -> odor 2 10 s ──
+# The pipeline scores the FIRST odor (parse_active_ofm stops at the 1 s gap). The
+# QC must compare against that first odor, not first-open -> last-close (30-51 s),
+# and separately check that the second odor ran 1 s later for 10 s.
+def _pair_csv(path: Path, first="OFM_A", second="OFM_L", *, gap_frames=40,
+              second_frames=400, n=3240) -> Path:
+    frames = np.arange(1, n + 1)
+    t = (frames - 1) / FPS
+    state = np.array(["off"] * n, dtype=object)
+
+    def put(ch, a, b):          # 0-based [a, b)
+        if ch == "OFM_P":       # paraffin = 2-frame master clicks at onset and offset
+            state[a:a + 2] = "OFM_P"
+            state[b - 2:b] = "OFM_P"
+        elif ch:
+            state[a:b] = ch
+    a1 = 1200
+    put(first, a1, a1 + 400)
+    a2 = a1 + 400 + gap_frames
+    if second_frames:
+        put(second, a2, a2 + second_frames)
+    pd.DataFrame({"FrameNumber": frames, "SensorNs": (t * 1e9).astype(np.int64),
+                  "UTC_ISO": "", "ActiveOFM": state, "FrameInterval_s": 0.025,
+                  "Deviation_s": 0.0}).to_csv(path, index=False)
+    return path
+
+
+PAIR = "output_november_13_batch_1_testing_3_IsoamylAcetate-1_then_Linalool-1_20261113_125306.csv"
+
+
+@pytest.mark.parametrize("first,second", [("OFM_A", "OFM_L"), ("OFM_A", "OFM_A"),
+                                          ("OFM_A", "OFM_P"), ("OFM_P", "OFM_A"),
+                                          ("OFM_C", "OFM_A")])
+def test_a_clean_pair_trial_passes(tmp_path, first, second):
+    row = qc.assess_frames_csv(_pair_csv(tmp_path / PAIR, first, second))
+    assert row["status"] == "assessed"
+    assert not row["flag"], row["reason"]
+    assert row["valve_on_s"] == pytest.approx(30.0)
+    assert row["valve_off_s"] == pytest.approx(40.0)       # the scored (first) odor
+    assert row["pipeline_off_s"] == pytest.approx(40.0)
+
+
+def test_pair_trial_name_keeps_both_odors(tmp_path):
+    row = qc.assess_frames_csv(_pair_csv(tmp_path / PAIR))
+    assert row["trial"] == "testing_3_IsoamylAcetate-1_then_Linalool-1"
+
+
+def test_pair_trial_missing_second_odor_is_flagged(tmp_path):
+    row = qc.assess_frames_csv(_pair_csv(tmp_path / PAIR, second_frames=0))
+    assert row["flag"] and "second odor" in row["reason"]
+
+
+def test_pair_trial_with_late_second_odor_is_flagged(tmp_path):
+    row = qc.assess_frames_csv(_pair_csv(tmp_path / PAIR, gap_frames=200))   # 5 s gap
+    assert row["flag"] and "second odor" in row["reason"]
+
+
+def test_pair_trial_with_short_second_odor_is_flagged(tmp_path):
+    row = qc.assess_frames_csv(_pair_csv(tmp_path / PAIR, second_frames=120))  # 3 s
+    assert row["flag"] and "second odor" in row["reason"]
+
+
+def test_a_single_odor_trial_that_reopens_is_still_flagged(tmp_path):
+    """The pair rule applies only to `_then_` trials; elsewhere a reopening stays a flag."""
+    row = qc.assess_frames_csv(_frames_csv(tmp_path / "output_b_testing_1_Citral-1_x.csv",
+                                           reopen=(2440, 2840)))
+    assert row["flag"]
+
+
+# ---- paraffin window cross-check against the sensors log -----------------
+
+def _paraffin_log(tmp_path, name, clicks):
+    p = _frames_csv(tmp_path / name, on=None)
+    df = pd.read_csv(p)
+    for a, b in clicks:                       # 1-based frame numbers
+        df.loc[a - 1:b - 1, "ActiveOFM"] = "OFM_P"
+    df.to_csv(p, index=False)
+    return p
+
+
+def _sensors(p, on_s, off_s):
+    t0 = int(pd.read_csv(p)["SensorNs"].iloc[0])
+    pd.DataFrame({"MonoNs": [t0 - 17_000_000, t0 + int(on_s * 1e9), t0 + int(off_s * 1e9)],
+                  "OFM_Event": ["RECORDING_START", "OFM_P_ON", "OFM_P_OFF"]}
+                 ).to_csv(p.with_name(f"sensors_{p.name}"), index=False)
+
+
+def test_paraffin_both_clicks_agreeing_with_sensors_is_not_flagged(tmp_path):
+    p = _paraffin_log(tmp_path, "output_b_pretest_1_ParaffinOil-100_x.csv",
+                      [(1195, 1196), (2395, 2396)])
+    _sensors(p, 29.9, 59.9)
+    row = qc.assess_frames_csv(p)
+    assert not row["flag"], row["reason"]
+
+
+def test_paraffin_missed_onset_click_is_flagged_against_the_sensors_log(tmp_path):
+    # only the offset click reached a frame (2026-11-13 rig_3 pretest_1)
+    p = _paraffin_log(tmp_path, "output_b_pretest_1_ParaffinOil-100_y.csv", [(1603, 1603)])
+    _sensors(p, 30.032, 40.085)
+    row = qc.assess_frames_csv(p)
+    assert row["flag"]
+    assert "sensors log" in row["reason"]
+    assert row["pipeline_on_s"] == pytest.approx(30.0, abs=0.1)
+    assert row["pipeline_off_s"] == pytest.approx(40.1, abs=0.1)
+
+
+def test_paraffin_window_disagreeing_with_sensors_is_flagged(tmp_path):
+    # frame log says 30-60 s, the sensors log says 30-40 s
+    p = _paraffin_log(tmp_path, "output_b_pretest_1_ParaffinOil-100_z.csv",
+                      [(1195, 1196), (2395, 2396)])
+    _sensors(p, 30.0, 40.0)
+    row = qc.assess_frames_csv(p)
+    assert row["flag"] and "sensors log" in row["reason"]

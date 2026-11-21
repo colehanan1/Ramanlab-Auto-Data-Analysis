@@ -2497,6 +2497,13 @@ def _thaw_cli_args(settings: Settings) -> list[str]:
     return args
 
 
+def _csv_has_data_rows(path: Path) -> bool:
+    """True when the CSV holds at least one non-blank line after its header."""
+    with Path(path).open("r", encoding="utf-8", errors="replace") as fh:
+        next(fh, None)
+        return any(line.strip() for line in fh)
+
+
 def _run_reactions(settings: Settings, config_path: Path | None = None) -> None:
     reaction_cfg = settings.reaction_prediction
 
@@ -2571,6 +2578,12 @@ def _run_reactions(settings: Settings, config_path: Path | None = None) -> None:
     csv_path = output_csv_path
     if not csv_path.exists():
         raise FileNotFoundError(f"Reaction prediction CSV not found: {csv_path}")
+    if not _csv_has_data_rows(csv_path):
+        # Every fly flagged non-reactive (or nothing scored): there is no matrix
+        # to draw. Skip like the other figure steps instead of aborting the run.
+        print(f"[REACTION] SKIP matrix: {csv_path.name} has no rows "
+              "(every fly flagged non-reactive / nothing scored).")
+        return
 
     matrix_cfg = reaction_cfg.matrix
     out_dir = Path(matrix_cfg.out_dir).expanduser()
@@ -3992,6 +4005,11 @@ def _main_locked(args: argparse.Namespace, config_path: Path, data: dict, settin
     if scores_csv.exists():
         _run_sensitivity_window_results(analysis_cfg, settings)
 
+    # -- IAA odor-pair (B2B) folder, Results/b2b. Runs every time; the script keeps
+    #    its figures when the pair datasets' rows, scores and code are unchanged --
+    if scores_csv.exists():
+        _run_b2b_pair_figures(analysis_cfg, settings, config_path=config_path)
+
     # Data and figures are done: record every dataset rebuilt tonight as frozen
     # (with the inputs seen when the run started). A run that died before this
     # point left them ``thawing``, and the next run rebuilds them.
@@ -4900,6 +4918,23 @@ def _sensitivity_window_command(
             cmd.extend(["--split-cohort", str(ds)])
     for ds in cfg.get("trial_series_cohorts") or []:
         cmd.extend(["--trial-series-cohort", str(ds)])
+    for split in cfg.get("cohort_splits") or []:   # one cohort, before vs from a moment
+        if split.get("cohort") and split.get("from"):
+            cmd.extend(["--cohort-split", f"{split['cohort']}@{split['from']}"])
+    plus = (analysis_cfg or {}).get("pretest_vs_test_plus_after") or {}
+    if plus.get("rescored_csv") and bool(plus.get("enabled", True)):
+        # window flies on the odor + N s scores, rescored earlier in the same run
+        cmd.extend(["--plus-after-csv", str(plus["rescored_csv"]),
+                    "--plus-after-s", f"{float(plus.get('after_s', 5.0)):g}"])
+    first = (analysis_cfg or {}).get("pretest_vs_test_first_odor") or {}
+    if first.get("rescored_csv") and bool(first.get("enabled", True)):
+        # window flies scored on only the first N s of the odor (user 2026-11-17)
+        cmd.extend(["--first-odor-csv", str(first["rescored_csv"]),
+                    "--first-odor-s", f"{float(first.get('odor_s', 10.0)):g}"])
+    for ds in cfg.get("transition_cohorts") or []:   # post − pre by response transition
+        cmd.extend(["--transition-cohort", str(ds)])
+    if cfg.get("control_cohort"):   # every other cohort's change minus this one's
+        cmd.extend(["--control-cohort", str(cfg["control_cohort"])])
     if csv_dir:
         cmd.extend(["--csv-dir", csv_dir])
     flagged = str(cfg.get("flagged_flies_csv")
@@ -4937,6 +4972,96 @@ def _run_sensitivity_window_results(analysis_cfg: Mapping[str, Any] | None,
         return False
     LOGGER.info("[analysis] sensitivity_window_results complete.")
     return True
+
+
+def _b2b_pair_figures_command(
+    analysis_cfg: Mapping[str, Any] | None,
+    settings: Any,
+    *,
+    python_exec: str,
+    config_path: Path | None = None,
+) -> list[str] | None:
+    """The ``b2b_pair_figures.py`` command, or None when unconfigured or disabled.
+
+    IAA odor-pair figures (Results/b2b, user 2026-11-16). The script decides itself
+    whether anything changed, so the pipeline launches it every run."""
+    cfg = (analysis_cfg or {}).get("b2b_pair_figures") or {}
+    if not cfg or not bool(cfg.get("enabled", True)) or not cfg.get("out_dir"):
+        return None
+    predictions = str(
+        cfg.get("predictions_csv")
+        or getattr(getattr(settings, "reaction_prediction", None), "output_csv", "")
+        or ""
+    )
+    csv_dir = str(cfg.get("csv_dir") or (Path(predictions).parent if predictions else ""))
+    script = REPO_ROOT / "scripts" / "analysis" / "b2b_pair_figures.py"
+    cmd = [str(Path(python_exec).expanduser()), str(script), "--out", str(cfg["out_dir"])]
+    if csv_dir:
+        cmd.extend(["--csv-dir", csv_dir])
+    if predictions:
+        cmd.extend(["--predictions", predictions])
+    if config_path is not None:   # the reaction threshold
+        cmd.extend(["--config", str(config_path)])
+    for root in cfg.get("data_roots") or []:
+        cmd.extend(["--data-root", str(root)])
+    if cfg.get("start") is not None and cfg.get("end") is not None:
+        cmd.extend(["--start", _yaml_clock(cfg["start"]), "--end", _yaml_clock(cfg["end"])])
+    return cmd
+
+
+def _yaml_clock(value: Any) -> str:
+    """``"16:40"`` as written; an unquoted YAML 1.1 ``16:40`` arrives as the sexagesimal
+    int 1000 (16 * 60 + 40) and is turned back into ``"16:40"``."""
+    if isinstance(value, int) and not isinstance(value, bool):
+        return f"{value // 60:02d}:{value % 60:02d}"
+    return str(value).strip()
+
+
+def _b2b_pair_figures_commands(
+    analysis_cfg: Mapping[str, Any] | None,
+    settings: Any,
+    *,
+    python_exec: str,
+    config_path: Path | None = None,
+) -> list[list[str]]:
+    """One ``b2b_pair_figures.py`` command per clock window (``windows:``, each with its
+    own ``out_dir``, ``start``, ``end``; user 2026-11-17), else the one for ``out_dir``.
+    Empty when unconfigured or disabled."""
+    cfg = (analysis_cfg or {}).get("b2b_pair_figures") or {}
+    if not cfg or not bool(cfg.get("enabled", True)):
+        return []
+    base = {k: v for k, v in cfg.items() if k != "windows"}
+    parts = [{**base, **w} for w in cfg.get("windows") or []] or [base]
+    cmds = [_b2b_pair_figures_command({"b2b_pair_figures": part}, settings,
+                                      python_exec=python_exec, config_path=config_path)
+            for part in parts]
+    return [c for c in cmds if c is not None]
+
+
+def _run_b2b_pair_figures(analysis_cfg: Mapping[str, Any] | None, settings: Any, *,
+                          config_path: Path | None = None) -> bool:
+    """Run the step, one folder per clock window; never aborts the pipeline. Returns True
+    when every folder built (or was already current)."""
+    cmds = _b2b_pair_figures_commands(analysis_cfg, settings, python_exec=sys.executable,
+                                      config_path=config_path)
+    if not cmds:
+        LOGGER.info("[analysis] b2b_pair_figures not configured; skipping.")
+        return False
+    env = os.environ.copy()
+    env["MPLBACKEND"] = "Agg"
+    env["PYTHONPATH"] = os.pathsep.join(
+        filter(None, [str(REPO_ROOT / "src"), env.get("PYTHONPATH")])
+    )
+    ok = True
+    for cmd in cmds:
+        LOGGER.info("[analysis] b2b_pair_figures → %s", " ".join(cmd))
+        result = subprocess.run(cmd, env=env, capture_output=False)
+        if result.returncode != 0:
+            LOGGER.warning("[analysis] b2b_pair_figures exited with code %d", result.returncode)
+            ok = False
+    if ok:
+        LOGGER.info("[analysis] b2b_pair_figures complete.")
+    return ok
 
 
 def _pretest_vs_test_traces_command(
@@ -5126,6 +5251,43 @@ def _pretest_vs_test_plus_after_commands(
     return [rescore, render]
 
 
+def _pretest_vs_test_first_odor_commands(
+    analysis_cfg: Mapping[str, Any] | None,
+    settings: Any,
+    *,
+    python_exec: str,
+    config_path: Path | None,
+) -> list[list[str]] | None:
+    """Rescore pre/post trials on only the first N s of the odor (user 2026-11-17).
+
+    One ``window_rescore.py --window odor_first`` command writing a predictions
+    CSV; ``sensitivity_window_results`` draws its window-fly figures from it.
+    """
+    name = "pretest_vs_test_first_odor"
+    block = (analysis_cfg or {}).get(name) or {}
+    if not block or not bool(block.get("enabled", True)):
+        return None
+    paths = _window_block_paths(
+        block, name, ("rescored_csv", "pretest_wide_csv", "testing_wide_csv")
+    )
+    predictions, model, threshold = _reaction_inputs(settings)
+    if paths is None or not predictions or not model or config_path is None:
+        return None
+    return [[
+        str(Path(python_exec).expanduser()),
+        str(REPO_ROOT / "scripts" / "analysis" / "window_rescore.py"),
+        "--predictions-csv", predictions,
+        "--wide-csv", paths["pretest_wide_csv"], paths["testing_wide_csv"],
+        "--model-path", model,
+        "--config", str(config_path),
+        "--window", "odor_first",
+        "--odor-s", f"{float(block.get('odor_s', 10.0)):g}",
+        "--binary-threshold", str(threshold),
+        "--paired-only",
+        "--output-csv", paths["rescored_csv"],
+    ]]
+
+
 def _score_window_comparison_command(
     analysis_cfg: Mapping[str, Any] | None,
     settings: Any,
@@ -5188,7 +5350,8 @@ def _run_window_rescore_steps(
     *,
     config_path: Path | None,
 ) -> None:
-    """The +N s pre-vs-post set and the score-window comparison, cached."""
+    """The +N s pre-vs-post set, the first-N-s rescore and the score-window
+    comparison, cached."""
     python_exec = getattr(
         getattr(settings, "reaction_prediction", None), "python", ""
     ) or sys.executable
@@ -5199,6 +5362,8 @@ def _run_window_rescore_steps(
     )
     steps = (
         ("pretest_vs_test_plus_after", _pretest_vs_test_plus_after_commands(
+            analysis_cfg, settings, python_exec=python_exec, config_path=config_path)),
+        ("pretest_vs_test_first_odor", _pretest_vs_test_first_odor_commands(
             analysis_cfg, settings, python_exec=python_exec, config_path=config_path)),
         ("score_window_comparison", (lambda c: [c] if c else None)(
             _score_window_comparison_command(

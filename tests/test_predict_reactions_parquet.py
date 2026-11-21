@@ -100,3 +100,67 @@ def test_augment_marks_non_reactive_low_span(tmp_path):
 
     result = pd.read_csv(out)
     assert result["non_reactive_flag"].iloc[0] == 1.0
+
+
+# ---------------------------------------------------------------------------
+# main(): odor-pair trials reach the scorer as two rows (user rule 2026-11-13)
+# ---------------------------------------------------------------------------
+
+
+def test_main_scores_each_pair_odor_as_its_own_row(tmp_path, monkeypatch):
+    import numpy as np
+    from types import SimpleNamespace
+    from fbpipe.steps import predict_reactions as pr
+
+    n = 3250
+    root = tmp_path / "IAA-PairFirst-Control-1-1"
+    batch = root / "b1"
+    batch.mkdir(parents=True)
+    state = np.array(["off"] * n, dtype=object)
+    state[1203:1603] = "OFM_A"
+    state[1647:2047] = "OFM_L"
+    pd.DataFrame({"FrameNumber": np.arange(1, n + 1), "ActiveOFM": state}).to_csv(
+        batch / "output_b1_testing_3_IsoamylAcetate-1_then_Linalool-1_20261113_125306.csv",
+        index=False)
+
+    def row(label, fly_number):
+        r = {"dataset": root.name, "fly": "b1", "fly_number": fly_number, "trial_type": "testing",
+             "trial_label": label, "fps": 40.0, "trial_odor_on_s": 30.1, "trial_odor_off_s": 40.1,
+             "trial_duration_s": n / 40.0, "global_min": 0.0, "global_max": 100.0,
+             "trimmed_global_min": 0.0, "trimmed_global_max": 100.0}
+        r.update({f"dir_val_{i}": float(i % 50) for i in range(n)})
+        return r
+    data = tmp_path / "wide.csv"
+    pd.DataFrame([row("testing_3_isoamylacetate-1_then_linalool-1", 1),
+                  row("testing_1_hexanol-1", 1)]).to_csv(data, index=False)
+    model = tmp_path / "m.json"
+    model.write_text("{}")
+    out = tmp_path / "pred.csv"
+    seen = {}
+
+    def fake_run(cmd, check, env):
+        src = pd.read_csv(cmd[cmd.index("--data-csv") + 1])
+        seen["labels"] = list(src["trial_label"])
+        seen["on_off"] = src[["trial_odor_on_s", "trial_odor_off_s", "trial_duration_s"]].values.tolist()
+        src.assign(prediction=1)[["dataset", "fly", "fly_number", "trial_label", "prediction"]].to_csv(
+            cmd[cmd.index("--output-csv") + 1], index=False)
+
+    monkeypatch.setattr(pr.subprocess, "run", fake_run)
+    monkeypatch.setattr(pr, "_pair_roots", lambda cfg: [root])
+    cfg = SimpleNamespace(
+        reaction_prediction=SimpleNamespace(
+            data_csv=str(data), extra_data_csvs=[], model_path=str(model), output_csv=str(out),
+            trial_types=["testing"], model_type="ordinal", binary_threshold=2, threshold=None),
+        non_reactive_span_px=5.0, flagged_flies_csv="", include_frozen=False)
+    monkeypatch.setattr("fbpipe.utils.frozen_folders.warn_if_unmarked", lambda *a, **k: None)
+    pr.main(cfg)
+
+    assert seen["labels"] == ["testing_3_isoamylacetate-1_then_linalool-1",
+                              "testing_3_isoamylacetate-1_then_linalool-1__odor2",
+                              "testing_1_hexanol-1"]
+    (o1_on, o1_off, o1_dur), (o2_on, o2_off, o2_dur), _ = seen["on_off"]
+    assert (o1_on, o1_off) == pytest.approx((30.1, 40.1)) and o1_dur == pytest.approx(42.2)
+    assert (o2_on, o2_off) == pytest.approx((30.1, 40.1))
+    assert o2_dur == pytest.approx((1204 + n - 1648) / 40.0)
+    pred = pd.read_csv(out)
+    assert sorted(pred["trial_label"]) == sorted(seen["labels"])

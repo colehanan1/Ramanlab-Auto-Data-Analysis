@@ -324,7 +324,13 @@ def _build_odor_map(fly_dir: Path) -> dict[str, str]:
     Returns: {"testing_3": "Benzaldehyde", "training_1": "Hexanol", ...}
     """
     odor_map: dict[str, str] = {}
-    pat = re.compile(r"(pretest|testing|training)_(\d+)_([A-Za-z0-9][A-Za-z0-9 .()-]+?)_\d{8}_", re.IGNORECASE)
+    # The odor token may be an odor PAIR, "<odor1>_then_<odor2>" (IAA odor-pair
+    # protocol, 2026-11-13); without the optional group a pair trial got no odor.
+    pat = re.compile(
+        r"(pretest|testing|training)_(\d+)_"
+        r"([A-Za-z0-9][A-Za-z0-9 .()-]+?(?:_then_[A-Za-z0-9][A-Za-z0-9 .()-]+?)?)_\d{8}_",
+        re.IGNORECASE,
+    )
 
     search_dirs = [fly_dir]
     fly_rel = fly_dir.name

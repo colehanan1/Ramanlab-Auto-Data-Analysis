@@ -910,6 +910,7 @@ class Settings:
     odor_off_s: float = 60.0
     odor_latency_s: float = 0.0
     delete_source_after_render: bool = True
+    trial_timing_qc_report_dir: str = ""  # "" -> trial_timing_qc.DEFAULT_REPORT_DIR
 
     # detector/tracker
     conf_thres: float = 0.40
@@ -1642,6 +1643,7 @@ def load_settings(config_path: str | Path) -> Settings:
         odor_off_s=float(os.getenv("ODOR_OFF_S", _get(data, "odor_off_s", 60.0))),
         odor_latency_s=float(os.getenv("ODOR_LATENCY_S", _get(data, "odor_latency_s", 0.0))),
         delete_source_after_render=(os.getenv("DELETE_SOURCE_AFTER_RENDER", str(_get(data, "delete_source_after_render", True))).lower()=="true"),
+        trial_timing_qc_report_dir=str(((data.get("trial_timing_qc") or {}) if isinstance(data.get("trial_timing_qc"), dict) else {}).get("report_dir", "") or ""),
 
         conf_thres=float(os.getenv("CONF_THRES", yolo.get("conf_thres", 0.40))),
         iou_match_thres=float(os.getenv("IOU_MATCH_THRES", yolo.get("iou_match_thres", 0.25))),

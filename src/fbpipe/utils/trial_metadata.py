@@ -31,6 +31,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Optional, Sequence
 
+import numpy as np
 import pandas as pd
 
 LOGGER = logging.getLogger(__name__)
@@ -52,8 +53,16 @@ CACHE_FILENAME = "_trial_meta.json"
 # bridge the master-valve clicks (v2 cached them as 2 frames long). 4:
 # ``light_last_s`` (end of a whole pulse train), and a sensors log without a
 # RECORDING_START row is timed from the frame log's first frame (v3 put those
-# light windows ~30 s early).
-_CACHE_SCHEMA_VERSION = 4
+# light windows ~30 s early). 5: a paraffin trial whose frame log caught only
+# one of the two 50 ms master-valve clicks takes its odor window from the
+# sensors log's OFM_P_ON / OFM_P_OFF (v4 cached a one-frame window). 6: a
+# light-only probe (``testing_17_LightOnly``) takes its window from the
+# sensors log's light events (v5 cached the clamped 30-60 s default: the last
+# frame, 0.025 s).
+_CACHE_SCHEMA_VERSION = 6
+
+# Trial labels of the light-only opto probe (no odor; the light is the stimulus).
+_LIGHT_ONLY_RE = re.compile(r"light[\s_\-]*only", re.IGNORECASE)
 
 
 @dataclass(frozen=True)
@@ -165,13 +174,65 @@ def _coerce_float(value: object) -> Optional[float]:
 _CLICK_GAP_FRAMES = 10
 
 
-def parse_active_ofm(csv_path: Path) -> tuple[Optional[int], Optional[int], Optional[str]]:
+# A paraffin window shorter than this (frames at 40 fps; 1 s) is a missed click.
+_MIN_PARAFFIN_WINDOW_S = 1.0
+# The sensors log stamps OFM_P_ON / OFM_P_OFF at the END of the 50 ms click.
+_PARAFFIN_CLICK_S = 0.05
+
+
+def parse_paraffin_window_from_sensors(
+    csv_path: Path, sensors_csv: Optional[Path] = None
+) -> Optional[tuple[float, Optional[float]]]:
+    """Paraffin window ``(on_s, off_s)`` from the sensors log, in frame-log time.
+
+    ``on_s = OFM_P_ON - 0.05 s`` (the event is logged at the end of the 50 ms
+    click), ``off_s = OFM_P_OFF`` (last one). Seconds are measured from the
+    frame log's first valid ``SensorNs`` -- the same clock ``MonoNs`` is on;
+    the sensors log's ``RECORDING_START`` row sits 0.02-0.2 s EARLIER than the
+    first frame, and the frame log's own OFM_P frames agree with the
+    first-frame base. ``off_s`` is None when no OFM_P_OFF follows the ON.
+    None when there is no sensors log, no frame ``SensorNs``, or no ON event.
+    """
+    csv_path = Path(csv_path)
+    if sensors_csv is None:
+        sensors_csv = csv_path.with_name(f"sensors_{csv_path.name}")
+    try:
+        se = pd.read_csv(sensors_csv, usecols=lambda c: c.strip().lower() in {"monons", "ofm_event"})
+        fr = pd.read_csv(csv_path, usecols=lambda c: c.strip().lower() == "sensorns")
+    except (ValueError, OSError, pd.errors.EmptyDataError, pd.errors.ParserError):
+        return None
+    mono_col = next((c for c in se.columns if c.strip().lower() == "monons"), None)
+    ev_col = next((c for c in se.columns if c.strip().lower() == "ofm_event"), None)
+    if mono_col is None or ev_col is None or fr.shape[1] != 1:
+        return None
+    ns = pd.to_numeric(fr.iloc[:, 0], errors="coerce")
+    ns = ns[ns > 0]
+    if ns.empty:
+        return None
+    t0 = float(ns.iloc[0])
+    mono = pd.to_numeric(se[mono_col], errors="coerce")
+    ev = se[ev_col].astype(str).str.strip().str.upper()
+    on = mono[(ev == "OFM_P_ON") & mono.notna()]
+    if on.empty:
+        return None
+    on_ns = float(on.iloc[0])
+    off = mono[(ev == "OFM_P_OFF") & mono.notna() & (mono > on_ns)]
+    on_s = (on_ns - t0) / 1e9 - _PARAFFIN_CLICK_S
+    off_s = (float(off.iloc[-1]) - t0) / 1e9 if not off.empty else None
+    return on_s, off_s
+
+
+def parse_active_ofm(
+    csv_path: Path, sensors_csv: Optional[Path] = None
+) -> tuple[Optional[int], Optional[int], Optional[str]]:
     """Read ``FrameNumber`` + ``ActiveOFM`` and return ``(on_frame, off_frame, channel)``.
 
     Robust to capitalisation and to trials where the odor never turns on.
+    ``sensors_csv`` (default: the frame log's ``sensors_`` namesake) is read
+    only for a paraffin window the frame log cut short; see below.
     """
     try:
-        df = pd.read_csv(csv_path, usecols=lambda c: c.lower() in {"framenumber", "activeofm"})
+        df = pd.read_csv(csv_path, usecols=lambda c: c.lower() in {"framenumber", "activeofm", "sensorns"})
     except (ValueError, FileNotFoundError, pd.errors.EmptyDataError) as exc:
         LOGGER.debug("ActiveOFM read failed for %s: %s", csv_path, exc)
         return None, None, None
@@ -198,9 +259,18 @@ def parse_active_ofm(csv_path: Path) -> tuple[Optional[int], Optional[int], Opti
     # last click (the same span trial_timing_qc reads as the valve window).
     if str(channel).upper() == "OFM_P":
         last_p = int((states.str.upper() == "OFM_P").to_numpy().nonzero()[0][-1])
-        if last_p + 1 >= len(df):
+        off_idx = last_p + 1
+        # The rig labels a frame from one GPIO read, so a 50 ms click can fall
+        # between two reads and leave a window of one frame (2026-11-13
+        # rig_3 pretest_1: only the offset click seen, 40.075-40.100 s). A
+        # window under 1 s is a missed click; the sensors log has both events.
+        if (last_p + 1 - on_idx) < _MIN_PARAFFIN_WINDOW_S * 40.0:
+            fixed = _paraffin_window_frames(df, frame_col, csv_path, sensors_csv)
+            if fixed is not None:
+                return fixed[0], fixed[1], channel
+        if off_idx >= len(df):
             return on_frame, None, channel
-        return on_frame, int(df[frame_col].iloc[last_p + 1]), channel
+        return on_frame, int(df[frame_col].iloc[off_idx]), channel
 
     # First off after on_frame that lasts longer than a valve click.
     flags = is_on.to_numpy()
@@ -218,6 +288,36 @@ def parse_active_ofm(csv_path: Path) -> tuple[Optional[int], Optional[int], Opti
             break
         i = j
     return on_frame, off_frame, channel
+
+
+def _paraffin_window_frames(
+    df: "pd.DataFrame", frame_col: str, csv_path: Path, sensors_csv: Optional[Path]
+) -> Optional[tuple[int, Optional[int]]]:
+    """Sensors-log paraffin window as ``(on_frame, off_frame)`` FrameNumbers, or None.
+
+    on = first frame at/after ``OFM_P_ON - 0.05 s``; off = first frame at/after
+    ``OFM_P_OFF`` (None if that is past the last frame), matching how
+    :func:`parse_active_ofm` reads a window the frame log saw whole. Needs the
+    frame log's ``SensorNs`` for the clock; refuses a window that is not
+    longer than 1 s.
+    """
+    sns = next((c for c in df.columns if c.lower() == "sensorns"), None)
+    if sns is None:
+        return None
+    win = parse_paraffin_window_from_sensors(csv_path, sensors_csv)
+    if win is None or win[1] is None or win[1] - win[0] < _MIN_PARAFFIN_WINDOW_S:
+        return None
+    ns = pd.to_numeric(df[sns], errors="coerce")
+    valid = ns > 0
+    if not valid.any():
+        return None
+    t = (ns - float(ns[valid].iloc[0])) / 1e9
+    on_hit = np.flatnonzero(((t >= win[0]) & valid).to_numpy())
+    if on_hit.size == 0:
+        return None
+    off_hit = np.flatnonzero(((t >= win[1]) & valid).to_numpy())
+    off_frame = int(df[frame_col].iloc[off_hit[0]]) if off_hit.size else None
+    return int(df[frame_col].iloc[on_hit[0]]), off_frame
 
 
 # Optogenetic-LED "on"/"off" markers in the sensors-log ``OFM_Event`` column.
@@ -734,24 +834,6 @@ def load_trial_metadata(
             # and the caller did not pass an actual frame count.
             n_frames = int(round((odor_off_s_default + odor_on_s_default) * fps))
 
-    # --- Odor window fallbacks: dataset override -> config defaults ---
-    if odor_on_frame is None or odor_off_frame is None:
-        override_on_s, override_off_s = _override_odor_window(dataset_override)
-        on_s = override_on_s if override_on_s is not None else odor_on_s_default
-        off_s = override_off_s if override_off_s is not None else odor_off_s_default
-        if odor_on_frame is None:
-            odor_on_frame = int(round(on_s * fps))
-        if odor_off_frame is None:
-            odor_off_frame = int(round(off_s * fps))
-
-    # Clamp to trial length to avoid nonsensical windows
-    odor_on_frame = max(0, min(int(odor_on_frame), n_frames - 1))
-    odor_off_frame = max(odor_on_frame + 1, min(int(odor_off_frame), n_frames))
-
-    trial_type = _apply_trial_type_override(raw_trial_type, dataset_override)
-    if not trial_type:
-        trial_type = "testing"  # safest default; matches historical pipeline behaviour
-
     # --- Optogenetic light times from the sensors log ---
     # Uses the *raw* (filename) trial type, since the sensors filename mirrors
     # the rig cycle name, not any dataset trial_type override.
@@ -765,6 +847,33 @@ def load_trial_metadata(
     if sensors_csv is not None:
         light_on_s, light_off_s = parse_light_window_seconds(sensors_csv)
         light_last_s = parse_light_span_seconds(sensors_csv)[1]
+
+    # --- Odor window fallbacks: dataset override -> light-only probe -> config defaults ---
+    if odor_on_frame is None or odor_off_frame is None:
+        override_on_s, override_off_s = _override_odor_window(dataset_override)
+        on_s = override_on_s if override_on_s is not None else odor_on_s_default
+        off_s = override_off_s if override_off_s is not None else odor_off_s_default
+        # A light-only probe delivers no odor, so the frame log has no window;
+        # its stimulus is the light (only in the sensors log). Matched by label
+        # only: an odor trial whose frame log lacks the valve keeps the default.
+        if (odor_on_frame is None and override_on_s is None and override_off_s is None
+                and light_on_s is not None and cycle_odor
+                and _LIGHT_ONLY_RE.fullmatch(str(cycle_odor).strip())):
+            on_s = light_on_s
+            light_end = light_last_s if light_last_s is not None else light_off_s
+            off_s = light_end if light_end is not None else n_frames / fps
+        if odor_on_frame is None:
+            odor_on_frame = int(round(on_s * fps))
+        if odor_off_frame is None:
+            odor_off_frame = int(round(off_s * fps))
+
+    # Clamp to trial length to avoid nonsensical windows
+    odor_on_frame = max(0, min(int(odor_on_frame), n_frames - 1))
+    odor_off_frame = max(odor_on_frame + 1, min(int(odor_off_frame), n_frames))
+
+    trial_type = _apply_trial_type_override(raw_trial_type, dataset_override)
+    if not trial_type:
+        trial_type = "testing"  # safest default; matches historical pipeline behaviour
 
     meta = TrialMetadata(
         dataset=dataset,

@@ -130,6 +130,46 @@ def set_model_scores(scores: dict[tuple[str, str, str, str], int]) -> None:
             _MODEL_SCORES.setdefault(canon_key, score)
 
 
+#: Where odor-pair trials' rig per-frame logs live (odor 2's valve window).
+_PAIR_DATA_ROOTS = (
+    Path("/home/ramanlab/Documents/cole/Data/flys_New"),
+    Path("/securedstorage/DATAsec/cole/Data-secured-New"),
+)
+_ODOR2_WINDOW_CACHE: dict = {}
+
+
+def _odor2_window(dataset_canon: str, fly: str, trial_label: str, fps: float):
+    """Odor 2's valve window (s, same clock as the trace) of an IAA odor-pair
+    trial (``..._<odor1>_then_<odor2>``), read from its rig per-frame log; None
+    for any other trial or when the log is not found."""
+    if "_then_" not in str(trial_label).lower():
+        return None
+    key = (str(dataset_canon), str(fly), str(trial_label))
+    if key not in _ODOR2_WINDOW_CACHE:
+        from fbpipe.utils import odor_pairs
+        row = pd.Series({"dataset": str(dataset_canon), "fly": str(fly), "trial_label": str(trial_label)})
+        path = odor_pairs.find_frames_csv(row, [r / str(dataset_canon) for r in _PAIR_DATA_ROOTS])
+        _ODOR2_WINDOW_CACHE[key] = (None if path is None
+                                    else odor_pairs.second_odor_window_s(path, float(fps)))
+    return _ODOR2_WINDOW_CACHE[key]
+
+
+def _score_text(
+    dataset_canon: str, fly: str, fly_number_label: str, trial_label: str
+) -> str | None:
+    """Score annotation for one panel. An IAA odor-pair trial
+    (``..._<odor1>_then_<odor2>``) is scored per odor by predict_reactions: the
+    label carries odor 1's score, ``<label>__odor2`` odor 2's (fbpipe.utils.odor_pairs)."""
+    s1 = _lookup_model_score(dataset_canon, fly, fly_number_label, trial_label)
+    if "_then_" in str(trial_label).lower():
+        s2 = _lookup_model_score(dataset_canon, fly, fly_number_label, f"{trial_label}__odor2")
+        if s1 is None and s2 is None:
+            return None
+        show = lambda v: "–" if v is None else v  # noqa: E731
+        return f"Odor 1: {show(s1)}   Odor 2: {show(s2)}"
+    return None if s1 is None else f"Score: {s1}"
+
+
 def _lookup_model_score(
     dataset_canon: str, fly: str, fly_number_label: str, trial_label: str
 ) -> int | None:
@@ -1633,7 +1673,18 @@ def _is_testing_9_label(label: object) -> bool:
 
 
 def _is_light_only_label(label: object) -> bool:
-    """Return True for light-only trials: testing_11 (legacy) or testing_9 (v2)."""
+    """Return True for light-only trials: testing_11 (legacy) or testing_9 (v2).
+
+    The label decides first: an odor-pair trial (``..._then_...``) is never the
+    light trial, and a ``lightonly`` label always is -- the odor-pair protocol
+    runs 16 pair trials (pair 9 is an odor trial) and ends with
+    ``testing_17_lightonly`` (2026-11-17). Other labels keep the trial-number rule.
+    """
+    text = str(label).lower()
+    if "_then_" in text:
+        return False
+    if "lightonly" in text:
+        return True
     if _ACTIVE_PROTOCOL == "v2":
         return _is_testing_9_label(label)
     return _is_testing_11_label(label)
@@ -2788,6 +2839,16 @@ def generate_envelope_plots(cfg: EnvelopePlotConfig) -> None:
                         color=odor_bar_color,
                     )
 
+                # IAA odor-pair trial: shade odor 2 too (1 s after odor 1).
+                _w2 = _odor2_window(dataset_canon, fly, trial_label, cfg.fps_default)
+                if _w2 is not None and min(_w2[1], per_trial_x_max) > _w2[0]:
+                    ax.axvspan(
+                        _w2[0],
+                        min(_w2[1], per_trial_x_max),
+                        alpha=odor_bar_alpha,
+                        color=odor_bar_color,
+                    )
+
                 if light_annotation_mode == "line" and light_start_s is not None and light_start_s <= x_max_limit:
                     ax.axvline(
                         light_start_s,
@@ -2854,17 +2915,17 @@ def generate_envelope_plots(cfg: EnvelopePlotConfig) -> None:
 
             # Per-trial model score (upper-right corner). Mirrors panel_title_x
             # so it sits at the same vertical band as the odor label.
-            score_val = _lookup_model_score(
+            score_text = _score_text(
                 str(dataset_canon),
                 str(fly),
                 fly_number_label,
                 str(trial_label),
             )
-            if score_val is not None:
+            if score_text is not None:
                 ax.text(
                     1.0 - float(cfg.panel_title_x),
                     panel_title_y,
-                    f"Score: {score_val}",
+                    score_text,
                     transform=panel_title_transform,
                     ha="right",
                     va=panel_title_va,

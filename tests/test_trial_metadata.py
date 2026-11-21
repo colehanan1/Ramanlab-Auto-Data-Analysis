@@ -11,6 +11,8 @@ Covers:
 from __future__ import annotations
 
 import json
+
+import numpy as np
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -575,3 +577,146 @@ def test_light_on_s_survives_cache_round_trip(tmp_path: Path) -> None:
     second = load_trial_metadata(trial, use_cache=True)
     assert second.source == "cache"
     assert second.light_on_s == pytest.approx(40.0, abs=1e-6)
+
+
+# ---------------------------------------------------------------------------
+# Paraffin window when the frame log missed a click (2026-11-13 rig_3 pretest_1)
+# ---------------------------------------------------------------------------
+
+_T0_NS = 1_195_781_809_842_000     # first frame's SensorNs
+_RS_NS = _T0_NS - 17_609_000       # RECORDING_START sits earlier than frame 1
+
+
+def _click_frame_log(path: Path, clicks: list[tuple[int, int]], n: int = 3600) -> Path:
+    """40 fps frame log with OFM_P frames over each 1-based (first, last) in ``clicks``."""
+    frames = np.arange(1, n + 1)
+    state = np.array(["off"] * n, dtype=object)
+    for a, b in clicks:
+        state[a - 1:b] = "OFM_P"
+    pd.DataFrame({
+        "FrameNumber": frames,
+        "SensorNs": _T0_NS + ((frames - 1) * 25_000_000).astype(np.int64),
+        "ActiveOFM": state,
+    }).to_csv(path, index=False)
+    return path
+
+
+def _p_sensors(frame_csv: Path, on_s: float, off_s: float) -> Path:
+    """Sensors log with OFM_P_ON/OFF ``on_s`` / ``off_s`` after the first frame."""
+    sens = frame_csv.with_name(f"sensors_{frame_csv.name}")
+    pd.DataFrame({
+        "MonoNs": [_RS_NS, _T0_NS + int(on_s * 1e9), _T0_NS + int(off_s * 1e9)],
+        "OFM_Event": ["RECORDING_START", "OFM_P_ON", "OFM_P_OFF"],
+    }).to_csv(sens, index=False)
+    return sens
+
+
+def test_normal_four_frame_click_log_ignores_the_sensors_log(tmp_path: Path) -> None:
+    # Both clicks seen (2 frames each, the common case): the frame log decides,
+    # and a sensors log that is present changes nothing.
+    csv = _click_frame_log(tmp_path / "output_a.csv", [(1194, 1195), (2398, 2399)])
+    assert parse_active_ofm(csv) == (1194, 2400, "OFM_P")
+    _p_sensors(csv, 29.871, 59.926)
+    assert parse_active_ofm(csv) == (1194, 2400, "OFM_P")
+
+
+def test_single_seen_click_takes_the_window_from_the_sensors_log(tmp_path: Path) -> None:
+    # 2026-11-13 rig_3 pretest_1: only the offset click (frame 1603) reached a
+    # frame; the sensors log has OFM_P_ON 30.032 s, OFM_P_OFF 40.085 s.
+    csv = _click_frame_log(tmp_path / "output_b.csv", [(1603, 1603)])
+    assert parse_active_ofm(csv) == (1603, 1604, "OFM_P")      # sensors log absent: old behaviour
+    _p_sensors(csv, 30.032, 40.085)
+    on_f, off_f, channel = parse_active_ofm(csv)
+    assert channel == "OFM_P"
+    assert (on_f - 1) / 40.0 == pytest.approx(29.982, abs=0.03)    # ON - 50 ms
+    assert (off_f - 1) / 40.0 == pytest.approx(40.085, abs=0.03)
+
+
+def test_single_seen_click_without_sensors_events_is_left_alone(tmp_path: Path) -> None:
+    csv = _click_frame_log(tmp_path / "output_c.csv", [(1603, 1603)])
+    sens = csv.with_name(f"sensors_{csv.name}")
+    pd.DataFrame({"MonoNs": [_RS_NS], "OFM_Event": ["RECORDING_START"]}).to_csv(sens, index=False)
+    assert parse_active_ofm(csv) == (1603, 1604, "OFM_P")
+
+
+def test_cache_schema_version_was_bumped_for_the_paraffin_window() -> None:
+    from fbpipe.utils import trial_metadata as tm
+    assert tm._CACHE_SCHEMA_VERSION >= 5
+
+
+# ---------------------------------------------------------------------------
+# Light-only probe (pair sessions since 2026-11-17: testing_17_LightOnly). The
+# frame log has no odor, so the window used to fall back to the 30-60 s config
+# default, clamped to the 30 s video: the last frame (a 0.025 s window). The
+# stimulus is the light, 10-20 s, logged only in the sensors log.
+# ---------------------------------------------------------------------------
+
+_PROBE_FPS = 40.04
+_PROBE_FRAMES = 1200
+
+
+def _light_probe(base: Path, *, odor: str = "LightOnly", sensors: bool = True,
+                 light_s: tuple[float, float] = (10.0005, 20.0206)) -> Path:
+    trial = _build_trial(
+        base, dataset="IAA-PairFirst-Control-1-1", batch="november_17_batch_2",
+        trial_type="testing", trial_index=17, odor=odor, n_frames=_PROBE_FRAMES,
+        fps=_PROBE_FPS, on_frame=_PROBE_FRAMES + 5, off_frame=_PROBE_FRAMES + 5,
+        timestamp="20261117_204600",
+    )
+    if sensors:
+        frame_csv = find_sidecar(trial)[1]
+        start = 1_000_000_000_000
+        pd.DataFrame({
+            "MonoNs": [start, start + int(light_s[0] * 1e9), start + int(light_s[1] * 1e9)],
+            "OFM_Event": ["RECORDING_START", "LIGHT_SOLID_ON", "LIGHT_OFF"],
+        }).to_csv(frame_csv.with_name(f"sensors_{frame_csv.name}"), index=False)
+    return trial
+
+
+def test_light_only_probe_takes_its_window_from_the_light(tmp_path: Path) -> None:
+    meta = load_trial_metadata(_light_probe(tmp_path), use_cache=False)
+    assert meta.odor == "LightOnly"
+    assert meta.light_on_s == pytest.approx(10.0005, abs=1e-6)
+    assert meta.odor_on_s == pytest.approx(10.0005, abs=1.0 / _PROBE_FPS)
+    assert meta.odor_off_s == pytest.approx(20.0206, abs=1.0 / _PROBE_FPS)
+
+
+def test_light_only_label_is_matched_loosely(tmp_path: Path) -> None:
+    for i, label in enumerate(("lightonly", "Light-Only", "LIGHT_ONLY")):
+        meta = load_trial_metadata(_light_probe(tmp_path / str(i), odor=label), use_cache=False)
+        assert meta.odor_on_s == pytest.approx(10.0005, abs=1.0 / _PROBE_FPS), label
+
+
+def test_odorless_trial_without_the_light_only_label_keeps_the_config_default(tmp_path: Path) -> None:
+    # An odor trial whose frame log never shows the valve (e.g. an old log) is
+    # NOT re-timed to the light: the 30-60 s default, clamped, as before.
+    meta = load_trial_metadata(_light_probe(tmp_path, odor="Hexanol"), use_cache=False)
+    assert (meta.odor_on_frame, meta.odor_off_frame) == (_PROBE_FRAMES - 1, _PROBE_FRAMES)
+
+
+def test_light_only_probe_without_a_sensors_log_keeps_the_config_default(tmp_path: Path) -> None:
+    meta = load_trial_metadata(_light_probe(tmp_path, sensors=False), use_cache=False)
+    assert meta.light_on_s is None
+    assert (meta.odor_on_frame, meta.odor_off_frame) == (_PROBE_FRAMES - 1, _PROBE_FRAMES)
+
+
+def test_dataset_override_window_still_wins_over_the_light(tmp_path: Path) -> None:
+    meta = load_trial_metadata(
+        _light_probe(tmp_path), use_cache=False,
+        dataset_override=_Override(odor_on_s=5.0, odor_off_s=15.0),
+    )
+    assert meta.odor_on_s == pytest.approx(5.0, abs=1.0 / _PROBE_FPS)
+    assert meta.odor_off_s == pytest.approx(15.0, abs=1.0 / _PROBE_FPS)
+
+
+def test_light_only_window_survives_the_cache(tmp_path: Path) -> None:
+    trial = _light_probe(tmp_path)
+    first = load_trial_metadata(trial, use_cache=True)
+    second = load_trial_metadata(trial, use_cache=True)
+    assert second.source == "cache"
+    assert (second.odor_on_frame, second.odor_off_frame) == (first.odor_on_frame, first.odor_off_frame)
+
+
+def test_cache_schema_version_was_bumped_for_the_light_only_window() -> None:
+    from fbpipe.utils import trial_metadata as tm
+    assert tm._CACHE_SCHEMA_VERSION >= 6

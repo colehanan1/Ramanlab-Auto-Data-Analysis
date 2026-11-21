@@ -10,8 +10,14 @@ production (``flybehavior-response predict-ordinal``) scores it. ``on`` /
     odor             [on, off)              the production layout
     after            [off, off + after_s)   only the time after odor-off
     odor_plus_after  [on, off + after_s)    the odor plus the time after it
+    odor_first       [on, on + odor_s)      only the first odor_s s of the odor
 
 Baseline is always ``[0, on)``; "after" always follows the end of "during".
+``odor_first`` keeps that rule by cutting the rest of the odor, [on + odor_s, off),
+out of the trace (``first_odor_trial``): the post-odor period then follows the
+shortened odor, so "after" is still production's post-odor window, and the
+whole-trial values never see the cut odor. The trial is scored as production
+would score one whose odor lasted odor_s s (user 2026-11-17).
 
 Odor-arrival delay. Production scores a model saved with ``fbr_odor_delay_s``
 = d (any d, 0 included; recipe ``v2-auc-logratio-delay1s``, d = 1 s, deployed
@@ -23,6 +29,7 @@ the same way:
     odor             [on + d, off + d)              production's own windows
     after            [off + d, off + d + after_s)
     odor_plus_after  [on + d, off + d + after_s)
+    odor_first       [on + d, on + d + odor_s), the trace resuming at off + d
 
 The baseline does not move, and the transit is left out on every window,
 whole-trial ``local_min`` / ``local_max`` included (those stay production's
@@ -119,16 +126,23 @@ class WindowSpec:
     start_offset_s: float
     end_ref: str
     end_offset_s: float
+    #: The odor cut to its first ``end_offset_s`` s, the rest removed from the
+    #: trace (``first_odor_trial``), instead of a moved "during" slot.
+    cut_odor: bool = False
 
 
-def window_spec(name: str, after_s: float = 5.0) -> WindowSpec:
+def window_spec(name: str, after_s: float = 5.0, odor_s: float = 10.0) -> WindowSpec:
     a = float(after_s)
     tag = f"{a:g} s"
+    o = float(odor_s)
     specs = {
         "odor": WindowSpec("odor", "odor", "on", 0.0, "off", 0.0),
         "after": WindowSpec("after", f"{tag} after odor", "off", 0.0, "off", a),
         "odor_plus_after": WindowSpec(
             "odor_plus_after", f"odor + {tag} after", "on", 0.0, "off", a
+        ),
+        "odor_first": WindowSpec(
+            "odor_first", f"first {o:g} s of odor", "on", 0.0, "on", o, cut_odor=True
         ),
     }
     if name not in specs:
@@ -186,6 +200,42 @@ def trial_windows(
     s = min(max(int(round(start_s * fps)), b), n - 1)
     e = min(max(int(round(end_s * fps)), s + 1), n)
     return Windows(b, s, e, n), fps
+
+
+def first_odor_trial(
+    trace: np.ndarray,
+    ctx: Mapping,
+    odor_s: float,
+    *,
+    delay_s: float | None = None,
+    default_fps: float = DEFAULT_FPS,
+) -> tuple[np.ndarray, dict]:
+    """``trace`` and its timing with the odor cut to its first ``odor_s`` s.
+
+    The odor slot ``[on + d, off + d)`` keeps its first ``odor_s`` s; the rest
+    is removed and the trace resumes at ``off + d``, so the post-odor period
+    follows the shortened odor. The timing returned says so (valve-off at
+    ``on + odor_s``, the new length), so the production layout of the result
+    has its odor window on the kept seconds and its "after" window on the
+    post-odor period. An odor no longer than ``odor_s`` is left whole.
+    """
+    w, fps = trial_windows(ctx, len(trace), _ODOR, default_fps, delay_s=delay_s)
+    x = np.asarray(trace, dtype=float)[: w.n_frames]
+    on = _num(ctx.get("trial_odor_on_s"))
+    off = _num(ctx.get("trial_odor_off_s"))
+    on = PROTOCOL_ODOR_ON_S if on is None else on
+    off = PROTOCOL_ODOR_OFF_S if off is None else off
+    new = dict(ctx)
+    new.update({"fps": fps, "trial_odor_on_s": on})
+    if off - on <= float(odor_s):
+        new.update({"trial_odor_off_s": off, "trial_duration_s": w.n_frames / fps})
+        return x, new
+    new["trial_odor_off_s"] = on + float(odor_s)
+    cut, _ = trial_windows({**new, "trial_duration_s": None}, w.n_frames, _ODOR,
+                           default_fps, delay_s=delay_s)
+    y = np.concatenate([x[: cut.odor_end], x[w.odor_end:]])
+    new["trial_duration_s"] = len(y) / fps
+    return y, new
 
 
 # ---------------------------------------------------------------------------
@@ -311,11 +361,16 @@ def raw_features(
     traces = df[cols].to_numpy(dtype=float)
     ctx_cols = [c for c in _TIMING + ["global_max", "trimmed_global_min"] if c in df.columns]
     ctx = df[ctx_cols].reset_index(drop=True)
-    if odor_delay_s is None:
-        rows = [_row_features(traces[i], ctx.iloc[i], spec, rule) for i in range(len(df))]
+    delay = None if odor_delay_s is None else float(odor_delay_s)
+    trials = [(traces[i], ctx.iloc[i]) for i in range(len(df))]
+    if spec.cut_odor:
+        # the cut trial on production's own layout (first_odor_trial)
+        trials = [first_odor_trial(x, c, spec.end_offset_s, delay_s=delay) for x, c in trials]
+        spec = _ODOR
+    if delay is None:
+        rows = [_row_features(x, c, spec, rule) for x, c in trials]
     else:
-        delay = float(odor_delay_s)
-        rows = [_delay_row_features(traces[i], ctx.iloc[i], spec, delay) for i in range(len(df))]
+        rows = [_delay_row_features(x, c, spec, delay) for x, c in trials]
     return pd.DataFrame(rows, columns=["global_max", "trimmed_global_min",
                                        *WINDOW_FEATURES, *xo.SIGNAL_FEATURES])
 
@@ -464,8 +519,10 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Pipeline config; its wide-table AUC threshold rule is used "
                         "for delay-free models (a delay model keeps its own).")
     p.add_argument("--window", default="odor_plus_after",
-                   choices=["odor", "after", "odor_plus_after"])
+                   choices=["odor", "after", "odor_plus_after", "odor_first"])
     p.add_argument("--after-s", type=float, default=5.0)
+    p.add_argument("--odor-s", type=float, default=10.0,
+                   help="--window odor_first: seconds of odor kept")
     p.add_argument("--binary-threshold", type=int, default=2)
     p.add_argument("--cohorts", nargs="*", default=None)
     p.add_argument("--paired-only", action="store_true",
@@ -476,7 +533,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    spec = window_spec(args.window, args.after_s)
+    spec = window_spec(args.window, args.after_s, args.odor_s)
     delay = model_odor_delay_s(args.model_path)
     if delay is not None:
         print(f"[window-rescore] model's odor-arrival delay is {delay:g} s: windows "

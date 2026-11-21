@@ -12,7 +12,9 @@ from pathlib import Path
 import pytest
 import yaml
 
+import scripts.pipeline.run_workflows as rw
 from scripts.pipeline.run_workflows import (
+    _pretest_vs_test_first_odor_commands,
     _pretest_vs_test_plus_after_commands,
     _score_window_comparison_command,
     _window_steps_expected,
@@ -91,6 +93,59 @@ def test_no_config_path_builds_nothing():
     """The AUC rule lives in the config file; without it scores would drift."""
     assert _pretest_vs_test_plus_after_commands(
         _plus(), _Settings(), python_exec="py", config_path=None) is None
+
+
+# ── first N s of the odor (user 2026-11-17) ───────────────────────────────
+
+
+def _first(**over):
+    block = {"rescored_csv": "/x/first10.csv", "pretest_wide_csv": PRE,
+             "testing_wide_csv": POST, "odor_s": 10}
+    block.update(over)
+    return {"pretest_vs_test_first_odor": block}
+
+
+def test_first_odor_is_one_rescore_on_the_first_n_s():
+    (rescore,) = _pretest_vs_test_first_odor_commands(
+        _first(), _Settings(), python_exec="py", config_path=CFGP)
+    assert rescore[1].endswith("scripts/analysis/window_rescore.py")
+    assert _arg(rescore, "--window") == "odor_first"
+    assert _arg(rescore, "--odor-s") == "10"
+    assert _arg(rescore, "--model-path") == "/x/model.json"
+    assert _arg(rescore, "--predictions-csv") == "/x/model_predictions.csv"
+    assert _arg(rescore, "--config") == str(CFGP)
+    assert _arg(rescore, "--output-csv") == "/x/first10.csv"
+    assert "--paired-only" in rescore
+    assert rescore[rescore.index("--wide-csv") + 1:rescore.index("--wide-csv") + 3] == [PRE, POST]
+
+
+@pytest.mark.parametrize("key", ["rescored_csv", "pretest_wide_csv", "testing_wide_csv"])
+def test_first_odor_needs_every_path(key):
+    assert _pretest_vs_test_first_odor_commands(
+        _first(**{key: ""}), _Settings(), python_exec="py", config_path=CFGP) is None
+
+
+def test_first_odor_absent_disabled_or_without_config_builds_nothing():
+    for cfg, path in (({}, CFGP), (_first(enabled=False), CFGP), (_first(), None)):
+        assert _pretest_vs_test_first_odor_commands(
+            cfg, _Settings(), python_exec="py", config_path=path) is None
+
+
+class _Force:
+    pass
+
+
+def test_the_window_step_runner_runs_the_first_odor_rescore(monkeypatch):
+    ran, states = [], []
+    monkeypatch.setattr(rw, "_should_skip", lambda *a, **k: False)
+    monkeypatch.setattr(rw, "_write_state", lambda settings, name, *a: states.append(name))
+    monkeypatch.setattr(rw.subprocess, "run",
+                        lambda cmd, **k: ran.append(cmd) or type("R", (), {"returncode": 0}))
+    settings = _Settings()
+    settings.force = _Force()
+    rw._run_window_rescore_steps(_first(), settings, config_path=CFGP)
+    assert states == ["pretest_vs_test_first_odor"]
+    assert _arg(ran[0], "--window") == "odor_first"
 
 
 # ── window comparison ─────────────────────────────────────────────────────

@@ -11,7 +11,8 @@ from typing import Iterable, Sequence, Set, Tuple
 
 import pandas as pd
 
-from ..config import Settings, load_flagged_fly_exclusions
+from ..config import Settings, get_main_directories, load_flagged_fly_exclusions
+from ..utils import odor_pairs
 from ..utils.smb_copy import copy_to_smb
 from ..utils.tables import read_table  # data_csv input may be Parquet or CSV
 
@@ -264,6 +265,30 @@ def _augment_prediction_csv(
     print(f"[REACTION] Annotated predictions with span metadata ({len(merged)} rows)")
 
 
+
+def _pair_roots(cfg: Settings) -> list[Path]:
+    """Dataset roots to look up odor-pair trials' rig per-frame logs in."""
+    return list(get_main_directories(cfg))
+
+
+def _split_odor_pairs(df: pd.DataFrame, cfg: Settings) -> pd.DataFrame:
+    """Each odor-pair trial → one row per odor (``fbpipe.utils.odor_pairs``)."""
+    if "trial_label" not in df.columns or not df["trial_label"].map(odor_pairs.is_pair_label).any():
+        return df
+    roots = _pair_roots(cfg)
+
+    def window(row):
+        path = odor_pairs.find_frames_csv(row, roots)
+        return None if path is None else odor_pairs.second_odor_window_s(path, float(row.get("fps") or 40.0))
+
+    out, report = odor_pairs.split_pair_rows(df, window)
+    print(f"[REACTION] Odor-pair trials: {report['split']} of {report['pairs']} scored per odor "
+          f"(odor 1 = label, odor 2 = label{odor_pairs.ODOR2_SUFFIX})")
+    for key in report["no_second_odor"]:
+        print(f"[REACTION][WARN] odor-pair trial with no second odor found, odor 1 only: {key}")
+    return out
+
+
 def main(cfg: Settings) -> None:
     settings = cfg.reaction_prediction
     if not settings.data_csv:
@@ -312,18 +337,23 @@ def main(cfg: Settings) -> None:
         )
         _write_empty_predictions(output_csv, df.columns)
         return
+    dropped_flies = len(filtered_df) != len(df)
+    n_before_split = len(filtered_df)
+    filtered_df = _split_odor_pairs(filtered_df, cfg)
+    pairs_split = len(filtered_df) != n_before_split
     model_input_df = filtered_df.copy()
 
     data_csv_for_cli = data_csv
     temp_path: Path | None = None
 
-    if len(filtered_df) != len(df):
-        flagged_labels = ", ".join(
-            f"{dataset}::{fly}::{fly_number}" for dataset, fly, fly_number in sorted(flagged_pairs)
-        )
-        print(
-            f"[REACTION] Skipping non-reactive flies before prediction: {flagged_labels}"
-        )
+    if dropped_flies or pairs_split:
+        if dropped_flies:
+            flagged_labels = ", ".join(
+                f"{dataset}::{fly}::{fly_number}" for dataset, fly, fly_number in sorted(flagged_pairs)
+            )
+            print(
+                f"[REACTION] Skipping non-reactive flies before prediction: {flagged_labels}"
+            )
         tmp = tempfile.NamedTemporaryFile(
             "w", suffix="_non_reactive_filtered.csv", delete=False
         )

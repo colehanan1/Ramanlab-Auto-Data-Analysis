@@ -66,6 +66,13 @@ OTHER_LIVE = [
     # Same hex test at 24 h and 33 h starved.
     "Hex-HexTest-Training-24-1",
     "Hex-HexTest-Training-33-1",
+    # IAA odor-pair protocol (config_v2_pairfirst_A / pairsecond_A), odor only.
+    # Added 2026-11-13.
+    "IAA-PairFirst-Control-1-1",
+    "IAA-PairSecond-Control-1-1",
+    # The 2026-11-12 no-fly end-to-end test of the same protocol.
+    "IAA-PairFirstTest-Control-1-1",
+    "IAA-PairSecondTest-Control-1-1",
 ]
 
 # Every per-cohort figure list a sensitivity cohort must appear in. The
