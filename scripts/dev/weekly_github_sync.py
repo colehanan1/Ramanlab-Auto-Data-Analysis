@@ -382,6 +382,20 @@ def run_pytest(cwd: Path, files: list[str] | None) -> tuple[set[str], set[str]]:
         return parse_junit(xml)
 
 
+def _link_missing(src: Path, dst: Path) -> None:
+    """Symlink ``src`` at ``dst``; if ``dst`` is already a folder (``config/``
+    holds tracked ``example.*`` files), link each entry it lacks instead, so a
+    gitignored file beside tracked ones still reaches the baseline. Entries the
+    worktree already has stay the pushed commit's version."""
+    if not src.exists():
+        return
+    if not dst.exists() and not dst.is_symlink():
+        dst.symlink_to(src)
+    elif src.is_dir() and dst.is_dir() and not dst.is_symlink():
+        for child in src.iterdir():
+            _link_missing(child, dst / child.name)
+
+
 def baseline_results(repo: Path, sha: str, files: list[str],
                      test_runner: Callable) -> tuple[set[str], set[str]]:
     """Run ``files`` at ``sha`` in a throwaway worktree (only files that existed then)."""
@@ -390,9 +404,7 @@ def baseline_results(repo: Path, sha: str, files: list[str],
     git(repo, "worktree", "add", "--detach", str(wt), sha)
     try:
         for name in BASELINE_LINKS:
-            src = repo / name
-            if src.exists() and not (wt / name).exists():
-                (wt / name).symlink_to(src)
+            _link_missing(repo / name, wt / name)
         existing = [f for f in files if (wt / f).is_file()]
         if not existing:
             return set(), set()

@@ -507,6 +507,35 @@ def test_baseline_tests_run_in_a_worktree_of_the_last_pushed_commit(repo):
     assert pushed  # sanity
 
 
+def test_baseline_sees_gitignored_files_inside_a_partly_tracked_folder(repo):
+    """config/ holds tracked example.* files, so the worktree already has a
+    config/ folder; the gitignored config_new.yaml must still be linked in, or
+    every test reading it skips at the baseline and a skip counts as a pass."""
+    sha = _commit(repo, "config/example.yaml", "tracked: old\n", force=True)
+    (repo / "config" / "example.yaml").write_text("tracked: edited locally\n")
+    (repo / "config" / "config_new.yaml").write_text("live: true\n")
+    (repo / "PiCode").mkdir()
+    (repo / "PiCode" / "rig.py").write_text("PIN = 13\n")
+    seen = {}
+
+    def runner(cwd, files):
+        cwd = Path(cwd)
+        seen["config_new"] = (cwd / "config" / "config_new.yaml").read_text()
+        seen["example"] = (cwd / "config" / "example.yaml").read_text()
+        seen["picode"] = (cwd / "PiCode" / "rig.py").read_text()
+        return set(), set()
+
+    wgs.baseline_results(repo, sha, ["tests/test_a.py"], runner)
+
+    assert seen["config_new"] == "live: true\n"
+    # A tracked file stays the pushed commit's version, never the local edit.
+    assert seen["example"] == "tracked: old\n"
+    assert seen["picode"] == "PIN = 13\n"
+    # Linking into the worktree never touched the real files.
+    assert (repo / "config" / "config_new.yaml").read_text() == "live: true\n"
+    assert (repo / "config" / "example.yaml").read_text() == "tracked: edited locally\n"
+
+
 def test_branch_backups_push_new_and_ff_branches_but_skip_diverged(repo, tmp_path):
     _git(repo, "checkout", "-b", "feature/new")
     _commit(repo, "n.py", "n = 1\n")
